@@ -1,0 +1,297 @@
+package com.hemju.threadmill.core.engine;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Objects;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.StaleJobException;
+import com.hemju.threadmill.core.handler.JobHandler;
+import com.hemju.threadmill.core.handler.JobHandlerResolver;
+import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.core.serialization.JobSerializer;
+import com.hemju.threadmill.core.serialization.SerializationException;
+import com.hemju.threadmill.core.spec.JobArgument;
+import com.hemju.threadmill.core.store.JobStore;
+
+/**
+ * Single, centralised execution path: claim → process → complete.
+ *
+ * <p>All three failure modes — exception, timeout, orphan reclaim — funnel
+ * through {@link #recordFailure(Job, ExecutionContext, Throwable, JobInterceptor.FailureCause)}
+ * so the {@link JobInterceptor#onProcessingFailed} hook (and the retry
+ * interceptor) is invoked exactly once per failure regardless of cause.
+ *
+ * <p>A job whose handler cannot be resolved or whose payload cannot be
+ * deserialized is moved to {@code QUARANTINED}; it never crashes a loop.
+ */
+public final class JobRunner {
+
+    private static final Logger LOG = LoggerFactory.getLogger(JobRunner.class);
+    public static final String META_TIMEOUT_SECONDS = "threadmill.job.timeoutSeconds";
+
+    private final JobStore store;
+    private final NodeId nodeId;
+    private final JobHandlerResolver resolver;
+    private final JobSerializer serializer;
+    private final JobInterceptors interceptors;
+    private final Duration jobTimeout;
+    private final ProcessingNodeConfig config;
+    private final ScheduledExecutorService timeoutExecutor;
+
+    public JobRunner(
+            JobStore store,
+            NodeId nodeId,
+            JobHandlerResolver resolver,
+            JobSerializer serializer,
+            JobInterceptors interceptors,
+            ProcessingNodeConfig config) {
+        this.store = Objects.requireNonNull(store, "store");
+        this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
+        this.resolver = Objects.requireNonNull(resolver, "resolver");
+        this.serializer = Objects.requireNonNull(serializer, "serializer");
+        this.interceptors = Objects.requireNonNull(interceptors, "interceptors");
+        this.config = Objects.requireNonNull(config, "config");
+        this.jobTimeout = config.jobTimeout();
+        this.timeoutExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = Thread.ofPlatform()
+                    .name("threadmill-timeout-watchdog")
+                    .daemon(true)
+                    .unstarted(r);
+            return t;
+        });
+    }
+
+    /** Stops the timeout watchdog. Intended for engine shutdown. */
+    public void shutdown() {
+        timeoutExecutor.shutdownNow();
+    }
+
+    /**
+     * Run a single claimed job to completion. Must be invoked on a virtual
+     * thread from the worker pool. Never throws — every failure is captured
+     * and routed through the single failure code path.
+     */
+    public void run(Job job) {
+        Objects.requireNonNull(job, "job");
+        var ctx = new ExecutionContext(
+                job,
+                store,
+                job.id(),
+                nodeId,
+                job.attempts(),
+                job.ownerHeartbeatAt().orElse(Instant.now()),
+                job.log(),
+                job.progress(),
+                job.metadata(),
+                serializer,
+                config);
+        interceptors.onProcessingStarting(job, ctx);
+
+        // Resolve handler + payload first. A resolution failure is a poison
+        // condition: quarantine, fire onProcessingFailed(QUARANTINE), do not retry.
+        JobHandler<JobPayload> handler;
+        JobPayload payload;
+        try {
+            @SuppressWarnings("unchecked")
+            JobHandler<JobPayload> resolved =
+                    (JobHandler<JobPayload>) resolver.resolve(job.spec().handlerType());
+            handler = resolved;
+            payload = deserializePayload(job);
+        } catch (Throwable resolutionFailure) {
+            quarantine(job, ctx, resolutionFailure);
+            return;
+        }
+
+        Thread carrier = Thread.currentThread();
+        java.util.concurrent.atomic.AtomicBoolean timedOut = new java.util.concurrent.atomic.AtomicBoolean(false);
+        ScheduledFuture<?> watchdog = timeoutExecutor.scheduleAtFixedRate(
+                () -> {
+                    var now = Instant.now();
+                    var lastCheckIn = ctx.lastCheckInAt();
+                    Duration effectiveTimeout = job.metadata()
+                            .get(META_TIMEOUT_SECONDS)
+                            .map(s -> Duration.ofSeconds(Long.parseLong(s)))
+                            .orElse(jobTimeout);
+                    Instant deadline = lastCheckIn
+                            .map(at -> at.plus(config.noProgressTimeout()))
+                            .orElse(ctx.claimedAt().plus(effectiveTimeout));
+                    if (!deadline.isAfter(now)) {
+                        timedOut.set(true);
+                        carrier.interrupt();
+                    }
+                },
+                Math.max(
+                        1L,
+                        Math.min(
+                                jobTimeout.toMillis(),
+                                config.noProgressTimeout().toMillis())),
+                Math.max(1L, Math.min(1000L, config.checkInMinInterval().toMillis())),
+                TimeUnit.MILLISECONDS);
+
+        try {
+            ScopedValue.where(EngineScopedValues.CURRENT, ctx).run(() -> {
+                try {
+                    handler.run(payload, ctx);
+                } catch (RuntimeException re) {
+                    throw re;
+                } catch (Exception e) {
+                    throw new HandlerInvocationException(e);
+                }
+            });
+            watchdog.cancel(false);
+            // Clear any straggler interrupt the watchdog may have raised after the handler returned.
+            Thread.interrupted();
+            if (timedOut.get()) {
+                throw new HandlerTimeoutException();
+            }
+            ctx.flushBestEffort();
+            markSucceeded(job, ctx);
+        } catch (Throwable t) {
+            watchdog.cancel(false);
+            Thread.interrupted();
+            ctx.flushBestEffort();
+            JobInterceptor.FailureCause cause = (t instanceof HandlerTimeoutException || timedOut.get())
+                    ? JobInterceptor.FailureCause.TIMEOUT
+                    : JobInterceptor.FailureCause.EXCEPTION;
+            recordFailure(job, ctx, unwrap(t), cause);
+        }
+    }
+
+    /** Called by orphan-recovery code in MaintenanceCycle. */
+    public void reclaimOrphan(Job job) {
+        var ctx = new ExecutionContext(
+                job,
+                store,
+                job.id(),
+                nodeId,
+                job.attempts(),
+                job.ownerHeartbeatAt().orElse(Instant.now()),
+                job.log(),
+                job.progress(),
+                job.metadata(),
+                serializer,
+                config);
+        recordFailure(
+                job,
+                ctx,
+                new IllegalStateException("Job orphaned — owner node's heartbeat expired"),
+                JobInterceptor.FailureCause.ORPHAN_RECLAIM);
+    }
+
+    // ---------------------------------------------------------------- the single failure path
+
+    private void recordFailure(Job job, ExecutionContext ctx, Throwable cause, JobInterceptor.FailureCause kind) {
+        try {
+            long version = job.version();
+            JobState from = job.currentState();
+            job.transitionTo(
+                    JobState.FAILED, Instant.now(), kindReason(kind), cause == null ? null : cause.getMessage());
+            job.clearOwner();
+            store.saveAtomic(job, version);
+            interceptors.onStateChange(job, from, JobState.FAILED);
+            // After the failure transition lands, run interceptor failure hooks
+            // (retry, metrics, etc.) — exactly once, regardless of cause.
+            interceptors.onProcessingFailed(job, ctx, cause, kind);
+        } catch (StaleJobException stale) {
+            LOG.debug("Job {} version moved under us during failure path — skipping", job.id());
+        } catch (Throwable t) {
+            LOG.error("Failure path itself threw for job {}", job.id(), t);
+        }
+    }
+
+    private void markSucceeded(Job job, ExecutionContext ctx) {
+        try {
+            long version = job.version();
+            JobState from = job.currentState();
+            // Persist any result the handler recorded via ctx.setResult(...).
+            if (ctx.capturedResult() != null) {
+                job.setResult(ctx.capturedResult());
+            }
+            job.transitionTo(JobState.SUCCEEDED, Instant.now(), "engine.success", null);
+            job.clearOwner();
+            store.saveAtomic(job, version);
+            interceptors.onStateChange(job, from, JobState.SUCCEEDED);
+            interceptors.onProcessingSucceeded(job, ctx);
+        } catch (StaleJobException stale) {
+            LOG.debug("Job {} version moved under us during success path", job.id());
+        }
+    }
+
+    private void quarantine(Job job, ExecutionContext ctx, Throwable cause) {
+        try {
+            long version = job.version();
+            JobState from = job.currentState();
+            job.transitionTo(
+                    JobState.QUARANTINED,
+                    Instant.now(),
+                    "engine.quarantine",
+                    cause == null ? null : cause.getMessage());
+            job.clearOwner();
+            store.saveAtomic(job, version);
+            interceptors.onStateChange(job, from, JobState.QUARANTINED);
+            interceptors.onProcessingFailed(job, ctx, cause, JobInterceptor.FailureCause.QUARANTINE);
+        } catch (Throwable t) {
+            LOG.error("Quarantine path itself threw for job {}", job.id(), t);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private JobPayload deserializePayload(Job job) {
+        if (job.spec().arguments().isEmpty()) {
+            return new EmptyPayload();
+        }
+        JobArgument first = job.spec().arguments().get(0);
+        try {
+            Class<?> klass = Class.forName(first.typeTag());
+            if (!JobPayload.class.isAssignableFrom(klass)) {
+                throw new SerializationException("Argument type is not a JobPayload: " + first.typeTag());
+            }
+            return serializer.deserializePayload(first, (Class<JobPayload>) klass);
+        } catch (ClassNotFoundException cnf) {
+            throw new SerializationException("Unknown payload type: " + first.typeTag(), cnf);
+        }
+    }
+
+    private static String kindReason(JobInterceptor.FailureCause kind) {
+        return switch (kind) {
+            case EXCEPTION -> "engine.exception";
+            case TIMEOUT -> "engine.timeout";
+            case ORPHAN_RECLAIM -> "engine.orphan-reclaim";
+            case QUARANTINE -> "engine.quarantine";
+        };
+    }
+
+    private static Throwable unwrap(Throwable t) {
+        if (t instanceof HandlerInvocationException && t.getCause() != null) return t.getCause();
+        if (t instanceof HandlerTimeoutException) return t;
+        return t;
+    }
+
+    /** Marker payload used when a JobSpec has no arguments. */
+    public static final class EmptyPayload implements JobPayload {}
+
+    /** Wrapper for a checked exception thrown by handler code. */
+    static final class HandlerInvocationException extends RuntimeException {
+        HandlerInvocationException(Throwable cause) {
+            super(cause);
+        }
+    }
+
+    /** Thrown when the watchdog interrupted the handler. */
+    static final class HandlerTimeoutException extends TimeoutException {
+        HandlerTimeoutException() {
+            super("Job exceeded its configured timeout");
+        }
+    }
+}

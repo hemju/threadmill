@@ -1,0 +1,29 @@
+# Local working notes — not committed
+.local-reference/
+
+# --- Build output ---
+build/
+out/
+bin/
+.gradle/
+target/
+*.class
+
+# --- IDE / editor ---
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.settings/
+.project
+.classpath
+*.swp
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Logs / temp ---
+*.log
+*.tmp

@@ -1,0 +1,41 @@
+[versions]
+java = "25"
+spotless = "8.5.0"
+palantirJavaFormat = "2.90.0"
+springBoot = "4.0.4"
+springFramework = "7.0.4"
+jackson = "2.18.2"
+slf4j = "2.0.16"
+micrometer = "1.14.1"
+junit = "5.11.4"
+assertj = "3.27.0"
+awaitility = "4.2.2"
+testcontainers = "2.0.5"
+postgresql = "42.7.4"
+lettuce = "6.5.1.RELEASE"
+networkntJsonschema = "1.5.4"
+
+[plugins]
+spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
+
+[libraries]
+spring-boot-autoconfigure = { module = "org.springframework.boot:spring-boot-autoconfigure", version.ref = "springBoot" }
+spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test", version.ref = "springBoot" }
+spring-context = { module = "org.springframework:spring-context", version.ref = "springFramework" }
+spring-tx = { module = "org.springframework:spring-tx", version.ref = "springFramework" }
+jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
+jackson-datatype-jsr310 = { module = "com.fasterxml.jackson.datatype:jackson-datatype-jsr310", version.ref = "jackson" }
+micrometer-core = { module = "io.micrometer:micrometer-core", version.ref = "micrometer" }
+slf4j-api = { module = "org.slf4j:slf4j-api", version.ref = "slf4j" }
+slf4j-simple = { module = "org.slf4j:slf4j-simple", version.ref = "slf4j" }
+junit-bom = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+assertj-core = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+awaitility = { module = "org.awaitility:awaitility", version.ref = "awaitility" }
+testcontainers-bom = { module = "org.testcontainers:testcontainers-bom", version.ref = "testcontainers" }
+testcontainers-junit-jupiter = { module = "org.testcontainers:testcontainers-junit-jupiter" }
+testcontainers-postgresql = { module = "org.testcontainers:testcontainers-postgresql" }
+postgresql-jdbc = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+lettuce-core = { module = "io.lettuce:lettuce-core", version.ref = "lettuce" }
+networknt-jsonschema = { module = "com.networknt:json-schema-validator", version.ref = "networkntJsonschema" }

@@ -1,0 +1,179 @@
+package com.hemju.threadmill.soak.harness;
+
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.Duration;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantLock;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import com.hemju.threadmill.core.JobId;
+
+/**
+ * Tracks per-job lifecycle timings: when it was enqueued, claimed, started,
+ * and completed. Each completion writes one JSON-lines record to
+ * {@code latencies.jsonl}; in-memory aggregates support the run summary
+ * percentiles and the {@code inflight} count surfaced in the live-status line.
+ */
+public final class LatencyTracker implements AutoCloseable {
+
+    private final BufferedWriter writer;
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final ReentrantLock writeLock = new ReentrantLock();
+    private final ConcurrentHashMap<String, Stages> stages = new ConcurrentHashMap<>();
+    private final LongList enqueueToClaim = new LongList();
+    private final LongList claimToStart = new LongList();
+    private final LongList startToComplete = new LongList();
+    private final LongList endToEnd = new LongList();
+
+    public LatencyTracker(Path file) throws IOException {
+        Objects.requireNonNull(file, "file");
+        if (file.getParent() != null) Files.createDirectories(file.getParent());
+        this.writer = Files.newBufferedWriter(
+                file,
+                StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE);
+    }
+
+    public void recordEnqueued(JobId id) {
+        stages.put(id.toString(), new Stages(System.nanoTime()));
+    }
+
+    public void recordClaimed(JobId id) {
+        Stages s = stages.get(id.toString());
+        if (s != null && s.claimedAt == 0L) s.claimedAt = System.nanoTime();
+    }
+
+    public void recordStarted(JobId id) {
+        Stages s = stages.get(id.toString());
+        if (s != null && s.startedAt == 0L) s.startedAt = System.nanoTime();
+    }
+
+    public void recordCompleted(JobId id, int attempts, String finalState) {
+        Stages s = stages.remove(id.toString());
+        if (s == null) return;
+        long completedAt = System.nanoTime();
+        long enqueuedToClaimMs = msBetween(s.enqueuedAt, s.claimedAt);
+        long claimToStartMs = msBetween(s.claimedAt, s.startedAt);
+        long startToCompleteMs = msBetween(s.startedAt, completedAt);
+        long endToEndMs = msBetween(s.enqueuedAt, completedAt);
+        if (s.claimedAt != 0L) enqueueToClaim.add(enqueuedToClaimMs);
+        if (s.claimedAt != 0L && s.startedAt != 0L) claimToStart.add(claimToStartMs);
+        if (s.startedAt != 0L) startToComplete.add(startToCompleteMs);
+        endToEnd.add(endToEndMs);
+
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("jobId", id.toString());
+        row.put("attempts", attempts);
+        row.put("finalState", finalState);
+        row.put("enqueueToClaimMs", s.claimedAt == 0L ? null : enqueuedToClaimMs);
+        row.put("claimToStartMs", s.claimedAt == 0L || s.startedAt == 0L ? null : claimToStartMs);
+        row.put("startToCompleteMs", s.startedAt == 0L ? null : startToCompleteMs);
+        row.put("endToEndMs", endToEndMs);
+        writeLine(row);
+    }
+
+    public int inflight() {
+        return stages.size();
+    }
+
+    public Map<String, Percentiles.Summary> percentiles() {
+        Map<String, Percentiles.Summary> out = new LinkedHashMap<>();
+        out.put("enqueueToClaim", enqueueToClaim.toPercentiles());
+        out.put("claimToStart", claimToStart.toPercentiles());
+        out.put("startToComplete", startToComplete.toPercentiles());
+        out.put("endToEnd", endToEnd.toPercentiles());
+        return out;
+    }
+
+    /** Snapshot of the current p99 end-to-end latency, in ms; used by the live-status printer. */
+    public long currentP99EndToEndMs() {
+        return endToEnd.snapshotPercentile(0.99);
+    }
+
+    private void writeLine(Map<String, Object> row) {
+        writeLock.lock();
+        try {
+            writer.write(mapper.writeValueAsString(row));
+            writer.write('\n');
+        } catch (JsonProcessingException e) {
+            throw new IllegalArgumentException("latency row not serialisable", e);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    private static long msBetween(long fromNano, long toNano) {
+        if (fromNano == 0L || toNano == 0L) return 0L;
+        return Duration.ofNanos(Math.max(0L, toNano - fromNano)).toMillis();
+    }
+
+    @Override
+    public void close() throws IOException {
+        writeLock.lock();
+        try {
+            writer.flush();
+            writer.close();
+        } finally {
+            writeLock.unlock();
+        }
+    }
+
+    private static final class Stages {
+        final long enqueuedAt;
+        volatile long claimedAt;
+        volatile long startedAt;
+
+        Stages(long enqueuedAt) {
+            this.enqueuedAt = enqueuedAt;
+        }
+    }
+
+    /**
+     * Thread-safe append-only list of longs. We deliberately keep raw values
+     * rather than reach for HdrHistogram — a soak run records at most a few
+     * hundred thousand samples, which sort in milliseconds.
+     */
+    private static final class LongList {
+        private final java.util.concurrent.ConcurrentLinkedQueue<Long> values =
+                new java.util.concurrent.ConcurrentLinkedQueue<>();
+
+        void add(long v) {
+            values.add(v);
+        }
+
+        Percentiles.Summary toPercentiles() {
+            long[] arr = values.stream().mapToLong(Long::longValue).toArray();
+            return Percentiles.summarise(arr);
+        }
+
+        long snapshotPercentile(double p) {
+            long[] arr = values.stream().mapToLong(Long::longValue).toArray();
+            return Percentiles.percentile(arr, p);
+        }
+    }
+
+    /** Exposes the raw recorded samples for tests / reporting. */
+    public List<long[]> rawSamples() {
+        long[] a = enqueueToClaim.values.stream().mapToLong(Long::longValue).toArray();
+        long[] b = claimToStart.values.stream().mapToLong(Long::longValue).toArray();
+        long[] c = startToComplete.values.stream().mapToLong(Long::longValue).toArray();
+        long[] d = endToEnd.values.stream().mapToLong(Long::longValue).toArray();
+        return List.of(a, b, c, d);
+    }
+}

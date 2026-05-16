@@ -1,0 +1,32 @@
+# Shared local datastores for examples and worker-churn simulations.
+# Start with:  docker compose up -d postgres redis
+# Stop with:   docker compose down
+
+services:
+  postgres:
+    image: postgres:18-alpine
+    container_name: threadmill-local-postgres
+    ports:
+      # Mapped to a non-standard host port so a system Postgres on 5432 does not conflict.
+      - "55432:5432"
+    environment:
+      POSTGRES_DB: threadmill
+      POSTGRES_USER: threadmill
+      POSTGRES_PASSWORD: threadmill
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "threadmill"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    container_name: threadmill-local-redis
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+    ports:
+      # Mapped to a non-standard host port so a system Redis on 6379 does not conflict.
+      - "56379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 10

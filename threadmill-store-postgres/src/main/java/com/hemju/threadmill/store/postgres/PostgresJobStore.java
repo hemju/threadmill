@@ -1,0 +1,1655 @@
+package com.hemju.threadmill.store.postgres;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.sql.Types;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+
+import javax.sql.DataSource;
+
+import com.hemju.threadmill.core.ConcurrencyMode;
+import com.hemju.threadmill.core.EnqueueResult;
+import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobEngineFatalException;
+import com.hemju.threadmill.core.JobId;
+import com.hemju.threadmill.core.JobReplacement;
+import com.hemju.threadmill.core.JobReplacements;
+import com.hemju.threadmill.core.JobSnapshot;
+import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.JobStateEntry;
+import com.hemju.threadmill.core.Names;
+import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.StaleJobException;
+import com.hemju.threadmill.core.schedule.CronExpression;
+import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
+import com.hemju.threadmill.core.serialization.JobSerializer;
+import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.JobStoreCapabilities;
+import com.hemju.threadmill.core.store.NodeHeartbeat;
+
+/**
+ * PostgreSQL implementation of {@link JobStore}.
+ *
+ * <p>Design highlights:
+ * <ul>
+ *   <li>The body column (JSON text) is the <strong>source of truth</strong>;
+ *       the indexed scalar columns ({@code state}, {@code queue},
+ *       {@code priority}, {@code scheduled_at}, {@code handler_signature},
+ *       {@code owner_heartbeat_at}, {@code current_state_at}) are
+ *       denormalized so hot queries hit indexes without parsing the body.</li>
+ *   <li>{@link #claimReady} uses {@code SELECT … FOR UPDATE SKIP LOCKED} so
+ *       contending workers never collide and never wait.</li>
+ *   <li>Every write is wrapped in {@link DeadlockRetry} — deadlocks on a
+ *       busy queue table are normal and the right response is bounded retry
+ *       with jittered backoff.</li>
+ *   <li>Per-state counts come from {@code threadmill_job_counts}, maintained
+ *       row-by-row by a trigger; a naive {@code COUNT(*)} would contend
+ *       with the claim path.</li>
+ *   <li>Oversized jobs are rejected by the serializer before any SQL runs.
+ *       The in-memory version is never corrupted on a failed save.</li>
+ * </ul>
+ */
+public final class PostgresJobStore implements JobStore {
+
+    private static final String MAINTENANCE_LEASE = "maintenance";
+
+    /** Threadmill requires PostgreSQL 18 or later. See {@link #requirePostgresEighteen}. */
+    static final int MINIMUM_SERVER_VERSION_NUM = 180000;
+
+    private final DataSource dataSource;
+    private final JobSerializer serializer;
+    private final JobStoreCapabilities capabilities;
+
+    public PostgresJobStore(DataSource dataSource) {
+        this(dataSource, new JsonJobSerializer(), JobStoreCapabilities.defaults());
+    }
+
+    public PostgresJobStore(DataSource dataSource, JobSerializer serializer, JobStoreCapabilities capabilities) {
+        this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.serializer = Objects.requireNonNull(serializer, "serializer");
+        this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
+        requirePostgresEighteen(this.dataSource);
+    }
+
+    /**
+     * Refuse to start against pre-PostgreSQL-18 servers. Threadmill's schema, queries, and
+     * migration runner target PostgreSQL 18+ only; older majors are not tested and are not
+     * supported. The check runs once at construction so a misconfigured host fails fast
+     * with an actionable message rather than at the first query.
+     *
+     * @throws JobEngineFatalException if the server reports a {@code server_version_num}
+     *     below {@value #MINIMUM_SERVER_VERSION_NUM}, or if the version cannot be read.
+     */
+    private static void requirePostgresEighteen(DataSource dataSource) {
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SHOW server_version_num")) {
+            if (!rs.next()) {
+                throw new JobEngineFatalException("Could not read PostgreSQL server_version_num — refusing to start");
+            }
+            int versionNum = Integer.parseInt(rs.getString(1).trim());
+            if (versionNum < MINIMUM_SERVER_VERSION_NUM) {
+                int major = versionNum / 10000;
+                throw new JobEngineFatalException(
+                        "Threadmill requires PostgreSQL 18 or later — found server major " + major
+                                + " (server_version_num=" + versionNum + "). Upgrade the server or use a"
+                                + " different backend (Redis, in-memory).");
+            }
+        } catch (SQLException e) {
+            throw new JobEngineFatalException("Failed to verify PostgreSQL server version", e);
+        }
+    }
+
+    // ---------------------------------------------------------------- capabilities
+
+    @Override
+    public JobStoreCapabilities capabilities() {
+        return capabilities;
+    }
+
+    // ---------------------------------------------------------------- single-job
+
+    @Override
+    public void insert(Job job) {
+        Objects.requireNonNull(job, "job");
+        Names.requireName("queue", job.queue());
+        long version = 1L;
+
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection()) {
+                    conn.setAutoCommit(false);
+                    try {
+                        JobSnapshot snapshot = snapshotForInsert(conn, job, version);
+                        String body = serializer.serializeJob(snapshot, capabilities);
+                        Instant currentStateAt = lastTransitionTime(snapshot, snapshot.currentState());
+                        insertSnapshot(conn, snapshot, body, currentStateAt, version);
+                        noteInsertedWorkflowDescendant(conn, snapshot);
+                        conn.commit();
+                        return null;
+                    } catch (RuntimeException | SQLException e) {
+                        conn.rollback();
+                        throw e;
+                    } finally {
+                        conn.setAutoCommit(true);
+                    }
+                }
+            });
+        } catch (SQLException e) {
+            if ("23505".equals(e.getSQLState())) {
+                throw new IllegalStateException("Job already exists: " + job.id(), e);
+            }
+            throw new JdbcException("Insert failed", e);
+        }
+        job.adoptVersion(version);
+    }
+
+    @Override
+    public List<JobId> insertAll(List<Job> jobsToInsert) {
+        Objects.requireNonNull(jobsToInsert, "jobs");
+        if (jobsToInsert.isEmpty()) return List.of();
+
+        // Pre-flight: serialize every snapshot up front. OversizedJobException
+        // here rejects the whole batch before any DB write — no Job in the
+        // input has its version mutated, matching insert()'s invariant.
+        record Prepared(Job job, JobSnapshot snapshot, String body, Instant currentStateAt) {}
+        var prepared = new ArrayList<Prepared>(jobsToInsert.size());
+        for (var j : jobsToInsert) {
+            Objects.requireNonNull(j, "job");
+            Names.requireName("queue", j.queue());
+            // snapshotForInsert(conn, ...) needs a connection for workflow-root resolution;
+            // we re-snapshot inside the transaction below. Here we only validate size.
+            JobSnapshot probe = j.snapshot();
+            String body = serializer.serializeJob(probe, capabilities);
+            prepared.add(new Prepared(j, probe, body, lastTransitionTime(probe, probe.currentState())));
+        }
+
+        long version = 1L;
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection()) {
+                    conn.setAutoCommit(false);
+                    try {
+                        // Re-snapshot inside the txn so workflow_root_id is resolved
+                        // against the live store state; re-serialize matches.
+                        var finalSnapshots = new ArrayList<JobSnapshot>(prepared.size());
+                        var finalBodies = new ArrayList<String>(prepared.size());
+                        var finalStateAt = new ArrayList<Instant>(prepared.size());
+                        for (var p : prepared) {
+                            JobSnapshot snap = snapshotForInsert(conn, p.job, version);
+                            String body = serializer.serializeJob(snap, capabilities);
+                            finalSnapshots.add(snap);
+                            finalBodies.add(body);
+                            finalStateAt.add(lastTransitionTime(snap, snap.currentState()));
+                        }
+                        try (PreparedStatement ps = conn.prepareStatement(
+                                "INSERT INTO threadmill_jobs (id, state, queue, priority, handler_signature, "
+                                        + "scheduled_at, owner_node_id, owner_heartbeat_at, last_checkin_at, current_state_at, "
+                                        + "version, body, created_at, concurrency_key, concurrency_mode, workflow_root_id) "
+                                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+                            for (int i = 0; i < finalSnapshots.size(); i++) {
+                                JobSnapshot snap = finalSnapshots.get(i);
+                                ps.setObject(1, snap.id().asUuid());
+                                ps.setString(2, snap.currentState().name());
+                                ps.setString(3, snap.queue());
+                                ps.setInt(4, snap.priority());
+                                ps.setString(5, snap.spec().handlerType());
+                                setNullableTimestamp(ps, 6, snap.scheduledFor());
+                                setNullableUuid(
+                                        ps,
+                                        7,
+                                        snap.ownerNodeId() == null
+                                                ? null
+                                                : snap.ownerNodeId().asUuid());
+                                setNullableTimestamp(ps, 8, snap.ownerHeartbeatAt());
+                                setNullableTimestamp(ps, 9, snap.lastCheckinAt());
+                                ps.setTimestamp(10, Timestamp.from(finalStateAt.get(i)));
+                                ps.setLong(11, version);
+                                ps.setString(12, finalBodies.get(i));
+                                ps.setTimestamp(13, Timestamp.from(snap.createdAt()));
+                                setNullableConcurrency(ps, 14, snap.concurrencyKey(), snap.concurrencyMode());
+                                ps.setObject(16, snap.workflowRootId().asUuid());
+                                ps.addBatch();
+                            }
+                            ps.executeBatch();
+                        }
+                        for (JobSnapshot snap : finalSnapshots) {
+                            noteInsertedWorkflowDescendant(conn, snap);
+                        }
+                        conn.commit();
+                        return null;
+                    } catch (RuntimeException | SQLException e) {
+                        conn.rollback();
+                        throw e;
+                    } finally {
+                        conn.setAutoCommit(true);
+                    }
+                }
+            });
+        } catch (SQLException e) {
+            if ("23505".equals(e.getSQLState())) {
+                throw new IllegalStateException("Duplicate job id in batch", e);
+            }
+            throw new JdbcException("insertAll failed", e);
+        }
+        var ids = new ArrayList<JobId>(prepared.size());
+        for (var p : prepared) {
+            p.job.adoptVersion(version);
+            ids.add(p.job.id());
+        }
+        return List.copyOf(ids);
+    }
+
+    @Override
+    public EnqueueResult enqueueIfAbsent(Job job, String dedupKey, Duration ttl, Instant now) {
+        Objects.requireNonNull(job, "job");
+        Objects.requireNonNull(ttl, "ttl");
+        Objects.requireNonNull(now, "now");
+        Names.requireName("queue", job.queue());
+        if (dedupKey == null || dedupKey.isBlank()) {
+            throw new IllegalArgumentException("dedupKey must not be blank");
+        }
+        long version = 1L;
+        try {
+            return DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection()) {
+                    conn.setAutoCommit(false);
+                    try {
+                        JobSnapshot snapshot = snapshotForInsert(conn, job, version);
+                        String body = serializer.serializeJob(snapshot, capabilities);
+                        Instant currentStateAt = lastTransitionTime(snapshot, snapshot.currentState());
+                        Optional<JobId> existing = findActiveDedup(conn, job.queue(), dedupKey, now);
+                        if (existing.isPresent()) {
+                            conn.commit();
+                            return new EnqueueResult.Coalesced(existing.get());
+                        }
+                        insertSnapshot(conn, snapshot, body, currentStateAt, version);
+                        noteInsertedWorkflowDescendant(conn, snapshot);
+                        try (PreparedStatement ps = conn.prepareStatement(
+                                "INSERT INTO threadmill_dedup_keys (queue, dedup_key, job_id, expires_at) VALUES (?, ?, ?, ?)")) {
+                            ps.setString(1, job.queue());
+                            ps.setString(2, dedupKey);
+                            ps.setObject(3, job.id().asUuid());
+                            ps.setTimestamp(4, Timestamp.from(now.plus(ttl)));
+                            ps.executeUpdate();
+                        }
+                        conn.commit();
+                        job.adoptVersion(version);
+                        return new EnqueueResult.Created(job.id());
+                    } catch (SQLException e) {
+                        conn.rollback();
+                        if ("23505".equals(e.getSQLState())) {
+                            Optional<JobId> existing = findActiveDedup(conn, job.queue(), dedupKey, now);
+                            if (existing.isPresent()) return new EnqueueResult.Coalesced(existing.get());
+                        }
+                        throw e;
+                    } catch (RuntimeException e) {
+                        conn.rollback();
+                        throw e;
+                    } finally {
+                        conn.setAutoCommit(true);
+                    }
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("enqueueIfAbsent failed", e);
+        }
+    }
+
+    @Override
+    public Optional<Job> findById(JobId id) {
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement("SELECT body FROM threadmill_jobs WHERE id = ?")) {
+            ps.setObject(1, id.asUuid());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                return Optional.of(serializer.deserializeJob(rs.getString(1)));
+            }
+        } catch (SQLException e) {
+            throw new JdbcException("findById failed", e);
+        }
+    }
+
+    @Override
+    public void saveAtomic(Job job, long expectedVersion) {
+        Objects.requireNonNull(job, "job");
+        long nextVersion = expectedVersion + 1;
+        JobSnapshot snapshot = withVersion(job, nextVersion);
+        // Serialize BEFORE any DB work so OversizedJobException can't corrupt state.
+        String body = serializer.serializeJob(snapshot, capabilities);
+        Instant currentStateAt = lastTransitionTime(snapshot, snapshot.currentState());
+
+        boolean saved;
+        try {
+            saved = DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection()) {
+                    conn.setAutoCommit(false);
+                    try {
+                        JobSnapshot oldSnapshot;
+                        try (PreparedStatement ps = conn.prepareStatement(
+                                "SELECT body, version FROM threadmill_jobs WHERE id = ? FOR UPDATE")) {
+                            ps.setObject(1, snapshot.id().asUuid());
+                            try (ResultSet rs = ps.executeQuery()) {
+                                if (!rs.next()) {
+                                    conn.commit();
+                                    return false;
+                                }
+                                if (rs.getLong(2) != expectedVersion) {
+                                    conn.commit();
+                                    return false;
+                                }
+                                oldSnapshot = serializer
+                                        .deserializeJob(rs.getString(1))
+                                        .snapshot();
+                            }
+                        }
+                        if (oldSnapshot.concurrencyKey() != null) {
+                            lockConcurrencyGroup(conn, oldSnapshot.concurrencyKey());
+                        }
+                        releaseWorkflowHoldIfTerminal(conn, oldSnapshot, snapshot.currentState());
+                        try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
+                                + "state = ?, queue = ?, priority = ?, handler_signature = ?, "
+                                + "scheduled_at = ?, owner_node_id = ?, owner_heartbeat_at = ?, last_checkin_at = ?, "
+                                + "current_state_at = ?, version = ?, body = ?, "
+                                + "concurrency_key = ?, concurrency_mode = ?, workflow_root_id = ? "
+                                + "WHERE id = ? AND version = ?")) {
+                            ps.setString(1, snapshot.currentState().name());
+                            ps.setString(2, snapshot.queue());
+                            ps.setInt(3, snapshot.priority());
+                            ps.setString(4, snapshot.spec().handlerType());
+                            setNullableTimestamp(ps, 5, snapshot.scheduledFor());
+                            setNullableUuid(
+                                    ps,
+                                    6,
+                                    snapshot.ownerNodeId() == null
+                                            ? null
+                                            : snapshot.ownerNodeId().asUuid());
+                            setNullableTimestamp(ps, 7, snapshot.ownerHeartbeatAt());
+                            setNullableTimestamp(ps, 8, snapshot.lastCheckinAt());
+                            ps.setTimestamp(9, Timestamp.from(currentStateAt));
+                            ps.setLong(10, nextVersion);
+                            ps.setString(11, body);
+                            setNullableConcurrency(ps, 12, snapshot.concurrencyKey(), snapshot.concurrencyMode());
+                            ps.setObject(14, snapshot.workflowRootId().asUuid());
+                            ps.setObject(15, snapshot.id().asUuid());
+                            ps.setLong(16, expectedVersion);
+                            int rows = ps.executeUpdate();
+                            conn.commit();
+                            return rows > 0;
+                        }
+                    } catch (RuntimeException | SQLException e) {
+                        conn.rollback();
+                        throw e;
+                    } finally {
+                        conn.setAutoCommit(true);
+                    }
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("saveAtomic failed", e);
+        }
+        if (!saved) {
+            throw new StaleJobException(job.id(), expectedVersion);
+        }
+        job.adoptVersion(nextVersion);
+    }
+
+    @Override
+    public boolean softDelete(JobId id) {
+        try {
+            return DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection()) {
+                    conn.setAutoCommit(false);
+                    try {
+                        String body;
+                        long version;
+                        try (PreparedStatement ps = conn.prepareStatement(
+                                "SELECT body, version FROM threadmill_jobs WHERE id = ? FOR UPDATE")) {
+                            ps.setObject(1, id.asUuid());
+                            try (ResultSet rs = ps.executeQuery()) {
+                                if (!rs.next()) {
+                                    conn.commit();
+                                    return false;
+                                }
+                                body = rs.getString(1);
+                                version = rs.getLong(2);
+                            }
+                        }
+                        Job j = serializer.deserializeJob(body);
+                        if (j.currentState() == JobState.DELETED) {
+                            conn.commit();
+                            return false;
+                        }
+                        JobSnapshot oldSnapshot = j.snapshot();
+                        if (oldSnapshot.concurrencyKey() != null) {
+                            lockConcurrencyGroup(conn, oldSnapshot.concurrencyKey());
+                        }
+                        j.transitionTo(JobState.DELETED, Instant.now(), "user.delete", null);
+                        long nextVersion = version + 1;
+                        JobSnapshot snapshot = withVersion(j, nextVersion);
+                        String newBody = serializer.serializeJob(snapshot, capabilities);
+                        Instant currentStateAt = lastTransitionTime(snapshot, JobState.DELETED);
+                        releaseWorkflowHoldIfTerminal(conn, oldSnapshot, JobState.DELETED);
+                        try (PreparedStatement ps = conn.prepareStatement(
+                                "UPDATE threadmill_jobs SET state = ?, version = ?, body = ?, current_state_at = ? "
+                                        + "WHERE id = ?")) {
+                            ps.setString(1, JobState.DELETED.name());
+                            ps.setLong(2, nextVersion);
+                            ps.setString(3, newBody);
+                            ps.setTimestamp(4, Timestamp.from(currentStateAt));
+                            ps.setObject(5, id.asUuid());
+                            ps.executeUpdate();
+                        }
+                        conn.commit();
+                        return true;
+                    } catch (RuntimeException | SQLException e) {
+                        conn.rollback();
+                        throw e;
+                    } finally {
+                        conn.setAutoCommit(true);
+                    }
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("softDelete failed", e);
+        }
+    }
+
+    // ---------------------------------------------------------------- claim & heartbeat
+
+    @Override
+    public List<Job> claimReady(NodeId nodeId, String queue, int max, Instant heartbeatAt) {
+        Objects.requireNonNull(nodeId, "nodeId");
+        Names.requireName("queue", queue);
+        Objects.requireNonNull(heartbeatAt, "heartbeatAt");
+        if (max <= 0) return List.of();
+        if (isQueuePaused(queue)) return List.of();
+        int cap = Math.min(max, capabilities.maxClaimBatch());
+
+        try {
+            return DeadlockRetry.run(() -> {
+                List<Job> result = new ArrayList<>();
+                try (Connection conn = dataSource.getConnection()) {
+                    conn.setAutoCommit(false);
+                    try {
+                        // 1. Atomically grab up to `cap` ready ids, skipping any locked by another worker.
+                        record Pending(UUID id, String body, long version) {}
+                        List<Pending> pending = new ArrayList<>();
+                        try (PreparedStatement ps =
+                                conn.prepareStatement("SELECT id, body, version FROM threadmill_jobs "
+                                        + "WHERE state = 'ENQUEUED' AND queue = ? "
+                                        + "ORDER BY priority DESC, id "
+                                        + "LIMIT ? FOR UPDATE SKIP LOCKED")) {
+                            ps.setString(1, queue);
+                            ps.setInt(2, Math.max(cap, cap * 64));
+                            try (ResultSet rs = ps.executeQuery()) {
+                                while (rs.next()) {
+                                    pending.add(new Pending((UUID) rs.getObject(1), rs.getString(2), rs.getLong(3)));
+                                }
+                            }
+                        }
+                        if (pending.isEmpty()) {
+                            conn.commit();
+                            return result;
+                        }
+
+                        // 2. For each, deserialize, transition to PROCESSING, re-serialize, and UPDATE the row.
+                        try (PreparedStatement ps = conn.prepareStatement(
+                                "UPDATE threadmill_jobs SET state = 'PROCESSING', owner_node_id = ?, "
+                                        + "owner_heartbeat_at = ?, last_checkin_at = NULL, current_state_at = ?, version = ?, body = ? "
+                                        + "WHERE id = ?")) {
+                            for (var p : pending) {
+                                if (result.size() >= cap) break;
+                                Job j = serializer.deserializeJob(p.body);
+                                if (j.concurrencyKey().isPresent())
+                                    lockConcurrencyGroup(
+                                            conn, j.concurrencyKey().get());
+                                if (!canClaim(conn, j.snapshot())) continue;
+                                acquireWorkflowHold(conn, j.snapshot());
+                                j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
+                                j.assignOwner(nodeId, heartbeatAt);
+                                j.incrementAttempts();
+                                long nextVersion = p.version + 1;
+                                JobSnapshot snap = withVersion(j, nextVersion);
+                                String newBody = serializer.serializeJob(snap, capabilities);
+                                ps.setObject(1, nodeId.asUuid());
+                                ps.setTimestamp(2, Timestamp.from(heartbeatAt));
+                                ps.setTimestamp(3, Timestamp.from(heartbeatAt));
+                                ps.setLong(4, nextVersion);
+                                ps.setString(5, newBody);
+                                ps.setObject(6, p.id);
+                                ps.addBatch();
+                                result.add(serializer.deserializeJob(newBody));
+                            }
+                            ps.executeBatch();
+                        }
+                        conn.commit();
+                        return result;
+                    } catch (RuntimeException | SQLException e) {
+                        conn.rollback();
+                        throw e;
+                    } finally {
+                        conn.setAutoCommit(true);
+                    }
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("claimReady failed", e);
+        }
+    }
+
+    // ---------------------------------------------------------------- queue pauses
+
+    @Override
+    public void pauseQueue(String queue, String reason) {
+        Names.requireName("queue", queue);
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_queue_pauses "
+                                + "(queue, paused_at, paused_by) VALUES (?, ?, ?) "
+                                + "ON CONFLICT (queue) DO UPDATE SET paused_at = EXCLUDED.paused_at, "
+                                + "paused_by = EXCLUDED.paused_by")) {
+                    ps.setString(1, queue);
+                    ps.setTimestamp(2, Timestamp.from(Instant.now()));
+                    ps.setString(3, reason);
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("pauseQueue failed", e);
+        }
+    }
+
+    @Override
+    public void resumeQueue(String queue) {
+        Names.requireName("queue", queue);
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps =
+                                conn.prepareStatement("DELETE FROM threadmill_queue_pauses WHERE queue = ?")) {
+                    ps.setString(1, queue);
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("resumeQueue failed", e);
+        }
+    }
+
+    @Override
+    public Set<String> listPausedQueues() {
+        try {
+            return DeadlockRetry.run(() -> {
+                var out = new HashSet<String>();
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps = conn.prepareStatement("SELECT queue FROM threadmill_queue_pauses");
+                        ResultSet rs = ps.executeQuery()) {
+                    while (rs.next()) out.add(rs.getString(1));
+                }
+                return Set.copyOf(out);
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("listPausedQueues failed", e);
+        }
+    }
+
+    private boolean isQueuePaused(String queue) {
+        try {
+            return DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps =
+                                conn.prepareStatement("SELECT 1 FROM threadmill_queue_pauses WHERE queue = ?")) {
+                    ps.setString(1, queue);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        return rs.next();
+                    }
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("isQueuePaused failed", e);
+        }
+    }
+
+    @Override
+    public void touchOwnerHeartbeat(NodeId nodeId, Instant now) {
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps =
+                                conn.prepareStatement("UPDATE threadmill_jobs SET owner_heartbeat_at = ? "
+                                        + "WHERE state = 'PROCESSING' AND owner_node_id = ?")) {
+                    ps.setTimestamp(1, Timestamp.from(now));
+                    ps.setObject(2, nodeId.asUuid());
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("touchOwnerHeartbeat failed", e);
+        }
+    }
+
+    @Override
+    public boolean saveExecutionUpdate(Job job, NodeId nodeId) {
+        Objects.requireNonNull(job, "job");
+        Objects.requireNonNull(nodeId, "nodeId");
+        JobSnapshot snapshot = withVersion(job, job.version());
+        String body = serializer.serializeJob(snapshot, capabilities);
+        try {
+            return DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
+                                + "owner_heartbeat_at = ?, last_checkin_at = ?, body = ? "
+                                + "WHERE id = ? AND state = 'PROCESSING' AND owner_node_id = ?")) {
+                    Instant heartbeat =
+                            snapshot.lastCheckinAt() == null ? snapshot.ownerHeartbeatAt() : snapshot.lastCheckinAt();
+                    setNullableTimestamp(ps, 1, heartbeat);
+                    setNullableTimestamp(ps, 2, snapshot.lastCheckinAt());
+                    ps.setString(3, body);
+                    ps.setObject(4, snapshot.id().asUuid());
+                    ps.setObject(5, nodeId.asUuid());
+                    return ps.executeUpdate() > 0;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("saveExecutionUpdate failed", e);
+        }
+    }
+
+    @Override
+    public void recordNodeHeartbeat(NodeId nodeId, Instant now) {
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps = conn.prepareStatement(
+                                "INSERT INTO threadmill_nodes (id, last_heartbeat_at) VALUES (?, ?) "
+                                        + "ON CONFLICT (id) DO UPDATE SET last_heartbeat_at = EXCLUDED.last_heartbeat_at")) {
+                    ps.setObject(1, nodeId.asUuid());
+                    ps.setTimestamp(2, Timestamp.from(now));
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("recordNodeHeartbeat failed", e);
+        }
+    }
+
+    @Override
+    public Optional<Instant> readNodeHeartbeat(NodeId nodeId) {
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps =
+                        conn.prepareStatement("SELECT last_heartbeat_at FROM threadmill_nodes WHERE id = ?")) {
+            ps.setObject(1, nodeId.asUuid());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                return Optional.of(rs.getTimestamp(1).toInstant());
+            }
+        } catch (SQLException e) {
+            throw new JdbcException("readNodeHeartbeat failed", e);
+        }
+    }
+
+    @Override
+    public boolean acquireOrRenewMaintenanceLease(NodeId nodeId, Duration leaseDuration) {
+        Objects.requireNonNull(nodeId, "nodeId");
+        com.hemju.threadmill.core.store.Mutexes.requirePositive(leaseDuration);
+        try {
+            return DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps =
+                                conn.prepareStatement("INSERT INTO threadmill_leases (name, holder, expires_at) "
+                                        + "VALUES (?, ?, clock_timestamp() + (? * interval '1 millisecond')) "
+                                        + "ON CONFLICT (name) DO UPDATE "
+                                        + "SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at "
+                                        + "WHERE threadmill_leases.holder = EXCLUDED.holder "
+                                        + "OR threadmill_leases.expires_at <= clock_timestamp()")) {
+                    ps.setString(1, MAINTENANCE_LEASE);
+                    ps.setObject(2, nodeId.asUuid());
+                    ps.setLong(3, leaseDuration.toMillis());
+                    return ps.executeUpdate() > 0;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("acquireOrRenewMaintenanceLease failed", e);
+        }
+    }
+
+    @Override
+    public void releaseMaintenanceLease(NodeId nodeId) {
+        Objects.requireNonNull(nodeId, "nodeId");
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps =
+                                conn.prepareStatement("DELETE FROM threadmill_leases WHERE name = ? AND holder = ?")) {
+                    ps.setString(1, MAINTENANCE_LEASE);
+                    ps.setObject(2, nodeId.asUuid());
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("releaseMaintenanceLease failed", e);
+        }
+    }
+
+    @Override
+    public Optional<NodeId> readMaintenanceLeaseOwner() {
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement(
+                        "SELECT holder FROM threadmill_leases WHERE name = ? AND expires_at > clock_timestamp()")) {
+            ps.setString(1, MAINTENANCE_LEASE);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                return Optional.of(NodeId.of((UUID) rs.getObject(1)));
+            }
+        } catch (SQLException e) {
+            throw new JdbcException("readMaintenanceLeaseOwner failed", e);
+        }
+    }
+
+    // ---------------------------------------------------------------- housekeeping queries
+
+    @Override
+    public List<Job> findDueForPromotion(Instant now, int max) {
+        return queryJobs(
+                "SELECT body FROM threadmill_jobs WHERE state = 'SCHEDULED' AND scheduled_at <= ? "
+                        + "ORDER BY scheduled_at LIMIT ?",
+                ps -> {
+                    ps.setTimestamp(1, Timestamp.from(now));
+                    ps.setInt(2, Math.max(0, max));
+                });
+    }
+
+    @Override
+    public List<Job> findOrphaned(Instant heartbeatExpiry, int max) {
+        return queryJobs(
+                "SELECT body FROM threadmill_jobs WHERE state = 'PROCESSING' "
+                        + "AND GREATEST(owner_heartbeat_at, COALESCE(last_checkin_at, owner_heartbeat_at)) <= ? "
+                        + "ORDER BY GREATEST(owner_heartbeat_at, COALESCE(last_checkin_at, owner_heartbeat_at)) LIMIT ?",
+                ps -> {
+                    ps.setTimestamp(1, Timestamp.from(heartbeatExpiry));
+                    ps.setInt(2, Math.max(0, max));
+                });
+    }
+
+    // ---------------------------------------------------------------- counts & search
+
+    @Override
+    public Map<JobState, Long> countsByState() {
+        var counts = new EnumMap<JobState, Long>(JobState.class);
+        for (JobState s : JobState.values()) counts.put(s, 0L);
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement("SELECT state, count FROM threadmill_job_counts");
+                ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                try {
+                    counts.put(JobState.valueOf(rs.getString(1)), rs.getLong(2));
+                } catch (IllegalArgumentException ignored) {
+                    // unknown state from an older schema — ignore
+                }
+            }
+        } catch (SQLException e) {
+            throw new JdbcException("countsByState failed", e);
+        }
+        return counts;
+    }
+
+    @Override
+    public Map<String, Long> queueDepths() {
+        Map<String, Long> depths = new HashMap<>();
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement(
+                        "SELECT queue, count(*) FROM threadmill_jobs WHERE state = 'ENQUEUED' GROUP BY queue");
+                ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                depths.put(rs.getString(1), rs.getLong(2));
+            }
+        } catch (SQLException e) {
+            throw new JdbcException("queueDepths failed", e);
+        }
+        return depths;
+    }
+
+    @Override
+    public List<String> listEnqueuedQueues() {
+        List<String> queues = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement(
+                        "SELECT DISTINCT queue FROM threadmill_jobs WHERE state = 'ENQUEUED' ORDER BY queue");
+                ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                queues.add(rs.getString(1));
+            }
+            return queues;
+        } catch (SQLException e) {
+            throw new JdbcException("listEnqueuedQueues failed", e);
+        }
+    }
+
+    @Override
+    public Optional<Instant> oldestEnqueuedAt(String queue) {
+        Names.requireName("queue", queue);
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement("SELECT current_state_at FROM threadmill_jobs "
+                        + "WHERE state = 'ENQUEUED' AND queue = ? ORDER BY current_state_at LIMIT 1")) {
+            ps.setString(1, queue);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                return Optional.of(rs.getTimestamp(1).toInstant());
+            }
+        } catch (SQLException e) {
+            throw new JdbcException("oldestEnqueuedAt failed", e);
+        }
+    }
+
+    @Override
+    public Optional<Instant> oldestProcessingHeartbeat() {
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement("SELECT owner_heartbeat_at FROM threadmill_jobs "
+                        + "WHERE state = 'PROCESSING' ORDER BY owner_heartbeat_at LIMIT 1");
+                ResultSet rs = ps.executeQuery()) {
+            if (!rs.next()) return Optional.empty();
+            return Optional.of(rs.getTimestamp(1).toInstant());
+        } catch (SQLException e) {
+            throw new JdbcException("oldestProcessingHeartbeat failed", e);
+        }
+    }
+
+    @Override
+    public List<NodeHeartbeat> listNodeHeartbeats() {
+        List<NodeHeartbeat> out = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps =
+                        conn.prepareStatement("SELECT id, last_heartbeat_at FROM threadmill_nodes ORDER BY id");
+                ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                out.add(new NodeHeartbeat(
+                        NodeId.of((UUID) rs.getObject(1)), rs.getTimestamp(2).toInstant()));
+            }
+            return out;
+        } catch (SQLException e) {
+            throw new JdbcException("listNodeHeartbeats failed", e);
+        }
+    }
+
+    @Override
+    public long deleteNodeHeartbeatsOlderThan(Instant cutoff) {
+        Objects.requireNonNull(cutoff, "cutoff");
+        try {
+            return DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps =
+                                conn.prepareStatement("DELETE FROM threadmill_nodes WHERE last_heartbeat_at <= ?")) {
+                    ps.setTimestamp(1, Timestamp.from(cutoff));
+                    return (long) ps.executeUpdate();
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("deleteNodeHeartbeatsOlderThan failed", e);
+        }
+    }
+
+    @Override
+    public long deleteExpiredDedupKeys(Instant now, int max) {
+        Objects.requireNonNull(now, "now");
+        if (max <= 0) return 0L;
+        try {
+            return DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps =
+                                conn.prepareStatement("DELETE FROM threadmill_dedup_keys d WHERE d.ctid IN ("
+                                        + "SELECT d2.ctid FROM threadmill_dedup_keys d2 "
+                                        + "LEFT JOIN threadmill_jobs j ON j.id = d2.job_id "
+                                        + "WHERE d2.expires_at <= ? AND (j.id IS NULL OR j.state IN ('SUCCEEDED','FAILED','DELETED','QUARANTINED')) "
+                                        + "LIMIT ?)")) {
+                    ps.setTimestamp(1, Timestamp.from(now));
+                    ps.setInt(2, max);
+                    return (long) ps.executeUpdate();
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("deleteExpiredDedupKeys failed", e);
+        }
+    }
+
+    @Override
+    public List<Job> findByHandlerSignature(String handlerType, int max) {
+        Objects.requireNonNull(handlerType, "handlerType");
+        return queryJobs("SELECT body FROM threadmill_jobs WHERE handler_signature = ? LIMIT ?", ps -> {
+            ps.setString(1, handlerType);
+            ps.setInt(2, Math.max(0, max));
+        });
+    }
+
+    // ---------------------------------------------------------------- retention
+
+    @Override
+    public long deleteFinishedOlderThan(Instant cutoff, JobState state, int max) {
+        try {
+            return DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps = conn.prepareStatement(
+                                "DELETE FROM threadmill_jobs WHERE id IN (" + "SELECT id FROM threadmill_jobs "
+                                        + "WHERE state = ? AND current_state_at <= ? "
+                                        + "LIMIT ?)")) {
+                    ps.setString(1, state.name());
+                    ps.setTimestamp(2, Timestamp.from(cutoff));
+                    ps.setInt(3, Math.max(0, max));
+                    return (long) ps.executeUpdate();
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("deleteFinishedOlderThan failed", e);
+        }
+    }
+
+    // ---------------------------------------------------------------- relationships & mutexes
+
+    @Override
+    public List<Job> findAwaitingByParent(JobId parentId, int max) {
+        // The body is the source of truth for relationships; scan AWAITING jobs and filter.
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps =
+                        conn.prepareStatement("SELECT body FROM threadmill_jobs WHERE state = 'AWAITING' LIMIT ?")) {
+            ps.setInt(1, Math.max(0, max * 4)); // overscan; filter client-side
+            List<Job> out = new ArrayList<>();
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next() && out.size() < max) {
+                    Job j = serializer.deserializeJob(rs.getString(1));
+                    if (j.relationship().isPresent()
+                            && j.relationship().get().parentId().equals(parentId)) {
+                        out.add(j);
+                    }
+                }
+            }
+            return out;
+        } catch (SQLException e) {
+            throw new JdbcException("findAwaitingByParent failed", e);
+        }
+    }
+
+    @Override
+    public boolean tryAcquireMutex(String name, String holder, Duration leaseDuration) {
+        Names.requireName("mutex", name);
+        Objects.requireNonNull(holder, "holder");
+        com.hemju.threadmill.core.store.Mutexes.requirePositive(leaseDuration);
+        var now = Instant.now();
+        Instant expires = now.plus(leaseDuration);
+        try {
+            return DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps = conn.prepareStatement(
+                                "INSERT INTO threadmill_mutexes (name, holder, expires_at) VALUES (?, ?, ?) "
+                                        + "ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at "
+                                        + "WHERE threadmill_mutexes.expires_at <= ? OR threadmill_mutexes.holder = EXCLUDED.holder")) {
+                    ps.setString(1, name);
+                    ps.setString(2, holder);
+                    ps.setTimestamp(3, Timestamp.from(expires));
+                    ps.setTimestamp(4, Timestamp.from(now));
+                    return ps.executeUpdate() > 0;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("tryAcquireMutex failed", e);
+        }
+    }
+
+    @Override
+    public boolean replaceJob(JobId id, long expectedVersion, JobReplacement replacement) {
+        Objects.requireNonNull(id, "id");
+        Objects.requireNonNull(replacement, "replacement");
+        try {
+            return DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection()) {
+                    conn.setAutoCommit(false);
+                    try {
+                        String body;
+                        long version;
+                        String state;
+                        try (PreparedStatement ps = conn.prepareStatement(
+                                "SELECT body, version, state FROM threadmill_jobs WHERE id = ? FOR UPDATE")) {
+                            ps.setObject(1, id.asUuid());
+                            try (ResultSet rs = ps.executeQuery()) {
+                                if (!rs.next()) {
+                                    conn.commit();
+                                    return false;
+                                }
+                                body = rs.getString(1);
+                                version = rs.getLong(2);
+                                state = rs.getString(3);
+                            }
+                        }
+                        if (version != expectedVersion) {
+                            conn.commit();
+                            throw new StaleJobException(id, expectedVersion);
+                        }
+                        if (!isReplaceableState(state)) {
+                            conn.commit();
+                            return false;
+                        }
+                        Job current = serializer.deserializeJob(body);
+                        Job replaced = JobReplacements.apply(current, replacement);
+                        long nextVersion = version + 1;
+                        JobSnapshot snap = withVersion(replaced, nextVersion);
+                        String newBody = serializer.serializeJob(snap, capabilities);
+                        Instant currentStateAt = lastTransitionTime(snap, snap.currentState());
+                        try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
+                                + "queue = ?, priority = ?, handler_signature = ?, scheduled_at = ?, "
+                                + "current_state_at = ?, version = ?, body = ?, "
+                                + "concurrency_key = ?, concurrency_mode = ?, workflow_root_id = ? "
+                                + "WHERE id = ? AND version = ?")) {
+                            ps.setString(1, snap.queue());
+                            ps.setInt(2, snap.priority());
+                            ps.setString(3, snap.spec().handlerType());
+                            setNullableTimestamp(ps, 4, snap.scheduledFor());
+                            ps.setTimestamp(5, Timestamp.from(currentStateAt));
+                            ps.setLong(6, nextVersion);
+                            ps.setString(7, newBody);
+                            setNullableConcurrency(ps, 8, snap.concurrencyKey(), snap.concurrencyMode());
+                            ps.setObject(10, snap.workflowRootId().asUuid());
+                            ps.setObject(11, id.asUuid());
+                            ps.setLong(12, expectedVersion);
+                            int rows = ps.executeUpdate();
+                            conn.commit();
+                            return rows > 0;
+                        }
+                    } catch (RuntimeException | SQLException e) {
+                        conn.rollback();
+                        throw e;
+                    } finally {
+                        conn.setAutoCommit(true);
+                    }
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("replaceJob failed", e);
+        }
+    }
+
+    private static boolean isReplaceableState(String state) {
+        return "ENQUEUED".equals(state) || "SCHEDULED".equals(state) || "AWAITING".equals(state);
+    }
+
+    @Override
+    public void releaseMutex(String name, String holder) {
+        Names.requireName("mutex", name);
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps =
+                                conn.prepareStatement("DELETE FROM threadmill_mutexes WHERE name = ? AND holder = ?")) {
+                    ps.setString(1, name);
+                    ps.setString(2, holder);
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("releaseMutex failed", e);
+        }
+    }
+
+    // ---------------------------------------------------------------- cron tasks
+
+    @Override
+    public void upsertCronTask(com.hemju.threadmill.core.schedule.CronTask task) {
+        Objects.requireNonNull(task, "task");
+        Names.requireName("cronTask", task.name());
+        Names.requireName("queue", task.queue());
+        String kind;
+        String value;
+        com.hemju.threadmill.core.schedule.CronTask.Trigger trigger = task.trigger();
+        if (trigger instanceof com.hemju.threadmill.core.schedule.CronTask.Trigger.CronExpr ce) {
+            kind = "CRON";
+            value = ce.expression().expression();
+        } else if (trigger instanceof com.hemju.threadmill.core.schedule.CronTask.Trigger.Interval iv) {
+            kind = "INTERVAL";
+            value = iv.interval().toString();
+        } else {
+            throw new IllegalStateException("Unknown trigger kind: " + trigger);
+        }
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps = conn.prepareStatement(
+                                "INSERT INTO threadmill_cron_tasks (name, trigger_kind, trigger_value, handler_signature, "
+                                        + "payload_type_tag, payload_serialized, queue, priority, missed_run_policy, time_zone, enabled) "
+                                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                                        + "ON CONFLICT (name) DO UPDATE SET "
+                                        + "trigger_kind = EXCLUDED.trigger_kind, trigger_value = EXCLUDED.trigger_value, "
+                                        + "handler_signature = EXCLUDED.handler_signature, "
+                                        + "payload_type_tag = EXCLUDED.payload_type_tag, "
+                                        + "payload_serialized = EXCLUDED.payload_serialized, "
+                                        + "queue = EXCLUDED.queue, priority = EXCLUDED.priority, "
+                                        + "missed_run_policy = EXCLUDED.missed_run_policy, "
+                                        + "time_zone = EXCLUDED.time_zone, enabled = EXCLUDED.enabled")) {
+                    ps.setString(1, task.name());
+                    ps.setString(2, kind);
+                    ps.setString(3, value);
+                    ps.setString(4, task.handlerType());
+                    ps.setString(5, task.payloadArgument().typeTag());
+                    ps.setString(6, task.payloadArgument().serialized());
+                    ps.setString(7, task.queue());
+                    ps.setInt(8, task.priority());
+                    ps.setString(9, task.missedRunPolicy().name());
+                    ps.setString(10, task.zone().getId());
+                    ps.setBoolean(11, task.enabled());
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("upsertCronTask failed", e);
+        }
+    }
+
+    @Override
+    public Optional<com.hemju.threadmill.core.schedule.CronTask> findCronTask(String name) {
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement(
+                        "SELECT name, trigger_kind, trigger_value, handler_signature, payload_type_tag, "
+                                + "payload_serialized, queue, priority, missed_run_policy, time_zone, enabled "
+                                + "FROM threadmill_cron_tasks WHERE name = ?")) {
+            ps.setString(1, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                return Optional.of(readCronTask(rs));
+            }
+        } catch (SQLException e) {
+            throw new JdbcException("findCronTask failed", e);
+        }
+    }
+
+    @Override
+    public List<com.hemju.threadmill.core.schedule.CronTask> listCronTasks() {
+        List<com.hemju.threadmill.core.schedule.CronTask> out = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement(
+                        "SELECT name, trigger_kind, trigger_value, handler_signature, payload_type_tag, "
+                                + "payload_serialized, queue, priority, missed_run_policy, time_zone, enabled "
+                                + "FROM threadmill_cron_tasks ORDER BY name");
+                ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) out.add(readCronTask(rs));
+        } catch (SQLException e) {
+            throw new JdbcException("listCronTasks failed", e);
+        }
+        return out;
+    }
+
+    @Override
+    public void deleteCronTask(String name) {
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps =
+                                conn.prepareStatement("DELETE FROM threadmill_cron_tasks WHERE name = ?")) {
+                    ps.setString(1, name);
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("deleteCronTask failed", e);
+        }
+    }
+
+    @Override
+    public void upsertCronTaskState(CronTaskScheduleState state) {
+        Objects.requireNonNull(state, "state");
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps = conn.prepareStatement(
+                                "INSERT INTO threadmill_cron_task_state (task_name, last_run_at, last_run_job_id, "
+                                        + "next_run_at, in_flight_job_id) VALUES (?, ?, ?, ?, ?) "
+                                        + "ON CONFLICT (task_name) DO UPDATE SET "
+                                        + "last_run_at = EXCLUDED.last_run_at, last_run_job_id = EXCLUDED.last_run_job_id, "
+                                        + "next_run_at = EXCLUDED.next_run_at, in_flight_job_id = EXCLUDED.in_flight_job_id")) {
+                    ps.setString(1, state.taskName());
+                    setNullableTimestamp(ps, 2, state.lastRunAt());
+                    setNullableUuid(ps, 3, state.lastRunJobId());
+                    setNullableTimestamp(ps, 4, state.nextRunAt());
+                    setNullableUuid(ps, 5, state.inFlightJobId());
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("upsertCronTaskState failed", e);
+        }
+    }
+
+    @Override
+    public Optional<CronTaskScheduleState> findCronTaskState(String name) {
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement(
+                        "SELECT task_name, last_run_at, last_run_job_id, next_run_at, in_flight_job_id "
+                                + "FROM threadmill_cron_task_state WHERE task_name = ?")) {
+            ps.setString(1, name);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                return Optional.of(new CronTaskScheduleState(
+                        rs.getString(1),
+                        rs.getTimestamp(2) == null ? null : rs.getTimestamp(2).toInstant(),
+                        (UUID) rs.getObject(3),
+                        rs.getTimestamp(4) == null ? null : rs.getTimestamp(4).toInstant(),
+                        (UUID) rs.getObject(5)));
+            }
+        } catch (SQLException e) {
+            throw new JdbcException("findCronTaskState failed", e);
+        }
+    }
+
+    private com.hemju.threadmill.core.schedule.CronTask readCronTask(ResultSet rs) throws SQLException {
+        String name = rs.getString(1);
+        String kind = rs.getString(2);
+        String value = rs.getString(3);
+        com.hemju.threadmill.core.schedule.CronTask.Trigger trigger;
+        if ("CRON".equals(kind)) {
+            trigger = new com.hemju.threadmill.core.schedule.CronTask.Trigger.CronExpr(CronExpression.parse(value));
+        } else if ("INTERVAL".equals(kind)) {
+            trigger = new com.hemju.threadmill.core.schedule.CronTask.Trigger.Interval(Duration.parse(value));
+        } else {
+            throw new SQLException("Unknown trigger_kind: " + kind);
+        }
+        return new com.hemju.threadmill.core.schedule.CronTask(
+                name,
+                trigger,
+                rs.getString(4),
+                new com.hemju.threadmill.core.spec.JobArgument(rs.getString(5), rs.getString(6)),
+                rs.getString(7),
+                rs.getInt(8),
+                com.hemju.threadmill.core.schedule.CronTask.MissedRunPolicy.valueOf(rs.getString(9)),
+                ZoneId.of(rs.getString(10)),
+                rs.getBoolean(11));
+    }
+
+    // ---------------------------------------------------------------- helpers
+
+    @FunctionalInterface
+    private interface StatementSetup {
+        void apply(PreparedStatement ps) throws SQLException;
+    }
+
+    private List<Job> queryJobs(String sql, StatementSetup setup) {
+        List<Job> out = new ArrayList<>();
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement(sql)) {
+            setup.apply(ps);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(serializer.deserializeJob(rs.getString(1)));
+                }
+            }
+        } catch (SQLException e) {
+            throw new JdbcException("query failed: " + sql, e);
+        }
+        return out;
+    }
+
+    private Optional<JobId> findActiveDedup(Connection conn, String queue, String dedupKey, Instant now)
+            throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT d.job_id, d.expires_at, j.state "
+                + "FROM threadmill_dedup_keys d LEFT JOIN threadmill_jobs j ON j.id = d.job_id "
+                + "WHERE d.queue = ? AND d.dedup_key = ? FOR UPDATE OF d")) {
+            ps.setString(1, queue);
+            ps.setString(2, dedupKey);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return Optional.empty();
+                var id = JobId.of((UUID) rs.getObject(1));
+                var expiresAt = rs.getTimestamp(2).toInstant();
+                String stateValue = rs.getString(3);
+                if (stateValue != null && (expiresAt.isAfter(now) || !isTerminal(JobState.valueOf(stateValue)))) {
+                    return Optional.of(id);
+                }
+            }
+        }
+        try (PreparedStatement ps =
+                conn.prepareStatement("DELETE FROM threadmill_dedup_keys WHERE queue = ? AND dedup_key = ?")) {
+            ps.setString(1, queue);
+            ps.setString(2, dedupKey);
+            ps.executeUpdate();
+        }
+        return Optional.empty();
+    }
+
+    private JobSnapshot snapshotForInsert(Connection conn, Job job, long version) throws SQLException {
+        JobSnapshot s = withVersion(job, version);
+        if (s.relationship() == null) {
+            return s;
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT workflow_root_id, concurrency_key, concurrency_mode FROM threadmill_jobs WHERE id = ?")) {
+            ps.setObject(1, s.relationship().parentId().asUuid());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return s;
+                }
+                var rootId = JobId.of((UUID) rs.getObject(1));
+                String key = rs.getString(2);
+                String modeValue = rs.getString(3);
+                ConcurrencyMode mode = modeValue == null ? null : ConcurrencyMode.valueOf(modeValue);
+                return new JobSnapshot(
+                        s.id(),
+                        s.spec(),
+                        s.queue(),
+                        s.priority(),
+                        s.createdAt(),
+                        s.cronTaskId(),
+                        s.relationship(),
+                        rootId,
+                        key,
+                        mode,
+                        s.stateHistory(),
+                        new HashMap<>(s.metadata()),
+                        s.log(),
+                        s.progress(),
+                        version,
+                        s.ownerNodeId(),
+                        s.ownerHeartbeatAt(),
+                        s.lastCheckinAt(),
+                        s.scheduledFor(),
+                        s.result(),
+                        s.attempts());
+            }
+        }
+    }
+
+    private boolean canClaim(Connection conn, JobSnapshot candidate) throws SQLException {
+        if (candidate.concurrencyKey() == null) {
+            return true;
+        }
+        if (hasActiveWorkflowHoldForRoot(conn, candidate)) {
+            return true;
+        }
+        if (candidate.concurrencyMode() == ConcurrencyMode.EXCLUSIVE) {
+            return groupIsIdle(conn, candidate.concurrencyKey()) && !hasEarlierPending(conn, candidate, false);
+        }
+        return noExclusiveInFlight(conn, candidate.concurrencyKey()) && !hasEarlierPending(conn, candidate, true);
+    }
+
+    private static void lockConcurrencyGroup(Connection conn, String key) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_concurrency_groups "
+                + "(concurrency_key, exclusive_in_flight, shared_in_flight, last_modified) "
+                + "VALUES (?, 0, 0, clock_timestamp()) "
+                + "ON CONFLICT (concurrency_key) DO NOTHING")) {
+            ps.setString(1, key);
+            ps.executeUpdate();
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT concurrency_key FROM threadmill_concurrency_groups WHERE concurrency_key = ? FOR UPDATE")) {
+            ps.setString(1, key);
+            ps.execute();
+        }
+    }
+
+    private boolean hasActiveWorkflowHoldForRoot(Connection conn, JobSnapshot candidate) throws SQLException {
+        try (PreparedStatement ps =
+                conn.prepareStatement("SELECT EXISTS (SELECT 1 FROM threadmill_concurrency_workflow_holds "
+                        + "WHERE concurrency_key = ? AND workflow_root_id = ?)")) {
+            ps.setString(1, candidate.concurrencyKey());
+            ps.setObject(2, candidate.workflowRootId().asUuid());
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getBoolean(1);
+            }
+        }
+    }
+
+    private boolean groupIsIdle(Connection conn, String key) throws SQLException {
+        try (PreparedStatement ps =
+                conn.prepareStatement("SELECT exclusive_in_flight, shared_in_flight FROM threadmill_concurrency_groups "
+                        + "WHERE concurrency_key = ?")) {
+            ps.setString(1, key);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return true;
+                return rs.getInt(1) == 0 && rs.getInt(2) == 0;
+            }
+        }
+    }
+
+    private boolean noExclusiveInFlight(Connection conn, String key) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT exclusive_in_flight FROM threadmill_concurrency_groups WHERE concurrency_key = ?")) {
+            ps.setString(1, key);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) return true;
+                return rs.getInt(1) == 0;
+            }
+        }
+    }
+
+    private void noteInsertedWorkflowDescendant(Connection conn, JobSnapshot snapshot) throws SQLException {
+        if (snapshot.concurrencyKey() == null) {
+            return;
+        }
+        lockConcurrencyGroup(conn, snapshot.concurrencyKey());
+        try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_concurrency_workflow_holds "
+                + "SET outstanding = outstanding + 1 "
+                + "WHERE concurrency_key = ? AND workflow_root_id = ?")) {
+            ps.setString(1, snapshot.concurrencyKey());
+            ps.setObject(2, snapshot.workflowRootId().asUuid());
+            ps.executeUpdate();
+        }
+    }
+
+    private void acquireWorkflowHold(Connection conn, JobSnapshot snapshot) throws SQLException {
+        if (snapshot.concurrencyKey() == null || hasActiveWorkflowHoldForRoot(conn, snapshot)) {
+            return;
+        }
+        int outstanding = countOutstandingWorkflowJobs(conn, snapshot);
+        if (outstanding <= 0) {
+            outstanding = 1;
+        }
+        try (PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_concurrency_workflow_holds "
+                + "(concurrency_key, workflow_root_id, outstanding) VALUES (?, ?, ?) "
+                + "ON CONFLICT (concurrency_key, workflow_root_id) DO NOTHING")) {
+            ps.setString(1, snapshot.concurrencyKey());
+            ps.setObject(2, snapshot.workflowRootId().asUuid());
+            ps.setInt(3, outstanding);
+            ps.executeUpdate();
+        }
+        String column =
+                snapshot.concurrencyMode() == ConcurrencyMode.EXCLUSIVE ? "exclusive_in_flight" : "shared_in_flight";
+        try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_concurrency_groups SET "
+                + column + " = " + column + " + 1, last_modified = clock_timestamp() "
+                + "WHERE concurrency_key = ?")) {
+            ps.setString(1, snapshot.concurrencyKey());
+            ps.executeUpdate();
+        }
+    }
+
+    private int countOutstandingWorkflowJobs(Connection conn, JobSnapshot snapshot) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT count(*) FROM threadmill_jobs "
+                + "WHERE concurrency_key = ? AND workflow_root_id = ? "
+                + "AND state NOT IN ('SUCCEEDED','FAILED','DELETED','QUARANTINED')")) {
+            ps.setString(1, snapshot.concurrencyKey());
+            ps.setObject(2, snapshot.workflowRootId().asUuid());
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getInt(1);
+            }
+        }
+    }
+
+    private void releaseWorkflowHoldIfTerminal(Connection conn, JobSnapshot oldSnapshot, JobState newState)
+            throws SQLException {
+        if (oldSnapshot.concurrencyKey() == null || isTerminal(oldSnapshot.currentState()) || !isTerminal(newState)) {
+            return;
+        }
+        int outstanding;
+        try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_concurrency_workflow_holds "
+                + "SET outstanding = outstanding - 1 "
+                + "WHERE concurrency_key = ? AND workflow_root_id = ? "
+                + "RETURNING outstanding")) {
+            ps.setString(1, oldSnapshot.concurrencyKey());
+            ps.setObject(2, oldSnapshot.workflowRootId().asUuid());
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return;
+                }
+                outstanding = rs.getInt(1);
+            }
+        }
+        if (outstanding > 0) {
+            return;
+        }
+        try (PreparedStatement ps = conn.prepareStatement("DELETE FROM threadmill_concurrency_workflow_holds "
+                + "WHERE concurrency_key = ? AND workflow_root_id = ?")) {
+            ps.setString(1, oldSnapshot.concurrencyKey());
+            ps.setObject(2, oldSnapshot.workflowRootId().asUuid());
+            ps.executeUpdate();
+        }
+        String column =
+                oldSnapshot.concurrencyMode() == ConcurrencyMode.EXCLUSIVE ? "exclusive_in_flight" : "shared_in_flight";
+        try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_concurrency_groups SET "
+                + column + " = GREATEST(" + column + " - 1, 0), last_modified = clock_timestamp() "
+                + "WHERE concurrency_key = ?")) {
+            ps.setString(1, oldSnapshot.concurrencyKey());
+            ps.executeUpdate();
+        }
+    }
+
+    private boolean hasEarlierPending(Connection conn, JobSnapshot candidate, boolean exclusiveOnly)
+            throws SQLException {
+        String modePredicate = exclusiveOnly ? "AND concurrency_mode = 'EXCLUSIVE' " : "";
+        try (PreparedStatement ps = conn.prepareStatement("SELECT EXISTS (SELECT 1 FROM threadmill_jobs "
+                + "WHERE concurrency_key = ? "
+                + modePredicate
+                + "AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
+                + "AND current_state_at < ? "
+                + "AND id <> ?)")) {
+            ps.setString(1, candidate.concurrencyKey());
+            ps.setTimestamp(2, Timestamp.from(lastTransitionTime(candidate, candidate.currentState())));
+            ps.setObject(3, candidate.id().asUuid());
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getBoolean(1);
+            }
+        }
+    }
+
+    private void insertSnapshot(
+            Connection conn, JobSnapshot snapshot, String body, Instant currentStateAt, long version)
+            throws SQLException {
+        try (PreparedStatement ps =
+                conn.prepareStatement("INSERT INTO threadmill_jobs (id, state, queue, priority, handler_signature, "
+                        + "scheduled_at, owner_node_id, owner_heartbeat_at, last_checkin_at, current_state_at, "
+                        + "version, body, created_at, concurrency_key, concurrency_mode, workflow_root_id) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+            ps.setObject(1, snapshot.id().asUuid());
+            ps.setString(2, snapshot.currentState().name());
+            ps.setString(3, snapshot.queue());
+            ps.setInt(4, snapshot.priority());
+            ps.setString(5, snapshot.spec().handlerType());
+            setNullableTimestamp(ps, 6, snapshot.scheduledFor());
+            setNullableUuid(
+                    ps,
+                    7,
+                    snapshot.ownerNodeId() == null
+                            ? null
+                            : snapshot.ownerNodeId().asUuid());
+            setNullableTimestamp(ps, 8, snapshot.ownerHeartbeatAt());
+            setNullableTimestamp(ps, 9, snapshot.lastCheckinAt());
+            ps.setTimestamp(10, Timestamp.from(currentStateAt));
+            ps.setLong(11, version);
+            ps.setString(12, body);
+            ps.setTimestamp(13, Timestamp.from(snapshot.createdAt()));
+            setNullableConcurrency(ps, 14, snapshot.concurrencyKey(), snapshot.concurrencyMode());
+            ps.setObject(16, snapshot.workflowRootId().asUuid());
+            ps.executeUpdate();
+        }
+    }
+
+    private static void setNullableConcurrency(PreparedStatement ps, int startIndex, String key, ConcurrencyMode mode)
+            throws SQLException {
+        if (key == null) {
+            ps.setNull(startIndex, Types.VARCHAR);
+            ps.setNull(startIndex + 1, Types.VARCHAR);
+        } else {
+            ps.setString(startIndex, key);
+            ps.setString(startIndex + 1, mode.name());
+        }
+    }
+
+    private static void setNullableTimestamp(PreparedStatement ps, int index, Instant v) throws SQLException {
+        if (v == null) ps.setNull(index, Types.TIMESTAMP_WITH_TIMEZONE);
+        else ps.setTimestamp(index, Timestamp.from(v));
+    }
+
+    private static void setNullableUuid(PreparedStatement ps, int index, UUID v) throws SQLException {
+        if (v == null) ps.setNull(index, Types.OTHER);
+        else ps.setObject(index, v);
+    }
+
+    private static Instant lastTransitionTime(JobSnapshot snapshot, JobState state) {
+        List<JobStateEntry> history = snapshot.stateHistory();
+        for (int i = history.size() - 1; i >= 0; i--) {
+            if (history.get(i).state() == state) return history.get(i).at();
+        }
+        return snapshot.createdAt();
+    }
+
+    private static JobSnapshot withVersion(Job job, long version) {
+        JobSnapshot s = job.snapshot();
+        return new JobSnapshot(
+                s.id(),
+                s.spec(),
+                s.queue(),
+                s.priority(),
+                s.createdAt(),
+                s.cronTaskId(),
+                s.relationship(),
+                s.workflowRootId(),
+                s.concurrencyKey(),
+                s.concurrencyMode(),
+                s.stateHistory(),
+                new HashMap<>(s.metadata()),
+                s.log(),
+                s.progress(),
+                version,
+                s.ownerNodeId(),
+                s.ownerHeartbeatAt(),
+                s.lastCheckinAt(),
+                s.scheduledFor(),
+                s.result(),
+                s.attempts());
+    }
+
+    private static boolean isTerminal(JobState state) {
+        return switch (state) {
+            case SUCCEEDED, FAILED, DELETED, QUARANTINED -> true;
+            case AWAITING, SCHEDULED, ENQUEUED, PROCESSING, PROCESSED -> false;
+        };
+    }
+
+    /** Translates {@link SQLException}s from a {@link JobStore} method into an unchecked form. */
+    public static class JdbcException extends RuntimeException {
+        public JdbcException(String message, SQLException cause) {
+            super(message, cause);
+        }
+    }
+}

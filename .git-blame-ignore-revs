@@ -1,0 +1,7 @@
+# Revisions to ignore when running `git blame`.
+#
+# Configure once with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# Mechanical Spotless reformat introducing Palantir Java Format + ktfmt.
+4107e3815d71f1d656deefb2752747d2b8d2482b

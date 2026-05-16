@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hemju.com/threadmill/soak/summary.schema.json",
+  "title": "Threadmill soak harness — run summary",
+  "type": "object",
+  "required": ["runId", "scenario", "backend", "config", "verdict", "invariants", "performance"],
+  "additionalProperties": false,
+  "properties": {
+    "runId": { "type": "string" },
+    "scenario": { "type": "string" },
+    "backend": { "type": "string", "enum": ["memory", "postgres", "redis"] },
+    "config": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "verdict": { "type": "string", "enum": ["passed", "failed"] },
+    "invariants": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "passed", "violations", "sampleChains"],
+        "additionalProperties": false,
+        "properties": {
+          "name": { "type": "string" },
+          "passed": { "type": "boolean" },
+          "violations": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "sampleChains": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "performance": {
+      "type": "object",
+      "required": [
+        "totalEnqueued",
+        "totalSucceeded",
+        "totalFailed",
+        "totalTimedOut",
+        "totalQuarantined",
+        "totalRetried",
+        "wallClockDurationMs",
+        "throughputJobsPerSec",
+        "latencyMs",
+        "lockContention"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "totalEnqueued": { "type": "integer", "minimum": 0 },
+        "totalSucceeded": { "type": "integer", "minimum": 0 },
+        "totalFailed": { "type": "integer", "minimum": 0 },
+        "totalTimedOut": { "type": "integer", "minimum": 0 },
+        "totalQuarantined": { "type": "integer", "minimum": 0 },
+        "totalRetried": { "type": "integer", "minimum": 0 },
+        "wallClockDurationMs": { "type": "integer", "minimum": 0 },
+        "throughputJobsPerSec": {
+          "type": "object",
+          "required": ["overall", "byQueue", "byHandler"],
+          "additionalProperties": false,
+          "properties": {
+            "overall": { "type": "number" },
+            "byQueue": { "type": "object", "additionalProperties": { "type": "number" } },
+            "byHandler": { "type": "object", "additionalProperties": { "type": "number" } }
+          }
+        },
+        "latencyMs": {
+          "type": "object",
+          "required": ["enqueueToClaim", "claimToStart", "startToComplete", "endToEnd"],
+          "additionalProperties": false,
+          "properties": {
+            "enqueueToClaim": { "$ref": "#/$defs/percentiles" },
+            "claimToStart": { "$ref": "#/$defs/percentiles" },
+            "startToComplete": { "$ref": "#/$defs/percentiles" },
+            "endToEnd": { "$ref": "#/$defs/percentiles" }
+          }
+        },
+        "lockContention": {
+          "type": "object",
+          "required": ["byKey"],
+          "additionalProperties": false,
+          "properties": {
+            "byKey": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "object",
+                "required": ["acquires", "maxConcurrentShared", "exclusiveCount", "avgWaitMs", "p99WaitMs"],
+                "additionalProperties": false,
+                "properties": {
+                  "acquires": { "type": "integer", "minimum": 0 },
+                  "maxConcurrentShared": { "type": "integer", "minimum": 0 },
+                  "exclusiveCount": { "type": "integer", "minimum": 0 },
+                  "avgWaitMs": { "type": "integer", "minimum": 0 },
+                  "p99WaitMs": { "type": "integer", "minimum": 0 }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "notes": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "percentiles": {
+      "type": "object",
+      "required": ["p50", "p95", "p99", "max", "count"],
+      "additionalProperties": false,
+      "properties": {
+        "p50": { "type": "integer", "minimum": 0 },
+        "p95": { "type": "integer", "minimum": 0 },
+        "p99": { "type": "integer", "minimum": 0 },
+        "max": { "type": "integer", "minimum": 0 },
+        "count": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
