@@ -323,16 +323,17 @@ public final class InMemoryJobStore implements JobStore {
         // the optimistic-lock version, otherwise an in-flight worker's saveAtomic
         // (running on the version recorded at claim time) would fail with a
         // spurious StaleJobException.
-        for (var e : jobs.entrySet()) {
-            if (e.getValue().state != JobState.PROCESSING) continue;
-            Job j = serializer.deserializeJob(e.getValue().wire);
-            if (j.ownerNodeId().filter(o -> o.equals(nodeId)).isPresent()) {
+        for (var id : jobs.keySet()) {
+            jobs.computeIfPresent(id, (jobId, existing) -> {
+                if (existing.state != JobState.PROCESSING) return existing;
+                Job j = serializer.deserializeJob(existing.wire);
+                if (j.ownerNodeId().filter(o -> o.equals(nodeId)).isEmpty()) return existing;
                 j.updateHeartbeat(now);
-                long sameVersion = e.getValue().version;
+                long sameVersion = existing.version;
                 JobSnapshot snap = withVersion(j, sameVersion);
                 String wire = serializer.serializeJob(snap, capabilities);
-                jobs.put(e.getKey(), entryFromSnapshot(snap, wire, sameVersion));
-            }
+                return entryFromSnapshot(snap, wire, sameVersion);
+            });
         }
     }
 

@@ -3,6 +3,7 @@ package com.hemju.threadmill.simulation;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,6 +44,9 @@ import com.hemju.threadmill.simulation.SimulationPayloads.ImportHandler;
 public final class SimulationRunner {
 
     private static final Logger LOG = LoggerFactory.getLogger(SimulationRunner.class);
+    private static final List<JobState> ACTIVE_STATES =
+            List.of(JobState.ENQUEUED, JobState.SCHEDULED, JobState.AWAITING, JobState.PROCESSING);
+    private static final int ACTIVE_DIAGNOSTIC_LIMIT = 40;
 
     private final JobStore store;
     private final SimulationConfig config;
@@ -111,7 +115,13 @@ public final class SimulationRunner {
                 if (remaining == 0) break;
                 Thread.sleep(100);
             }
-            long remaining = remainingActive();
+            var finalCounts = store.countsByState();
+            long remaining = activeCount(finalCounts);
+            var activeJobs =
+                    remaining == 0 ? List.<ActiveJobDiagnostic>of() : activeJobDiagnostics(ACTIVE_DIAGNOSTIC_LIMIT);
+            if (remaining != 0) {
+                emitDrainDiagnostics(finalCounts, activeJobs);
+            }
             return new SimulationResult(
                     backendLabel,
                     start,
@@ -121,7 +131,9 @@ public final class SimulationRunner {
                     interceptor.failed(),
                     interceptor.timedOut(),
                     interceptor.quarantined(),
-                    remaining);
+                    remaining,
+                    finalCounts,
+                    activeJobs);
         } finally {
             node.close();
             trace.emit("node_stopped", Map.of("nodeId", node.nodeId().toString()));
@@ -203,12 +215,50 @@ public final class SimulationRunner {
     }
 
     private long remainingActive() {
-        var counts = store.countsByState();
+        return activeCount(store.countsByState());
+    }
+
+    private static long activeCount(Map<JobState, Long> counts) {
         long active = 0;
-        for (JobState s : List.of(JobState.ENQUEUED, JobState.SCHEDULED, JobState.AWAITING, JobState.PROCESSING)) {
+        for (JobState s : ACTIVE_STATES) {
             active += counts.getOrDefault(s, 0L);
         }
         return active;
+    }
+
+    private List<ActiveJobDiagnostic> activeJobDiagnostics(int limit) {
+        var jobsById = new LinkedHashMap<JobId, Job>();
+        collectActiveJobs(jobsById, ImportHandler.class.getName());
+        collectActiveJobs(jobsById, ExportHandler.class.getName());
+        return jobsById.values().stream()
+                .filter(j -> ACTIVE_STATES.contains(j.currentState()))
+                .sorted(Comparator.comparing(Job::queue).thenComparing(j -> j.id().toString()))
+                .limit(limit)
+                .map(ActiveJobDiagnostic::from)
+                .toList();
+    }
+
+    private void collectActiveJobs(Map<JobId, Job> jobsById, String handlerType) {
+        for (Job job : store.findByHandlerSignature(handlerType, config.totalJobs() * 4)) {
+            if (ACTIVE_STATES.contains(job.currentState())) {
+                jobsById.putIfAbsent(job.id(), job);
+            }
+        }
+    }
+
+    private void emitDrainDiagnostics(Map<JobState, Long> finalCounts, List<ActiveJobDiagnostic> activeJobs) {
+        var fields = new LinkedHashMap<String, Object>();
+        fields.put("backend", backendLabel);
+        fields.put("counts", finalCounts);
+        fields.put("reportedActive", activeCount(finalCounts));
+        fields.put("listedActive", activeJobs.size());
+        fields.put("activeJobs", activeJobs);
+        trace.emit("drain_timeout", fields);
+        LOG.warn(
+                "Threadmill simulation did not drain: backend={} counts={} listedActive={}",
+                backendLabel,
+                finalCounts,
+                activeJobs);
     }
 
     public record SimulationResult(
@@ -220,7 +270,9 @@ public final class SimulationRunner {
             long failed,
             long timedOut,
             long quarantined,
-            long stillActive) {
+            long stillActive,
+            Map<JobState, Long> finalCounts,
+            List<ActiveJobDiagnostic> activeJobs) {
 
         public Duration duration() {
             return Duration.between(startedAt, endedAt);
@@ -228,6 +280,37 @@ public final class SimulationRunner {
 
         public boolean drained() {
             return stillActive == 0;
+        }
+    }
+
+    public record ActiveJobDiagnostic(
+            String jobId,
+            JobState state,
+            String queue,
+            int attempts,
+            long version,
+            String ownerNodeId,
+            Instant ownerHeartbeatAt,
+            String scheduledFor,
+            String concurrencyKey,
+            String concurrencyMode,
+            String workflowRootId,
+            String handlerType) {
+
+        static ActiveJobDiagnostic from(Job job) {
+            return new ActiveJobDiagnostic(
+                    job.id().toString(),
+                    job.currentState(),
+                    job.queue(),
+                    job.attempts(),
+                    job.version(),
+                    job.ownerNodeId().map(Object::toString).orElse(null),
+                    job.ownerHeartbeatAt().orElse(null),
+                    job.scheduledFor().map(Object::toString).orElse(null),
+                    job.concurrencyKey().orElse(null),
+                    job.concurrencyMode().map(Enum::name).orElse(null),
+                    job.workflowRootId().toString(),
+                    job.spec().handlerType());
         }
     }
 }

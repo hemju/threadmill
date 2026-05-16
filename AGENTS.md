@@ -338,6 +338,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Workflow successor promotion when predecessor succeeds | `AdvancedFeatureTest.aWorkflowSuccessorIsPromotedWhenItsPredecessorSucceeds` |
 | Tagged-job routing on tagged vs untagged nodes | `AdvancedFeatureTest.taggedJobIsNotRunByUntaggedNodeAndIsLaterRunByTaggedNode` |
 | Concurrency / no version desync under heavy contention | `InMemoryJobStoreConcurrencyTest.noVersionDesyncUnderHeavyContention` |
+| In-memory owner heartbeat races terminal save and resurrects PROCESSING | `InMemoryJobStoreConcurrencyTest.heartbeatRefreshCannotResurrectTerminalJob` |
 | State-machine illegal-transition rejection | `JobStateMachineTest.criticalIllegalTransitionsThrow` (covers PROCESSING→ENQUEUED, SCHEDULED→PROCESSING, ENQUEUED→ENQUEUED, QUARANTINED outbound, PROCESSED outbound) |
 | Atomic job replacement (apply / stale / wrong-state / vanished) | `AbstractJobStoreContractTest.replaceJobAppliesNewDefinition` + `replaceJobThrowsOnStaleVersion` + `replaceJobRejectsNonReplaceableState` + `replaceJobOnVanishedIsFalse` + the in-memory engine variants in `JobReplacementTest` |
 | Per-key read/write concurrency admits adjacent readers but serializes writers | `AbstractJobStoreContractTest.sharedJobsWithSameConcurrencyKeyClaimTogether` + `exclusiveJobsWithSameConcurrencyKeySerialize` |

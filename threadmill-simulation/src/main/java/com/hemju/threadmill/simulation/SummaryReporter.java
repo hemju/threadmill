@@ -28,6 +28,30 @@ final class SummaryReporter {
                     o.tracePath(),
                     o.verifier().lineCount(),
                     o.verifier().violations().size());
+            if (!r.drained()) {
+                System.out.printf("    finalCounts=%s%n", r.finalCounts());
+                if (r.activeJobs().isEmpty()) {
+                    System.out.println(
+                            "    activeJobs=[] (counts reported active jobs, but handler search found none)");
+                } else {
+                    System.out.println("    activeJobs:");
+                    for (var job : r.activeJobs()) {
+                        System.out.printf(
+                                "      - id=%s state=%s queue=%s attempts=%d version=%d key=%s mode=%s owner=%s"
+                                        + " workflowRoot=%s handler=%s%n",
+                                job.jobId(),
+                                job.state(),
+                                job.queue(),
+                                job.attempts(),
+                                job.version(),
+                                job.concurrencyKey(),
+                                job.concurrencyMode(),
+                                job.ownerNodeId(),
+                                job.workflowRootId(),
+                                job.handlerType());
+                    }
+                }
+            }
             if (!o.verifier().isClean()) {
                 for (String v : o.verifier().violations()) {
                     System.out.println("      ! " + v);
