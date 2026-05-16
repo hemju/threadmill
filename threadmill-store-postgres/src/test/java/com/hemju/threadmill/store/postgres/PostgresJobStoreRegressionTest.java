@@ -300,11 +300,11 @@ class PostgresJobStoreRegressionTest {
                         + "WHERE concurrency_key = ? "
                         + "AND concurrency_mode = 'EXCLUSIVE' "
                         + "AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
-                        + "AND current_state_at < ? "
-                        + "AND id <> ?)")) {
+                        + "AND (current_state_at < ? OR (current_state_at = ? AND id < ?)))")) {
             ps.setString(1, "project:hot");
             ps.setTimestamp(2, Timestamp.from(base.plusSeconds(1)));
-            ps.setObject(3, candidateId.asUuid());
+            ps.setTimestamp(3, Timestamp.from(base.plusSeconds(1)));
+            ps.setObject(4, candidateId.asUuid());
             try (ResultSet rs = ps.executeQuery()) {
                 var plan = new StringBuilder();
                 while (rs.next()) plan.append(rs.getString(1)).append('\n');

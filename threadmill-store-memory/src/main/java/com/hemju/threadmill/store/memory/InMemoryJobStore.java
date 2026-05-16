@@ -298,7 +298,7 @@ public final class InMemoryJobStore implements JobStore {
             for (var ce : candidates) {
                 if (result.size() >= cap) break;
                 Entry existing = ce.getValue();
-                if (!canClaim(existing)) continue;
+                if (!canClaim(ce)) continue;
                 Job j = serializer.deserializeJob(existing.wire);
                 j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
                 j.assignOwner(nodeId, heartbeatAt);
@@ -735,7 +735,8 @@ public final class InMemoryJobStore implements JobStore {
                 s.attempts());
     }
 
-    private boolean canClaim(Entry candidate) {
+    private boolean canClaim(Map.Entry<JobId, Entry> candidateEntry) {
+        Entry candidate = candidateEntry.getValue();
         if (candidate.concurrencyKey == null) {
             return true;
         }
@@ -743,12 +744,12 @@ public final class InMemoryJobStore implements JobStore {
             return true;
         }
         if (candidate.concurrencyMode == ConcurrencyMode.EXCLUSIVE) {
-            return noOtherInFlightForKey(candidate) && !hasEarlierPendingJob(candidate);
+            return noOtherInFlightForKey(candidate) && !hasEarlierPendingJob(candidateEntry);
         }
         if (hasExclusiveInFlightForKey(candidate)) {
             return false;
         }
-        return hasEarlierPendingExclusive(candidate) == false;
+        return hasEarlierPendingExclusive(candidateEntry) == false;
     }
 
     private boolean noOtherInFlightForKey(Entry candidate) {
@@ -766,17 +767,19 @@ public final class InMemoryJobStore implements JobStore {
                         && contributesInFlight(e));
     }
 
-    private boolean hasEarlierPendingExclusive(Entry candidate) {
-        return jobs.values().stream()
-                .anyMatch(e -> sameConcurrencyKey(candidate, e)
-                        && e.concurrencyMode == ConcurrencyMode.EXCLUSIVE
-                        && isPending(e.state)
+    private boolean hasEarlierPendingExclusive(Map.Entry<JobId, Entry> candidate) {
+        return jobs.entrySet().stream()
+                .anyMatch(e -> sameConcurrencyKey(candidate.getValue(), e.getValue())
+                        && e.getValue().concurrencyMode == ConcurrencyMode.EXCLUSIVE
+                        && isPending(e.getValue().state)
                         && pendingBefore(e, candidate));
     }
 
-    private boolean hasEarlierPendingJob(Entry candidate) {
-        return jobs.values().stream()
-                .anyMatch(e -> sameConcurrencyKey(candidate, e) && isPending(e.state) && pendingBefore(e, candidate));
+    private boolean hasEarlierPendingJob(Map.Entry<JobId, Entry> candidate) {
+        return jobs.entrySet().stream()
+                .anyMatch(e -> sameConcurrencyKey(candidate.getValue(), e.getValue())
+                        && isPending(e.getValue().state)
+                        && pendingBefore(e, candidate));
     }
 
     private boolean contributesInFlight(Entry entry) {
@@ -810,11 +813,18 @@ public final class InMemoryJobStore implements JobStore {
         return a.concurrencyKey != null && a.concurrencyKey.equals(b.concurrencyKey);
     }
 
-    private static boolean pendingBefore(Entry possibleEarlier, Entry candidate) {
-        var left = possibleEarlier.currentStateAt;
-        var right = candidate.currentStateAt;
-        if (left == null && right == null) {
+    private static boolean pendingBefore(Map.Entry<JobId, Entry> possibleEarlier, Map.Entry<JobId, Entry> candidate) {
+        if (possibleEarlier.getKey().equals(candidate.getKey())) {
             return false;
+        }
+        var left = possibleEarlier.getValue().currentStateAt;
+        var right = candidate.getValue().currentStateAt;
+        if (left == null && right == null) {
+            return possibleEarlier
+                            .getKey()
+                            .asUuid()
+                            .compareTo(candidate.getKey().asUuid())
+                    < 0;
         }
         if (left == null) {
             return false;
@@ -822,7 +832,11 @@ public final class InMemoryJobStore implements JobStore {
         if (right == null) {
             return true;
         }
-        return left.isBefore(right);
+        int timeOrder = left.compareTo(right);
+        if (timeOrder != 0) {
+            return timeOrder < 0;
+        }
+        return possibleEarlier.getKey().asUuid().compareTo(candidate.getKey().asUuid()) < 0;
     }
 
     private static Instant lastTransitionTime(JobSnapshot snapshot, JobState state) {

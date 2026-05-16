@@ -114,6 +114,8 @@ public final class RedisJobStore implements JobStore {
     private record ConnectionHandle(
             AbstractRedisClient client, AutoCloseable connection, RedisClusterCommands<String, String> commands) {}
 
+    private record ClaimLock(String key, String token) {}
+
     private static ConnectionHandle connect(RedisStoreConfig config) {
         Objects.requireNonNull(config, "config");
         return switch (config) {
@@ -184,6 +186,27 @@ public final class RedisJobStore implements JobStore {
         long version = 1L;
         RedisClusterCommands<String, String> r = sync();
         JobSnapshot snapshot = snapshotForInsert(r, job, version);
+        List<ClaimLock> locks = List.of();
+        while (true) {
+            locks = acquireClaimLocks(r, concurrencyClaimLockKeys(List.of(snapshot)));
+            JobSnapshot lockedSnapshot = snapshotForInsert(r, job, version);
+            if (concurrencyClaimLockKeys(List.of(lockedSnapshot)).equals(claimLockKeys(locks))) {
+                snapshot = lockedSnapshot;
+                break;
+            }
+            releaseClaimLocks(r, locks);
+            locks = List.of();
+            snapshot = lockedSnapshot;
+        }
+        try {
+            insertSnapshot(r, snapshot);
+        } finally {
+            releaseClaimLocks(r, locks);
+        }
+        job.adoptVersion(version);
+    }
+
+    private void insertSnapshot(RedisClusterCommands<String, String> r, JobSnapshot snapshot) {
         String body = serializer.serializeJob(snapshot, capabilities);
         Instant stateAt = lastTransitionTime(snapshot, snapshot.currentState());
 
@@ -227,12 +250,11 @@ public final class RedisJobStore implements JobStore {
 
         String result = r.eval(LuaScripts.insert(), ScriptOutputType.VALUE, keys, args);
         if ("EXISTS".equals(result)) {
-            throw new IllegalStateException("Job already exists: " + job.id());
+            throw new IllegalStateException("Job already exists: " + snapshot.id());
         }
         if (snapshot.currentState() == JobState.ENQUEUED) {
             r.sadd(RedisKeys.QUEUES, snapshot.queue());
         }
-        job.adoptVersion(version);
     }
 
     @Override
@@ -258,69 +280,100 @@ public final class RedisJobStore implements JobStore {
             stateAts.add(lastTransitionTime(snap, snap.currentState()));
         }
 
-        // Pack 7 keys + 18 args per job for the batched Lua script.
-        int n = snapshots.size();
-        var keyList = new ArrayList<String>(n * 7);
-        var argList = new ArrayList<String>(1 + n * 18);
-        argList.add(Integer.toString(n));
-        for (int i = 0; i < n; i++) {
-            JobSnapshot snap = snapshots.get(i);
-            Instant stateAt = stateAts.get(i);
-            String activeKey = activeKeyFor(snap.currentState(), snap.queue(), snap.ownerNodeId());
-            double activeScore = activeScoreFor(snap, stateAt);
-            keyList.add(RedisKeys.job(snap.id()));
-            keyList.add(activeKey == null ? "" : activeKey);
-            keyList.add(RedisKeys.byStateTime(snap.currentState()));
-            keyList.add(RedisKeys.byHandler(snap.spec().handlerType()));
-            keyList.add(RedisKeys.COUNTS);
-            keyList.add(concurrencyPendingKey(snap));
-            keyList.add(concurrencyWorkflowsKey(snap.concurrencyKey()));
-
-            argList.add(snap.id().toString());
-            argList.add(bodies.get(i));
-            argList.add(snap.currentState().name());
-            argList.add(snap.queue());
-            argList.add(snap.spec().handlerType());
-            argList.add(Integer.toString(snap.priority()));
-            argList.add(
-                    snap.scheduledFor() == null
-                            ? ""
-                            : Long.toString(snap.scheduledFor().toEpochMilli()));
-            argList.add(snap.ownerNodeId() == null ? "" : snap.ownerNodeId().toString());
-            argList.add(
-                    snap.ownerHeartbeatAt() == null
-                            ? ""
-                            : Long.toString(snap.ownerHeartbeatAt().toEpochMilli()));
-            argList.add(
-                    snap.lastCheckinAt() == null
-                            ? ""
-                            : Long.toString(snap.lastCheckinAt().toEpochMilli()));
-            argList.add(Long.toString(stateAt.toEpochMilli()));
-            argList.add(Long.toString(snap.createdAt().toEpochMilli()));
-            argList.add(Double.toString(activeScore));
-            argList.add(snap.workflowRootId().toString());
-            argList.add(snap.concurrencyKey() == null ? "" : snap.concurrencyKey());
-            argList.add(
-                    snap.concurrencyMode() == null ? "" : snap.concurrencyMode().name());
-            argList.add(concurrencyPendingMember(snap));
-            argList.add(Long.toString(toEpochMicros(stateAt)));
-        }
-        String result = r.eval(
-                LuaScripts.insertAll(),
-                ScriptOutputType.VALUE,
-                keyList.toArray(new String[0]),
-                argList.toArray(new String[0]));
-        if (result != null && result.startsWith("EXISTS:")) {
-            int idx = Integer.parseInt(result.substring("EXISTS:".length()));
-            throw new IllegalStateException("Duplicate job id in batch at index " + idx + ": "
-                    + snapshots.get(idx).id());
-        }
-
-        // Add queue names to the QUEUES set for any ENQUEUED jobs.
-        for (JobSnapshot snap : snapshots) {
-            if (snap.currentState() == JobState.ENQUEUED) {
-                r.sadd(RedisKeys.QUEUES, snap.queue());
+        List<ClaimLock> locks = List.of();
+        while (true) {
+            locks = acquireClaimLocks(r, concurrencyClaimLockKeys(snapshots));
+            var lockedSnapshots = new ArrayList<JobSnapshot>(jobsToInsert.size());
+            var lockedBodies = new ArrayList<String>(jobsToInsert.size());
+            var lockedStateAts = new ArrayList<Instant>(jobsToInsert.size());
+            for (var j : jobsToInsert) {
+                JobSnapshot snap = snapshotForInsert(r, j, version);
+                lockedSnapshots.add(snap);
+                lockedBodies.add(serializer.serializeJob(snap, capabilities));
+                lockedStateAts.add(lastTransitionTime(snap, snap.currentState()));
             }
+            if (concurrencyClaimLockKeys(lockedSnapshots).equals(claimLockKeys(locks))) {
+                snapshots = lockedSnapshots;
+                bodies = lockedBodies;
+                stateAts = lockedStateAts;
+                break;
+            }
+            releaseClaimLocks(r, locks);
+            locks = List.of();
+            snapshots = lockedSnapshots;
+            bodies = lockedBodies;
+            stateAts = lockedStateAts;
+        }
+
+        try {
+            // Pack 7 keys + 18 args per job for the batched Lua script.
+            int n = snapshots.size();
+            var keyList = new ArrayList<String>(n * 7);
+            var argList = new ArrayList<String>(1 + n * 18);
+            argList.add(Integer.toString(n));
+            for (int i = 0; i < n; i++) {
+                JobSnapshot snap = snapshots.get(i);
+                Instant stateAt = stateAts.get(i);
+                String activeKey = activeKeyFor(snap.currentState(), snap.queue(), snap.ownerNodeId());
+                double activeScore = activeScoreFor(snap, stateAt);
+                keyList.add(RedisKeys.job(snap.id()));
+                keyList.add(activeKey == null ? "" : activeKey);
+                keyList.add(RedisKeys.byStateTime(snap.currentState()));
+                keyList.add(RedisKeys.byHandler(snap.spec().handlerType()));
+                keyList.add(RedisKeys.COUNTS);
+                keyList.add(concurrencyPendingKey(snap));
+                keyList.add(concurrencyWorkflowsKey(snap.concurrencyKey()));
+
+                argList.add(snap.id().toString());
+                argList.add(bodies.get(i));
+                argList.add(snap.currentState().name());
+                argList.add(snap.queue());
+                argList.add(snap.spec().handlerType());
+                argList.add(Integer.toString(snap.priority()));
+                argList.add(
+                        snap.scheduledFor() == null
+                                ? ""
+                                : Long.toString(snap.scheduledFor().toEpochMilli()));
+                argList.add(snap.ownerNodeId() == null ? "" : snap.ownerNodeId().toString());
+                argList.add(
+                        snap.ownerHeartbeatAt() == null
+                                ? ""
+                                : Long.toString(snap.ownerHeartbeatAt().toEpochMilli()));
+                argList.add(
+                        snap.lastCheckinAt() == null
+                                ? ""
+                                : Long.toString(snap.lastCheckinAt().toEpochMilli()));
+                argList.add(Long.toString(stateAt.toEpochMilli()));
+                argList.add(Long.toString(snap.createdAt().toEpochMilli()));
+                argList.add(Double.toString(activeScore));
+                argList.add(snap.workflowRootId().toString());
+                argList.add(snap.concurrencyKey() == null ? "" : snap.concurrencyKey());
+                argList.add(
+                        snap.concurrencyMode() == null
+                                ? ""
+                                : snap.concurrencyMode().name());
+                argList.add(concurrencyPendingMember(snap));
+                argList.add(Long.toString(toEpochMicros(stateAt)));
+            }
+            String result = r.eval(
+                    LuaScripts.insertAll(),
+                    ScriptOutputType.VALUE,
+                    keyList.toArray(new String[0]),
+                    argList.toArray(new String[0]));
+            if (result != null && result.startsWith("EXISTS:")) {
+                int idx = Integer.parseInt(result.substring("EXISTS:".length()));
+                throw new IllegalStateException("Duplicate job id in batch at index " + idx + ": "
+                        + snapshots.get(idx).id());
+            }
+
+            // Add queue names to the QUEUES set for any ENQUEUED jobs.
+            for (JobSnapshot snap : snapshots) {
+                if (snap.currentState() == JobState.ENQUEUED) {
+                    r.sadd(RedisKeys.QUEUES, snap.queue());
+                }
+            }
+        } finally {
+            releaseClaimLocks(r, locks);
         }
         var ids = new ArrayList<JobId>(jobsToInsert.size());
         for (var j : jobsToInsert) {
@@ -342,6 +395,33 @@ public final class RedisJobStore implements JobStore {
         long version = 1L;
         RedisClusterCommands<String, String> r = sync();
         JobSnapshot snapshot = snapshotForInsert(r, job, version);
+        List<ClaimLock> locks = List.of();
+        while (true) {
+            locks = acquireClaimLocks(r, concurrencyClaimLockKeys(List.of(snapshot)));
+            JobSnapshot lockedSnapshot = snapshotForInsert(r, job, version);
+            if (concurrencyClaimLockKeys(List.of(lockedSnapshot)).equals(claimLockKeys(locks))) {
+                snapshot = lockedSnapshot;
+                break;
+            }
+            releaseClaimLocks(r, locks);
+            locks = List.of();
+            snapshot = lockedSnapshot;
+        }
+        try {
+            return enqueueIfAbsentSnapshot(r, job, dedupKey, ttl, now, version, snapshot);
+        } finally {
+            releaseClaimLocks(r, locks);
+        }
+    }
+
+    private EnqueueResult enqueueIfAbsentSnapshot(
+            RedisClusterCommands<String, String> r,
+            Job job,
+            String dedupKey,
+            Duration ttl,
+            Instant now,
+            long version,
+            JobSnapshot snapshot) {
         String body = serializer.serializeJob(snapshot, capabilities);
         Instant stateAt = lastTransitionTime(snapshot, snapshot.currentState());
         String activeKey = activeKeyFor(snapshot.currentState(), snapshot.queue(), snapshot.ownerNodeId());
@@ -572,76 +652,86 @@ public final class RedisJobStore implements JobStore {
 
         RedisClusterCommands<String, String> r = sync();
         List<Job> result = new ArrayList<>(cap);
+        long pageSize = Math.max(cap * 128L, cap);
         for (int attempt = 0; attempt < 20; attempt++) {
             boolean blocked = false;
-            List<String> candidateIds = r.zrange(RedisKeys.queue(queue), 0, Math.max(cap * 128L - 1L, cap - 1L));
-            if (candidateIds == null || candidateIds.isEmpty()) return result;
+            long offset = 0L;
+            while (result.size() < cap) {
+                List<String> candidateIds = r.zrange(RedisKeys.queue(queue), offset, offset + pageSize - 1L);
+                if (candidateIds == null || candidateIds.isEmpty()) break;
 
-            for (String idStr : candidateIds) {
-                if (result.size() >= cap) break;
-                var id = JobId.parse(idStr);
-                String jobKey = RedisKeys.job(id);
-                Map<String, String> hash = r.hgetall(jobKey);
-                if (hash == null || hash.isEmpty()) continue;
-                if (!"ENQUEUED".equals(hash.get("state"))) continue;
-                String oldBody = hash.get("body");
-                String oldVersion = hash.get("version");
-                if (oldBody == null || oldVersion == null) continue;
-                long newVersion = Long.parseLong(oldVersion) + 1L;
-                Job j = serializer.deserializeJob(oldBody);
-                String lockKey =
-                        j.concurrencyKey().map(RedisKeys::concurrencyClaimLock).orElse(null);
-                String lockToken = lockKey == null ? null : UUID.randomUUID().toString();
-                if (lockKey != null && !tryClaimLock(r, lockKey, lockToken)) {
-                    blocked = true;
-                    continue;
-                }
-                try {
-                    j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
-                    j.assignOwner(nodeId, heartbeatAt);
-                    j.incrementAttempts();
-                    JobSnapshot snap = withVersion(j, newVersion);
-                    String newBody = serializer.serializeJob(snap, capabilities);
-                    String concurrencyKey = snap.concurrencyKey();
-                    String reply = r.eval(
-                            LuaScripts.claimCommit(),
-                            ScriptOutputType.VALUE,
-                            new String[] {
-                                jobKey,
-                                RedisKeys.queue(queue),
-                                RedisKeys.PROCESSING_ALL,
-                                RedisKeys.processingFor(nodeId),
-                                RedisKeys.byStateTime(JobState.ENQUEUED),
-                                RedisKeys.byStateTime(JobState.PROCESSING),
-                                RedisKeys.COUNTS,
-                                concurrencyCountersKey(concurrencyKey),
-                                concurrencyPendingKey(concurrencyKey),
-                                concurrencyWorkflowsKey(concurrencyKey)
-                            },
-                            idStr,
-                            oldVersion,
-                            Long.toString(newVersion),
-                            newBody,
-                            nodeId.toString(),
-                            Long.toString(heartbeatAt.toEpochMilli()),
-                            Integer.toString(snap.attempts()),
-                            concurrencyKey == null ? "" : concurrencyKey,
-                            snap.concurrencyMode() == null
-                                    ? ""
-                                    : snap.concurrencyMode().name(),
-                            snap.workflowRootId().toString(),
-                            concurrencyPendingMember(snap),
-                            Integer.toString(workflowOutstandingCount(r, snap)));
-                    if ("OK".equals(reply)) {
-                        result.add(serializer.deserializeJob(newBody));
-                    } else if ("BLOCKED".equals(reply)) {
+                for (String idStr : candidateIds) {
+                    if (result.size() >= cap) break;
+                    var id = JobId.parse(idStr);
+                    String jobKey = RedisKeys.job(id);
+                    Map<String, String> hash = r.hgetall(jobKey);
+                    if (hash == null || hash.isEmpty()) continue;
+                    if (!"ENQUEUED".equals(hash.get("state"))) continue;
+                    String oldBody = hash.get("body");
+                    String oldVersion = hash.get("version");
+                    if (oldBody == null || oldVersion == null) continue;
+                    long newVersion = Long.parseLong(oldVersion) + 1L;
+                    Job j = serializer.deserializeJob(oldBody);
+                    String lockKey = j.concurrencyKey()
+                            .map(RedisKeys::concurrencyClaimLock)
+                            .orElse(null);
+                    String lockToken =
+                            lockKey == null ? null : UUID.randomUUID().toString();
+                    if (lockKey != null && !tryClaimLock(r, lockKey, lockToken)) {
                         blocked = true;
+                        continue;
                     }
-                } finally {
-                    if (lockKey != null) {
-                        releaseClaimLock(r, lockKey, lockToken);
+                    try {
+                        j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
+                        j.assignOwner(nodeId, heartbeatAt);
+                        j.incrementAttempts();
+                        JobSnapshot snap = withVersion(j, newVersion);
+                        String newBody = serializer.serializeJob(snap, capabilities);
+                        String concurrencyKey = snap.concurrencyKey();
+                        String reply = r.eval(
+                                LuaScripts.claimCommit(),
+                                ScriptOutputType.VALUE,
+                                new String[] {
+                                    jobKey,
+                                    RedisKeys.queue(queue),
+                                    RedisKeys.PROCESSING_ALL,
+                                    RedisKeys.processingFor(nodeId),
+                                    RedisKeys.byStateTime(JobState.ENQUEUED),
+                                    RedisKeys.byStateTime(JobState.PROCESSING),
+                                    RedisKeys.COUNTS,
+                                    concurrencyCountersKey(concurrencyKey),
+                                    concurrencyPendingKey(concurrencyKey),
+                                    concurrencyWorkflowsKey(concurrencyKey)
+                                },
+                                idStr,
+                                oldVersion,
+                                Long.toString(newVersion),
+                                newBody,
+                                nodeId.toString(),
+                                Long.toString(heartbeatAt.toEpochMilli()),
+                                Integer.toString(snap.attempts()),
+                                concurrencyKey == null ? "" : concurrencyKey,
+                                snap.concurrencyMode() == null
+                                        ? ""
+                                        : snap.concurrencyMode().name(),
+                                snap.workflowRootId().toString(),
+                                concurrencyPendingMember(snap),
+                                Integer.toString(workflowOutstandingCount(r, snap)));
+                        if ("OK".equals(reply)) {
+                            result.add(serializer.deserializeJob(newBody));
+                        } else if ("BLOCKED".equals(reply)) {
+                            blocked = true;
+                        }
+                    } finally {
+                        if (lockKey != null) {
+                            releaseClaimLock(r, lockKey, lockToken);
+                        }
                     }
                 }
+                if (candidateIds.size() < pageSize) {
+                    break;
+                }
+                offset += pageSize;
             }
             if (!result.isEmpty() || !blocked) {
                 return result;
@@ -1284,6 +1374,56 @@ public final class RedisJobStore implements JobStore {
     private static boolean tryClaimLock(RedisClusterCommands<String, String> r, String key, String token) {
         String reply = r.set(key, token, SetArgs.Builder.nx().px(30_000));
         return "OK".equals(reply);
+    }
+
+    private static List<String> concurrencyClaimLockKeys(List<JobSnapshot> snapshots) {
+        return snapshots.stream()
+                .map(JobSnapshot::concurrencyKey)
+                .filter(Objects::nonNull)
+                .map(RedisKeys::concurrencyClaimLock)
+                .distinct()
+                .sorted()
+                .toList();
+    }
+
+    private static List<String> claimLockKeys(List<ClaimLock> locks) {
+        return locks.stream().map(ClaimLock::key).toList();
+    }
+
+    private static List<ClaimLock> acquireClaimLocks(RedisClusterCommands<String, String> r, List<String> keys) {
+        if (keys.isEmpty()) {
+            return List.of();
+        }
+        long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+        while (true) {
+            var acquired = new ArrayList<ClaimLock>(keys.size());
+            boolean complete = true;
+            for (String key : keys) {
+                String token = UUID.randomUUID().toString();
+                if (tryClaimLock(r, key, token)) {
+                    acquired.add(new ClaimLock(key, token));
+                } else {
+                    complete = false;
+                    break;
+                }
+            }
+            if (complete) {
+                return List.copyOf(acquired);
+            }
+            releaseClaimLocks(r, acquired);
+            if (System.nanoTime() >= deadline) {
+                throw new IllegalStateException("Timed out waiting for concurrency claim lock");
+            }
+            java.util.concurrent.locks.LockSupport.parkNanos(
+                    Duration.ofMillis(2).toNanos());
+        }
+    }
+
+    private static void releaseClaimLocks(RedisClusterCommands<String, String> r, List<ClaimLock> locks) {
+        for (int i = locks.size() - 1; i >= 0; i--) {
+            ClaimLock lock = locks.get(i);
+            releaseClaimLock(r, lock.key(), lock.token());
+        }
     }
 
     private static void releaseClaimLock(RedisClusterCommands<String, String> r, String key, String token) {

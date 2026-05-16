@@ -17,6 +17,7 @@ import java.util.concurrent.TimeUnit;
 
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
+import io.lettuce.core.SetArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import org.junit.jupiter.api.AfterAll;
@@ -27,7 +28,10 @@ import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
 
+import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobId;
+import com.hemju.threadmill.core.JobRelationship;
 import com.hemju.threadmill.core.JobSnapshot;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
@@ -156,6 +160,62 @@ class RedisJobStoreRegressionTest {
                 .as("no double-claim across concurrent virtual-thread workers")
                 .isEmpty();
         assertThat(seen).hasSize(total);
+    }
+
+    @Test
+    void keyedInsertWaitsForConcurrencyClaimLockAndPreservesWorkflowHold() throws Exception {
+        JobStore store = store();
+        Job root = Job.builder()
+                .spec(JobSpec.of("com.example.Root", new JobArgument("java.lang.String", "\"x\"")))
+                .concurrencyKey("project:locked")
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .build();
+        store.insert(root);
+        Job claimedRoot =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+
+        String lockKey = RedisKeys.concurrencyClaimLock("project:locked");
+        String token = UUID.randomUUID().toString();
+        assertThat(adminConnection
+                        .sync()
+                        .set(lockKey, token, SetArgs.Builder.nx().px(30_000)))
+                .isEqualTo("OK");
+
+        Job child = workflowChild("com.example.Child", claimedRoot.id());
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            var insert = executor.submit(() -> {
+                store.insert(child);
+                return null;
+            });
+            Thread.sleep(150);
+            assertThat(insert)
+                    .as("keyed insert waits while a same-key claim is preparing")
+                    .isNotDone();
+
+            adminConnection.sync().del(lockKey);
+            insert.get(10, TimeUnit.SECONDS);
+        } finally {
+            adminConnection.sync().del(lockKey);
+        }
+
+        finish(store, claimedRoot, JobState.SUCCEEDED);
+        promote(store, child.id());
+        Job outsider = Job.builder()
+                .spec(JobSpec.of("com.example.Other", new JobArgument("java.lang.String", "\"x\"")))
+                .concurrencyKey("project:locked")
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .build();
+        store.insert(outsider);
+
+        List<Job> claimedChild = store.claimReady(NodeId.newId(), "default", 2, Instant.now());
+        assertThat(claimedChild).extracting(Job::id).containsExactly(child.id());
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .isEmpty();
+
+        finish(store, claimedChild.get(0), JobState.SUCCEEDED);
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(outsider.id());
     }
 
     @Test
@@ -320,6 +380,28 @@ class RedisJobStoreRegressionTest {
         Thread.sleep(220);
         assertThat(store.tryAcquireMutex("billing-close", "node-c", Duration.ofSeconds(5)))
                 .isTrue();
+    }
+
+    private static Job workflowChild(String handler, JobId parentId) {
+        return Job.builder()
+                .spec(JobSpec.of(handler, new JobArgument("java.lang.String", "\"x\"")))
+                .relationship(new JobRelationship(parentId, JobRelationship.Kind.WORKFLOW_STEP))
+                .initialState(JobState.AWAITING)
+                .build();
+    }
+
+    private static void finish(JobStore store, Job job, JobState state) {
+        long version = job.version();
+        job.transitionTo(state, Instant.now(), "test.finish", null);
+        job.clearOwner();
+        store.saveAtomic(job, version);
+    }
+
+    private static void promote(JobStore store, JobId id) {
+        Job job = store.findById(id).orElseThrow();
+        long version = job.version();
+        job.transitionTo(JobState.ENQUEUED, Instant.now(), "test.promote", null);
+        store.saveAtomic(job, version);
     }
 
     private static CronTask sampleCronTask(String name) {

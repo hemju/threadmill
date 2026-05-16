@@ -53,6 +53,18 @@ local workflow_root_id = ARGV[10]
 local pending_member = ARGV[11]
 local outstanding_count = tonumber(ARGV[12])
 
+local function member_job_id(member)
+    local sep = string.find(member, ':', 1, true)
+    if sep == nil then
+        return member
+    end
+    return string.sub(member, sep + 1)
+end
+
+local function member_matches(member, exclusive_only)
+    return not exclusive_only or string.sub(member, 1, 10) == 'EXCLUSIVE:'
+end
+
 local function has_earlier_pending(exclusive_only)
     if pending_key == '' or pending_member == '' then
         return false
@@ -63,10 +75,14 @@ local function has_earlier_pending(exclusive_only)
     end
     local earlier = redis.call('ZRANGEBYSCORE', pending_key, '-inf', '(' .. score)
     for _, member in ipairs(earlier) do
-        if member ~= pending_member then
-            if not exclusive_only or string.sub(member, 1, 10) == 'EXCLUSIVE:' then
-                return true
-            end
+        if member ~= pending_member and member_matches(member, exclusive_only) then
+            return true
+        end
+    end
+    local same_score = redis.call('ZRANGEBYSCORE', pending_key, score, score)
+    for _, member in ipairs(same_score) do
+        if member ~= pending_member and member_matches(member, exclusive_only) and member_job_id(member) < job_id then
+            return true
         end
     end
     return false

@@ -51,6 +51,10 @@ One atomic operation per backend:
 Once the claim transaction commits, Threadmill releases it and only re-opens
 a transaction to save the terminal state. The handler runs on its own.
 
+For the detailed Postgres and Redis execution paths, including how the
+claim-time concurrency checks interact with row locks and Lua scripts, see
+[Backend execution model](backend-execution-model.md).
+
 ## What if my handler does its own `@Transactional` (Spring) work?
 
 That's the **handler's** transaction, managed by Spring against the

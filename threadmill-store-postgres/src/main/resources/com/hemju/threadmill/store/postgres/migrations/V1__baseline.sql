@@ -60,7 +60,7 @@ CREATE INDEX threadmill_jobs_state_time_idx ON threadmill_jobs (state, current_s
 -- pending job for this concurrency key?" before committing a claim; without
 -- this partial index the check degrades to a table scan on busy stores.
 CREATE INDEX threadmill_jobs_concurrency_pending_idx
-    ON threadmill_jobs (concurrency_key, current_state_at)
+    ON threadmill_jobs (concurrency_key, current_state_at, id)
     WHERE state IN ('ENQUEUED', 'SCHEDULED', 'AWAITING');
 
 -- Workflow successor promotion: find AWAITING jobs whose parent just completed.

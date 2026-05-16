@@ -494,54 +494,52 @@ public final class PostgresJobStore implements JobStore {
                 try (Connection conn = dataSource.getConnection()) {
                     conn.setAutoCommit(false);
                     try {
-                        // 1. Atomically grab up to `cap` ready ids, skipping any locked by another worker.
-                        record Pending(UUID id, String body, long version) {}
-                        List<Pending> pending = new ArrayList<>();
-                        try (PreparedStatement ps =
-                                conn.prepareStatement("SELECT id, body, version FROM threadmill_jobs "
-                                        + "WHERE state = 'ENQUEUED' AND queue = ? "
-                                        + "ORDER BY priority DESC, id "
-                                        + "LIMIT ? FOR UPDATE SKIP LOCKED")) {
-                            ps.setString(1, queue);
-                            ps.setInt(2, Math.max(cap, cap * 64));
-                            try (ResultSet rs = ps.executeQuery()) {
-                                while (rs.next()) {
-                                    pending.add(new Pending((UUID) rs.getObject(1), rs.getString(2), rs.getLong(3)));
-                                }
-                            }
-                        }
-                        if (pending.isEmpty()) {
-                            conn.commit();
-                            return result;
-                        }
+                        // 1. Atomically page through ready ids, skipping any locked by another worker.
+                        // A hot blocked key must not hide claimable work deeper in the queue.
+                        int pageSize = Math.max(cap, cap * 64);
+                        Integer cursorPriority = null;
+                        UUID cursorId = null;
 
                         // 2. For each, deserialize, transition to PROCESSING, re-serialize, and UPDATE the row.
                         try (PreparedStatement ps = conn.prepareStatement(
                                 "UPDATE threadmill_jobs SET state = 'PROCESSING', owner_node_id = ?, "
                                         + "owner_heartbeat_at = ?, last_checkin_at = NULL, current_state_at = ?, version = ?, body = ? "
                                         + "WHERE id = ?")) {
-                            for (var p : pending) {
-                                if (result.size() >= cap) break;
-                                Job j = serializer.deserializeJob(p.body);
-                                if (j.concurrencyKey().isPresent())
-                                    lockConcurrencyGroup(
-                                            conn, j.concurrencyKey().get());
-                                if (!canClaim(conn, j.snapshot())) continue;
-                                acquireWorkflowHold(conn, j.snapshot());
-                                j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
-                                j.assignOwner(nodeId, heartbeatAt);
-                                j.incrementAttempts();
-                                long nextVersion = p.version + 1;
-                                JobSnapshot snap = withVersion(j, nextVersion);
-                                String newBody = serializer.serializeJob(snap, capabilities);
-                                ps.setObject(1, nodeId.asUuid());
-                                ps.setTimestamp(2, Timestamp.from(heartbeatAt));
-                                ps.setTimestamp(3, Timestamp.from(heartbeatAt));
-                                ps.setLong(4, nextVersion);
-                                ps.setString(5, newBody);
-                                ps.setObject(6, p.id);
-                                ps.addBatch();
-                                result.add(serializer.deserializeJob(newBody));
+                            while (result.size() < cap) {
+                                List<PendingClaim> pending =
+                                        readClaimPage(conn, queue, pageSize, cursorPriority, cursorId);
+                                if (pending.isEmpty()) {
+                                    break;
+                                }
+                                for (var p : pending) {
+                                    if (result.size() >= cap) break;
+                                    Job j = serializer.deserializeJob(p.body);
+                                    if (j.concurrencyKey().isPresent())
+                                        lockConcurrencyGroup(
+                                                conn, j.concurrencyKey().get());
+                                    if (!canClaim(conn, j.snapshot())) continue;
+                                    acquireWorkflowHold(conn, j.snapshot());
+                                    j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
+                                    j.assignOwner(nodeId, heartbeatAt);
+                                    j.incrementAttempts();
+                                    long nextVersion = p.version + 1;
+                                    JobSnapshot snap = withVersion(j, nextVersion);
+                                    String newBody = serializer.serializeJob(snap, capabilities);
+                                    ps.setObject(1, nodeId.asUuid());
+                                    ps.setTimestamp(2, Timestamp.from(heartbeatAt));
+                                    ps.setTimestamp(3, Timestamp.from(heartbeatAt));
+                                    ps.setLong(4, nextVersion);
+                                    ps.setString(5, newBody);
+                                    ps.setObject(6, p.id);
+                                    ps.addBatch();
+                                    result.add(serializer.deserializeJob(newBody));
+                                }
+                                PendingClaim last = pending.get(pending.size() - 1);
+                                cursorPriority = last.priority;
+                                cursorId = last.id;
+                                if (pending.size() < pageSize) {
+                                    break;
+                                }
                             }
                             ps.executeBatch();
                         }
@@ -559,6 +557,34 @@ public final class PostgresJobStore implements JobStore {
             throw new JdbcException("claimReady failed", e);
         }
     }
+
+    private List<PendingClaim> readClaimPage(
+            Connection conn, String queue, int limit, Integer cursorPriority, UUID cursorId) throws SQLException {
+        String cursorPredicate = cursorPriority == null ? "" : "AND (priority < ? OR (priority = ? AND id > ?)) ";
+        try (PreparedStatement ps = conn.prepareStatement("SELECT id, body, version, priority FROM threadmill_jobs "
+                + "WHERE state = 'ENQUEUED' AND queue = ? "
+                + cursorPredicate
+                + "ORDER BY priority DESC, id "
+                + "LIMIT ? FOR UPDATE SKIP LOCKED")) {
+            ps.setString(1, queue);
+            int index = 2;
+            if (cursorPriority != null) {
+                ps.setInt(index++, cursorPriority);
+                ps.setInt(index++, cursorPriority);
+                ps.setObject(index++, cursorId);
+            }
+            ps.setInt(index, limit);
+            try (ResultSet rs = ps.executeQuery()) {
+                var page = new ArrayList<PendingClaim>();
+                while (rs.next()) {
+                    page.add(new PendingClaim((UUID) rs.getObject(1), rs.getString(2), rs.getLong(3), rs.getInt(4)));
+                }
+                return page;
+            }
+        }
+    }
+
+    private record PendingClaim(UUID id, String body, long version, int priority) {}
 
     // ---------------------------------------------------------------- queue pauses
 
@@ -1545,11 +1571,12 @@ public final class PostgresJobStore implements JobStore {
                 + "WHERE concurrency_key = ? "
                 + modePredicate
                 + "AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
-                + "AND current_state_at < ? "
-                + "AND id <> ?)")) {
+                + "AND (current_state_at < ? OR (current_state_at = ? AND id < ?)))")) {
             ps.setString(1, candidate.concurrencyKey());
-            ps.setTimestamp(2, Timestamp.from(lastTransitionTime(candidate, candidate.currentState())));
-            ps.setObject(3, candidate.id().asUuid());
+            Instant candidateStateAt = lastTransitionTime(candidate, candidate.currentState());
+            ps.setTimestamp(2, Timestamp.from(candidateStateAt));
+            ps.setTimestamp(3, Timestamp.from(candidateStateAt));
+            ps.setObject(4, candidate.id().asUuid());
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getBoolean(1);

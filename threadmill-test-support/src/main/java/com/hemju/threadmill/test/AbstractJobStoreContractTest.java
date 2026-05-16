@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -457,6 +458,67 @@ public abstract class AbstractJobStoreContractTest {
     }
 
     @Test
+    @DisplayName("same-timestamp pending order uses job id as the tie-breaker")
+    void sameTimestampPendingOrderUsesJobIdTieBreaker() {
+        var sameTime = Instant.now().minusSeconds(3).truncatedTo(ChronoUnit.MILLIS);
+        Job sharedA = concurrentJobWithId(
+                "com.example.Export", fixedJobId(1), "project:42", ConcurrencyMode.SHARED, 0, sameTime);
+        Job exclusiveB = concurrentJobWithId(
+                "com.example.Import", fixedJobId(2), "project:42", ConcurrencyMode.EXCLUSIVE, 0, sameTime);
+        Job sharedC = concurrentJobWithId(
+                "com.example.Export", fixedJobId(3), "project:42", ConcurrencyMode.SHARED, 0, sameTime);
+        store.insert(sharedA);
+        store.insert(exclusiveB);
+        store.insert(sharedC);
+
+        List<Job> first = store.claimReady(NodeId.newId(), "default", 3, Instant.now());
+        assertThat(first).extracting(Job::id).containsExactly(sharedA.id());
+        finish(first.get(0), JobState.SUCCEEDED);
+
+        List<Job> second = store.claimReady(NodeId.newId(), "default", 3, Instant.now());
+        assertThat(second).extracting(Job::id).containsExactly(exclusiveB.id());
+        finish(second.get(0), JobState.SUCCEEDED);
+
+        assertThat(store.claimReady(NodeId.newId(), "default", 3, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(sharedC.id());
+    }
+
+    @Test
+    @DisplayName("claimReady scans past a blocked same-key priority window")
+    void claimReadyScansPastBlockedSameKeyPriorityWindow() {
+        var base = Instant.now().minusSeconds(10);
+        Job olderExclusive = concurrentJob("com.example.Import", "project:hot", ConcurrencyMode.EXCLUSIVE, -100, base);
+        store.insert(olderExclusive);
+        for (int i = 0; i < 150; i++) {
+            store.insert(concurrentJob(
+                    "com.example.Export", "project:hot", ConcurrencyMode.SHARED, 100, base.plusMillis(i + 1)));
+        }
+
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(olderExclusive.id());
+    }
+
+    @Test
+    @DisplayName("claimReady scans past a blocked hot key to claim independent work")
+    void claimReadyScansPastBlockedHotKeyToOtherKeys() {
+        var base = Instant.now().minusSeconds(10);
+        store.insert(concurrentJob("com.example.Import", "project:hot", ConcurrencyMode.EXCLUSIVE, -100, base));
+        for (int i = 0; i < 150; i++) {
+            store.insert(concurrentJob(
+                    "com.example.Export", "project:hot", ConcurrencyMode.SHARED, 100, base.plusMillis(i + 1)));
+        }
+        Job independent = concurrentJob(
+                "com.example.Import", "project:other", ConcurrencyMode.EXCLUSIVE, -10, base.plusSeconds(1));
+        store.insert(independent);
+
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(independent.id());
+    }
+
+    @Test
     @DisplayName("sustained contention never runs a writer with readers or another writer")
     void concurrencyKeyContentionMaintainsReadWriteInvariants() throws Exception {
         for (int i = 0; i < 100; i++) {
@@ -852,6 +914,33 @@ public abstract class AbstractJobStoreContractTest {
     }
 
     @Test
+    @DisplayName("a workflow child inserted after root claim keeps the workflow hold")
+    void workflowChildInsertedAfterRootClaimKeepsWorkflowHold() {
+        Job root = concurrentJob("com.example.Root", "project:42", ConcurrencyMode.EXCLUSIVE, 10, Instant.now());
+        store.insert(root);
+        Job claimedRoot =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+
+        Job child = Jobs.awaitingWorkflowStep("com.example.Child", claimedRoot);
+        store.insert(child);
+        Job outsider = concurrentJob("com.example.Other", "project:42", ConcurrencyMode.EXCLUSIVE, -1, Instant.now());
+        store.insert(outsider);
+
+        finish(claimedRoot, JobState.SUCCEEDED);
+        promote(child.id());
+
+        List<Job> claimedChild = store.claimReady(NodeId.newId(), "default", 2, Instant.now());
+        assertThat(claimedChild).extracting(Job::id).containsExactly(child.id());
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .isEmpty();
+
+        finish(claimedChild.get(0), JobState.SUCCEEDED);
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(outsider.id());
+    }
+
+    @Test
     @DisplayName("concurrency key validation rejects blank, oversize, and missing mode")
     void concurrencyKeyValidationRejectsInvalidDefinitions() {
         assertThatThrownBy(() -> Jobs.withConcurrency("com.example.Bad", " ", ConcurrencyMode.EXCLUSIVE))
@@ -1230,12 +1319,22 @@ public abstract class AbstractJobStoreContractTest {
 
     private static Job concurrentJob(
             String handler, String key, ConcurrencyMode mode, int priority, Instant createdAt) {
+        return concurrentJobWithId(handler, JobId.newId(), key, mode, priority, createdAt);
+    }
+
+    private static Job concurrentJobWithId(
+            String handler, JobId id, String key, ConcurrencyMode mode, int priority, Instant createdAt) {
         return Job.builder()
+                .id(id)
                 .spec(JobSpec.of(handler, new JobArgument("java.lang.String", "\"hello\"")))
                 .concurrencyKey(key)
                 .concurrencyMode(mode)
                 .priority(priority)
                 .createdAt(createdAt)
                 .build();
+    }
+
+    private static JobId fixedJobId(int value) {
+        return JobId.of(new UUID(0L, value));
     }
 }

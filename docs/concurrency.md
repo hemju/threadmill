@@ -49,6 +49,10 @@ Threadmill still provides at-least-once delivery. Concurrency prevents
 simultaneous execution for a key; handlers must still be idempotent because a
 job may run again after a crash.
 
+For backend-specific claim and release paths, including the Postgres row-lock
+shape and the Redis Lua-script shape, see
+[Backend execution model](backend-execution-model.md).
+
 ## Workflows
 
 Workflow successors inherit the parent's concurrency key and mode. The hold is

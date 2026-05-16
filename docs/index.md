@@ -13,6 +13,8 @@
   contract, the outbox pattern. **Read this before writing a handler.**
 - [Concurrency](concurrency.md) — per-key locks (`EXCLUSIVE` / `SHARED`),
   workflow inheritance, worked examples.
+- [Backend execution model](backend-execution-model.md) — Postgres and Redis
+  claim/save paths, lock scopes, parallelism, and starvation boundaries.
 - [Queue topology](queue-topology.md) — lanes, families, weights, pause /
   resume.
 - [Long-running jobs](long-running-jobs.md) — `ctx.checkIn()`,
