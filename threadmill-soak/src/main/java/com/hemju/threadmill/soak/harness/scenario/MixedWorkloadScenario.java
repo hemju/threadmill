@@ -1,5 +1,6 @@
 package com.hemju.threadmill.soak.harness.scenario;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
@@ -47,10 +48,10 @@ public final class MixedWorkloadScenario implements SoakScenario {
     }
 
     @Override
-    public java.time.Duration drainBudget() {
+    public Duration drainBudget() {
         // Multi-key + EXCLUSIVE imports can serialize chunks of work; 60s
         // covers any duration the harness supports.
-        return java.time.Duration.ofSeconds(60);
+        return Duration.ofSeconds(60);
     }
 
     @Override

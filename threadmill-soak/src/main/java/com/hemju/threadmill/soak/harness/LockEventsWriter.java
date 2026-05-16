@@ -4,7 +4,9 @@ import java.io.BufferedWriter;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -33,7 +35,7 @@ public final class LockEventsWriter {
         Map<String, Acquire> openAcquires = new HashMap<>();
         Map<String, KeyStats> byKey = new LinkedHashMap<>();
         Map<String, Integer> activeShared = new HashMap<>();
-        var waits = new java.util.HashMap<String, java.util.ArrayList<Long>>();
+        Map<String, ArrayList<Long>> waits = new HashMap<>();
 
         try (BufferedWriter writer = Files.newBufferedWriter(dir.lockEventsJsonl(), StandardCharsets.UTF_8)) {
             for (JsonNode e : corpus.events()) {
@@ -57,7 +59,7 @@ public final class LockEventsWriter {
                     String openKey = jobId + "::" + key;
                     Acquire open = openAcquires.remove(openKey);
                     if (open != null) {
-                        long heldMs = java.time.Duration.between(open.at, ts).toMillis();
+                        long heldMs = Duration.between(open.at, ts).toMillis();
                         Map<String, Object> row = new LinkedHashMap<>();
                         row.put("jobId", jobId);
                         row.put("lockKey", key);
@@ -67,8 +69,7 @@ public final class LockEventsWriter {
                         row.put("heldMillis", heldMs);
                         writer.write(mapper.writeValueAsString(row));
                         writer.write('\n');
-                        waits.computeIfAbsent(key, k -> new java.util.ArrayList<>())
-                                .add(heldMs);
+                        waits.computeIfAbsent(key, k -> new ArrayList<>()).add(heldMs);
                         if ("SHARED".equals(open.mode)) {
                             activeShared.merge(key, -1, Integer::sum);
                         }
@@ -81,7 +82,7 @@ public final class LockEventsWriter {
         for (var entry : byKey.entrySet()) {
             String key = entry.getKey();
             KeyStats s = entry.getValue();
-            var samples = waits.getOrDefault(key, new java.util.ArrayList<>());
+            var samples = waits.getOrDefault(key, new ArrayList<>());
             long avg = samples.isEmpty()
                     ? 0L
                     : (long) samples.stream()

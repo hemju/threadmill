@@ -1,5 +1,6 @@
 package com.hemju.threadmill.soak.harness.scenario;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
@@ -51,7 +52,7 @@ public final class RwLockStressScenario implements SoakScenario {
         // the minimum of this constant and the configured rate).
         long localRate = Math.min(25L, gen.jobsPerSecond());
         while (Instant.now().isBefore(ctx.runDeadline())) {
-            long nanos = n * java.time.Duration.ofSeconds(1).toNanos() / localRate;
+            long nanos = n * Duration.ofSeconds(1).toNanos() / localRate;
             gen.pace(runStart.plusNanos(nanos));
             boolean isExclusive = ThreadLocalRandom.current().nextDouble() < 0.05;
             ConcurrencyMode mode = isExclusive ? ConcurrencyMode.EXCLUSIVE : ConcurrencyMode.SHARED;
@@ -67,10 +68,10 @@ public final class RwLockStressScenario implements SoakScenario {
     }
 
     @Override
-    public java.time.Duration drainBudget() {
+    public Duration drainBudget() {
         // Single-key contention serializes EXCLUSIVE jobs; drain can run long
         // on a busy run. 90s is comfortably above worst-case for any
         // duration the harness supports.
-        return java.time.Duration.ofSeconds(90);
+        return Duration.ofSeconds(90);
     }
 }

@@ -142,7 +142,8 @@ queue deliberately.
 The trace contains supervisor start/stop, worker process starts, exits, kills,
 and restarts, every job enqueue, every attempt start and finish, interrupted
 attempts, and periodic store snapshots. It is a production-behaviour trace
-generator, not a replacement for the contract tests.
+generator, not a replacement for the contract tests. The task exits non-zero
+when the queue does not drain within `--drain-timeout`.
 
 ## Why a separate module
 

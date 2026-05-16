@@ -2,6 +2,7 @@ package com.hemju.threadmill.soak.harness.scenario;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * Registry of the eight scenarios shipped with the harness. New scenarios
@@ -9,7 +10,7 @@ import java.util.Map;
  */
 public final class Scenarios {
 
-    private static final Map<String, java.util.function.Supplier<SoakScenario>> REGISTRY = new LinkedHashMap<>();
+    private static final Map<String, Supplier<SoakScenario>> REGISTRY = new LinkedHashMap<>();
 
     static {
         REGISTRY.put("mixed-workload", MixedWorkloadScenario::new);
@@ -30,9 +31,5 @@ public final class Scenarios {
             throw new IllegalArgumentException("unknown scenario: " + name + " — valid names: " + REGISTRY.keySet());
         }
         return supplier.get();
-    }
-
-    public static java.util.Set<String> names() {
-        return REGISTRY.keySet();
     }
 }

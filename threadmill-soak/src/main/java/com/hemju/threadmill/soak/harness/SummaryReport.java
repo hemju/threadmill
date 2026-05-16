@@ -1,5 +1,6 @@
 package com.hemju.threadmill.soak.harness;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -73,7 +74,7 @@ public record SummaryReport(
         root.put("backend", backend);
         root.put("config", config);
         root.put("verdict", verdict);
-        List<Map<String, Object>> invariants = new java.util.ArrayList<>();
+        List<Map<String, Object>> invariants = new ArrayList<>();
         for (InvariantResult r : invariantResults) {
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("name", r.name());

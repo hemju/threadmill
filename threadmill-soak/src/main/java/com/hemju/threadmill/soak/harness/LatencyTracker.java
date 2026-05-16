@@ -9,10 +9,10 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.locks.ReentrantLock;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -32,9 +32,6 @@ public final class LatencyTracker implements AutoCloseable {
     private final ObjectMapper mapper = new ObjectMapper();
     private final ReentrantLock writeLock = new ReentrantLock();
     private final ConcurrentHashMap<String, Stages> stages = new ConcurrentHashMap<>();
-    private final LongList enqueueToClaim = new LongList();
-    private final LongList claimToStart = new LongList();
-    private final LongList startToComplete = new LongList();
     private final LongList endToEnd = new LongList();
 
     public LatencyTracker(Path file) throws IOException {
@@ -70,9 +67,6 @@ public final class LatencyTracker implements AutoCloseable {
         long claimToStartMs = msBetween(s.claimedAt, s.startedAt);
         long startToCompleteMs = msBetween(s.startedAt, completedAt);
         long endToEndMs = msBetween(s.enqueuedAt, completedAt);
-        if (s.claimedAt != 0L) enqueueToClaim.add(enqueuedToClaimMs);
-        if (s.claimedAt != 0L && s.startedAt != 0L) claimToStart.add(claimToStartMs);
-        if (s.startedAt != 0L) startToComplete.add(startToCompleteMs);
         endToEnd.add(endToEndMs);
 
         Map<String, Object> row = new LinkedHashMap<>();
@@ -88,15 +82,6 @@ public final class LatencyTracker implements AutoCloseable {
 
     public int inflight() {
         return stages.size();
-    }
-
-    public Map<String, Percentiles.Summary> percentiles() {
-        Map<String, Percentiles.Summary> out = new LinkedHashMap<>();
-        out.put("enqueueToClaim", enqueueToClaim.toPercentiles());
-        out.put("claimToStart", claimToStart.toPercentiles());
-        out.put("startToComplete", startToComplete.toPercentiles());
-        out.put("endToEnd", endToEnd.toPercentiles());
-        return out;
     }
 
     /** Snapshot of the current p99 end-to-end latency, in ms; used by the live-status printer. */
@@ -150,30 +135,15 @@ public final class LatencyTracker implements AutoCloseable {
      * hundred thousand samples, which sort in milliseconds.
      */
     private static final class LongList {
-        private final java.util.concurrent.ConcurrentLinkedQueue<Long> values =
-                new java.util.concurrent.ConcurrentLinkedQueue<>();
+        private final ConcurrentLinkedQueue<Long> values = new ConcurrentLinkedQueue<>();
 
         void add(long v) {
             values.add(v);
-        }
-
-        Percentiles.Summary toPercentiles() {
-            long[] arr = values.stream().mapToLong(Long::longValue).toArray();
-            return Percentiles.summarise(arr);
         }
 
         long snapshotPercentile(double p) {
             long[] arr = values.stream().mapToLong(Long::longValue).toArray();
             return Percentiles.percentile(arr, p);
         }
-    }
-
-    /** Exposes the raw recorded samples for tests / reporting. */
-    public List<long[]> rawSamples() {
-        long[] a = enqueueToClaim.values.stream().mapToLong(Long::longValue).toArray();
-        long[] b = claimToStart.values.stream().mapToLong(Long::longValue).toArray();
-        long[] c = startToComplete.values.stream().mapToLong(Long::longValue).toArray();
-        long[] d = endToEnd.values.stream().mapToLong(Long::longValue).toArray();
-        return List.of(a, b, c, d);
     }
 }

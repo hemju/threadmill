@@ -2,6 +2,7 @@ package com.hemju.threadmill.soak.harness;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -62,7 +63,7 @@ final class SoakHarnessRunnerTest {
 
             // Validate schema once at the end of each scenario.
             ObjectMapper mapper = new ObjectMapper();
-            JsonNode summary = mapper.readTree(java.nio.file.Files.readString(outputDir.resolve("summary.json")));
+            JsonNode summary = mapper.readTree(Files.readString(outputDir.resolve("summary.json")));
             assertThat(summary.path("verdict").asText()).isEqualTo("passed");
         } finally {
             clearSoakProps();

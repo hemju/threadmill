@@ -1,5 +1,6 @@
 package com.hemju.threadmill.soak.harness.scenario;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 
@@ -40,7 +41,7 @@ public final class RetryStormScenario implements SoakScenario {
 
     @Override
     public ProcessingNodeConfig.Builder tuneConfig(ProcessingNodeConfig.Builder b) {
-        return b.defaultMaxAttempts(MAX_ATTEMPTS).jobTimeout(java.time.Duration.ofSeconds(2));
+        return b.defaultMaxAttempts(MAX_ATTEMPTS).jobTimeout(Duration.ofSeconds(2));
     }
 
     @Override
@@ -59,8 +60,8 @@ public final class RetryStormScenario implements SoakScenario {
     }
 
     @Override
-    public java.time.Duration drainBudget() {
+    public Duration drainBudget() {
         // Retries add wall-clock; give the engine longer to settle.
-        return java.time.Duration.ofSeconds(90);
+        return Duration.ofSeconds(90);
     }
 }

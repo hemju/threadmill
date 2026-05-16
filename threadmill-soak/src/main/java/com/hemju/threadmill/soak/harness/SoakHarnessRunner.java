@@ -1,15 +1,18 @@
 package com.hemju.threadmill.soak.harness;
 
 import java.io.IOException;
+import java.nio.file.Files;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.networknt.schema.JsonSchema;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -195,7 +198,7 @@ public final class SoakHarnessRunner {
         Map<String, Double> byQueue = new LinkedHashMap<>();
         Map<String, Long> succeededPerQueue = new LinkedHashMap<>();
         Map<String, Long> succeededPerHandler = new LinkedHashMap<>();
-        Map<String, String> handlerByJobId = new java.util.HashMap<>();
+        Map<String, String> handlerByJobId = new HashMap<>();
         for (JsonNode e : corpus.events()) {
             String event = e.path("event").asText();
             if ("enqueued".equals(event)) {
@@ -241,12 +244,12 @@ public final class SoakHarnessRunner {
      */
     private Map<String, Percentiles.Summary> latencyPercentilesFromFile() {
         Map<String, Percentiles.Summary> result = new LinkedHashMap<>();
-        java.util.ArrayList<Long> enqueueToClaim = new java.util.ArrayList<>();
-        java.util.ArrayList<Long> claimToStart = new java.util.ArrayList<>();
-        java.util.ArrayList<Long> startToComplete = new java.util.ArrayList<>();
-        java.util.ArrayList<Long> endToEnd = new java.util.ArrayList<>();
-        try (var lines = java.nio.file.Files.lines(outputDir.latenciesJsonl())) {
-            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        ArrayList<Long> enqueueToClaim = new ArrayList<>();
+        ArrayList<Long> claimToStart = new ArrayList<>();
+        ArrayList<Long> startToComplete = new ArrayList<>();
+        ArrayList<Long> endToEnd = new ArrayList<>();
+        try (var lines = Files.lines(outputDir.latenciesJsonl())) {
+            var mapper = new ObjectMapper();
             lines.forEach(line -> {
                 if (line.isBlank()) return;
                 try {
@@ -270,12 +273,12 @@ public final class SoakHarnessRunner {
         return result;
     }
 
-    private static void pushIfPresent(JsonNode n, String field, java.util.ArrayList<Long> dest) {
+    private static void pushIfPresent(JsonNode n, String field, ArrayList<Long> dest) {
         JsonNode v = n.get(field);
         if (v != null && !v.isNull()) dest.add(v.asLong());
     }
 
-    private static long[] toArray(java.util.ArrayList<Long> list) {
+    private static long[] toArray(ArrayList<Long> list) {
         long[] arr = new long[list.size()];
         for (int i = 0; i < list.size(); i++) arr[i] = list.get(i);
         return arr;

@@ -1,5 +1,6 @@
 package com.hemju.threadmill.soak.harness.scenario;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -71,7 +72,7 @@ public final class WeightedQueuesScenario implements SoakScenario {
         Instant runStart = ctx.runStart();
         long localRate = Math.max(150L, gen.jobsPerSecond());
         while (Instant.now().isBefore(ctx.runDeadline())) {
-            long nanos = n * java.time.Duration.ofSeconds(1).toNanos() / localRate;
+            long nanos = n * Duration.ofSeconds(1).toNanos() / localRate;
             gen.pace(runStart.plusNanos(nanos));
             String queue =
                     switch ((int) (n % 3)) {
@@ -85,9 +86,9 @@ public final class WeightedQueuesScenario implements SoakScenario {
     }
 
     @Override
-    public java.time.Duration drainBudget() {
+    public Duration drainBudget() {
         // With 3× over-production, drain takes a few seconds once production
         // stops; 60s is comfortable for any duration the harness supports.
-        return java.time.Duration.ofSeconds(60);
+        return Duration.ofSeconds(60);
     }
 }

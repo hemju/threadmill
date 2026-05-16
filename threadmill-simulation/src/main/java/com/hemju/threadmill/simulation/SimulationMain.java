@@ -2,6 +2,8 @@ package com.hemju.threadmill.simulation;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeFormatterBuilder;
 import java.time.temporal.ChronoField;
@@ -53,7 +55,7 @@ public final class SimulationMain {
             .appendValue(ChronoField.MINUTE_OF_HOUR, 2)
             .appendValue(ChronoField.SECOND_OF_MINUTE, 2)
             .toFormatter(Locale.ROOT)
-            .withZone(java.time.ZoneOffset.UTC);
+            .withZone(ZoneOffset.UTC);
 
     private SimulationMain() {}
 
@@ -160,7 +162,7 @@ public final class SimulationMain {
     }
 
     private static Path traceFile(String backend) {
-        String name = "simulation-" + FILENAME_TIMESTAMP.format(java.time.Instant.now()) + "-" + backend + ".jsonl";
+        String name = "simulation-" + FILENAME_TIMESTAMP.format(Instant.now()) + "-" + backend + ".jsonl";
         return Path.of("build", "simulation", name);
     }
 

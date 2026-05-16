@@ -1,5 +1,6 @@
 package com.hemju.threadmill.soak.harness.scenario;
 
+import java.time.Duration;
 import java.util.List;
 
 import com.hemju.threadmill.core.engine.ProcessingNode;
@@ -54,7 +55,7 @@ public interface SoakScenario {
      * Maximum wait after the producer stops before the harness assumes drain
      * is impossible. Scenarios with long handlers extend this.
      */
-    default java.time.Duration drainBudget() {
-        return java.time.Duration.ofSeconds(45);
+    default Duration drainBudget() {
+        return Duration.ofSeconds(45);
     }
 }

@@ -83,8 +83,7 @@ public final class WorkerChurnSimulatorMain {
                     long workMillis =
                             ThreadLocalRandom.current().nextLong(options.minWorkMillis, options.maxWorkMillis + 1);
                     JobId id = scheduler.enqueue(
-                            new WorkerChurnPayload(
-                                    runId, sequence, Instant.now().toEpochMilli(), workMillis, trace.toString()),
+                            new WorkerChurnPayload(runId, sequence, workMillis, trace.toString()),
                             WorkerChurnHandler.class,
                             options.queue,
                             0);
@@ -112,10 +111,14 @@ public final class WorkerChurnSimulatorMain {
                 Thread.sleep(25);
             }
 
-            waitForDrain(options, workers, runId, handle.store(), submittedIds);
+            boolean drained = waitForDrain(options, workers, runId, handle.store(), submittedIds);
             appendStoreSnapshot(trace, runId, handle.store(), "worker-churn-summary", options.queue);
-            WorkerChurnTraceLog.append(trace, "worker-churn-stop", Map.of("runId", runId, "submitted", sequence));
+            WorkerChurnTraceLog.append(
+                    trace, "worker-churn-stop", Map.of("runId", runId, "submitted", sequence, "drained", drained));
             System.out.println("trace written to " + trace.toAbsolutePath());
+            if (!drained) {
+                throw new IllegalStateException("worker-churn simulation did not drain within " + options.drainTimeout);
+            }
         } finally {
             for (WorkerProcess worker : workers) {
                 worker.stop(trace, runId, "supervisor-stop");
@@ -240,7 +243,7 @@ public final class WorkerChurnSimulatorMain {
         WorkerChurnTraceLog.append(trace, event, fields);
     }
 
-    private static void waitForDrain(
+    private static boolean waitForDrain(
             Options options, List<WorkerProcess> workers, String runId, JobStore store, List<JobId> submittedIds)
             throws Exception {
         WorkerChurnTraceLog.append(
@@ -256,11 +259,12 @@ public final class WorkerChurnSimulatorMain {
                     .count();
             if (unfinished == 0) {
                 WorkerChurnTraceLog.append(options.traceFile, "drain-complete", Map.of("runId", runId));
-                return;
+                return true;
             }
             Thread.sleep(100);
         }
         appendStoreSnapshot(options.traceFile, runId, store, "drain-timeout", options.queue);
+        return false;
     }
 
     private static boolean isUnfinished(Optional<Job> job) {
@@ -317,7 +321,7 @@ public final class WorkerChurnSimulatorMain {
                     case "--max-work-millis" -> options.maxWorkMillis = Long.parseLong(value);
                     case "--trace" -> options.traceFile = Path.of(value);
                     case "--queue" -> options.queue = value;
-                    default -> throw new IllegalArgumentException("unknown simulator argument: " + key);
+                    default -> throw new IllegalArgumentException("unknown worker-churn argument: " + key);
                 }
             }
             if (options.workers <= 0) throw new IllegalArgumentException("--workers must be positive");

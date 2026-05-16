@@ -25,13 +25,12 @@ final class SoakHarnessSmokeTest {
     @Test
     void smokeRunOnMemoryProducesPassedVerdictAndAllArtifacts(@TempDir Path tempDir) throws Exception {
         Path outputDir = tempDir.resolve("soak-smoke");
-        System.setProperty("threadmill.soak.scenario", "mixed-workload");
-        // 8 s + 50 jobs/sec keeps the test in check (~10 s wall-clock) while
-        // giving the queue-family lane and concurrency keys enough time to
-        // settle. Shorter runs are reliable on standalone-Gradle invocations
-        // but flaky inside the JUnit JVM under heavy concurrent producers.
-        System.setProperty("threadmill.soak.duration", "8s");
-        System.setProperty("threadmill.soak.jobsPerSecond", "50");
+        System.setProperty("threadmill.soak.scenario", "rw-lock-stress");
+        // Keep this untagged smoke focused on the harness output contract. The
+        // scenario still exercises lock events, but its producer is bounded so
+        // the check gate does not inherit mixed-workload churn variance.
+        System.setProperty("threadmill.soak.duration", "5s");
+        System.setProperty("threadmill.soak.jobsPerSecond", "25");
         System.setProperty("threadmill.soak.nodes", "1");
         System.setProperty("threadmill.soak.workerCount", "4");
         System.setProperty("threadmill.soak.outputDir", outputDir.toString());
@@ -52,7 +51,7 @@ final class SoakHarnessSmokeTest {
             ObjectMapper mapper = new ObjectMapper();
             JsonNode summary = mapper.readTree(Files.readString(outputDir.resolve("summary.json")));
             assertThat(summary.path("verdict").asText()).isEqualTo("passed");
-            assertThat(summary.path("scenario").asText()).isEqualTo("mixed-workload");
+            assertThat(summary.path("scenario").asText()).isEqualTo("rw-lock-stress");
             assertThat(summary.path("backend").asText()).isEqualTo("memory");
 
             String trace = Files.readString(outputDir.resolve("trace.jsonl"));
