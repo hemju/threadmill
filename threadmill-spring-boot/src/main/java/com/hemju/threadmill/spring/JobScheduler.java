@@ -14,6 +14,7 @@ import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.engine.JobRunner;
+import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.engine.RetryInterceptor;
 import com.hemju.threadmill.core.handler.JobHandler;
@@ -55,19 +56,31 @@ public class JobScheduler {
     protected final JobSerializer serializer;
     protected final ThreadmillJobRegistry registry;
     protected final ProcessingNodeConfig config;
+    protected final LocalWakeBus wakeBus;
 
     public JobScheduler(
             JobStore store, JobSerializer serializer, ThreadmillJobRegistry registry, ProcessingNodeConfig config) {
+        this(store, serializer, registry, config, new LocalWakeBus());
+    }
+
+    public JobScheduler(
+            JobStore store,
+            JobSerializer serializer,
+            ThreadmillJobRegistry registry,
+            ProcessingNodeConfig config,
+            LocalWakeBus wakeBus) {
         this.store = Objects.requireNonNull(store, "store");
         this.serializer = Objects.requireNonNull(serializer, "serializer");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.config = Objects.requireNonNull(config, "config");
+        this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
     }
 
     public <P extends JobPayload> JobId enqueue(Class<? extends JobHandler<P>> handler, P payload) {
         var registration = registrationFor(handler, payload);
         Job job = jobFor(payload, null, registration.priority(), null, null, registration);
         store.insert(job);
+        wakeBus.wake(registration.queue());
         return job.id();
     }
 
@@ -80,6 +93,8 @@ public class JobScheduler {
         Objects.requireNonNull(when, "when");
         var registration = registrationFor(handler, payload);
         Job job = jobFor(payload, when, registration.priority(), null, null, registration);
+        // SCHEDULED jobs aren't claimable yet; maintenance picks them up at the due time
+        // and the wake will fire from there. Producer-side wake here would be a no-op.
         store.insert(job);
         return job.id();
     }
@@ -89,6 +104,7 @@ public class JobScheduler {
         var registration = registrationFor(handler, payload);
         Job job = jobFor(payload, null, priority, null, null, registration);
         store.insert(job);
+        wakeBus.wake(registration.queue());
         return job.id();
     }
 
@@ -105,12 +121,15 @@ public class JobScheduler {
         Objects.requireNonNull(handler, "handler");
         Objects.requireNonNull(payloads, "payloads");
         if (payloads.isEmpty()) return List.of();
+        ThreadmillJobRegistry.Registration registration = null;
         var jobs = new ArrayList<Job>(payloads.size());
         for (P p : payloads) {
-            var registration = registrationFor(handler, p);
+            registration = registrationFor(handler, p);
             jobs.add(jobFor(p, null, registration.priority(), null, null, registration));
         }
-        return store.insertAll(jobs);
+        List<JobId> ids = store.insertAll(jobs);
+        wakeBus.wake(registration.queue());
+        return ids;
     }
 
     public <P extends JobPayload> EnqueueResult enqueueIfAbsent(
@@ -122,7 +141,11 @@ public class JobScheduler {
         }
         var registration = registrationFor(handler, payload);
         Job job = jobFor(payload, null, registration.priority(), dedupKey, ttl, registration);
-        return store.enqueueIfAbsent(job, dedupKey, ttl, Instant.now());
+        EnqueueResult result = store.enqueueIfAbsent(job, dedupKey, ttl, Instant.now());
+        if (result instanceof EnqueueResult.Created) {
+            wakeBus.wake(registration.queue());
+        }
+        return result;
     }
 
     // ---------------------------------------------------------------- queue pauses

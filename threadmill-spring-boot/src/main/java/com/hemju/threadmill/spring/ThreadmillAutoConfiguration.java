@@ -17,6 +17,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 
+import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
@@ -124,8 +125,14 @@ public class ThreadmillAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public Scheduler threadmillScheduler(JobStore store, JobSerializer serializer) {
-        return new Scheduler(store, serializer);
+    public LocalWakeBus threadmillLocalWakeBus() {
+        return new LocalWakeBus();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public Scheduler threadmillScheduler(JobStore store, JobSerializer serializer, LocalWakeBus wakeBus) {
+        return new Scheduler(store, serializer, wakeBus);
     }
 
     @Bean
@@ -181,11 +188,12 @@ public class ThreadmillAutoConfiguration {
             JobSerializer serializer,
             ThreadmillJobRegistry registry,
             ProcessingNodeConfig config,
-            ThreadmillProperties properties) {
+            ThreadmillProperties properties,
+            LocalWakeBus wakeBus) {
         if (properties.getSpring().isEnqueueAfterCommit()) {
-            return new TransactionAwareJobScheduler(store, serializer, registry, config);
+            return new TransactionAwareJobScheduler(store, serializer, registry, config, wakeBus);
         }
-        return new JobScheduler(store, serializer, registry, config);
+        return new JobScheduler(store, serializer, registry, config, wakeBus);
     }
 
     @Bean
@@ -196,12 +204,14 @@ public class ThreadmillAutoConfiguration {
             JobSerializer serializer,
             JobHandlerResolver resolver,
             ProcessingNodeConfig config,
-            ThreadmillJobRegistry registry) {
+            ThreadmillJobRegistry registry,
+            LocalWakeBus wakeBus) {
         List<String> queues = resolveQueues(config, registry);
         var builder = ProcessingNode.builder(store)
                 .config(config)
                 .serializer(serializer)
-                .handlerResolver(resolver);
+                .handlerResolver(resolver)
+                .wakeBus(wakeBus);
         for (String queue : queues) {
             builder.lane(queue, config.workerCount());
         }

@@ -13,6 +13,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.engine.QueueLane;
@@ -119,6 +120,24 @@ class SchedulingTest {
         node = ProcessingNode.builder(store).config(fastConfig()).build();
         node.start();
         await().atMost(Duration.ofSeconds(5)).until(() -> RecorderHandler.RECORD.contains("later"));
+    }
+
+    @Test
+    void scheduledPromotionWakesLocalDispatcherWhenJobBecomesClaimable() {
+        var wakeBus = new LocalWakeBus();
+        scheduler = new Scheduler(store, serializer, wakeBus);
+        scheduler.scheduleAt(Instant.now().plusMillis(150), new HelloPayload("later"), RecorderHandler.class);
+        node = ProcessingNode.builder(store)
+                .config(fastConfig().toBuilder()
+                        .pollInterval(Duration.ofSeconds(3))
+                        .maintenancePollInterval(Duration.ofMillis(20))
+                        .build())
+                .wakeBus(wakeBus)
+                .build();
+
+        node.start();
+
+        await().atMost(Duration.ofSeconds(2)).until(() -> RecorderHandler.RECORD.contains("later"));
     }
 
     @Test

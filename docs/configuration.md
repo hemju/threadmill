@@ -6,7 +6,7 @@ must be nonblank, at most 128 characters, and contain no control characters.
 | Setting | Default | Notes |
 |---|---:|---|
 | `workerCount` | `10` | Workers in the default lane. |
-| `pollInterval` | `500ms` | Dispatcher idle poll interval. |
+| `pollInterval` | `500ms` | Dispatcher fallback idle poll interval. Scheduled promotion and same-JVM producers sharing a `LocalWakeBus` can dispatch sooner. |
 | `claimHeartbeat` | `15s` | Owner heartbeat refresh cadence. |
 | `maintenancePollInterval` | `1s` | Master-only maintenance tick for recurring materialization, scheduled promotion, and orphan reclaim. |
 | `retentionInterval` | `1h` | Master-only cadence for succeeded-job cleanup, expired dedup cleanup, and stale node-heartbeat cleanup. |

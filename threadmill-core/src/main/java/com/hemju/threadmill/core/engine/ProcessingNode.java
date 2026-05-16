@@ -15,6 +15,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
+import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
@@ -48,6 +49,8 @@ public final class ProcessingNode implements AutoCloseable {
     private final List<Dispatcher> dispatchers = new ArrayList<>();
     private final List<QueueLane> lanes;
     private final MaintenanceCycle maintenance;
+    private final LocalWakeBus wakeBus;
+    private final Runnable wakeRegistration;
     private final Set<String> tags;
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final AtomicBoolean stopped = new AtomicBoolean(false);
@@ -61,6 +64,7 @@ public final class ProcessingNode implements AutoCloseable {
         this.config = b.config == null ? ProcessingNodeConfig.defaults() : b.config;
         this.serializer = b.serializer == null ? new JsonJobSerializer() : b.serializer;
         this.nodeId = b.nodeId == null ? NodeId.newId() : b.nodeId;
+        this.wakeBus = b.wakeBus == null ? new LocalWakeBus() : b.wakeBus;
         JobHandlerResolver resolver = b.resolver == null ? new ReflectiveJobHandlerResolver() : b.resolver;
         this.workerPool = Executors.newVirtualThreadPerTaskExecutor();
         this.interceptors = new JobInterceptors();
@@ -90,9 +94,10 @@ public final class ProcessingNode implements AutoCloseable {
             dispatchers.add(
                     new Dispatcher(store, nodeId, runner, workerPool, capacity, laneConfig, tags, lane.family()));
         }
+        this.wakeRegistration = wakeBus.register(this::wake);
 
-        var materializer = new RecurringMaterializer(store);
-        this.maintenance = new MaintenanceCycle(store, nodeId, registry, runner, materializer, config);
+        var materializer = new RecurringMaterializer(store, wakeBus);
+        this.maintenance = new MaintenanceCycle(store, nodeId, registry, runner, materializer, config, wakeBus);
     }
 
     public NodeId nodeId() {
@@ -114,6 +119,9 @@ public final class ProcessingNode implements AutoCloseable {
     /** Persist a freshly-built job. Adopted version is updated on the input. */
     public void enqueue(Job job) {
         store.insert(job);
+        if (job.currentState() == JobState.ENQUEUED) {
+            wakeBus.wake(job.queue());
+        }
     }
 
     public Optional<Job> findById(JobId id) {
@@ -137,6 +145,7 @@ public final class ProcessingNode implements AutoCloseable {
         if (!stopped.compareAndSet(false, true)) return;
         for (Dispatcher d : dispatchers) d.stop();
         maintenance.stop();
+        wakeRegistration.run();
         registry.stop();
         workerPool.shutdown();
         try {
@@ -161,6 +170,21 @@ public final class ProcessingNode implements AutoCloseable {
         return lanes;
     }
 
+    /**
+     * Wake the local dispatcher(s) handling {@code queue}. Opportunistic — the
+     * dispatcher will pick the job up on its next poll regardless; this just
+     * eliminates the {@code pollInterval} wait when the producer is in the
+     * same JVM. Cross-node wakes are not part of this hook.
+     *
+     * <p>Typically called via {@link LocalWakeBus} after each producer-side
+     * insert that puts a job into {@code ENQUEUED} state.
+     */
+    public void wake(String queue) {
+        for (Dispatcher d : dispatchers) {
+            if (d.matches(queue)) d.wake();
+        }
+    }
+
     /** Builder for a {@link ProcessingNode}. */
     public static final class Builder {
         private final JobStore store;
@@ -168,6 +192,7 @@ public final class ProcessingNode implements AutoCloseable {
         private ProcessingNodeConfig config;
         private JobHandlerResolver resolver;
         private JobSerializer serializer;
+        private LocalWakeBus wakeBus;
         private final List<JobInterceptor> userInterceptors = new ArrayList<>();
         private final List<QueueLane> lanes = new ArrayList<>();
         private final Set<String> tags = new LinkedHashSet<>();
@@ -194,6 +219,11 @@ public final class ProcessingNode implements AutoCloseable {
 
         public Builder serializer(JobSerializer v) {
             this.serializer = v;
+            return this;
+        }
+
+        public Builder wakeBus(LocalWakeBus v) {
+            this.wakeBus = v;
             return this;
         }
 

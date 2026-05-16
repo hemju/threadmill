@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
+import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.QueueLane;
 import com.hemju.threadmill.core.handler.JobAction;
@@ -161,6 +162,28 @@ class ThreadmillAutoConfigurationTest {
     }
 
     @Test
+    void enqueueWakesLocalDispatcherViaWakeBus() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
+                .withBean(QueueAHandler.class)
+                .withPropertyValues("threadmill.spring.enqueue-after-commit=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var bus = context.getBean(LocalWakeBus.class);
+                    var calls = new java.util.concurrent.CopyOnWriteArrayList<String>();
+                    bus.register(calls::add);
+
+                    var scheduler = context.getBean(JobScheduler.class);
+                    scheduler.enqueue(QueueAHandler.class, new PayloadA());
+
+                    // The auto-config also registers ProcessingNode::wake as a sink, so we
+                    // verify our captured sink saw the wake — proves the producer-side
+                    // signal fired on the right queue without coupling to dispatcher internals.
+                    assertThat(calls).contains("alpha");
+                });
+    }
+
+    @Test
     void rawJobHandlerIsRejectedWithGuidance() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
@@ -198,7 +221,9 @@ class ThreadmillAutoConfigurationTest {
 
     public static final class Payload implements JobPayload {}
 
-    public static final class PayloadA implements JobPayload {}
+    public static final class PayloadA implements JobPayload {
+        public String tag = "wake";
+    }
 
     public static final class PayloadB implements JobPayload {}
 

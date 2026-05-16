@@ -56,6 +56,7 @@ public final class MaintenanceCycle {
     private final JobRunner runner;
     private final RecurringMaterializer materializer;
     private final ProcessingNodeConfig config;
+    private final LocalWakeBus wakeBus;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicReference<Thread> loopThread = new AtomicReference<>();
 
@@ -66,12 +67,24 @@ public final class MaintenanceCycle {
             JobRunner runner,
             RecurringMaterializer materializer,
             ProcessingNodeConfig config) {
+        this(store, nodeId, registry, runner, materializer, config, new LocalWakeBus());
+    }
+
+    public MaintenanceCycle(
+            JobStore store,
+            NodeId nodeId,
+            NodeRegistry registry,
+            JobRunner runner,
+            RecurringMaterializer materializer,
+            ProcessingNodeConfig config,
+            LocalWakeBus wakeBus) {
         this.store = Objects.requireNonNull(store, "store");
         this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
         this.registry = Objects.requireNonNull(registry, "registry");
         this.runner = Objects.requireNonNull(runner, "runner");
         this.materializer = Objects.requireNonNull(materializer, "materializer");
         this.config = Objects.requireNonNull(config, "config");
+        this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
     }
 
     public void start() {
@@ -134,6 +147,7 @@ public final class MaintenanceCycle {
                 j.transitionTo(JobState.ENQUEUED, Instant.now(), "engine.promote", null);
                 j.clearScheduledFor();
                 store.saveAtomic(j, v);
+                wakeBus.wake(j.queue());
                 // No interceptor for state-change here keeps the failure path responsibility-clear;
                 // the engine's only state-change hook is JobInterceptors via JobRunner.
             } catch (StaleJobException ignored) {

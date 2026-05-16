@@ -109,12 +109,33 @@ public final class Dispatcher {
 
     public void stop() {
         running.set(false);
+        wakeSignal.signal();
         Thread t = loopThread.getAndSet(null);
         if (t != null) t.interrupt();
     }
 
     public boolean isPaused() {
         return paused.get();
+    }
+
+    /**
+     * Returns {@code true} if this dispatcher handles {@code queue} — either as
+     * its fixed queue or as a match against its queue-family pattern. Used by
+     * {@link ProcessingNode#wake(String)} to route a producer-side wake to the
+     * right lane.
+     */
+    boolean matches(String queue) {
+        if (queueFamily != null) return queueFamily.matches(queue);
+        return config.defaultQueue().equals(queue);
+    }
+
+    /**
+     * Wake this dispatcher out of its poll-interval sleep. Opportunistic —
+     * coalesced by {@link WakeSignal}'s single-permit cap; safe to call from
+     * any thread on every enqueue.
+     */
+    void wake() {
+        wakeSignal.signal();
     }
 
     private void loop() {

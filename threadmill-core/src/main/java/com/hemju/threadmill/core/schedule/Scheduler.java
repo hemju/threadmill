@@ -14,6 +14,7 @@ import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobReplacement;
 import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.serialization.JobSerializer;
@@ -38,10 +39,16 @@ public final class Scheduler {
 
     private final JobStore store;
     private final JobSerializer serializer;
+    private final LocalWakeBus wakeBus;
 
     public Scheduler(JobStore store, JobSerializer serializer) {
+        this(store, serializer, new LocalWakeBus());
+    }
+
+    public Scheduler(JobStore store, JobSerializer serializer, LocalWakeBus wakeBus) {
         this.store = Objects.requireNonNull(store, "store");
         this.serializer = Objects.requireNonNull(serializer, "serializer");
+        this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
     }
 
     // ---------------------------------------------------------------- fire-and-forget
@@ -74,6 +81,7 @@ public final class Scheduler {
                 .concurrencyMode(concurrencyMode)
                 .build();
         store.insert(job);
+        wakeBus.wake(queue);
         return job.id();
     }
 
@@ -100,7 +108,11 @@ public final class Scheduler {
         JobArgument arg = serializer.serializePayload(payload);
         JobSpec spec = new JobSpec(handler.getName(), List.of(arg), dedupKey, ttl);
         Job job = Job.builder().spec(spec).queue(queue).priority(priority).build();
-        return store.enqueueIfAbsent(job, dedupKey, ttl, Instant.now());
+        EnqueueResult result = store.enqueueIfAbsent(job, dedupKey, ttl, Instant.now());
+        if (result instanceof EnqueueResult.Created) {
+            wakeBus.wake(queue);
+        }
+        return result;
     }
 
     // ---------------------------------------------------------------- scheduled
@@ -303,7 +315,9 @@ public final class Scheduler {
                     .priority(priority)
                     .build());
         }
-        return store.insertAll(jobs);
+        List<JobId> ids = store.insertAll(jobs);
+        wakeBus.wake(queue);
+        return ids;
     }
 
     // ---------------------------------------------------------------- queue pauses

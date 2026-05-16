@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,6 +14,7 @@ import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import com.hemju.threadmill.core.JobId;
+import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
@@ -30,6 +32,7 @@ class TransactionAwareJobSchedulerTest {
 
     private InMemoryJobStore store;
     private TransactionAwareJobScheduler enqueuer;
+    private CopyOnWriteArrayList<String> wakeCalls;
 
     public static final class GreetPayload implements JobPayload {
         public String tag;
@@ -53,8 +56,11 @@ class TransactionAwareJobSchedulerTest {
         store = new InMemoryJobStore();
         var serializer = new JsonJobSerializer();
         var registry = new TestRegistry();
+        var wakeBus = new LocalWakeBus();
+        wakeCalls = new CopyOnWriteArrayList<>();
+        wakeBus.register(wakeCalls::add);
         enqueuer = new TransactionAwareJobScheduler(
-                store, serializer, registry, ProcessingNodeConfig.builder().build());
+                store, serializer, registry, ProcessingNodeConfig.builder().build(), wakeBus);
     }
 
     @AfterEach
@@ -80,6 +86,22 @@ class TransactionAwareJobSchedulerTest {
                     .isEmpty();
             triggerAfterCommit();
             assertThat(store.findById(id)).isPresent();
+        } finally {
+            TransactionSynchronizationManager.clear();
+        }
+    }
+
+    @Test
+    void enqueueInsideTransactionWakesOnlyAfterCommit() {
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            enqueuer.enqueue(GreetHandler.class, new GreetPayload("deferred"));
+
+            assertThat(wakeCalls).isEmpty();
+
+            triggerAfterCommit();
+
+            assertThat(wakeCalls).containsExactly("default");
         } finally {
             TransactionSynchronizationManager.clear();
         }
@@ -139,6 +161,19 @@ class TransactionAwareJobSchedulerTest {
             assertThat(store.findById(id)).isEmpty();
             triggerAfterCommit();
             assertThat(store.findById(id)).isPresent();
+        } finally {
+            TransactionSynchronizationManager.clear();
+        }
+    }
+
+    @Test
+    void scheduledEnqueueDoesNotWakeBeforePromotion() {
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            enqueuer.enqueueIn(GreetHandler.class, new GreetPayload("later"), Duration.ofMinutes(5));
+            triggerAfterCommit();
+
+            assertThat(wakeCalls).isEmpty();
         } finally {
             TransactionSynchronizationManager.clear();
         }

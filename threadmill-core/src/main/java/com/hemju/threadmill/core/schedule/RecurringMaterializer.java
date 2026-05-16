@@ -10,6 +10,7 @@ import org.slf4j.LoggerFactory;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
 
@@ -31,9 +32,15 @@ public final class RecurringMaterializer {
     private static final Logger LOG = LoggerFactory.getLogger(RecurringMaterializer.class);
 
     private final JobStore store;
+    private final LocalWakeBus wakeBus;
 
     public RecurringMaterializer(JobStore store) {
+        this(store, new LocalWakeBus());
+    }
+
+    public RecurringMaterializer(JobStore store, LocalWakeBus wakeBus) {
         this.store = Objects.requireNonNull(store, "store");
+        this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
     }
 
     /** Examine every cron task; for those due, materialize new instances per policy. */
@@ -95,6 +102,7 @@ public final class RecurringMaterializer {
                 .initialState(JobState.ENQUEUED)
                 .build();
         store.insert(job);
+        wakeBus.wake(task.queue());
         return job.id();
     }
 }

@@ -111,7 +111,7 @@ list). The most common:
 |---|---|---|
 | `threadmill.enabled` | `true` | Wire the `Scheduler` bean without starting a `ProcessingNode` when `false` (submitter-only mode). |
 | `threadmill.workerCount` | `10` | Virtual-thread workers per default lane. |
-| `threadmill.pollInterval` | `PT0.5S` | Maximum sleep before the next claim cycle. Idle workers wake the dispatcher early via `WakeSignal`, so this is an upper bound. |
+| `threadmill.pollInterval` | `PT0.5S` | Fallback sleep before the next claim cycle. Idle workers, same-JVM producers, and scheduled promotion wake the dispatcher early, so this is an upper bound. |
 | `threadmill.maintenancePollInterval` | `PT1S` | Master-only maintenance cadence for recurring tasks, scheduled promotion, and orphan reclaim. |
 | `threadmill.retentionInterval` | `PT1H` | Master-only retention cadence for succeeded jobs, dedup keys, and stale node records. |
 | `threadmill.defaultMaxAttempts` | `5` | Per-job retry budget (including first attempt). |

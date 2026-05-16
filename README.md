@@ -146,7 +146,7 @@ binder or directly via `ProcessingNodeConfig.builder()`.
 | Key | Default | Meaning |
 |---|---|---|
 | `threadmill.workerCount` | 10 | Workers per default lane |
-| `threadmill.pollInterval` | 500ms | Dispatcher poll cadence |
+| `threadmill.pollInterval` | 500ms | Dispatcher fallback poll cadence; scheduled promotion and same-JVM producers sharing a `LocalWakeBus` wake local dispatchers sooner |
 | `threadmill.claimHeartbeat` | 15s | Owned-job heartbeat refresh cadence |
 | `threadmill.maintenancePollInterval` | 1s | Recurring materialization, scheduled promotion, and orphan-scan cadence |
 | `threadmill.retentionInterval` | 1h | Succeeded-job, dedup-key, and stale-node retention cadence |
