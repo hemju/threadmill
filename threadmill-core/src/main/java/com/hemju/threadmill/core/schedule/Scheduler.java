@@ -209,6 +209,43 @@ public final class Scheduler {
         store.deleteCronTask(name);
     }
 
+    /**
+     * Define a recurring task with an already-parsed trigger.
+     *
+     * <p>Use this when the caller has parsed the cron expression or constructed
+     * the {@link CronTask.Trigger.Interval} itself — for example a framework
+     * adapter that validates annotation-level recurring specs at startup and
+     * does not want the {@code Scheduler} to re-parse a string. Restart
+     * semantics match {@link #defineCronTask}: existing schedule state
+     * (last-run, in-flight) is preserved; only the next-run timestamp is
+     * recomputed from {@code now} against the new trigger.
+     */
+    public void defineRecurring(
+            String name,
+            CronTask.Trigger trigger,
+            JobPayload payload,
+            String handlerClassName,
+            String queue,
+            int priority,
+            CronTask.MissedRunPolicy missedRunPolicy) {
+        Objects.requireNonNull(name, "name");
+        Objects.requireNonNull(trigger, "trigger");
+        Objects.requireNonNull(payload, "payload");
+        Objects.requireNonNull(handlerClassName, "handlerClassName");
+        Objects.requireNonNull(queue, "queue");
+        Objects.requireNonNull(missedRunPolicy, "missedRunPolicy");
+        upsertCron(new CronTask(
+                name,
+                trigger,
+                handlerClassName,
+                serializer.serializePayload(payload),
+                queue,
+                priority,
+                missedRunPolicy,
+                ZoneId.systemDefault(),
+                true));
+    }
+
     // ---------------------------------------------------------------- replace
 
     /**

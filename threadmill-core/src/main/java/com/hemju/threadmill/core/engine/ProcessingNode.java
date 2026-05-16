@@ -46,6 +46,7 @@ public final class ProcessingNode implements AutoCloseable {
     private final JobRunner runner;
     private final NodeRegistry registry;
     private final List<Dispatcher> dispatchers = new ArrayList<>();
+    private final List<QueueLane> lanes;
     private final MaintenanceCycle maintenance;
     private final Set<String> tags;
     private final AtomicBoolean started = new AtomicBoolean(false);
@@ -77,7 +78,7 @@ public final class ProcessingNode implements AutoCloseable {
         // Build one Dispatcher per configured lane. Each gets its own Semaphore,
         // which is the engine's defence against starvation: a flood of jobs on
         // one queue cannot occupy capacity reserved for another.
-        List<QueueLane> lanes = b.lanes.isEmpty()
+        this.lanes = b.lanes.isEmpty()
                 ? List.of(new QueueLane(config.defaultQueue(), config.workerCount()))
                 : List.copyOf(b.lanes);
         for (QueueLane lane : lanes) {
@@ -153,6 +154,11 @@ public final class ProcessingNode implements AutoCloseable {
     /** Returns the set of tags this node advertises. */
     public Set<String> tags() {
         return tags;
+    }
+
+    /** Returns the queue lanes this node polls. Each lane has its own dispatcher and capacity. */
+    public List<QueueLane> lanes() {
+        return lanes;
     }
 
     /** Builder for a {@link ProcessingNode}. */

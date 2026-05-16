@@ -16,6 +16,7 @@ import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.engine.RetryInterceptor;
+import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
@@ -26,15 +27,36 @@ import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
 
-/** Spring-friendly enqueue API that routes jobs by payload type. */
-public class JobEnqueuer {
+/**
+ * Spring-friendly scheduling API.
+ *
+ * <p>Every method takes the target handler class as the first argument and the
+ * payload as the second. The generic constraint
+ * {@code Class<? extends JobHandler<P>>} paired with {@code P payload} makes a
+ * mismatch a {@code javac} error — the only way to enqueue a payload whose
+ * handler is unregistered or whose type is wrong is to bypass the type system
+ * (raw types, reflection). For no-payload handlers, pair the handler class
+ * with {@code NoPayload.INSTANCE}; declare those handlers as
+ * {@link com.hemju.threadmill.core.handler.JobAction} so the payload-type
+ * parameter does not appear in the user-facing signature.
+ *
+ * <p>A defensive runtime check still cross-references the supplied handler
+ * against the {@code @Job} registration at enqueue time: callers that lie via
+ * raw types or reflection trip {@link IllegalStateException} before a job is
+ * written to the store.
+ *
+ * <p>For background on transactional behaviour see
+ * {@link TransactionAwareJobScheduler}, which is the default {@code JobScheduler}
+ * bean under Spring's auto-configuration.
+ */
+public class JobScheduler {
 
     protected final JobStore store;
     protected final JobSerializer serializer;
     protected final ThreadmillJobRegistry registry;
     protected final ProcessingNodeConfig config;
 
-    public JobEnqueuer(
+    public JobScheduler(
             JobStore store, JobSerializer serializer, ThreadmillJobRegistry registry, ProcessingNodeConfig config) {
         this.store = Objects.requireNonNull(store, "store");
         this.serializer = Objects.requireNonNull(serializer, "serializer");
@@ -42,26 +64,30 @@ public class JobEnqueuer {
         this.config = Objects.requireNonNull(config, "config");
     }
 
-    public JobId enqueue(JobPayload payload) {
-        Job job = jobFor(payload, null, registry.registrationFor(payload).priority());
+    public <P extends JobPayload> JobId enqueue(Class<? extends JobHandler<P>> handler, P payload) {
+        var registration = registrationFor(handler, payload);
+        Job job = jobFor(payload, null, registration.priority(), null, null, registration);
         store.insert(job);
         return job.id();
     }
 
-    public JobId enqueueIn(JobPayload payload, Duration delay) {
+    public <P extends JobPayload> JobId enqueueIn(Class<? extends JobHandler<P>> handler, P payload, Duration delay) {
         Objects.requireNonNull(delay, "delay");
-        return enqueueAt(payload, Instant.now().plus(delay));
+        return enqueueAt(handler, payload, Instant.now().plus(delay));
     }
 
-    public JobId enqueueAt(JobPayload payload, Instant when) {
+    public <P extends JobPayload> JobId enqueueAt(Class<? extends JobHandler<P>> handler, P payload, Instant when) {
         Objects.requireNonNull(when, "when");
-        Job job = jobFor(payload, when, registry.registrationFor(payload).priority());
+        var registration = registrationFor(handler, payload);
+        Job job = jobFor(payload, when, registration.priority(), null, null, registration);
         store.insert(job);
         return job.id();
     }
 
-    public JobId enqueueWithPriority(JobPayload payload, int priority) {
-        Job job = jobFor(payload, null, priority);
+    public <P extends JobPayload> JobId enqueueWithPriority(
+            Class<? extends JobHandler<P>> handler, P payload, int priority) {
+        var registration = registrationFor(handler, payload);
+        Job job = jobFor(payload, null, priority, null, null, registration);
         store.insert(job);
         return job.id();
     }
@@ -70,25 +96,32 @@ public class JobEnqueuer {
      * Enqueue a batch of payloads in one logical operation. Either all are
      * persisted or none — backed by {@code JobStore.insertAll}.
      *
-     * <p>Each payload is routed by its runtime type, so a batch may mix
-     * payload types as long as every type has a registered handler.
+     * <p>All payloads must share the same handler type, which is the price of
+     * compile-time safety. For mixed-handler batches, call {@link #enqueue}
+     * once per payload.
      */
-    public List<JobId> enqueueAll(List<? extends JobPayload> payloads) {
+    public <P extends JobPayload> List<JobId> enqueueAll(
+            Class<? extends JobHandler<P>> handler, List<? extends P> payloads) {
+        Objects.requireNonNull(handler, "handler");
         Objects.requireNonNull(payloads, "payloads");
         if (payloads.isEmpty()) return List.of();
         var jobs = new ArrayList<Job>(payloads.size());
-        for (JobPayload p : payloads) {
-            jobs.add(jobFor(p, null, registry.registrationFor(p).priority()));
+        for (P p : payloads) {
+            var registration = registrationFor(handler, p);
+            jobs.add(jobFor(p, null, registration.priority(), null, null, registration));
         }
         return store.insertAll(jobs);
     }
 
-    public EnqueueResult enqueueIfAbsent(JobPayload payload, String dedupKey, Duration ttl) {
+    public <P extends JobPayload> EnqueueResult enqueueIfAbsent(
+            Class<? extends JobHandler<P>> handler, P payload, String dedupKey, Duration ttl) {
+        Objects.requireNonNull(dedupKey, "dedupKey");
         Objects.requireNonNull(ttl, "ttl");
         if (ttl.compareTo(config.maxDedupTtl()) > 0) {
             throw new IllegalArgumentException("dedup ttl must not exceed " + config.maxDedupTtl());
         }
-        Job job = jobFor(payload, null, registry.registrationFor(payload).priority(), dedupKey, ttl);
+        var registration = registrationFor(handler, payload);
+        Job job = jobFor(payload, null, registration.priority(), dedupKey, ttl, registration);
         return store.enqueueIfAbsent(job, dedupKey, ttl, Instant.now());
     }
 
@@ -109,9 +142,10 @@ public class JobEnqueuer {
         return store.listPausedQueues();
     }
 
-    public CronTaskId enqueueRecurring(JobPayload payload, String cron) {
+    public <P extends JobPayload> CronTaskId enqueueRecurring(
+            Class<? extends JobHandler<P>> handler, P payload, String cron) {
         Objects.requireNonNull(cron, "cron");
-        var registration = registry.registrationFor(payload);
+        var registration = registrationFor(handler, payload);
         String name = registration.payloadType().getSimpleName() + "-" + UUID.randomUUID();
         var expression = CronExpression.parse(cron);
         ZoneId zone = ZoneId.systemDefault();
@@ -130,13 +164,35 @@ public class JobEnqueuer {
         return new CronTaskId(name);
     }
 
-    protected Job jobFor(JobPayload payload, Instant scheduledFor, int priority) {
-        return jobFor(payload, scheduledFor, priority, null, null);
-    }
-
-    protected Job jobFor(JobPayload payload, Instant scheduledFor, int priority, String dedupKey, Duration dedupTtl) {
+    /**
+     * Resolve the registration and verify the supplied handler class is the one
+     * registered for {@code payload}. Generics make a mismatch impossible at
+     * compile time, but runtime callers (reflection, mocks, tests) can still
+     * lie; this guard keeps "no handler routed here" out of the consumer side.
+     */
+    protected <P extends JobPayload> ThreadmillJobRegistry.Registration registrationFor(
+            Class<? extends JobHandler<P>> handler, P payload) {
+        Objects.requireNonNull(handler, "handler");
         Objects.requireNonNull(payload, "payload");
         var registration = registry.registrationFor(payload);
+        if (!handler.equals(registration.handlerType())) {
+            throw new IllegalStateException("Handler " + handler.getName()
+                    + " is not the @Job registered for payload "
+                    + payload.getClass().getName()
+                    + " (registered handler: "
+                    + registration.handlerType().getName()
+                    + ")");
+        }
+        return registration;
+    }
+
+    protected Job jobFor(
+            JobPayload payload,
+            Instant scheduledFor,
+            int priority,
+            String dedupKey,
+            Duration dedupTtl,
+            ThreadmillJobRegistry.Registration registration) {
         JobArgument arg = serializer.serializePayload(payload);
         var builder = Job.builder()
                 .spec(new JobSpec(registration.handlerType().getName(), List.of(arg), dedupKey, dedupTtl))

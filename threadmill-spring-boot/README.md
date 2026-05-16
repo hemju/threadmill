@@ -17,23 +17,25 @@ dependencies {
 
 ```java
 @Component
-@ThreadmillJob(queue = "email", timeout = "PT2M", maxRetries = 5)
+@Job(queue = "email", timeout = "PT2M", maxRetries = 5)
 final class SendEmailHandler implements JobHandler<SendEmail> {
     @Override public void run(SendEmail payload, JobExecutionContext ctx) { … }
 }
 
 @RestController
 final class MailController {
-    private final JobEnqueuer jobs;
-    MailController(JobEnqueuer jobs) { this.jobs = jobs; }
+    private final JobScheduler jobs;
+    MailController(JobScheduler jobs) { this.jobs = jobs; }
 
     @PostMapping("/mail")
-    JobId send(@RequestBody SendEmail command) { return jobs.enqueue(command); }
+    JobId send(@RequestBody SendEmail command) {
+        return jobs.enqueue(SendEmailHandler.class, command);
+    }
 }
 ```
 
-That's the whole integration. `@ThreadmillJob` discovery happens at context
-start; `JobEnqueuer` routes by payload type.
+That's the whole integration. `@Job` discovery happens at context
+start; `JobScheduler` verifies the handler/payload pair at enqueue time.
 
 ## Store selection
 
@@ -71,12 +73,12 @@ held until the transaction commits. A rollback discards the enqueue.
 @Transactional
 public void scheduleWelcome(UserCreated created) {
     userRepo.save(created.toUser());         // pending write
-    jobs.enqueue(new SendEmail(...));        // also pending
+    jobs.enqueue(SendEmailHandler.class, new SendEmail(...)); // also pending
     // Both happen — or neither: the job insert fires on afterCommit.
 }
 ```
 
-`TransactionAwareJobEnqueuer` is the bean wired by default. It builds the
+`TransactionAwareJobScheduler` is the bean wired by default. It builds the
 `Job` (id reserved client-side via UUIDv7) synchronously and registers the
 actual `store.insert(...)` via `TransactionSynchronizationManager`. If no
 synchronisation is active, the insert is immediate — identical to the
@@ -110,13 +112,15 @@ list). The most common:
 | `threadmill.enabled` | `true` | Wire the `Scheduler` bean without starting a `ProcessingNode` when `false` (submitter-only mode). |
 | `threadmill.workerCount` | `10` | Virtual-thread workers per default lane. |
 | `threadmill.pollInterval` | `PT0.5S` | Maximum sleep before the next claim cycle. Idle workers wake the dispatcher early via `WakeSignal`, so this is an upper bound. |
+| `threadmill.maintenancePollInterval` | `PT1S` | Master-only maintenance cadence for recurring tasks, scheduled promotion, and orphan reclaim. |
+| `threadmill.retentionInterval` | `PT1H` | Master-only retention cadence for succeeded jobs, dedup keys, and stale node records. |
 | `threadmill.defaultMaxAttempts` | `5` | Per-job retry budget (including first attempt). |
 | `threadmill.jobTimeout` | `PT5M` | Per-job timeout. |
 | `threadmill.spring.enqueue-after-commit` | `true` | Defer enqueue to `afterCommit` when a Spring transaction is active. |
 | `threadmill.store.redis.mode` | `standalone` | `standalone` / `sentinel` / `cluster`. |
 | `threadmill.store.redis.uri` | — | `redis://host:port` for standalone mode. |
 
-## `@ThreadmillJob` annotation
+## `@Job` annotation
 
 Applied to a `JobHandler<P>` Spring bean. Required attributes:
 
@@ -125,7 +129,7 @@ Applied to a `JobHandler<P>` Spring bean. Required attributes:
 - `timeout` — ISO-8601 duration. Falls back to `threadmill.jobTimeout`.
 - `maxRetries` — falls back to `threadmill.defaultMaxAttempts`.
 
-`ThreadmillJobRegistry` discovers every `@ThreadmillJob` bean at context
+`ThreadmillJobRegistry` discovers every `@Job` bean at context
 start. Two handlers for the same payload type fail startup with both names
 in the error message.
 
@@ -145,5 +149,5 @@ in the error message.
 ./gradlew :threadmill-spring-boot:test
 ```
 
-9 tests across `SpringBootIntegrationTest`, `ThreadmillAutoConfigurationTest`,
-and `TransactionAwareJobEnqueuerTest`.
+Tests cover `SpringBootIntegrationTest`, `ThreadmillAutoConfigurationTest`,
+and `TransactionAwareJobSchedulerTest`.

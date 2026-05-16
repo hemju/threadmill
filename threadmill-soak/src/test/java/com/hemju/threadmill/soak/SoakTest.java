@@ -130,6 +130,7 @@ class SoakTest {
                 .workerCount(16)
                 .pollInterval(Duration.ofMillis(10))
                 .claimHeartbeat(Duration.ofMillis(100))
+                .maintenancePollInterval(Duration.ofMillis(10))
                 .heartbeatTimeout(Duration.ofSeconds(5))
                 .jobTimeout(Duration.ofSeconds(10))
                 .claimBatchSize(64)

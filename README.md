@@ -24,8 +24,8 @@ because, occasionally, they will.
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
-import com.hemju.threadmill.spring.JobEnqueuer;
-import com.hemju.threadmill.spring.ThreadmillJob;
+import com.hemju.threadmill.spring.Job;
+import com.hemju.threadmill.spring.JobScheduler;
 import org.springframework.stereotype.Component;
 
 // 1. Define a payload (a simple Jackson-serializable command object).
@@ -33,7 +33,7 @@ public record SendEmail(String to, String subject) implements JobPayload {}
 
 // 2. Define a Spring bean handler.
 @Component
-@ThreadmillJob(queue = "email", timeout = "PT2M")
+@Job(queue = "email", timeout = "PT2M")
 public final class SendEmailHandler implements JobHandler<SendEmail> {
     @Override
     public void run(SendEmail p, JobExecutionContext ctx) {
@@ -45,14 +45,14 @@ public final class SendEmailHandler implements JobHandler<SendEmail> {
 // 3. Enqueue by payload type. Threadmill routes to the annotated handler.
 @Component
 public final class MailController {
-    private final JobEnqueuer jobs;
+    private final JobScheduler jobs;
 
-    public MailController(JobEnqueuer jobs) {
+    public MailController(JobScheduler jobs) {
         this.jobs = jobs;
     }
 
     public void send() {
-        jobs.enqueue(new SendEmail("a@b.com", "hi"));
+        jobs.enqueue(SendEmailHandler.class, new SendEmail("a@b.com", "hi"));
     }
 }
 ```
@@ -147,7 +147,9 @@ binder or directly via `ProcessingNodeConfig.builder()`.
 |---|---|---|
 | `threadmill.workerCount` | 10 | Workers per default lane |
 | `threadmill.pollInterval` | 500ms | Dispatcher poll cadence |
-| `threadmill.claimHeartbeat` | 15s | Heartbeat refresh cadence |
+| `threadmill.claimHeartbeat` | 15s | Owned-job heartbeat refresh cadence |
+| `threadmill.maintenancePollInterval` | 1s | Recurring materialization, scheduled promotion, and orphan-scan cadence |
+| `threadmill.retentionInterval` | 1h | Succeeded-job, dedup-key, and stale-node retention cadence |
 | `threadmill.heartbeatTimeout` | 60s | Orphan threshold |
 | `threadmill.jobTimeout` | 5m | Per-job runtime cap |
 | `threadmill.defaultMaxAttempts` | 5 | Retry budget for the global default policy |
@@ -190,8 +192,8 @@ Shipped in v1:
   with explicit precedence (per-job > per-exception-type > default),
   cross-cluster mutexes with lease semantics, node tags, atomic job
   replacement, producer-side deduplication, and long-running job check-ins.
-- Framework adapter: Spring Boot auto-configuration with `@ThreadmillJob`
-  handler discovery and `JobEnqueuer`.
+- Framework adapter: Spring Boot auto-configuration with `@Job`
+  handler discovery and `JobScheduler`.
 - Observability: Micrometer integration; data-first dashboard snapshot.
 - Soak / load suite (separate from `check`) for sustained throughput,
   recurring no-skip, and induced store-outage recovery on all three

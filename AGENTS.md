@@ -96,7 +96,7 @@ Use these terms for these concepts. Refining a name during implementation is all
 | Queue-family weighting | `QueueWeights` |
 | Workflow root scalar | `workflow_root_id` |
 | Idle-worker → dispatcher signal | `WakeSignal` |
-| Spring after-commit enqueue wrapper | `TransactionAwareJobEnqueuer` |
+| Spring after-commit scheduler wrapper | `TransactionAwareJobScheduler` |
 | Database objects | `threadmill_jobs`, `threadmill_cron_tasks`, `threadmill_cron_task_state`, `threadmill_nodes`, `threadmill_metadata`, `threadmill_job_counts`, `threadmill_schema_history`, `threadmill_mutexes`, `threadmill_leases`, `threadmill_concurrency_groups`, `threadmill_concurrency_workflow_holds`, `threadmill_queue_pauses`, `threadmill_dedup_keys` |
 | Configuration namespace | `threadmill.*`, `threadmill.queue-family.*` |
 | Stale-version exception | `StaleJobException` |
@@ -250,6 +250,7 @@ This section is the project's memory: the load-bearing decisions worth knowing b
 - **Retry is an interceptor, not engine code.** `RetryInterceptor` schedules the next attempt by transitioning the job to `SCHEDULED` with a backoff. Precedence is fully realised: per-job metadata override (`threadmill.retry.maxAttempts`, `threadmill.retry.initialBackoffSeconds`) > per-exception-type policy (most-specific class match wins) > global default.
 - **`touchOwnerHeartbeat` never bumps `version`.** It is a non-state-changing operation; bumping version would cause spurious `StaleJobException` for an in-flight worker holding the version from claim time. All three stores agree.
 - **Master election is a store-backed maintenance lease.** `NodeRegistry` records its heartbeat and acquires/renews `JobStore.acquireOrRenewMaintenanceLease(...)`; `MaintenanceCycle` runs only on the lease holder. Postgres stores this in `threadmill_leases`; Redis uses a TTL key plus Lua compare-and-renew / compare-and-release. The maintenance holder also removes stale node-registry heartbeat records older than `ProcessingNodeConfig.nodeHeartbeatRetention()` so churn-heavy deployments do not accumulate unbounded node rows / set entries.
+- **Maintenance work has independent cadences.** `maintenancePollInterval` drives latency-sensitive recurring materialization, scheduled promotion, and orphan reclaim. `claimHeartbeat` refreshes owner heartbeats. `retentionInterval` drives slow cleanup of succeeded jobs, expired dedup keys, and stale node records.
 - **Scoped values, not ThreadLocal.** `EngineScopedValues.CURRENT` is bound around `handler.run(...)`; virtual threads the handler spawns inherit it.
 - **Storage fault tolerance.** The `Dispatcher`'s `CircuitBreaker` pauses the loop on a failure-count threshold and probes `store.capabilities()` to detect recovery. The cluster pauses, never crashes.
 - **Quarantine.** Handler-resolution and payload-deserialization failures land in `QUARANTINED`. `RetryInterceptor` deliberately skips `FailureCause.QUARANTINE` so a permanently broken job never causes a retry storm.
@@ -288,8 +289,8 @@ This section is the project's memory: the load-bearing decisions worth knowing b
 - **Spring Boot 4.x is the minimum.** Earlier versions ship an ASM that cannot parse Java 25 class files (major version 69) and crash during `@ComponentScan`. The auto-config marker file lives at `META-INF/spring/org.springframework.boot.autoconfigure.AutoConfiguration.imports`.
 - **Spring Boot test classpath:** do not pull `slf4j-simple` — Spring Boot ships Logback, and the dual binding crashes the bootstrap. Use Spring's logging defaults.
 - **`SpringJobHandlerResolver`** first tries a bean lookup; falls back to autowire-by-type so handlers can be either `@Component` beans or constructor-injected types.
-- **`@ThreadmillJob` + `JobEnqueuer` are the preferred Spring API.** The registry discovers annotated `JobHandler<P>` beans, infers `P`, and fails startup if two handlers claim the same payload type. `JobEnqueuer` routes by payload type so application code does not pass handler classes in normal Spring use.
-- **No static facade.** Keep enqueue APIs injectable (`JobEnqueuer` for Spring, `Scheduler` for manual/core use) so applications can test, decorate, and configure them through their host container.
+- **`@Job` + `JobScheduler` are the preferred Spring API.** The registry discovers annotated `JobHandler<P>` beans, infers `P`, and fails startup if two handlers claim the same payload type. `JobScheduler` verifies the handler/payload pair at enqueue time so mistakes fail before a job is written.
+- **No static facade.** Keep enqueue APIs injectable (`JobScheduler` for Spring, `Scheduler` for manual/core use) so applications can test, decorate, and configure them through their host container.
 
 ### Observability
 
@@ -373,7 +374,8 @@ Every hard-won failure mode that has come up during development, and the test th
 | Per-queue pause primitive contract (idempotency, claim-skip, isolation) | `AbstractJobStoreContractTest.pauseQueueIsIdempotent` + `resumeQueueIsIdempotent` + `listPausedQueuesReflectsPausesAndResumes` + `claimReadyReturnsEmptyForPausedQueue` |
 | Bulk-enqueue atomicity (size-check rejects whole batch, no version desync) | `AbstractJobStoreContractTest.insertAllAtomicallyAdvancesVersionForEverySuccessfulJob` + `insertAllRejectsBatchAndLeavesAllVersionsAtZeroIfAnySerializationFails` + `insertAllPreservesIdOrderInReturnedList` + `insertAllUnderContentionDoesNotDeadlockBeyondRetry` + `insertAllAcceptsConcurrencyKeyedJobsWithoutFallback` |
 | Dispatcher waits out poll interval on bursty load | `ProcessingNodeTest.idleWorkerWakesDispatcherEarlyUnderBurstyLoad` + `WakeSignalTest.signalWakesAnAwaitingThread` + `multipleSignalsCollapseIntoOnePermit` |
-| Enqueue inside a Spring transaction fires before commit (default-on after-commit) | `TransactionAwareJobEnqueuerTest.enqueueInsideTransactionIsNotVisibleBeforeCommit` + `enqueueInsideTransactionIsRolledBackOnRollback` + `ThreadmillAutoConfigurationTest.defaultsToTransactionAwareJobEnqueuer` + `enqueueAfterCommitFalseUsesPlainJobEnqueuer` |
+| Enqueue inside a Spring transaction fires before commit (default-on after-commit) | `TransactionAwareJobSchedulerTest.enqueueInsideTransactionIsNotVisibleBeforeCommit` + `enqueueInsideTransactionIsRolledBackOnRollback` + `ThreadmillAutoConfigurationTest.defaultsToTransactionAwareJobScheduler` + `enqueueAfterCommitFalseUsesPlainJobScheduler` |
+| Mixed-payload Spring batch bypasses handler/payload validation | `TransactionAwareJobSchedulerTest.enqueueAllRejectsMixedPayloadsBeforeWritingAnything` |
 | PostgresJobStore starts against pre-PG18 server | `PostgresVersionGateTest.refusesToStartAgainstPrePostgresEighteenServers` |
 
 ### Postgres-layer improvements (engagement notes)

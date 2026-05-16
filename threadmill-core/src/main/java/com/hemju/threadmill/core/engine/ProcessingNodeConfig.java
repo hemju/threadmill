@@ -31,7 +31,9 @@ public record ProcessingNodeConfig(
         int logMaxEntries,
         int logMaxBytes,
         Duration maxDedupTtl,
-        Duration shutdownGracePeriod) {
+        Duration shutdownGracePeriod,
+        Duration maintenancePollInterval,
+        Duration retentionInterval) {
 
     public ProcessingNodeConfig {
         if (workerCount <= 0) throw new IllegalArgumentException("workerCount must be positive");
@@ -57,6 +59,8 @@ public record ProcessingNodeConfig(
         Objects.requireNonNull(queueFamilyRetentionAfterEmpty, "queueFamilyRetentionAfterEmpty");
         Objects.requireNonNull(maxDedupTtl, "maxDedupTtl");
         Objects.requireNonNull(shutdownGracePeriod, "shutdownGracePeriod");
+        Objects.requireNonNull(maintenancePollInterval, "maintenancePollInterval");
+        Objects.requireNonNull(retentionInterval, "retentionInterval");
         requirePositive("pollInterval", pollInterval);
         requirePositive("claimHeartbeat", claimHeartbeat);
         requirePositive("heartbeatTimeout", heartbeatTimeout);
@@ -71,6 +75,8 @@ public record ProcessingNodeConfig(
         requirePositive("queueFamilyRetentionAfterEmpty", queueFamilyRetentionAfterEmpty);
         requirePositive("maxDedupTtl", maxDedupTtl);
         requirePositive("shutdownGracePeriod", shutdownGracePeriod);
+        requirePositive("maintenancePollInterval", maintenancePollInterval);
+        requirePositive("retentionInterval", retentionInterval);
         if (!maintenanceLeaseDuration.minus(claimHeartbeat).isPositive()) {
             throw new IllegalArgumentException("maintenanceLeaseDuration must be greater than claimHeartbeat");
         }
@@ -103,7 +109,9 @@ public record ProcessingNodeConfig(
                 1000,
                 256 * 1024,
                 Duration.ofDays(30),
-                Duration.ofSeconds(10));
+                Duration.ofSeconds(10),
+                Duration.ofSeconds(1),
+                Duration.ofHours(1));
     }
 
     public Builder toBuilder() {
@@ -137,6 +145,8 @@ public record ProcessingNodeConfig(
         private int logMaxBytes;
         private Duration maxDedupTtl;
         private Duration shutdownGracePeriod;
+        private Duration maintenancePollInterval;
+        private Duration retentionInterval;
 
         private Builder(ProcessingNodeConfig c) {
             this.workerCount = c.workerCount;
@@ -161,6 +171,8 @@ public record ProcessingNodeConfig(
             this.logMaxBytes = c.logMaxBytes;
             this.maxDedupTtl = c.maxDedupTtl;
             this.shutdownGracePeriod = c.shutdownGracePeriod;
+            this.maintenancePollInterval = c.maintenancePollInterval;
+            this.retentionInterval = c.retentionInterval;
         }
 
         public Builder workerCount(int v) {
@@ -273,6 +285,16 @@ public record ProcessingNodeConfig(
             return this;
         }
 
+        public Builder maintenancePollInterval(Duration v) {
+            this.maintenancePollInterval = v;
+            return this;
+        }
+
+        public Builder retentionInterval(Duration v) {
+            this.retentionInterval = v;
+            return this;
+        }
+
         public ProcessingNodeConfig build() {
             return new ProcessingNodeConfig(
                     workerCount,
@@ -296,7 +318,9 @@ public record ProcessingNodeConfig(
                     logMaxEntries,
                     logMaxBytes,
                     maxDedupTtl,
-                    shutdownGracePeriod);
+                    shutdownGracePeriod,
+                    maintenancePollInterval,
+                    retentionInterval);
         }
     }
 

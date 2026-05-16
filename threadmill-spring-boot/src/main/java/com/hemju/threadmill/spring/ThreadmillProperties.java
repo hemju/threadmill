@@ -26,6 +26,20 @@ public class ThreadmillProperties {
     /** How often owned jobs and the node registry heartbeat are refreshed. */
     private Duration claimHeartbeat = Duration.ofSeconds(15);
 
+    /**
+     * How often the master-only maintenance loop ticks. This bounds the latency
+     * of materializing due recurring jobs, promoting due scheduled jobs to
+     * {@code ENQUEUED}, and reclaiming orphans. Defaults to 1 s.
+     */
+    private Duration maintenancePollInterval = Duration.ofSeconds(1);
+
+    /**
+     * How often retention sweeps run on the master node — old succeeded jobs,
+     * expired dedup keys, and stale node-heartbeat rows. Deletion is not
+     * time-sensitive, so the default is generous. Defaults to 1 h.
+     */
+    private Duration retentionInterval = Duration.ofHours(1);
+
     /** How long before a heartbeat is considered expired. */
     private Duration heartbeatTimeout = Duration.ofSeconds(60);
 
@@ -105,6 +119,22 @@ public class ThreadmillProperties {
 
     public void setClaimHeartbeat(Duration claimHeartbeat) {
         this.claimHeartbeat = claimHeartbeat;
+    }
+
+    public Duration getMaintenancePollInterval() {
+        return maintenancePollInterval;
+    }
+
+    public void setMaintenancePollInterval(Duration maintenancePollInterval) {
+        this.maintenancePollInterval = maintenancePollInterval;
+    }
+
+    public Duration getRetentionInterval() {
+        return retentionInterval;
+    }
+
+    public void setRetentionInterval(Duration retentionInterval) {
+        this.retentionInterval = retentionInterval;
     }
 
     public Duration getHeartbeatTimeout() {

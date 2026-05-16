@@ -47,7 +47,7 @@ making progress.
 
 ## Pausing a Queue
 
-`Scheduler.pauseQueue(queue, reason)` (or the Spring `JobEnqueuer` equivalent)
+`Scheduler.pauseQueue(queue, reason)` (or the Spring `JobScheduler` equivalent)
 stops claim cycles from picking up jobs on `queue`. Pending jobs stay
 `ENQUEUED`; in-flight jobs run to completion. The reason string is recorded
 for operator audit trails. Resume with `Scheduler.resumeQueue(queue)`. Both

@@ -104,7 +104,7 @@ parent row).
 
 ## What about jobs enqueued from a non-transactional context?
 
-Immediate insert. The `TransactionAwareJobEnqueuer` checks
+Immediate insert. The `TransactionAwareJobScheduler` checks
 `TransactionSynchronizationManager.isSynchronizationActive()` and, when no
 synchronisation is active, falls through to the underlying `Scheduler.enqueue(...)`
 path — identical to the pre-after-commit behaviour.
@@ -237,7 +237,7 @@ engine remembers what it did.
 
 ### How does Threadmill hook into Spring's transaction synchronization?
 
-Via `TransactionSynchronizationManager`. `TransactionAwareJobEnqueuer` checks
+Via `TransactionSynchronizationManager`. `TransactionAwareJobScheduler` checks
 `isSynchronizationActive()`; when true, it registers a synchronization whose
 `afterCommit()` runs the actual `store.insert(...)`.
 
@@ -282,7 +282,7 @@ hops without value.
 class WelcomeApp { … }
 
 @Component
-@ThreadmillJob(queue = "email", timeout = "PT30S", maxRetries = 5)
+@Job(queue = "email", timeout = "PT30S", maxRetries = 5)
 class SendEmailHandler implements JobHandler<SendEmail> {
     private final EmailGateway gateway;
     private final OutboxRepository outbox;
@@ -302,14 +302,14 @@ class SendEmailHandler implements JobHandler<SendEmail> {
 @Service
 class WelcomeService {
     private final UserRepo users;
-    private final JobEnqueuer jobs;
+    private final JobScheduler jobs;
 
-    WelcomeService(UserRepo u, JobEnqueuer j) { this.users = u; this.jobs = j; }
+    WelcomeService(UserRepo u, JobScheduler j) { this.users = u; this.jobs = j; }
 
     @Transactional
     public JobId welcome(NewUser cmd) {
         var user = users.save(cmd.toUser());                       // (d) pending write
-        return jobs.enqueue(new SendEmail(user.email(), template())); // (e) pending enqueue
+        return jobs.enqueue(SendEmailHandler.class, new SendEmail(user.email(), template())); // (e) pending enqueue
         // (f) on commit: row saved, then job inserted.
         // (g) on rollback: neither happens — workers never see this job.
     }
@@ -346,8 +346,8 @@ results in a duplicate email.
 
 ## See also
 
-- `docs/handlers.md` — writing handlers, `@ThreadmillJob`, idempotency, the
-  at-least-once contract.
+- `threadmill-spring-boot/README.md` — writing Spring handlers with `@Job`,
+  idempotency, and the auto-config story.
 - `docs/concurrency.md` — when to use `EXCLUSIVE` / `SHARED` per-key
   concurrency.
 - `threadmill-spring-boot/README.md` — the auto-config story, the

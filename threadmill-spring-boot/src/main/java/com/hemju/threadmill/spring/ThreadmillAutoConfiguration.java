@@ -1,5 +1,6 @@
 package com.hemju.threadmill.spring;
 
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 
@@ -153,6 +154,8 @@ public class ThreadmillAutoConfiguration {
                 .storeOutagePollInterval(properties.getStoreOutagePollInterval())
                 .shutdownGracePeriod(properties.getShutdownGracePeriod())
                 .defaultQueue(properties.getDefaultQueue())
+                .maintenancePollInterval(properties.getMaintenancePollInterval())
+                .retentionInterval(properties.getRetentionInterval())
                 .build();
     }
 
@@ -164,16 +167,25 @@ public class ThreadmillAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public JobEnqueuer threadmillJobEnqueuer(
+    public ThreadmillRecurringRegistrar threadmillRecurringRegistrar(
+            Scheduler scheduler, ThreadmillJobRegistry registry) {
+        var registrar = new ThreadmillRecurringRegistrar(scheduler, registry);
+        registrar.registerAll();
+        return registrar;
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public JobScheduler threadmillJobScheduler(
             JobStore store,
             JobSerializer serializer,
             ThreadmillJobRegistry registry,
             ProcessingNodeConfig config,
             ThreadmillProperties properties) {
         if (properties.getSpring().isEnqueueAfterCommit()) {
-            return new TransactionAwareJobEnqueuer(store, serializer, registry, config);
+            return new TransactionAwareJobScheduler(store, serializer, registry, config);
         }
-        return new JobEnqueuer(store, serializer, registry, config);
+        return new JobScheduler(store, serializer, registry, config);
     }
 
     @Bean
@@ -185,11 +197,15 @@ public class ThreadmillAutoConfiguration {
             JobHandlerResolver resolver,
             ProcessingNodeConfig config,
             ThreadmillJobRegistry registry) {
-        ProcessingNode node = ProcessingNode.builder(store)
+        List<String> queues = resolveQueues(config, registry);
+        var builder = ProcessingNode.builder(store)
                 .config(config)
                 .serializer(serializer)
-                .handlerResolver(resolver)
-                .build();
+                .handlerResolver(resolver);
+        for (String queue : queues) {
+            builder.lane(queue, config.workerCount());
+        }
+        ProcessingNode node = builder.build();
         for (var registration : registry.registrations()) {
             LOG.info(
                     "Threadmill: registered handler {} for payload {} on queue '{}' (timeout={}, maxRetries={})",
@@ -200,15 +216,34 @@ public class ThreadmillAutoConfiguration {
                     registration.maxRetries());
         }
         LOG.info(
-                "Threadmill: {} handlers registered across {} queues; store={}; node={}",
+                "Threadmill: {} handlers registered; polling lanes={} with {} workers each; store={}; node={}",
                 registry.registrations().size(),
-                registry.registrations().stream()
-                        .map(ThreadmillJobRegistry.Registration::queue)
-                        .distinct()
-                        .count(),
+                queues,
+                config.workerCount(),
                 store.getClass().getSimpleName(),
                 node.nodeId());
         return node;
+    }
+
+    /**
+     * Resolve the queue lanes the {@link ProcessingNode} will poll.
+     *
+     * <p>Starts with the configured default queue so it is always served, then
+     * adds every distinct queue declared by an {@code @Job} handler.
+     * Without this, a handler annotated with a non-default {@code queue} would
+     * accept enqueues but never run — its jobs would sit in the store with no
+     * dispatcher polling them.
+     *
+     * <p>Order is insertion order, with the default queue first, so it is
+     * deterministic across restarts and easy to read in startup logs.
+     */
+    private static List<String> resolveQueues(ProcessingNodeConfig config, ThreadmillJobRegistry registry) {
+        var queues = new LinkedHashSet<String>();
+        queues.add(config.defaultQueue());
+        for (var registration : registry.registrations()) {
+            queues.add(registration.queue());
+        }
+        return List.copyOf(queues);
     }
 
     /**

@@ -3,7 +3,7 @@
 ## Start here
 
 - [Getting started](getting-started.md) — five-minute Spring Boot quickstart.
-- [Spring quickstart](quickstart.md) — Spring Boot wiring, `@ThreadmillJob`,
+- [Spring quickstart](quickstart.md) — Spring Boot wiring, `@Job`,
   after-commit enqueue.
 
 ## Deep dives

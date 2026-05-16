@@ -4,7 +4,7 @@ Long-running handlers should check in while they make progress. Check-ins are
 liveness and progress signals; they are not a way to disable failure detection.
 
 ```java
-@ThreadmillJob(queue = "imports", timeout = "PT1M")
+@Job(queue = "imports", timeout = "PT1M")
 final class ImportHandler implements JobHandler<ImportFile> {
     @Override
     public void run(ImportFile payload, JobExecutionContext ctx) throws Exception {

@@ -32,6 +32,19 @@ import com.hemju.threadmill.core.store.JobStore;
  *   <li>Node-registry retention deletes stale heartbeat records for nodes
  *       that have not returned.</li>
  * </ol>
+ *
+ * <h2>Cadences</h2>
+ * <p>Three independent cadences share one loop thread to avoid coupling
+ * latency-sensitive ops to slow housekeeping:
+ * <ul>
+ *   <li>{@code maintenancePollInterval} (the loop tick) bounds materialization,
+ *       promotion, and orphan reclaim latency. Default 1 s.</li>
+ *   <li>{@code claimHeartbeat} drives owner-heartbeat refresh — slow enough not
+ *       to thrash the store, fast enough to stay well below {@code heartbeatTimeout}.
+ *       Default 15 s.</li>
+ *   <li>{@code retentionInterval} drives retention sweeps — old SUCCEEDED jobs,
+ *       expired dedup keys, and stale node-heartbeat rows. Default 1 h.</li>
+ * </ul>
  */
 public final class MaintenanceCycle {
 
@@ -77,23 +90,37 @@ public final class MaintenanceCycle {
     }
 
     private void loop() {
+        // Three independent cadences share one thread:
+        //   - the loop ticks at maintenancePollInterval (fast; bounds materialize/promote/orphan latency)
+        //   - heartbeat refresh fires at claimHeartbeat (slow; just enough to keep claims alive)
+        //   - retention sweeps fire at retentionInterval (slowest; deletion is not time-sensitive)
+        // Deadline tracking keeps the slower cadences from running every tick.
+        Instant nextHeartbeat = Instant.EPOCH;
+        Instant nextRetention = Instant.EPOCH;
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
-                // Heartbeat is always done, even before knowing if we're master,
-                // so the registry sees us alive.
-                store.touchOwnerHeartbeat(nodeId, Instant.now());
+                Instant now = Instant.now();
+                if (!now.isBefore(nextHeartbeat)) {
+                    // Heartbeat is always done, even before knowing if we're master,
+                    // so the registry sees us alive.
+                    store.touchOwnerHeartbeat(nodeId, now);
+                    nextHeartbeat = now.plus(config.claimHeartbeat());
+                }
                 if (registry.isMaster()) {
-                    materializer.tick(Instant.now());
+                    materializer.tick(now);
                     promoteScheduled();
                     reclaimOrphans();
-                    retentionSweep();
-                    nodeHeartbeatRetentionSweep();
-                    dedupRetentionSweep();
+                    if (!now.isBefore(nextRetention)) {
+                        retentionSweep();
+                        nodeHeartbeatRetentionSweep();
+                        dedupRetentionSweep();
+                        nextRetention = now.plus(config.retentionInterval());
+                    }
                 }
-                sleep(config.claimHeartbeat());
+                sleep(config.maintenancePollInterval());
             } catch (Throwable t) {
                 LOG.warn("Maintenance cycle failed", t);
-                sleep(config.claimHeartbeat());
+                sleep(config.maintenancePollInterval());
             }
         }
     }

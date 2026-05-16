@@ -1,6 +1,7 @@
 package com.hemju.threadmill.spring;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.util.List;
@@ -20,15 +21,15 @@ import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 
 /**
- * Drives the {@link TransactionAwareJobEnqueuer} contract directly by
+ * Drives the {@link TransactionAwareJobScheduler} contract directly by
  * managing {@link TransactionSynchronizationManager} from the test. Boots no
  * Spring context — the wrapper only checks
  * {@code isSynchronizationActive()} so the manager is sufficient.
  */
-class TransactionAwareJobEnqueuerTest {
+class TransactionAwareJobSchedulerTest {
 
     private InMemoryJobStore store;
-    private TransactionAwareJobEnqueuer enqueuer;
+    private TransactionAwareJobScheduler enqueuer;
 
     public static final class GreetPayload implements JobPayload {
         public String tag;
@@ -45,12 +46,14 @@ class TransactionAwareJobEnqueuerTest {
         public void run(GreetPayload p, JobExecutionContext c) {}
     }
 
+    public static final class OtherPayload implements JobPayload {}
+
     @BeforeEach
     void setUp() {
         store = new InMemoryJobStore();
         var serializer = new JsonJobSerializer();
         var registry = new TestRegistry();
-        enqueuer = new TransactionAwareJobEnqueuer(
+        enqueuer = new TransactionAwareJobScheduler(
                 store, serializer, registry, ProcessingNodeConfig.builder().build());
     }
 
@@ -63,7 +66,7 @@ class TransactionAwareJobEnqueuerTest {
 
     @Test
     void enqueueOutsideTransactionIsImmediate() {
-        JobId id = enqueuer.enqueue(new GreetPayload("immediate"));
+        JobId id = enqueuer.enqueue(GreetHandler.class, new GreetPayload("immediate"));
         assertThat(store.findById(id)).isPresent();
     }
 
@@ -71,7 +74,7 @@ class TransactionAwareJobEnqueuerTest {
     void enqueueInsideTransactionIsNotVisibleBeforeCommit() {
         TransactionSynchronizationManager.initSynchronization();
         try {
-            JobId id = enqueuer.enqueue(new GreetPayload("deferred"));
+            JobId id = enqueuer.enqueue(GreetHandler.class, new GreetPayload("deferred"));
             assertThat(store.findById(id))
                     .as("row must not exist until afterCommit fires")
                     .isEmpty();
@@ -86,7 +89,7 @@ class TransactionAwareJobEnqueuerTest {
     void enqueueInsideTransactionIsRolledBackOnRollback() {
         TransactionSynchronizationManager.initSynchronization();
         try {
-            JobId id = enqueuer.enqueue(new GreetPayload("rolled-back"));
+            JobId id = enqueuer.enqueue(GreetHandler.class, new GreetPayload("rolled-back"));
             assertThat(store.findById(id)).isEmpty();
             // No afterCommit triggered — simulating rollback.
             // The synchronization is dropped on clear() without firing afterCommit.
@@ -103,7 +106,8 @@ class TransactionAwareJobEnqueuerTest {
     void enqueueAllDefersTheBatchAndCommitsAtomically() {
         TransactionSynchronizationManager.initSynchronization();
         try {
-            var ids = enqueuer.enqueueAll(List.of(new GreetPayload("a"), new GreetPayload("b"), new GreetPayload("c")));
+            var ids = enqueuer.enqueueAll(
+                    GreetHandler.class, List.of(new GreetPayload("a"), new GreetPayload("b"), new GreetPayload("c")));
             for (JobId id : ids) {
                 assertThat(store.findById(id)).isEmpty();
             }
@@ -117,10 +121,21 @@ class TransactionAwareJobEnqueuerTest {
     }
 
     @Test
+    @SuppressWarnings({"rawtypes", "unchecked"})
+    void enqueueAllRejectsMixedPayloadsBeforeWritingAnything() {
+        assertThatThrownBy(() -> enqueuer.enqueueAll(
+                        (Class) GreetHandler.class, List.of(new GreetPayload("a"), new OtherPayload())))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("No @Job handler registered");
+
+        assertThat(store.countsByState().values()).containsOnly(0L);
+    }
+
+    @Test
     void scheduledEnqueueIsAlsoDeferred() {
         TransactionSynchronizationManager.initSynchronization();
         try {
-            JobId id = enqueuer.enqueueIn(new GreetPayload("later"), Duration.ofMinutes(5));
+            JobId id = enqueuer.enqueueIn(GreetHandler.class, new GreetPayload("later"), Duration.ofMinutes(5));
             assertThat(store.findById(id)).isEmpty();
             triggerAfterCommit();
             assertThat(store.findById(id)).isPresent();
@@ -139,7 +154,7 @@ class TransactionAwareJobEnqueuerTest {
     private static final class TestRegistry extends ThreadmillJobRegistry {
         TestRegistry() {
             super(new ThreadmillJobRegistry.Registration(
-                    GreetPayload.class, GreetHandler.class, "default", 0, 5, Duration.ofMinutes(5)));
+                    GreetPayload.class, GreetHandler.class, "default", 0, 5, Duration.ofMinutes(5), null));
         }
     }
 }

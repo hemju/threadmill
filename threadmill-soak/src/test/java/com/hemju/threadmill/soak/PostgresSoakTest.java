@@ -228,6 +228,7 @@ class PostgresSoakTest {
                 .workerCount(8)
                 .pollInterval(Duration.ofMillis(20))
                 .claimHeartbeat(Duration.ofMillis(200))
+                .maintenancePollInterval(Duration.ofMillis(20))
                 .heartbeatTimeout(Duration.ofSeconds(30))
                 .jobTimeout(Duration.ofSeconds(15))
                 .claimBatchSize(32)

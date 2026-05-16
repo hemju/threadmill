@@ -9,20 +9,25 @@ package com.hemju.threadmill.core.handler;
  * resolves the handler instance through a {@link JobHandlerResolver} —
  * usually backed by the host's DI container.
  *
+ * <p>For handlers that do not need a per-invocation payload — periodic
+ * housekeeping, heartbeats, sweeps — implement {@link JobAction} instead.
+ * It is a typed alias for {@code JobHandler<NoPayload>} with a no-payload
+ * run signature, so neither the user nor the engine carries an unused
+ * type parameter.
+ *
  * <p>Threadmill provides <strong>at-least-once</strong> delivery: a handler
  * may be invoked more than once for the same logical job (for example after
  * a node crash). Implementations must therefore be idempotent.
  *
  * @param <P> the payload type this handler consumes
  */
-@FunctionalInterface
 public interface JobHandler<P extends JobPayload> {
 
     /**
      * Run the job.
      *
-     * @param payload  the typed payload to operate on
-     * @param ctx      the per-execution context
+     * @param payload the typed payload to operate on
+     * @param ctx     the per-execution context
      * @throws Exception any exception thrown here funnels through the engine's
      *                   single failure path: state transition to {@code FAILED}
      *                   plus interceptor notification

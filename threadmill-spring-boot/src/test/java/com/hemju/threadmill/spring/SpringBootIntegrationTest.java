@@ -21,7 +21,7 @@ import com.hemju.threadmill.core.handler.JobPayload;
 
 /**
  * Boots a Spring context, enqueues a job through the auto-configured
- * {@link JobEnqueuer}, and asserts the auto-configured {@link ProcessingNode}
+ * {@link JobScheduler}, and asserts the auto-configured {@link ProcessingNode}
  * runs it. Also asserts the handler is resolved as a Spring bean.
  */
 @SpringBootTest(
@@ -30,7 +30,7 @@ import com.hemju.threadmill.core.handler.JobPayload;
 class SpringBootIntegrationTest {
 
     @Autowired
-    JobEnqueuer enqueuer;
+    JobScheduler enqueuer;
 
     @Autowired
     ProcessingNode node;
@@ -42,7 +42,7 @@ class SpringBootIntegrationTest {
     void contextStartsAndJobIsProcessed() {
         assertThat(node).isNotNull();
         assertThat(enqueuer).isNotNull();
-        enqueuer.enqueue(new HelloPayload("spring"));
+        enqueuer.enqueue(TestHandler.class, new HelloPayload("spring"));
         await().atMost(Duration.ofSeconds(5)).until(() -> handler.invocations.contains("spring"));
     }
 
@@ -57,7 +57,7 @@ class SpringBootIntegrationTest {
     }
 
     @Component
-    @ThreadmillJob(queue = "default", timeout = "PT2S")
+    @Job(queue = "default", timeout = "PT2S")
     public static final class TestHandler implements JobHandler<HelloPayload> {
         public final ConcurrentLinkedQueue<String> invocations = new ConcurrentLinkedQueue<>();
 

@@ -8,6 +8,8 @@ must be nonblank, at most 128 characters, and contain no control characters.
 | `workerCount` | `10` | Workers in the default lane. |
 | `pollInterval` | `500ms` | Dispatcher idle poll interval. |
 | `claimHeartbeat` | `15s` | Owner heartbeat refresh cadence. |
+| `maintenancePollInterval` | `1s` | Master-only maintenance tick for recurring materialization, scheduled promotion, and orphan reclaim. |
+| `retentionInterval` | `1h` | Master-only cadence for succeeded-job cleanup, expired dedup cleanup, and stale node-heartbeat cleanup. |
 | `heartbeatTimeout` | `60s` | Orphan and node heartbeat expiry. |
 | `maintenanceLeaseDuration` | `60s` | Store-backed leadership lease. Must be greater than `claimHeartbeat`. |
 | `nodeHeartbeatRetention` | `10m` | How long old node registry entries remain visible after their last heartbeat. Must be greater than `heartbeatTimeout`. |
