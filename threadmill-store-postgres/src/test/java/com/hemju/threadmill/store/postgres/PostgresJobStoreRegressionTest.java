@@ -7,15 +7,18 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import javax.sql.DataSource;
@@ -32,6 +35,7 @@ import org.testcontainers.utility.DockerImageName;
 import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
+import com.hemju.threadmill.core.JobRelationship;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.schedule.CronTask;
@@ -39,6 +43,7 @@ import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.test.Jobs;
 
 /**
  * PostgreSQL-specific regression tests.
@@ -123,10 +128,10 @@ class PostgresJobStoreRegressionTest {
 
         int workers = 12;
         var start = new CountDownLatch(1);
-        Set<java.util.UUID> seen = ConcurrentHashMap.newKeySet();
-        var collisions = new ConcurrentHashMap<java.util.UUID, Integer>();
+        Set<UUID> seen = ConcurrentHashMap.newKeySet();
+        var collisions = new ConcurrentHashMap<UUID, Integer>();
         try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
-            List<java.util.concurrent.Future<List<Job>>> futures = new ArrayList<>();
+            List<Future<List<Job>>> futures = new ArrayList<>();
             for (int w = 0; w < workers; w++) {
                 NodeId node = NodeId.newId();
                 futures.add(executor.submit(() -> {
@@ -245,6 +250,37 @@ class PostgresJobStoreRegressionTest {
     }
 
     @Test
+    void concurrentCleanSchemaMigrationsAreSerialized() throws Exception {
+        dropSchemaObjects();
+
+        var start = new CountDownLatch(1);
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<?> first = executor.submit(() -> {
+                start.await();
+                new MigrationRunner(dataSource).migrate();
+                return null;
+            });
+            Future<?> second = executor.submit(() -> {
+                start.await();
+                new MigrationRunner(dataSource).migrate();
+                return null;
+            });
+            start.countDown();
+            first.get(60, TimeUnit.SECONDS);
+            second.get(60, TimeUnit.SECONDS);
+            executor.shutdown();
+            assertThat(executor.awaitTermination(30, TimeUnit.SECONDS)).isTrue();
+        }
+
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getInt(1)).isEqualTo(1);
+        }
+    }
+
+    @Test
     void concurrencyPendingCheckUsesPartialIndex() throws SQLException {
         JobStore store = store();
         var base = Instant.now().minusSeconds(5);
@@ -267,12 +303,74 @@ class PostgresJobStoreRegressionTest {
                         + "AND current_state_at < ? "
                         + "AND id <> ?)")) {
             ps.setString(1, "project:hot");
-            ps.setTimestamp(2, java.sql.Timestamp.from(base.plusSeconds(1)));
+            ps.setTimestamp(2, Timestamp.from(base.plusSeconds(1)));
             ps.setObject(3, candidateId.asUuid());
             try (ResultSet rs = ps.executeQuery()) {
                 var plan = new StringBuilder();
                 while (rs.next()) plan.append(rs.getString(1)).append('\n');
                 assertThat(plan.toString()).contains("threadmill_jobs_concurrency_pending_idx");
+            }
+        }
+    }
+
+    @Test
+    void orphanRecoveryUsesProcessingLivenessIndex() throws SQLException {
+        JobStore store = store();
+        var heartbeat = Instant.now().minusSeconds(120);
+        for (int i = 0; i < 120; i++) {
+            store.insert(Jobs.enqueued("com.example.H"));
+        }
+        store.claimReady(NodeId.newId(), "default", 120, heartbeat);
+
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute("SET enable_seqscan = off");
+            try (PreparedStatement ps = conn.prepareStatement("EXPLAIN (FORMAT TEXT) "
+                    + "SELECT body FROM threadmill_jobs WHERE state = 'PROCESSING' "
+                    + "AND GREATEST(owner_heartbeat_at, COALESCE(last_checkin_at, owner_heartbeat_at)) <= ? "
+                    + "ORDER BY GREATEST(owner_heartbeat_at, COALESCE(last_checkin_at, owner_heartbeat_at)) LIMIT ?")) {
+                ps.setTimestamp(1, Timestamp.from(Instant.now()));
+                ps.setInt(2, 10);
+                try (ResultSet rs = ps.executeQuery()) {
+                    var plan = new StringBuilder();
+                    while (rs.next()) plan.append(rs.getString(1)).append('\n');
+                    assertThat(plan.toString()).contains("threadmill_jobs_processing_liveness_idx");
+                }
+            }
+        }
+    }
+
+    @Test
+    void workflowSuccessorLookupUsesParentIndex() throws SQLException {
+        JobStore store = store();
+        Job parent = Jobs.enqueued("com.example.Parent");
+        Job otherParent = Jobs.enqueued("com.example.OtherParent");
+        store.insert(parent);
+        store.insert(otherParent);
+
+        for (int i = 0; i < 80; i++) {
+            store.insert(awaitingChildOf(i % 3 == 0 ? otherParent : parent, i));
+        }
+
+        assertThat(store.findAwaitingByParent(parent.id(), 10))
+                .hasSize(10)
+                .allSatisfy(job -> assertThat(job.relationship())
+                        .hasValueSatisfying(relationship ->
+                                assertThat(relationship.parentId()).isEqualTo(parent.id())));
+
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute("SET enable_seqscan = off");
+            try (PreparedStatement ps = conn.prepareStatement("EXPLAIN (FORMAT TEXT) "
+                    + "SELECT body FROM threadmill_jobs WHERE state = 'AWAITING' AND parent_job_id = ? "
+                    + "ORDER BY current_state_at, id LIMIT ?")) {
+                ps.setObject(1, parent.id().asUuid());
+                ps.setInt(2, 10);
+                try (ResultSet rs = ps.executeQuery()) {
+                    var plan = new StringBuilder();
+                    while (rs.next()) plan.append(rs.getString(1)).append('\n');
+                    assertThat(plan.toString()).contains("threadmill_jobs_awaiting_parent_idx");
+                }
             }
         }
     }
@@ -285,8 +383,8 @@ class PostgresJobStoreRegressionTest {
         var last = Instant.parse("2026-05-15T09:00:00Z");
 
         store.upsertCronTask(task);
-        store.upsertCronTaskState(new CronTaskScheduleState(
-                task.name(), last, java.util.UUID.randomUUID(), next, java.util.UUID.randomUUID()));
+        store.upsertCronTaskState(
+                new CronTaskScheduleState(task.name(), last, UUID.randomUUID(), next, UUID.randomUUID()));
 
         assertThat(store.findCronTask(task.name())).contains(task);
         assertThat(store.listCronTasks()).containsExactly(task);
@@ -332,5 +430,33 @@ class PostgresJobStoreRegressionTest {
                 CronTask.MissedRunPolicy.CATCH_UP,
                 ZoneId.of("UTC"),
                 true);
+    }
+
+    private static Job awaitingChildOf(Job parent, int index) {
+        return Job.builder()
+                .spec(JobSpec.of("com.example.Child", new JobArgument("java.lang.String", "\"" + index + "\"")))
+                .relationship(new JobRelationship(parent.id(), JobRelationship.Kind.WORKFLOW_STEP))
+                .initialState(JobState.AWAITING)
+                .createdAt(Instant.now().plusMillis(index))
+                .build();
+    }
+
+    private static void dropSchemaObjects() throws SQLException {
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute("DROP TABLE IF EXISTS threadmill_mutexes CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_concurrency_workflow_holds CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_concurrency_groups CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_dedup_keys CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_cron_task_state CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_cron_tasks CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_jobs CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_nodes CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_leases CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_metadata CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_job_counts CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_queue_pauses CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_schema_history CASCADE");
+        }
     }
 }

@@ -25,7 +25,8 @@ CREATE TABLE threadmill_jobs (
     created_at TIMESTAMPTZ NOT NULL,
     concurrency_key TEXT,
     concurrency_mode TEXT,
-    workflow_root_id UUID NOT NULL
+    workflow_root_id UUID NOT NULL,
+    parent_job_id UUID
 );
 
 -- Claim path: WHERE state='ENQUEUED' AND queue=? ORDER BY priority DESC, id LIMIT n FOR UPDATE SKIP LOCKED.
@@ -43,6 +44,12 @@ CREATE INDEX threadmill_jobs_processing_idx
     ON threadmill_jobs (owner_heartbeat_at)
     WHERE state = 'PROCESSING';
 
+-- Orphan recovery uses the latest processing liveness marker: owner heartbeat
+-- or long-running job check-in, whichever is newer.
+CREATE INDEX threadmill_jobs_processing_liveness_idx
+    ON threadmill_jobs ((GREATEST(owner_heartbeat_at, COALESCE(last_checkin_at, owner_heartbeat_at))))
+    WHERE state = 'PROCESSING';
+
 -- Find-by-handler-signature.
 CREATE INDEX threadmill_jobs_handler_idx ON threadmill_jobs (handler_signature);
 
@@ -55,6 +62,11 @@ CREATE INDEX threadmill_jobs_state_time_idx ON threadmill_jobs (state, current_s
 CREATE INDEX threadmill_jobs_concurrency_pending_idx
     ON threadmill_jobs (concurrency_key, current_state_at)
     WHERE state IN ('ENQUEUED', 'SCHEDULED', 'AWAITING');
+
+-- Workflow successor promotion: find AWAITING jobs whose parent just completed.
+CREATE INDEX threadmill_jobs_awaiting_parent_idx
+    ON threadmill_jobs (parent_job_id, current_state_at, id)
+    WHERE state = 'AWAITING' AND parent_job_id IS NOT NULL;
 
 CREATE TABLE threadmill_nodes (
     id UUID PRIMARY KEY,

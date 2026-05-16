@@ -37,11 +37,14 @@ import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.schedule.CronExpression;
+import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
+import com.hemju.threadmill.core.store.Mutexes;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
 
 /**
@@ -202,8 +205,8 @@ public final class PostgresJobStore implements JobStore {
                         try (PreparedStatement ps = conn.prepareStatement(
                                 "INSERT INTO threadmill_jobs (id, state, queue, priority, handler_signature, "
                                         + "scheduled_at, owner_node_id, owner_heartbeat_at, last_checkin_at, current_state_at, "
-                                        + "version, body, created_at, concurrency_key, concurrency_mode, workflow_root_id) "
-                                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+                                        + "version, body, created_at, concurrency_key, concurrency_mode, workflow_root_id, "
+                                        + "parent_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
                             for (int i = 0; i < finalSnapshots.size(); i++) {
                                 JobSnapshot snap = finalSnapshots.get(i);
                                 ps.setObject(1, snap.id().asUuid());
@@ -226,6 +229,7 @@ public final class PostgresJobStore implements JobStore {
                                 ps.setTimestamp(13, Timestamp.from(snap.createdAt()));
                                 setNullableConcurrency(ps, 14, snap.concurrencyKey(), snap.concurrencyMode());
                                 ps.setObject(16, snap.workflowRootId().asUuid());
+                                setNullableParentJobId(ps, 17, snap);
                                 ps.addBatch();
                             }
                             ps.executeBatch();
@@ -368,7 +372,7 @@ public final class PostgresJobStore implements JobStore {
                                 + "state = ?, queue = ?, priority = ?, handler_signature = ?, "
                                 + "scheduled_at = ?, owner_node_id = ?, owner_heartbeat_at = ?, last_checkin_at = ?, "
                                 + "current_state_at = ?, version = ?, body = ?, "
-                                + "concurrency_key = ?, concurrency_mode = ?, workflow_root_id = ? "
+                                + "concurrency_key = ?, concurrency_mode = ?, workflow_root_id = ?, parent_job_id = ? "
                                 + "WHERE id = ? AND version = ?")) {
                             ps.setString(1, snapshot.currentState().name());
                             ps.setString(2, snapshot.queue());
@@ -388,8 +392,9 @@ public final class PostgresJobStore implements JobStore {
                             ps.setString(11, body);
                             setNullableConcurrency(ps, 12, snapshot.concurrencyKey(), snapshot.concurrencyMode());
                             ps.setObject(14, snapshot.workflowRootId().asUuid());
-                            ps.setObject(15, snapshot.id().asUuid());
-                            ps.setLong(16, expectedVersion);
+                            setNullableParentJobId(ps, 15, snapshot);
+                            ps.setObject(16, snapshot.id().asUuid());
+                            ps.setLong(17, expectedVersion);
                             int rows = ps.executeUpdate();
                             conn.commit();
                             return rows > 0;
@@ -714,7 +719,7 @@ public final class PostgresJobStore implements JobStore {
     @Override
     public boolean acquireOrRenewMaintenanceLease(NodeId nodeId, Duration leaseDuration) {
         Objects.requireNonNull(nodeId, "nodeId");
-        com.hemju.threadmill.core.store.Mutexes.requirePositive(leaseDuration);
+        Mutexes.requirePositive(leaseDuration);
         try {
             return DeadlockRetry.run(() -> {
                 try (Connection conn = dataSource.getConnection();
@@ -970,19 +975,18 @@ public final class PostgresJobStore implements JobStore {
 
     @Override
     public List<Job> findAwaitingByParent(JobId parentId, int max) {
-        // The body is the source of truth for relationships; scan AWAITING jobs and filter.
+        Objects.requireNonNull(parentId, "parentId");
+        if (max <= 0) return List.of();
         try (Connection conn = dataSource.getConnection();
-                PreparedStatement ps =
-                        conn.prepareStatement("SELECT body FROM threadmill_jobs WHERE state = 'AWAITING' LIMIT ?")) {
-            ps.setInt(1, Math.max(0, max * 4)); // overscan; filter client-side
+                PreparedStatement ps = conn.prepareStatement("SELECT body FROM threadmill_jobs "
+                        + "WHERE state = 'AWAITING' AND parent_job_id = ? "
+                        + "ORDER BY current_state_at, id LIMIT ?")) {
+            ps.setObject(1, parentId.asUuid());
+            ps.setInt(2, max);
             List<Job> out = new ArrayList<>();
             try (ResultSet rs = ps.executeQuery()) {
-                while (rs.next() && out.size() < max) {
-                    Job j = serializer.deserializeJob(rs.getString(1));
-                    if (j.relationship().isPresent()
-                            && j.relationship().get().parentId().equals(parentId)) {
-                        out.add(j);
-                    }
+                while (rs.next()) {
+                    out.add(serializer.deserializeJob(rs.getString(1)));
                 }
             }
             return out;
@@ -995,7 +999,7 @@ public final class PostgresJobStore implements JobStore {
     public boolean tryAcquireMutex(String name, String holder, Duration leaseDuration) {
         Names.requireName("mutex", name);
         Objects.requireNonNull(holder, "holder");
-        com.hemju.threadmill.core.store.Mutexes.requirePositive(leaseDuration);
+        Mutexes.requirePositive(leaseDuration);
         var now = Instant.now();
         Instant expires = now.plus(leaseDuration);
         try {
@@ -1059,7 +1063,7 @@ public final class PostgresJobStore implements JobStore {
                         try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
                                 + "queue = ?, priority = ?, handler_signature = ?, scheduled_at = ?, "
                                 + "current_state_at = ?, version = ?, body = ?, "
-                                + "concurrency_key = ?, concurrency_mode = ?, workflow_root_id = ? "
+                                + "concurrency_key = ?, concurrency_mode = ?, workflow_root_id = ?, parent_job_id = ? "
                                 + "WHERE id = ? AND version = ?")) {
                             ps.setString(1, snap.queue());
                             ps.setInt(2, snap.priority());
@@ -1070,8 +1074,9 @@ public final class PostgresJobStore implements JobStore {
                             ps.setString(7, newBody);
                             setNullableConcurrency(ps, 8, snap.concurrencyKey(), snap.concurrencyMode());
                             ps.setObject(10, snap.workflowRootId().asUuid());
-                            ps.setObject(11, id.asUuid());
-                            ps.setLong(12, expectedVersion);
+                            setNullableParentJobId(ps, 11, snap);
+                            ps.setObject(12, id.asUuid());
+                            ps.setLong(13, expectedVersion);
                             int rows = ps.executeUpdate();
                             conn.commit();
                             return rows > 0;
@@ -1115,17 +1120,17 @@ public final class PostgresJobStore implements JobStore {
     // ---------------------------------------------------------------- cron tasks
 
     @Override
-    public void upsertCronTask(com.hemju.threadmill.core.schedule.CronTask task) {
+    public void upsertCronTask(CronTask task) {
         Objects.requireNonNull(task, "task");
         Names.requireName("cronTask", task.name());
         Names.requireName("queue", task.queue());
         String kind;
         String value;
-        com.hemju.threadmill.core.schedule.CronTask.Trigger trigger = task.trigger();
-        if (trigger instanceof com.hemju.threadmill.core.schedule.CronTask.Trigger.CronExpr ce) {
+        CronTask.Trigger trigger = task.trigger();
+        if (trigger instanceof CronTask.Trigger.CronExpr ce) {
             kind = "CRON";
             value = ce.expression().expression();
-        } else if (trigger instanceof com.hemju.threadmill.core.schedule.CronTask.Trigger.Interval iv) {
+        } else if (trigger instanceof CronTask.Trigger.Interval iv) {
             kind = "INTERVAL";
             value = iv.interval().toString();
         } else {
@@ -1167,7 +1172,7 @@ public final class PostgresJobStore implements JobStore {
     }
 
     @Override
-    public Optional<com.hemju.threadmill.core.schedule.CronTask> findCronTask(String name) {
+    public Optional<CronTask> findCronTask(String name) {
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(
                         "SELECT name, trigger_kind, trigger_value, handler_signature, payload_type_tag, "
@@ -1184,8 +1189,8 @@ public final class PostgresJobStore implements JobStore {
     }
 
     @Override
-    public List<com.hemju.threadmill.core.schedule.CronTask> listCronTasks() {
-        List<com.hemju.threadmill.core.schedule.CronTask> out = new ArrayList<>();
+    public List<CronTask> listCronTasks() {
+        List<CronTask> out = new ArrayList<>();
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(
                         "SELECT name, trigger_kind, trigger_value, handler_signature, payload_type_tag, "
@@ -1263,26 +1268,26 @@ public final class PostgresJobStore implements JobStore {
         }
     }
 
-    private com.hemju.threadmill.core.schedule.CronTask readCronTask(ResultSet rs) throws SQLException {
+    private CronTask readCronTask(ResultSet rs) throws SQLException {
         String name = rs.getString(1);
         String kind = rs.getString(2);
         String value = rs.getString(3);
-        com.hemju.threadmill.core.schedule.CronTask.Trigger trigger;
+        CronTask.Trigger trigger;
         if ("CRON".equals(kind)) {
-            trigger = new com.hemju.threadmill.core.schedule.CronTask.Trigger.CronExpr(CronExpression.parse(value));
+            trigger = new CronTask.Trigger.CronExpr(CronExpression.parse(value));
         } else if ("INTERVAL".equals(kind)) {
-            trigger = new com.hemju.threadmill.core.schedule.CronTask.Trigger.Interval(Duration.parse(value));
+            trigger = new CronTask.Trigger.Interval(Duration.parse(value));
         } else {
             throw new SQLException("Unknown trigger_kind: " + kind);
         }
-        return new com.hemju.threadmill.core.schedule.CronTask(
+        return new CronTask(
                 name,
                 trigger,
                 rs.getString(4),
-                new com.hemju.threadmill.core.spec.JobArgument(rs.getString(5), rs.getString(6)),
+                new JobArgument(rs.getString(5), rs.getString(6)),
                 rs.getString(7),
                 rs.getInt(8),
-                com.hemju.threadmill.core.schedule.CronTask.MissedRunPolicy.valueOf(rs.getString(9)),
+                CronTask.MissedRunPolicy.valueOf(rs.getString(9)),
                 ZoneId.of(rs.getString(10)),
                 rs.getBoolean(11));
     }
@@ -1558,8 +1563,8 @@ public final class PostgresJobStore implements JobStore {
         try (PreparedStatement ps =
                 conn.prepareStatement("INSERT INTO threadmill_jobs (id, state, queue, priority, handler_signature, "
                         + "scheduled_at, owner_node_id, owner_heartbeat_at, last_checkin_at, current_state_at, "
-                        + "version, body, created_at, concurrency_key, concurrency_mode, workflow_root_id) "
-                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+                        + "version, body, created_at, concurrency_key, concurrency_mode, workflow_root_id, "
+                        + "parent_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
             ps.setObject(1, snapshot.id().asUuid());
             ps.setString(2, snapshot.currentState().name());
             ps.setString(3, snapshot.queue());
@@ -1580,6 +1585,7 @@ public final class PostgresJobStore implements JobStore {
             ps.setTimestamp(13, Timestamp.from(snapshot.createdAt()));
             setNullableConcurrency(ps, 14, snapshot.concurrencyKey(), snapshot.concurrencyMode());
             ps.setObject(16, snapshot.workflowRootId().asUuid());
+            setNullableParentJobId(ps, 17, snapshot);
             ps.executeUpdate();
         }
     }
@@ -1603,6 +1609,15 @@ public final class PostgresJobStore implements JobStore {
     private static void setNullableUuid(PreparedStatement ps, int index, UUID v) throws SQLException {
         if (v == null) ps.setNull(index, Types.OTHER);
         else ps.setObject(index, v);
+    }
+
+    private static void setNullableParentJobId(PreparedStatement ps, int index, JobSnapshot snapshot)
+            throws SQLException {
+        if (snapshot.relationship() == null) {
+            ps.setNull(index, Types.OTHER);
+        } else {
+            ps.setObject(index, snapshot.relationship().parentId().asUuid());
+        }
     }
 
     private static Instant lastTransitionTime(JobSnapshot snapshot, JobState state) {

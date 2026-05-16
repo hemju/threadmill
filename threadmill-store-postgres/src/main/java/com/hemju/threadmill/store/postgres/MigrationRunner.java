@@ -37,6 +37,7 @@ public final class MigrationRunner {
     private static final Pattern FILE_PATTERN = Pattern.compile("V(\\d+)__([A-Za-z0-9_]+)\\.sql");
     private static final String RESOURCE_ROOT = "com/hemju/threadmill/store/postgres/migrations/";
     private static final List<String> SHIPPED_MIGRATIONS = List.of("V1__baseline.sql");
+    private static final long MIGRATION_LOCK_KEY = 0x5468726561646D6CL;
 
     private final DataSource dataSource;
 
@@ -48,11 +49,16 @@ public final class MigrationRunner {
     public void migrate() {
         List<Migration> all = loadAll();
         try (Connection conn = dataSource.getConnection()) {
-            ensureHistoryTable(conn);
-            List<Integer> applied = readApplied(conn);
-            for (Migration m : all) {
-                if (applied.contains(m.version())) continue;
-                applyOne(conn, m);
+            acquireMigrationLock(conn);
+            try {
+                ensureHistoryTable(conn);
+                List<Integer> applied = readApplied(conn);
+                for (Migration m : all) {
+                    if (applied.contains(m.version())) continue;
+                    applyOne(conn, m);
+                }
+            } finally {
+                releaseMigrationLock(conn);
             }
         } catch (SQLException e) {
             throw new MigrationException("Migration failed", e);
@@ -107,6 +113,24 @@ public final class MigrationRunner {
             st.execute("CREATE TABLE IF NOT EXISTS threadmill_schema_history (" + "version INT PRIMARY KEY, "
                     + "description TEXT NOT NULL, "
                     + "applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())");
+        }
+    }
+
+    private void acquireMigrationLock(Connection conn) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT pg_advisory_lock(?)")) {
+            ps.setLong(1, MIGRATION_LOCK_KEY);
+            ps.execute();
+        }
+    }
+
+    private void releaseMigrationLock(Connection conn) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT pg_advisory_unlock(?)")) {
+            ps.setLong(1, MIGRATION_LOCK_KEY);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next() || !rs.getBoolean(1)) {
+                    throw new SQLException("Failed to release Threadmill migration advisory lock");
+                }
+            }
         }
     }
 
