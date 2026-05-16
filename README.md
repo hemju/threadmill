@@ -203,7 +203,8 @@ Not yet in v1 (design-compatible, additive when needed):
   rate limiters; richer cron expressions (business-day, last-of-month).
 - Mountable dashboard UI; OpenTelemetry tracing; pluggable auth for the
   dashboard.
-- Reproducible production-grade benchmarks; release engineering.
+- Reproducible production-grade benchmarks; Maven Central publishing
+  automation.
 
 ## Soak / benchmark numbers
 

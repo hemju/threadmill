@@ -1,5 +1,15 @@
 # Release Checklist
 
+Before publishing the repository:
+
+- Confirm `LICENSE` is the Apache License 2.0 and the README license section
+  points to it.
+- Confirm `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, and the
+  `.github` issue / pull-request templates are present.
+- Confirm the README still states the at-least-once delivery guarantee, Java 25
+  requirement, PostgreSQL 18+ requirement, Redis AOF durability note, and
+  Testcontainers requirement for real backend tests.
+
 Run from a clean git tree:
 
 ```bash
