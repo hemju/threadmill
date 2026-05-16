@@ -136,6 +136,9 @@ public final class Dispatcher {
                 Thread.currentThread().interrupt();
                 break;
             } catch (Throwable t) {
+                if (!running.get()) {
+                    break;
+                }
                 LOG.warn("Dispatcher poll failed", t);
                 if (breaker.recordFailure()) {
                     LOG.error(

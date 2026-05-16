@@ -63,6 +63,12 @@ CREATE INDEX threadmill_jobs_concurrency_pending_idx
     ON threadmill_jobs (concurrency_key, current_state_at, id)
     WHERE state IN ('ENQUEUED', 'SCHEDULED', 'AWAITING');
 
+-- Workflow-root outstanding counts: WHERE concurrency_key=? AND workflow_root_id=?
+-- AND state NOT IN terminal states.
+CREATE INDEX threadmill_jobs_workflow_outstanding_idx
+    ON threadmill_jobs (concurrency_key, workflow_root_id)
+    WHERE state NOT IN ('SUCCEEDED', 'FAILED', 'DELETED', 'QUARANTINED');
+
 -- Workflow successor promotion: find AWAITING jobs whose parent just completed.
 CREATE INDEX threadmill_jobs_awaiting_parent_idx
     ON threadmill_jobs (parent_job_id, current_state_at, id)

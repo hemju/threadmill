@@ -8,6 +8,7 @@
 --   [5] counts hash                       (threadmill:counts)
 --   [6] concurrency pending ZSET, or empty
 --   [7] concurrency workflows HASH, or empty
+--   [8] concurrency workflow counts HASH, or empty
 --
 -- ARGV:
 --   [1] job id (string)
@@ -38,6 +39,7 @@ local handler_key    = KEYS[4]
 local counts_key     = KEYS[5]
 local pending_key    = KEYS[6]
 local workflows_key  = KEYS[7]
+local workflow_counts_key = KEYS[8]
 
 local job_id           = ARGV[1]
 local body             = ARGV[2]
@@ -91,6 +93,10 @@ if concurrency_key ~= '' and workflows_key ~= '' and
    redis.call('HGET', workflows_key, workflow_root_id) ~= false and
    (state == 'ENQUEUED' or state == 'SCHEDULED' or state == 'AWAITING' or state == 'PROCESSING') then
     redis.call('HINCRBY', workflows_key, workflow_root_id, 1)
+end
+if concurrency_key ~= '' and workflow_counts_key ~= '' and
+   (state == 'ENQUEUED' or state == 'SCHEDULED' or state == 'AWAITING' or state == 'PROCESSING') then
+    redis.call('HINCRBY', workflow_counts_key, workflow_root_id, 1)
 end
 redis.call('ZADD', state_time_key, state_time, job_id)
 redis.call('SADD', handler_key, job_id)

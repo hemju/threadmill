@@ -87,6 +87,11 @@ The harness is distinct from:
 | `-PredisTopology=<topology>` | `standalone` | v1 supports `standalone` only. |
 | `-Pforce=<bool>` | `false` | Allow overwriting an existing `-PoutputDir`. |
 
+The Postgres harness uses a fixed connection pool (`maxConnections=80`)
+because the soak loop intentionally creates enough claim, completion, heartbeat,
+and metric traffic to make one-connection-per-operation fixtures distort the
+result.
+
 ### Scenario library
 
 | Scenario | Description |

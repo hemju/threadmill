@@ -16,6 +16,8 @@
 --   [10] new concurrency pending ZSET, or empty
 --   [11] old concurrency counters HASH, or empty
 --   [12] old concurrency workflows HASH, or empty
+--   [13] old concurrency workflow counts HASH, or empty
+--   [14] new concurrency workflow counts HASH, or empty
 --
 -- ARGV:
 --   [1] job id
@@ -57,6 +59,8 @@ local old_pending_key        = KEYS[9]
 local new_pending_key        = KEYS[10]
 local old_counters_key       = KEYS[11]
 local old_workflows_key      = KEYS[12]
+local old_workflow_counts_key = KEYS[13]
+local new_workflow_counts_key = KEYS[14]
 
 local job_id              = ARGV[1]
 local expected_version    = tonumber(ARGV[2])
@@ -86,6 +90,16 @@ local function is_terminal(state)
     return state == 'SUCCEEDED' or state == 'FAILED' or state == 'DELETED' or state == 'QUARANTINED'
 end
 
+local function decrement_workflow_count(key, root_id)
+    if key == '' or root_id == '' then
+        return
+    end
+    local count = redis.call('HINCRBY', key, root_id, -1)
+    if count <= 0 then
+        redis.call('HDEL', key, root_id)
+    end
+end
+
 if redis.call('EXISTS', job_key) == 0 then
     return 'VANISHED'
 end
@@ -111,6 +125,18 @@ end
 if old_state ~= new_state then
     redis.call('HINCRBY', counts_key, old_state, -1)
     redis.call('HINCRBY', counts_key, new_state, 1)
+end
+
+local old_counted = old_concurrency_key ~= '' and (not is_terminal(old_state))
+local new_counted = concurrency_key ~= '' and (not is_terminal(new_state))
+local same_workflow_count = old_counted and new_counted and
+    old_concurrency_key == concurrency_key and old_workflow_root_id == workflow_root_id
+
+if old_counted and not same_workflow_count then
+    decrement_workflow_count(old_workflow_counts_key, old_workflow_root_id)
+end
+if new_counted and not same_workflow_count and new_workflow_counts_key ~= '' then
+    redis.call('HINCRBY', new_workflow_counts_key, workflow_root_id, 1)
 end
 
 if old_concurrency_key ~= '' and old_workflows_key ~= '' and old_counters_key ~= '' and

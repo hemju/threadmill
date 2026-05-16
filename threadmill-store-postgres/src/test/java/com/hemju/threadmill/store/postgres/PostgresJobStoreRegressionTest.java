@@ -314,6 +314,72 @@ class PostgresJobStoreRegressionTest {
     }
 
     @Test
+    void batchedConcurrencyPendingLookupUsesPartialIndex() throws SQLException {
+        JobStore store = store();
+        var base = Instant.now().minusSeconds(5);
+        for (int i = 0; i < 100; i++) {
+            store.insert(Job.builder()
+                    .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                    .concurrencyKey(i % 2 == 0 ? "project:hot" : "project:warm")
+                    .concurrencyMode(i % 10 == 0 ? ConcurrencyMode.EXCLUSIVE : ConcurrencyMode.SHARED)
+                    .createdAt(base.plusMillis(i))
+                    .build());
+        }
+
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute("SET enable_seqscan = off");
+            var keyArray = conn.createArrayOf("text", new String[] {"project:hot", "project:warm"});
+            try (PreparedStatement ps = conn.prepareStatement("EXPLAIN (FORMAT TEXT) "
+                    + "SELECT DISTINCT ON (concurrency_key) concurrency_key, current_state_at, id "
+                    + "FROM threadmill_jobs "
+                    + "WHERE concurrency_key = ANY (?) "
+                    + "AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
+                    + "ORDER BY concurrency_key, current_state_at, id")) {
+                ps.setArray(1, keyArray);
+                try (ResultSet rs = ps.executeQuery()) {
+                    var plan = new StringBuilder();
+                    while (rs.next()) plan.append(rs.getString(1)).append('\n');
+                    assertThat(plan.toString()).contains("threadmill_jobs_concurrency_pending_idx");
+                }
+            } finally {
+                keyArray.free();
+            }
+        }
+    }
+
+    @Test
+    void workflowOutstandingCountUsesPartialIndex() throws SQLException {
+        JobStore store = store();
+        Job root = Job.builder()
+                .spec(JobSpec.of("com.example.Root", new JobArgument("java.lang.String", "\"x\"")))
+                .concurrencyKey("project:workflow")
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .build();
+        store.insert(root);
+        for (int i = 0; i < 80; i++) {
+            store.insert(awaitingChildOf(root, i));
+        }
+
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute("SET enable_seqscan = off");
+            try (PreparedStatement ps = conn.prepareStatement("EXPLAIN (FORMAT TEXT) SELECT count(*) "
+                    + "FROM threadmill_jobs "
+                    + "WHERE concurrency_key = ? AND workflow_root_id = ? "
+                    + "AND state NOT IN ('SUCCEEDED','FAILED','DELETED','QUARANTINED')")) {
+                ps.setString(1, "project:workflow");
+                ps.setObject(2, root.id().asUuid());
+                try (ResultSet rs = ps.executeQuery()) {
+                    var plan = new StringBuilder();
+                    while (rs.next()) plan.append(rs.getString(1)).append('\n');
+                    assertThat(plan.toString()).contains("threadmill_jobs_workflow_outstanding_idx");
+                }
+            }
+        }
+    }
+
+    @Test
     void orphanRecoveryUsesProcessingLivenessIndex() throws SQLException {
         JobStore store = store();
         var heartbeat = Instant.now().minusSeconds(120);

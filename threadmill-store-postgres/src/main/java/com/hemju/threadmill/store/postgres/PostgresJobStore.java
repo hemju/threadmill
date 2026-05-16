@@ -511,13 +511,11 @@ public final class PostgresJobStore implements JobStore {
                                 if (pending.isEmpty()) {
                                     break;
                                 }
-                                for (var p : pending) {
+                                List<PendingClaim> claimable = claimableCandidates(conn, pending, cap - result.size());
+                                Map<UUID, String> bodies = fetchBodies(conn, claimable);
+                                for (var p : claimable) {
                                     if (result.size() >= cap) break;
-                                    Job j = serializer.deserializeJob(p.body);
-                                    if (j.concurrencyKey().isPresent())
-                                        lockConcurrencyGroup(
-                                                conn, j.concurrencyKey().get());
-                                    if (!canClaim(conn, j.snapshot())) continue;
+                                    Job j = serializer.deserializeJob(bodies.get(p.id));
                                     acquireWorkflowHold(conn, j.snapshot());
                                     j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
                                     j.assignOwner(nodeId, heartbeatAt);
@@ -561,7 +559,8 @@ public final class PostgresJobStore implements JobStore {
     private List<PendingClaim> readClaimPage(
             Connection conn, String queue, int limit, Integer cursorPriority, UUID cursorId) throws SQLException {
         String cursorPredicate = cursorPriority == null ? "" : "AND (priority < ? OR (priority = ? AND id > ?)) ";
-        try (PreparedStatement ps = conn.prepareStatement("SELECT id, body, version, priority FROM threadmill_jobs "
+        try (PreparedStatement ps = conn.prepareStatement("SELECT id, version, priority, concurrency_key, "
+                + "concurrency_mode, workflow_root_id, current_state_at FROM threadmill_jobs "
                 + "WHERE state = 'ENQUEUED' AND queue = ? "
                 + cursorPredicate
                 + "ORDER BY priority DESC, id "
@@ -577,14 +576,213 @@ public final class PostgresJobStore implements JobStore {
             try (ResultSet rs = ps.executeQuery()) {
                 var page = new ArrayList<PendingClaim>();
                 while (rs.next()) {
-                    page.add(new PendingClaim((UUID) rs.getObject(1), rs.getString(2), rs.getLong(3), rs.getInt(4)));
+                    String mode = rs.getString(5);
+                    page.add(new PendingClaim(
+                            (UUID) rs.getObject(1),
+                            rs.getLong(2),
+                            rs.getInt(3),
+                            rs.getString(4),
+                            mode == null ? null : ConcurrencyMode.valueOf(mode),
+                            (UUID) rs.getObject(6),
+                            rs.getTimestamp(7).toInstant()));
                 }
                 return page;
             }
         }
     }
 
-    private record PendingClaim(UUID id, String body, long version, int priority) {}
+    private List<PendingClaim> claimableCandidates(Connection conn, List<PendingClaim> pending, int remaining)
+            throws SQLException {
+        Set<String> keys = new HashSet<>();
+        for (var candidate : pending) {
+            if (candidate.concurrencyKey != null) {
+                keys.add(candidate.concurrencyKey);
+            }
+        }
+        if (keys.isEmpty()) {
+            return pending.subList(0, Math.min(remaining, pending.size()));
+        }
+        lockConcurrencyGroups(conn, keys);
+        Map<String, GroupState> groups = loadGroupStates(conn, keys);
+        Set<WorkflowKey> activeHolds = loadActiveWorkflowHolds(conn, pending, keys);
+        Map<String, PendingOrder> firstPending = loadFirstPendingByKey(conn, keys, false);
+        Map<String, PendingOrder> firstExclusivePending = loadFirstPendingByKey(conn, keys, true);
+        var claimable = new ArrayList<PendingClaim>(Math.min(remaining, pending.size()));
+        for (var candidate : pending) {
+            if (claimable.size() >= remaining) {
+                break;
+            }
+            if (canClaim(candidate, groups, activeHolds, firstPending, firstExclusivePending)) {
+                claimable.add(candidate);
+            }
+        }
+        return claimable;
+    }
+
+    private Map<UUID, String> fetchBodies(Connection conn, List<PendingClaim> claimable) throws SQLException {
+        if (claimable.isEmpty()) {
+            return Map.of();
+        }
+        UUID[] ids = claimable.stream().map(PendingClaim::id).toArray(UUID[]::new);
+        var idArray = conn.createArrayOf("uuid", ids);
+        try (PreparedStatement ps = conn.prepareStatement("SELECT id, body FROM threadmill_jobs WHERE id = ANY (?)")) {
+            ps.setArray(1, idArray);
+            try (ResultSet rs = ps.executeQuery()) {
+                var bodies = new HashMap<UUID, String>();
+                while (rs.next()) {
+                    bodies.put((UUID) rs.getObject(1), rs.getString(2));
+                }
+                return bodies;
+            }
+        } finally {
+            idArray.free();
+        }
+    }
+
+    private void lockConcurrencyGroups(Connection conn, Set<String> keys) throws SQLException {
+        var sorted = keys.stream().sorted().toList();
+        try (PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_concurrency_groups "
+                + "(concurrency_key, exclusive_in_flight, shared_in_flight, last_modified) "
+                + "VALUES (?, 0, 0, clock_timestamp()) "
+                + "ON CONFLICT (concurrency_key) DO NOTHING")) {
+            for (String key : sorted) {
+                ps.setString(1, key);
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        }
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT concurrency_key FROM threadmill_concurrency_groups WHERE concurrency_key = ? FOR UPDATE")) {
+            for (String key : sorted) {
+                ps.setString(1, key);
+                ps.execute();
+            }
+        }
+    }
+
+    private Map<String, GroupState> loadGroupStates(Connection conn, Set<String> keys) throws SQLException {
+        var keyArray = conn.createArrayOf("text", keys.toArray(String[]::new));
+        try (PreparedStatement ps =
+                conn.prepareStatement("SELECT concurrency_key, exclusive_in_flight, shared_in_flight "
+                        + "FROM threadmill_concurrency_groups WHERE concurrency_key = ANY (?)")) {
+            ps.setArray(1, keyArray);
+            try (ResultSet rs = ps.executeQuery()) {
+                var groups = new HashMap<String, GroupState>();
+                while (rs.next()) {
+                    groups.put(rs.getString(1), new GroupState(rs.getInt(2), rs.getInt(3)));
+                }
+                return groups;
+            }
+        } finally {
+            keyArray.free();
+        }
+    }
+
+    private Set<WorkflowKey> loadActiveWorkflowHolds(Connection conn, List<PendingClaim> pending, Set<String> keys)
+            throws SQLException {
+        var roots = pending.stream()
+                .filter(candidate -> candidate.concurrencyKey != null)
+                .map(PendingClaim::workflowRootId)
+                .distinct()
+                .toArray(UUID[]::new);
+        if (roots.length == 0) {
+            return Set.of();
+        }
+        var keyArray = conn.createArrayOf("text", keys.toArray(String[]::new));
+        var rootArray = conn.createArrayOf("uuid", roots);
+        try (PreparedStatement ps = conn.prepareStatement("SELECT concurrency_key, workflow_root_id "
+                + "FROM threadmill_concurrency_workflow_holds "
+                + "WHERE concurrency_key = ANY (?) AND workflow_root_id = ANY (?)")) {
+            ps.setArray(1, keyArray);
+            ps.setArray(2, rootArray);
+            try (ResultSet rs = ps.executeQuery()) {
+                var holds = new HashSet<WorkflowKey>();
+                while (rs.next()) {
+                    holds.add(new WorkflowKey(rs.getString(1), (UUID) rs.getObject(2)));
+                }
+                return holds;
+            }
+        } finally {
+            keyArray.free();
+            rootArray.free();
+        }
+    }
+
+    private Map<String, PendingOrder> loadFirstPendingByKey(Connection conn, Set<String> keys, boolean exclusiveOnly)
+            throws SQLException {
+        var keyArray = conn.createArrayOf("text", keys.toArray(String[]::new));
+        String modePredicate = exclusiveOnly ? "AND concurrency_mode = 'EXCLUSIVE' " : "";
+        try (PreparedStatement ps = conn.prepareStatement("SELECT DISTINCT ON (concurrency_key) "
+                + "concurrency_key, current_state_at, id FROM threadmill_jobs "
+                + "WHERE concurrency_key = ANY (?) "
+                + modePredicate
+                + "AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
+                + "ORDER BY concurrency_key, current_state_at, id")) {
+            ps.setArray(1, keyArray);
+            try (ResultSet rs = ps.executeQuery()) {
+                var first = new HashMap<String, PendingOrder>();
+                while (rs.next()) {
+                    first.put(
+                            rs.getString(1), new PendingOrder(rs.getTimestamp(2).toInstant(), (UUID) rs.getObject(3)));
+                }
+                return first;
+            }
+        } finally {
+            keyArray.free();
+        }
+    }
+
+    private static boolean canClaim(
+            PendingClaim candidate,
+            Map<String, GroupState> groups,
+            Set<WorkflowKey> activeHolds,
+            Map<String, PendingOrder> firstPending,
+            Map<String, PendingOrder> firstExclusivePending) {
+        if (candidate.concurrencyKey == null) {
+            return true;
+        }
+        if (activeHolds.contains(new WorkflowKey(candidate.concurrencyKey, candidate.workflowRootId))) {
+            return true;
+        }
+        GroupState group = groups.getOrDefault(candidate.concurrencyKey, GroupState.IDLE);
+        if (candidate.concurrencyMode == ConcurrencyMode.EXCLUSIVE) {
+            return group.isIdle() && !isBefore(firstPending.get(candidate.concurrencyKey), candidate);
+        }
+        return group.exclusiveInFlight == 0
+                && !isBefore(firstExclusivePending.get(candidate.concurrencyKey), candidate);
+    }
+
+    private static boolean isBefore(PendingOrder possibleEarlier, PendingClaim candidate) {
+        if (possibleEarlier == null || possibleEarlier.id.equals(candidate.id)) {
+            return false;
+        }
+        int timeOrder = possibleEarlier.currentStateAt.compareTo(candidate.currentStateAt);
+        if (timeOrder != 0) {
+            return timeOrder < 0;
+        }
+        return possibleEarlier.id.compareTo(candidate.id) < 0;
+    }
+
+    private record PendingClaim(
+            UUID id,
+            long version,
+            int priority,
+            String concurrencyKey,
+            ConcurrencyMode concurrencyMode,
+            UUID workflowRootId,
+            Instant currentStateAt) {}
+
+    private record GroupState(int exclusiveInFlight, int sharedInFlight) {
+        static final GroupState IDLE = new GroupState(0, 0);
+
+        boolean isIdle() {
+            return exclusiveInFlight == 0 && sharedInFlight == 0;
+        }
+    }
+
+    private record PendingOrder(Instant currentStateAt, UUID id) {}
+
+    private record WorkflowKey(String concurrencyKey, UUID workflowRootId) {}
 
     // ---------------------------------------------------------------- queue pauses
 

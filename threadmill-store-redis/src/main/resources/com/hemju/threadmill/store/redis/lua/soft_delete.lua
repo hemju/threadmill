@@ -11,6 +11,7 @@
 --   [7] old concurrency pending ZSET, or empty
 --   [8] old concurrency counters HASH, or empty
 --   [9] old concurrency workflows HASH, or empty
+--   [10] old concurrency workflow counts HASH, or empty
 --
 -- ARGV:
 --   [1] job id
@@ -33,6 +34,7 @@ local counts_key         = KEYS[6]
 local old_pending_key    = KEYS[7]
 local old_counters_key   = KEYS[8]
 local old_workflows_key  = KEYS[9]
+local old_workflow_counts_key = KEYS[10]
 
 local job_id   = ARGV[1]
 local new_body = ARGV[2]
@@ -73,6 +75,12 @@ redis.call('HINCRBY', counts_key, old_state, -1)
 redis.call('HINCRBY', counts_key, 'DELETED', 1)
 
 if old_concurrency_key ~= '' and old_workflows_key ~= '' and old_counters_key ~= '' and not is_terminal(old_state) then
+    if old_workflow_counts_key ~= '' then
+        local workflow_count = redis.call('HINCRBY', old_workflow_counts_key, old_workflow_root_id, -1)
+        if workflow_count <= 0 then
+            redis.call('HDEL', old_workflow_counts_key, old_workflow_root_id)
+        end
+    end
     local outstanding = redis.call('HINCRBY', old_workflows_key, old_workflow_root_id, -1)
     if outstanding <= 0 then
         redis.call('HDEL', old_workflows_key, old_workflow_root_id)

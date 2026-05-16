@@ -219,6 +219,78 @@ class RedisJobStoreRegressionTest {
     }
 
     @Test
+    void workflowCountsTrackChildrenBeforeFirstClaimAndReleaseAfterLastTerminalJob() {
+        JobStore store = store();
+        Job root = keyedJob("com.example.Root", "project:counts", ConcurrencyMode.EXCLUSIVE);
+        store.insert(root);
+        Job childA = workflowChild("com.example.ChildA", root.id());
+        Job childB = workflowChild("com.example.ChildB", root.id());
+        store.insertAll(List.of(childA, childB));
+
+        assertWorkflowCount("project:counts", root.id(), 3);
+        assertActiveWorkflowHold("project:counts", root.id(), null);
+
+        Job claimedRoot =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        assertActiveWorkflowHold("project:counts", root.id(), 3);
+
+        finish(store, claimedRoot, JobState.SUCCEEDED);
+        assertWorkflowCount("project:counts", root.id(), 2);
+        assertActiveWorkflowHold("project:counts", root.id(), 2);
+
+        promote(store, childA.id());
+        promote(store, childB.id());
+        List<Job> claimedChildren = store.claimReady(NodeId.newId(), "default", 2, Instant.now());
+        assertThat(claimedChildren).extracting(Job::id).containsExactlyInAnyOrder(childA.id(), childB.id());
+        finish(store, claimedChildren.get(0), JobState.SUCCEEDED);
+        assertWorkflowCount("project:counts", root.id(), 1);
+        assertActiveWorkflowHold("project:counts", root.id(), 1);
+        finish(store, claimedChildren.get(1), JobState.SUCCEEDED);
+        assertWorkflowCount("project:counts", root.id(), null);
+        assertActiveWorkflowHold("project:counts", root.id(), null);
+    }
+
+    @Test
+    void workflowCountsTrackRetryBackIntoPendingState() {
+        JobStore store = store();
+        Job job = keyedJob("com.example.Retry", "project:retry", ConcurrencyMode.EXCLUSIVE);
+        store.insert(job);
+        assertWorkflowCount("project:retry", job.id(), 1);
+
+        Job claimed =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        finish(store, claimed, JobState.FAILED);
+        assertWorkflowCount("project:retry", job.id(), null);
+        assertActiveWorkflowHold("project:retry", job.id(), null);
+
+        Job retry = store.findById(job.id()).orElseThrow();
+        long version = retry.version();
+        retry.transitionTo(JobState.SCHEDULED, Instant.now(), "test.retry", null);
+        store.saveAtomic(retry, version);
+        assertWorkflowCount("project:retry", job.id(), 1);
+
+        promote(store, job.id());
+        Job reclaimed =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        finish(store, reclaimed, JobState.SUCCEEDED);
+        assertWorkflowCount("project:retry", job.id(), null);
+        assertActiveWorkflowHold("project:retry", job.id(), null);
+    }
+
+    @Test
+    void workflowCountsTrackSoftDeleteOfPendingKeyedJob() {
+        JobStore store = store();
+        Job job = keyedJob("com.example.Delete", "project:delete", ConcurrencyMode.EXCLUSIVE);
+        store.insert(job);
+        assertWorkflowCount("project:delete", job.id(), 1);
+
+        assertThat(store.softDelete(job.id())).isTrue();
+
+        assertWorkflowCount("project:delete", job.id(), null);
+        assertActiveWorkflowHold("project:delete", job.id(), null);
+    }
+
+    @Test
     void afterClaimIndexesAndHashAreInSync() {
         JobStore store = store();
         Job j = sample();
@@ -388,6 +460,24 @@ class RedisJobStoreRegressionTest {
                 .relationship(new JobRelationship(parentId, JobRelationship.Kind.WORKFLOW_STEP))
                 .initialState(JobState.AWAITING)
                 .build();
+    }
+
+    private static Job keyedJob(String handler, String key, ConcurrencyMode mode) {
+        return Job.builder()
+                .spec(JobSpec.of(handler, new JobArgument("java.lang.String", "\"x\"")))
+                .concurrencyKey(key)
+                .concurrencyMode(mode)
+                .build();
+    }
+
+    private static void assertWorkflowCount(String key, JobId rootId, Integer expected) {
+        assertThat(adminConnection.sync().hget(RedisKeys.concurrencyWorkflowCounts(key), rootId.toString()))
+                .isEqualTo(expected == null ? null : expected.toString());
+    }
+
+    private static void assertActiveWorkflowHold(String key, JobId rootId, Integer expected) {
+        assertThat(adminConnection.sync().hget(RedisKeys.concurrencyWorkflows(key), rootId.toString()))
+                .isEqualTo(expected == null ? null : expected.toString());
     }
 
     private static void finish(JobStore store, Job job, JobState state) {

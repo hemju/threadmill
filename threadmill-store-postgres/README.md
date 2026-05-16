@@ -55,7 +55,8 @@ columns are denormalised for the engine's hot queries.
 | `threadmill_jobs_processing_idx` | `(owner_heartbeat_at) WHERE state='PROCESSING'` | Orphan recovery. |
 | `threadmill_jobs_handler_idx` | `(handler_signature)` | Find-by-handler. |
 | `threadmill_jobs_state_time_idx` | `(state, current_state_at)` | Retention. |
-| `threadmill_jobs_concurrency_pending_idx` | `(concurrency_key, current_state_at) WHERE state IN (ENQUEUED, SCHEDULED, AWAITING)` | Claim-time concurrency pending check. |
+| `threadmill_jobs_concurrency_pending_idx` | `(concurrency_key, current_state_at, id) WHERE state IN (ENQUEUED, SCHEDULED, AWAITING)` | Claim-time concurrency pending check. |
+| `threadmill_jobs_workflow_outstanding_idx` | `(concurrency_key, workflow_root_id) WHERE state NOT IN (SUCCEEDED, FAILED, DELETED, QUARANTINED)` | Workflow-root outstanding count. |
 
 ### Auxiliary tables
 

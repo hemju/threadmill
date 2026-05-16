@@ -219,7 +219,8 @@ public final class RedisJobStore implements JobStore {
             RedisKeys.byHandler(snapshot.spec().handlerType()),
             RedisKeys.COUNTS,
             concurrencyPendingKey(snapshot),
-            concurrencyWorkflowsKey(snapshot.concurrencyKey())
+            concurrencyWorkflowsKey(snapshot.concurrencyKey()),
+            concurrencyWorkflowCountsKey(snapshot.concurrencyKey())
         };
         var args = new String[] {
             snapshot.id().toString(),
@@ -306,9 +307,9 @@ public final class RedisJobStore implements JobStore {
         }
 
         try {
-            // Pack 7 keys + 18 args per job for the batched Lua script.
+            // Pack 8 keys + 18 args per job for the batched Lua script.
             int n = snapshots.size();
-            var keyList = new ArrayList<String>(n * 7);
+            var keyList = new ArrayList<String>(n * 8);
             var argList = new ArrayList<String>(1 + n * 18);
             argList.add(Integer.toString(n));
             for (int i = 0; i < n; i++) {
@@ -323,6 +324,7 @@ public final class RedisJobStore implements JobStore {
                 keyList.add(RedisKeys.COUNTS);
                 keyList.add(concurrencyPendingKey(snap));
                 keyList.add(concurrencyWorkflowsKey(snap.concurrencyKey()));
+                keyList.add(concurrencyWorkflowCountsKey(snap.concurrencyKey()));
 
                 argList.add(snap.id().toString());
                 argList.add(bodies.get(i));
@@ -438,7 +440,8 @@ public final class RedisJobStore implements JobStore {
                     RedisKeys.COUNTS,
                     RedisKeys.dedupExpiry(),
                     concurrencyPendingKey(snapshot),
-                    concurrencyWorkflowsKey(snapshot.concurrencyKey())
+                    concurrencyWorkflowsKey(snapshot.concurrencyKey()),
+                    concurrencyWorkflowCountsKey(snapshot.concurrencyKey())
                 },
                 snapshot.id().toString(),
                 body,
@@ -539,7 +542,9 @@ public final class RedisJobStore implements JobStore {
             concurrencyPendingKey(oldConcurrencyKey),
             concurrencyPendingKey(snapshot),
             concurrencyCountersKey(oldConcurrencyKey),
-            concurrencyWorkflowsKey(oldConcurrencyKey)
+            concurrencyWorkflowsKey(oldConcurrencyKey),
+            concurrencyWorkflowCountsKey(oldConcurrencyKey),
+            concurrencyWorkflowCountsKey(snapshot.concurrencyKey())
         };
         var args = new String[] {
             snapshot.id().toString(),
@@ -621,7 +626,8 @@ public final class RedisJobStore implements JobStore {
             RedisKeys.COUNTS,
             concurrencyPendingKey(oldConcurrencyKey),
             concurrencyCountersKey(oldConcurrencyKey),
-            concurrencyWorkflowsKey(oldConcurrencyKey)
+            concurrencyWorkflowsKey(oldConcurrencyKey),
+            concurrencyWorkflowCountsKey(oldConcurrencyKey)
         };
         var args = new String[] {
             id.toString(),
@@ -701,7 +707,8 @@ public final class RedisJobStore implements JobStore {
                                     RedisKeys.COUNTS,
                                     concurrencyCountersKey(concurrencyKey),
                                     concurrencyPendingKey(concurrencyKey),
-                                    concurrencyWorkflowsKey(concurrencyKey)
+                                    concurrencyWorkflowsKey(concurrencyKey),
+                                    concurrencyWorkflowCountsKey(concurrencyKey)
                                 },
                                 idStr,
                                 oldVersion,
@@ -715,8 +722,7 @@ public final class RedisJobStore implements JobStore {
                                         ? ""
                                         : snap.concurrencyMode().name(),
                                 snap.workflowRootId().toString(),
-                                concurrencyPendingMember(snap),
-                                Integer.toString(workflowOutstandingCount(r, snap)));
+                                concurrencyPendingMember(snap));
                         if ("OK".equals(reply)) {
                             result.add(serializer.deserializeJob(newBody));
                         } else if ("BLOCKED".equals(reply)) {
@@ -1346,6 +1352,10 @@ public final class RedisJobStore implements JobStore {
         return key == null ? "" : RedisKeys.concurrencyWorkflows(key);
     }
 
+    private static String concurrencyWorkflowCountsKey(String key) {
+        return key == null ? "" : RedisKeys.concurrencyWorkflowCounts(key);
+    }
+
     private static String concurrencyPendingMember(JobSnapshot snapshot) {
         return snapshot.concurrencyMode() == null
                 ? ""
@@ -1354,21 +1364,6 @@ public final class RedisJobStore implements JobStore {
 
     private static String concurrencyPendingMember(String mode, JobId id) {
         return mode == null ? "" : RedisKeys.concurrencyPendingMember(ConcurrencyMode.valueOf(mode), id);
-    }
-
-    private int workflowOutstandingCount(RedisClusterCommands<String, String> r, JobSnapshot candidate) {
-        if (candidate.concurrencyKey() == null) {
-            return 0;
-        }
-        int count = 0;
-        for (Map<String, String> hash :
-                hashesForStates(r, JobState.AWAITING, JobState.SCHEDULED, JobState.ENQUEUED, JobState.PROCESSING)) {
-            if (candidate.workflowRootId().toString().equals(hash.get("workflow_root_id"))
-                    && candidate.concurrencyKey().equals(blankToNull(hash.get("concurrency_key")))) {
-                count++;
-            }
-        }
-        return Math.max(1, count);
     }
 
     private static boolean tryClaimLock(RedisClusterCommands<String, String> r, String key, String token) {

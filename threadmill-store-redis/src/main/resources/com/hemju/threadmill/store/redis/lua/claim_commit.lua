@@ -14,6 +14,7 @@
 --   [8] concurrency counters HASH, or empty
 --   [9] concurrency pending ZSET, or empty
 --   [10] concurrency workflows HASH, or empty
+--   [11] concurrency workflow counts HASH, or empty
 
 -- ARGV:
 --   [1] job id
@@ -27,7 +28,6 @@
 --   [9] concurrency mode, or empty
 --   [10] workflow root id
 --   [11] concurrency pending member, or empty
---   [12] workflow outstanding count
 
 local job_key = KEYS[1]
 local queue_key = KEYS[2]
@@ -39,6 +39,7 @@ local counts_key = KEYS[7]
 local counters_key = KEYS[8]
 local pending_key = KEYS[9]
 local workflows_key = KEYS[10]
+local workflow_counts_key = KEYS[11]
 
 local job_id = ARGV[1]
 local expected_version = tonumber(ARGV[2])
@@ -51,7 +52,6 @@ local concurrency_key = ARGV[8]
 local concurrency_mode = ARGV[9]
 local workflow_root_id = ARGV[10]
 local pending_member = ARGV[11]
-local outstanding_count = tonumber(ARGV[12])
 
 local function member_job_id(member)
     local sep = string.find(member, ':', 1, true)
@@ -121,6 +121,10 @@ if concurrency_key ~= '' then
                 return 'BLOCKED'
             end
             redis.call('HINCRBY', counters_key, 'shared_in_flight', 1)
+        end
+        local outstanding_count = tonumber(redis.call('HGET', workflow_counts_key, workflow_root_id) or '1')
+        if outstanding_count < 1 then
+            outstanding_count = 1
         end
         redis.call('HSET', workflows_key, workflow_root_id, tostring(outstanding_count))
     end

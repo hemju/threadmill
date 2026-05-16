@@ -47,7 +47,8 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:dedup_expiry` | ZSET | Dedup record expiries; maintenance cleanup reads this. |
 | `{threadmill}:concurrency:{key}:counters` | HASH | Per-key in-flight counts (`exclusive_in_flight`, `shared_in_flight`). |
 | `{threadmill}:concurrency:{key}:pending` | ZSET | Pending concurrency members, scored by enqueue-time micros. |
-| `{threadmill}:concurrency:{key}:workflows` | HASH | Workflow root id → outstanding non-terminal job count. |
+| `{threadmill}:concurrency:{key}:workflows` | HASH | Workflow root id → active outstanding hold count. Presence means the workflow currently owns the key. |
+| `{threadmill}:concurrency:{key}:workflow_counts` | HASH | Workflow root id → total non-terminal job count. Maintained incrementally so claim does not scan active jobs. |
 | `{threadmill}:concurrency:{key}:claim_lock` | STRING | Short-lived mutex around per-key claim bookkeeping. |
 
 ## Lua script inventory
@@ -62,7 +63,7 @@ server (single-threaded execution).
 | `insert_all.lua` | Atomic batch insert. Two-pass: first EXISTS-checks every job id; if all clear, applies every HSET / ZADD / HINCRBY in one script. Either every row lands or none do. |
 | `enqueue_if_absent.lua` | Producer-side dedup: insert iff `(queue, dedupKey)` isn't already mapped to an active job. |
 | `save_atomic.lua` | Version-matched conditional update — the optimistic-lock save. |
-| `claim_commit.lua` | The reliable-fetch claim. Java prepares the PROCESSING body first, then this script verifies version / state / queue membership and commits body, scalars, indexes (queue → processing + per-node), attempts, owner heartbeat, and counts together. Consults concurrency counters and workflow holds before committing. A crash before this script leaves the job ENQUEUED; a crash after leaves a complete PROCESSING record for orphan recovery. |
+| `claim_commit.lua` | The reliable-fetch claim. Java prepares the PROCESSING body first, then this script verifies version / state / queue membership and commits body, scalars, indexes (queue → processing + per-node), attempts, owner heartbeat, and counts together. Consults concurrency counters, pending members, workflow counts, and workflow holds before committing. A crash before this script leaves the job ENQUEUED; a crash after leaves a complete PROCESSING record for orphan recovery. |
 | `touch_heartbeat.lua` | Rescore every owned PROCESSING id in the per-node ZSET. Does not bump optimistic-lock version. |
 | `replace_job.lua` | Atomic in-place definition swap for non-running jobs. Moves the row between queue ZSETs if the queue changes. |
 | `soft_delete.lua` | Move a job to DELETED, removing it from active indexes and per-handler set, decrementing counts. |

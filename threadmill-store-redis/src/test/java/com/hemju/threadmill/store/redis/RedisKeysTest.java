@@ -37,7 +37,8 @@ class RedisKeysTest {
                 RedisKeys.concurrencyClaimLock("project:42"),
                 RedisKeys.concurrencyCounters("project:42"),
                 RedisKeys.concurrencyPending("project:42"),
-                RedisKeys.concurrencyWorkflows("project:42"));
+                RedisKeys.concurrencyWorkflows("project:42"),
+                RedisKeys.concurrencyWorkflowCounts("project:42"));
 
         assertThat(keys)
                 .allSatisfy(key -> assertThat(SlotHash.getSlot(key)).as(key).isEqualTo(slot));

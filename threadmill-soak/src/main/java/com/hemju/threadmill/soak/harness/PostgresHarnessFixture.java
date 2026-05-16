@@ -5,8 +5,6 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Optional;
 
-import javax.sql.DataSource;
-
 import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
@@ -24,10 +22,12 @@ import com.hemju.threadmill.store.postgres.PostgresJobStore;
  */
 public final class PostgresHarnessFixture implements BackendFixture {
 
+    private static final int MAX_CONNECTIONS = 80;
+
     @SuppressWarnings({"resource", "deprecation"})
     private final PostgreSQLContainer container;
 
-    private final DataSource dataSource;
+    private final HarnessPooledDataSource dataSource;
     private final PostgresJobStore store;
 
     @SuppressWarnings({"resource", "deprecation"})
@@ -68,21 +68,24 @@ public final class PostgresHarnessFixture implements BackendFixture {
 
     @Override
     public void close() {
+        dataSource.close();
         if (container != null && container.isRunning()) container.stop();
     }
 
     @SuppressWarnings("deprecation")
-    private static DataSource dataSourceFromContainer(PostgreSQLContainer container) {
-        PGSimpleDataSource ds = new PGSimpleDataSource();
-        ds.setUrl(container.getJdbcUrl());
+    private static HarnessPooledDataSource dataSourceFromContainer(PostgreSQLContainer container) {
+        var ds = new PGSimpleDataSource();
+        ds.setServerName(container.getHost());
+        ds.setPortNumber(container.getMappedPort(5432));
+        ds.setDatabaseName(container.getDatabaseName());
         ds.setUser(container.getUsername());
         ds.setPassword(container.getPassword());
-        return ds;
+        return new HarnessPooledDataSource(ds, MAX_CONNECTIONS);
     }
 
-    private static DataSource dataSourceFromUrl(String jdbcUrl) {
-        PGSimpleDataSource ds = new PGSimpleDataSource();
+    private static HarnessPooledDataSource dataSourceFromUrl(String jdbcUrl) {
+        var ds = new PGSimpleDataSource();
         ds.setUrl(jdbcUrl);
-        return ds;
+        return new HarnessPooledDataSource(ds, MAX_CONNECTIONS);
     }
 }

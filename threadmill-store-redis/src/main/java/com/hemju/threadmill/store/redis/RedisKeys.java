@@ -40,7 +40,9 @@ import com.hemju.threadmill.core.NodeId;
  *   <li>{@code {threadmill}:concurrency:{key}:pending} — ZSET of pending
  *       concurrency members, scored by enqueue-time micros.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflows} — HASH workflow root
- *       id → outstanding non-terminal job count.</li>
+ *       id → active outstanding hold count.</li>
+ *   <li>{@code {threadmill}:concurrency:{key}:workflow_counts} — HASH workflow
+ *       root id → total non-terminal job count.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:claim_lock} — short-lived mutex
  *       around per-key claim bookkeeping.</li>
  *   <li>{@code {threadmill}:node:heartbeat:{nodeId}} — STRING with TTL; the key
@@ -127,6 +129,11 @@ public final class RedisKeys {
     public static String concurrencyWorkflows(String key) {
         Objects.requireNonNull(key, "key");
         return PREFIX + "concurrency:" + userSegment(key) + ":workflows";
+    }
+
+    public static String concurrencyWorkflowCounts(String key) {
+        Objects.requireNonNull(key, "key");
+        return PREFIX + "concurrency:" + userSegment(key) + ":workflow_counts";
     }
 
     public static String concurrencyPendingMember(ConcurrencyMode mode, JobId id) {

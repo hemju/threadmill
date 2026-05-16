@@ -82,12 +82,11 @@ sequenceDiagram
     participant H as Handler
 
     D->>PG: claimReady(queue, capacity)
-    PG->>J: page candidates FOR UPDATE SKIP LOCKED
-    loop each candidate
-        alt candidate has concurrency key
-            PG->>G: SELECT group row FOR UPDATE
-            PG->>J: check earlier pending jobs for same key
-        end
+    PG->>J: page scalar candidates FOR UPDATE SKIP LOCKED
+    PG->>G: lock distinct group rows once, sorted by key
+    PG->>J: batch-load active holds and earliest pending order
+    loop each claimable candidate
+        PG->>J: fetch body
         PG->>J: UPDATE state to PROCESSING, owner, attempts, version
         alt first job in workflow hold
             PG->>G: increment shared or exclusive in-flight counter
@@ -110,6 +109,9 @@ sequenceDiagram
   `FOR UPDATE SKIP LOCKED`, so competing nodes skip rows already being claimed.
 - A blocked hot-key page does not end the claim. Postgres keeps paging by
   queue order until it fills the claim batch or exhausts the queue.
+- Claim decisions are scalar-first: group counters, active workflow holds, and
+  earliest pending order are loaded once per page, and job bodies are fetched
+  only for candidates that will actually claim.
 - Different concurrency keys mostly proceed independently.
 - The same concurrency key serializes through the group row lock while a claim
   or release decision is made.
@@ -134,7 +136,7 @@ sequenceDiagram
     participant Q as queue ZSET
     participant L as key claim lock
     participant S as claim_commit.lua
-    participant C as counters and pending indexes
+    participant C as counters and concurrency indexes
     participant H as Handler
 
     D->>R: claimReady(queue, capacity)
@@ -145,7 +147,7 @@ sequenceDiagram
             R->>L: acquire short per-key claim lock
         end
         R->>S: verify state, version, queue membership
-        S->>C: inspect in-flight counters and earlier pending members
+        S->>C: inspect counters, pending members, workflow count
         S->>C: increment workflow/counter hold and remove pending member
         S->>Q: remove from ENQUEUED queue index
         S-->>R: OK or BLOCKED
@@ -164,13 +166,15 @@ sequenceDiagram
 The short per-key claim lock is not the logical concurrency hold. It only
 serializes the claim decision for one key while Java prepares and submits the
 Lua commit. The durable scheduling state is the job hash plus the per-key
-counter, pending, and workflow structures. If a client races or the lock
-expires, the Lua script still verifies the job version, current state, queue
-membership, and key counters before it can move anything to `PROCESSING`.
+counter, pending, workflow-count, and active workflow-hold structures. If a
+client races or the lock expires, the Lua script still verifies the job
+version, current state, queue membership, and key counters before it can move
+anything to `PROCESSING`.
 
 All Redis engine keys live under the `{threadmill}` slot, so the scripts update
 the job body, active-state indexes, counts, concurrency counters, pending
-members, and workflow holds atomically on one Redis Cluster slot.
+members, workflow counts, and workflow holds atomically on one Redis Cluster
+slot.
 
 ### Redis Parallelism
 
@@ -184,6 +188,9 @@ members, and workflow holds atomically on one Redis Cluster slot.
   share one Redis server execution lane.
 - The same concurrency key is additionally serialized by the per-key claim
   lock while claim preparation is in progress.
+- Workflow outstanding counts are maintained incrementally in a separate hash;
+  the active workflow-hold hash only means "this workflow currently owns the
+  key."
 - Handlers run outside Redis scripts, so a slow handler does not block Redis
   from serving claims or saves.
 
@@ -201,7 +208,8 @@ also applies to the quieter mutation paths:
   pending structure when their state is `ENQUEUED`, `SCHEDULED`, or `AWAITING`.
   Redis keyed inserts take the short per-key claim lock before updating
   workflow bookkeeping, so they cannot race a same-key claim that is preparing
-  the first workflow hold.
+  the first workflow hold. Redis also increments the separate workflow-count
+  hash for keyed non-terminal jobs.
 - Workflow child insertion inherits the parent's `workflow_root_id`,
   `concurrencyKey`, and `ConcurrencyMode`. If the root hold is already active,
   the workflow outstanding count is incremented.
@@ -209,7 +217,9 @@ also applies to the quieter mutation paths:
   the replacement changes the queue, scheduled time, key, or mode.
 - `saveAtomic` removes old pending membership, adds new pending membership when
   a retry or workflow promotion creates pending work, and releases active holds
-  on release-state transitions.
+  on release-state transitions. Redis decrements workflow counts when a keyed
+  job becomes terminal and increments them when a terminal job re-enters a
+  pending state for retry.
 - `softDelete` removes active or pending indexes and releases the hold when a
   `PROCESSING` job is deleted.
 
