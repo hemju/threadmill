@@ -70,6 +70,22 @@ public interface JobSerializer {
     /** Deserialize a typed argument to a concrete instance. */
     Object deserializeArgument(JobArgument argument);
 
+    /**
+     * Resolve a persisted type tag to the current Java type name. Serializers
+     * that support class-name aliases override this method.
+     */
+    default String resolveTypeTag(String typeTag) {
+        return typeTag;
+    }
+
+    /**
+     * Apply an explicit JSON-level payload migration, if one is registered.
+     * The default implementation leaves the argument unchanged.
+     */
+    default JobArgument migrateArgument(JobArgument argument) {
+        return argument;
+    }
+
     /** Serialize a {@link JobPayload} (a {@code JobArgument} shaped for a payload). */
     JobArgument serializePayload(JobPayload payload);
 

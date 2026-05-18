@@ -21,6 +21,13 @@ change may lose the state change depending on `appendfsync` setting.
 Crash-mid-claim semantics are still correct (orphan recovery runs), the
 durability question is whether the engine remembers what it did.
 
+Threadmill also requires `maxmemory-policy noeviction`. Eviction policies are
+cache semantics, not durable job-store semantics: `allkeys-*` can split job
+hashes from their indexes/counts, and `volatile-*` can delete TTL-backed
+heartbeats, leases, mutexes, or claim locks. `RedisJobStore` validates the
+policy on startup unless `RedisSafetyValidation.externallyValidatedMode()` is
+used for managed Redis where `CONFIG GET` is unavailable.
+
 ## Key layout
 
 Every key lives under `{threadmill}:` so multi-key Lua scripts route to
@@ -40,6 +47,8 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:counts` | HASH | State → cardinality. `HINCRBY` inside every state-changing script. **Never** `SCARD` / `ZCARD` for live counts. |
 | `{threadmill}:queues` | SET | Active queue names (membership maintained by `claim_commit`). |
 | `{threadmill}:queue_pauses` | HASH | Paused queue → reason. |
+| `{threadmill}:cron_task_namespace:{namespace}` | SET | Cron task names owned by one reconciliation namespace. |
+| `{threadmill}:cron_task_namespaces` | SET | Known recurring reconciliation namespaces. |
 | `{threadmill}:nodes` | SET | Known NodeIds. |
 | `{threadmill}:node:heartbeat:{node}` | STRING with TTL | Key existence is the heartbeat; TTL is the timeout. |
 | `{threadmill}:lease:maintenance` | STRING | Maintenance-lease holder; refreshed via `lease_acquire.lua`. |

@@ -221,6 +221,7 @@ class PostgresJobStoreRegressionTest {
             st.execute("DROP TABLE IF EXISTS threadmill_concurrency_workflow_holds CASCADE");
             st.execute("DROP TABLE IF EXISTS threadmill_concurrency_groups CASCADE");
             st.execute("DROP TABLE IF EXISTS threadmill_dedup_keys CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_cron_task_ownership CASCADE");
             st.execute("DROP TABLE IF EXISTS threadmill_cron_task_state CASCADE");
             st.execute("DROP TABLE IF EXISTS threadmill_cron_tasks CASCADE");
             st.execute("DROP TABLE IF EXISTS threadmill_jobs CASCADE");
@@ -240,7 +241,7 @@ class PostgresJobStoreRegressionTest {
             st.execute(sql);
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
-                assertThat(rs.getInt(1)).isEqualTo(1);
+                assertThat(rs.getInt(1)).isEqualTo(2);
             }
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_job_counts")) {
                 assertThat(rs.next()).isTrue();
@@ -276,7 +277,7 @@ class PostgresJobStoreRegressionTest {
                 Statement st = conn.createStatement();
                 ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
             assertThat(rs.next()).isTrue();
-            assertThat(rs.getInt(1)).isEqualTo(1);
+            assertThat(rs.getInt(1)).isEqualTo(2);
         }
     }
 
@@ -514,6 +515,7 @@ class PostgresJobStoreRegressionTest {
             st.execute("DROP TABLE IF EXISTS threadmill_concurrency_workflow_holds CASCADE");
             st.execute("DROP TABLE IF EXISTS threadmill_concurrency_groups CASCADE");
             st.execute("DROP TABLE IF EXISTS threadmill_dedup_keys CASCADE");
+            st.execute("DROP TABLE IF EXISTS threadmill_cron_task_ownership CASCADE");
             st.execute("DROP TABLE IF EXISTS threadmill_cron_task_state CASCADE");
             st.execute("DROP TABLE IF EXISTS threadmill_cron_tasks CASCADE");
             st.execute("DROP TABLE IF EXISTS threadmill_jobs CASCADE");

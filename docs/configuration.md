@@ -56,6 +56,13 @@ Spring can auto-create a Redis store when `threadmill.store.redis.*` is set.
 | `threadmill.store.redis.sentinel.password` | | Optional password. |
 | `threadmill.store.redis.cluster.nodes` | | Cluster seed nodes in `host:port` form. |
 | `threadmill.store.redis.cluster.read-policy` | `master` | Only master reads are allowed for engine correctness. |
+| `threadmill.store.redis.no-eviction-externally-validated` | `false` | Set only for managed Redis where `CONFIG GET maxmemory-policy` is unavailable and operators have verified `noeviction` out of band. |
 
 Redis Cluster uses one `{threadmill}` hash slot. See
 [redis-topologies.md](redis-topologies.md).
+
+## Spring Recurring Properties
+
+| Setting | Default | Notes |
+|---|---:|---|
+| `threadmill.spring.recurring-namespace` | `spring.application.name` | Namespace whose annotation-driven recurring tasks are reconciled at startup. If neither value is set, Threadmill only upserts discovered tasks and does not delete stale ones. |

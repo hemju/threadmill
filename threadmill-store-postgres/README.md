@@ -18,9 +18,10 @@ trigger semantics — without back-compat shims.
 
 ## Schema
 
-Created by a single `V1__baseline.sql` (see `src/main/resources/com/hemju/threadmill/store/postgres/migrations/`).
-The `MigrationRunner` bootstraps `threadmill_schema_history` itself
-(`CREATE IF NOT EXISTS`) before recording that the baseline migration ran.
+Created by `V1__baseline.sql` plus additive migrations under
+`src/main/resources/com/hemju/threadmill/store/postgres/migrations/`. The
+`MigrationRunner` bootstraps `threadmill_schema_history` itself (`CREATE IF NOT
+EXISTS`) before recording shipped migrations.
 
 ### `threadmill_jobs`
 
@@ -66,6 +67,8 @@ columns are denormalised for the engine's hot queries.
 - `threadmill_cron_tasks` + `threadmill_cron_task_state` — recurring task identity
   and bookkeeping. Identity (definition) and state (last/next run) are split so
   re-registering a task never resurrects stale timing.
+- `threadmill_cron_task_ownership` — namespace-owned recurring tasks for
+  startup reconciliation. Deleting a cron task cascades ownership rows.
 - `threadmill_mutexes` — cross-cluster named mutexes with a `expires_at` lease.
 - `threadmill_leases` — store-backed leadership leases for `MaintenanceCycle`.
 - `threadmill_dedup_keys` — producer-side deduplication. Cleanup gated on the

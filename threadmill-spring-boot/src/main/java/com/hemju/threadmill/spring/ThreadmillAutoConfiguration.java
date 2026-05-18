@@ -23,7 +23,9 @@ import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
 import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JobSerializer;
-import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.serialization.JobSerializers;
+import com.hemju.threadmill.core.serialization.PayloadMigrations;
+import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 import com.hemju.threadmill.store.postgres.PostgresJobStore;
@@ -39,7 +41,7 @@ import com.hemju.threadmill.store.redis.RedisStoreConfig;
  *   <li>A {@link JobStore} — defaults to {@link InMemoryJobStore}. Applications
  *       that want Postgres or Redis define their own bean and this default is
  *       skipped.</li>
- *   <li>A {@link JobSerializer} — defaults to {@link JsonJobSerializer} backed
+ *   <li>A {@link JobSerializer} — defaults to Threadmill JSON serialization backed
  *       by Threadmill's mapper; applications may override with their own
  *       Jackson-backed serializer to share the host application's mapper.</li>
  *   <li>A {@link JobHandlerResolver} — defaults to
@@ -113,14 +115,26 @@ public class ThreadmillAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
-    public JobSerializer threadmillJobSerializer() {
-        return new JsonJobSerializer();
+    public PayloadMigrations threadmillPayloadMigrations() {
+        return PayloadMigrations.empty();
     }
 
     @Bean
     @ConditionalOnMissingBean
-    public JobHandlerResolver threadmillJobHandlerResolver(ApplicationContext context) {
-        return new SpringJobHandlerResolver(context);
+    public TypeNameAliases threadmillTypeNameAliases() {
+        return TypeNameAliases.empty();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public JobSerializer threadmillJobSerializer(TypeNameAliases aliases, PayloadMigrations payloadMigrations) {
+        return JobSerializers.json(aliases, payloadMigrations);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public JobHandlerResolver threadmillJobHandlerResolver(ApplicationContext context, TypeNameAliases aliases) {
+        return new SpringJobHandlerResolver(context, aliases);
     }
 
     @Bean
@@ -175,8 +189,13 @@ public class ThreadmillAutoConfiguration {
     @Bean
     @ConditionalOnMissingBean
     public ThreadmillRecurringRegistrar threadmillRecurringRegistrar(
-            Scheduler scheduler, ThreadmillJobRegistry registry) {
-        var registrar = new ThreadmillRecurringRegistrar(scheduler, registry);
+            Scheduler scheduler,
+            ThreadmillJobRegistry registry,
+            JobSerializer serializer,
+            ThreadmillProperties properties,
+            ApplicationContext context) {
+        var registrar = new ThreadmillRecurringRegistrar(
+                scheduler, registry, serializer, recurringNamespace(properties, context));
         registrar.registerAll();
         return registrar;
     }
@@ -270,26 +289,38 @@ public class ThreadmillAutoConfiguration {
     }
 
     private static RedisStoreConfig redisStoreConfig(ThreadmillProperties.RedisProperties redis) {
+        var safety = redis.isNoEvictionExternallyValidated()
+                ? RedisStoreConfig.RedisSafetyValidation.externallyValidatedMode()
+                : RedisStoreConfig.RedisSafetyValidation.strict();
         return switch (redis.getMode().toLowerCase(Locale.ROOT)) {
             case "standalone" -> {
                 if (redis.getUri() == null || redis.getUri().isBlank()) {
                     throw new IllegalArgumentException("threadmill.store.redis.uri must be set for standalone Redis");
                 }
-                yield new RedisStoreConfig.Standalone(RedisURI.create(redis.getUri()));
+                yield new RedisStoreConfig.Standalone(RedisURI.create(redis.getUri()), safety);
             }
             case "sentinel" -> {
                 var sentinel = redis.getSentinel();
                 yield new RedisStoreConfig.Sentinel(
-                        sentinel.getMasterName(), parseRedisNodes(sentinel.getNodes()), sentinel.getPassword());
+                        sentinel.getMasterName(), parseRedisNodes(sentinel.getNodes()), sentinel.getPassword(), safety);
             }
             case "cluster" -> {
                 var cluster = redis.getCluster();
-                yield new RedisStoreConfig.Cluster(parseRedisNodes(cluster.getNodes()), cluster.getReadPolicy());
+                yield new RedisStoreConfig.Cluster(
+                        parseRedisNodes(cluster.getNodes()), cluster.getReadPolicy(), safety);
             }
             default ->
                 throw new IllegalArgumentException(
                         "threadmill.store.redis.mode must be standalone, sentinel, or cluster");
         };
+    }
+
+    private static String recurringNamespace(ThreadmillProperties properties, ApplicationContext context) {
+        String configured = properties.getSpring().getRecurringNamespace();
+        if (configured != null && !configured.isBlank()) {
+            return configured;
+        }
+        return context.getEnvironment().getProperty("spring.application.name");
     }
 
     private static List<RedisStoreConfig.HostAndPort> parseRedisNodes(List<String> nodes) {

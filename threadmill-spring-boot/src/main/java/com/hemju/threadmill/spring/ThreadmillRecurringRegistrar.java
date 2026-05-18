@@ -1,5 +1,6 @@
 package com.hemju.threadmill.spring;
 
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -8,7 +9,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.handler.NoPayload;
+import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.Scheduler;
+import com.hemju.threadmill.core.serialization.JobSerializer;
+import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 
 /**
  * Registers handlers annotated with {@code @Job} and {@code @Recurring}
@@ -30,10 +34,19 @@ public class ThreadmillRecurringRegistrar {
 
     private final Scheduler scheduler;
     private final ThreadmillJobRegistry registry;
+    private final JobSerializer serializer;
+    private final String namespace;
 
     public ThreadmillRecurringRegistrar(Scheduler scheduler, ThreadmillJobRegistry registry) {
+        this(scheduler, registry, new JsonJobSerializer(), null);
+    }
+
+    public ThreadmillRecurringRegistrar(
+            Scheduler scheduler, ThreadmillJobRegistry registry, JobSerializer serializer, String namespace) {
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.registry = Objects.requireNonNull(registry, "registry");
+        this.serializer = serializer;
+        this.namespace = namespace == null || namespace.isBlank() ? null : namespace;
     }
 
     /** Returns the recurring registrations this registrar would publish. */
@@ -50,13 +63,12 @@ public class ThreadmillRecurringRegistrar {
      * during context refresh by the auto-configuration; safe to call again.
      */
     public void registerAll() {
+        var desired = new ArrayList<CronTask>();
         for (var registration : recurring()) {
-            if (registration.payloadType() != NoPayload.class) {
-                throw new IllegalStateException("Annotation-driven recurring requires JobHandler<NoPayload>; handler "
-                        + registration.handlerType().getName()
-                        + " declares payload "
-                        + registration.payloadType().getName()
-                        + ". Use Scheduler.defineRecurring(...) for handlers with a non-trivial payload.");
+            CronTask task = taskFor(registration);
+            desired.add(task);
+            if (namespace != null) {
+                continue;
             }
             var recurring = registration.recurring();
             scheduler.defineRecurring(
@@ -67,12 +79,49 @@ public class ThreadmillRecurringRegistrar {
                     registration.queue(),
                     registration.priority(),
                     recurring.missedRunPolicy());
-            LOG.info(
-                    "Threadmill: registered recurring task '{}' on queue '{}' for handler {} (trigger={})",
-                    recurring.name(),
-                    registration.queue(),
-                    registration.handlerType().getName(),
-                    recurring.trigger());
+            logRegistered(task, null);
         }
+        if (namespace != null) {
+            scheduler.reconcileRecurring(namespace, desired);
+            for (CronTask task : desired) {
+                logRegistered(task, namespace);
+            }
+        } else if (!desired.isEmpty()) {
+            LOG.warn("Threadmill: recurring cleanup is disabled because no recurring namespace is configured");
+        }
+    }
+
+    private CronTask taskFor(ThreadmillJobRegistry.Registration registration) {
+        if (registration.payloadType() != NoPayload.class) {
+            throw new IllegalStateException("Annotation-driven recurring requires JobHandler<NoPayload>; handler "
+                    + registration.handlerType().getName()
+                    + " declares payload "
+                    + registration.payloadType().getName()
+                    + ". Use Scheduler.defineRecurring(...) for handlers with a non-trivial payload.");
+        }
+        if (serializer == null) {
+            throw new IllegalStateException("Annotation-driven recurring reconciliation requires a JobSerializer");
+        }
+        var recurring = registration.recurring();
+        return new CronTask(
+                recurring.name(),
+                recurring.trigger(),
+                registration.handlerType().getName(),
+                serializer.serializePayload(NoPayload.INSTANCE),
+                registration.queue(),
+                registration.priority(),
+                recurring.missedRunPolicy(),
+                ZoneId.systemDefault(),
+                true);
+    }
+
+    private void logRegistered(CronTask task, String namespace) {
+        LOG.info(
+                "Threadmill: registered recurring task '{}' on queue '{}' for handler {} (trigger={}, namespace={})",
+                task.name(),
+                task.queue(),
+                task.handlerType(),
+                task.trigger(),
+                namespace == null ? "<none>" : namespace);
     }
 }

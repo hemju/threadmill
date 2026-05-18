@@ -101,6 +101,11 @@ public final class RedisKeys {
         return PREFIX + prefix + ":" + userSegment(name);
     }
 
+    public static String cronTaskNamespace(String namespace) {
+        Objects.requireNonNull(namespace, "namespace");
+        return PREFIX + "cron_task_namespace:" + userSegment(namespace);
+    }
+
     public static String dedup(String queue, String dedupKey) {
         Objects.requireNonNull(queue, "queue");
         Objects.requireNonNull(dedupKey, "dedupKey");

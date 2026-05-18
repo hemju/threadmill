@@ -1,6 +1,7 @@
 package com.hemju.threadmill.store.redis;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -24,17 +25,22 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobEngineFatalException;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobRelationship;
+import com.hemju.threadmill.core.JobReplacement;
 import com.hemju.threadmill.core.JobSnapshot;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.StoreCapacityExceededException;
 import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
@@ -44,6 +50,8 @@ import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
+import com.hemju.threadmill.store.redis.RedisStoreConfig.RedisSafetyValidation;
+import com.hemju.threadmill.store.redis.RedisStoreConfig.Standalone;
 
 /**
  * Redis-specific regression tests.
@@ -89,6 +97,8 @@ class RedisJobStoreRegressionTest {
 
     @BeforeEach
     void flush() {
+        adminConnection.sync().configSet("maxmemory", "0");
+        adminConnection.sync().configSet("maxmemory-policy", "noeviction");
         adminConnection.sync().flushdb();
     }
 
@@ -100,6 +110,85 @@ class RedisJobStoreRegressionTest {
         return Job.builder()
                 .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
                 .build();
+    }
+
+    @ParameterizedTest
+    @ValueSource(
+            strings = {
+                "allkeys-lru",
+                "allkeys-lfu",
+                "allkeys-random",
+                "volatile-lru",
+                "volatile-lfu",
+                "volatile-random",
+                "volatile-ttl"
+            })
+    void startupRejectsEvictionPolicy(String policy) {
+        adminConnection.sync().configSet("maxmemory-policy", policy);
+        assertThatThrownBy(() -> new RedisJobStore(uri))
+                .isInstanceOf(JobEngineFatalException.class)
+                .hasMessageContaining("noeviction");
+    }
+
+    @Test
+    void externallyValidatedModeAllowsStartupAgainstEvictionPolicy() {
+        adminConnection.sync().configSet("maxmemory-policy", "allkeys-lru");
+        var config = new Standalone(uri, RedisSafetyValidation.externallyValidatedMode());
+
+        RedisJobStore opened = new RedisJobStore(config);
+        try {
+            assertThat(opened.capabilities()).isNotNull();
+        } finally {
+            opened.close();
+        }
+    }
+
+    @Test
+    void writableProbeTranslatesRedisOom() {
+        JobStore store = store();
+        adminConnection.sync().configSet("maxmemory", "1");
+
+        assertThatThrownBy(store::verifyWritable).isInstanceOf(StoreCapacityExceededException.class);
+    }
+
+    @Test
+    void replaceJobMovesIdAcrossByHandlerIndexWhenHandlerSignatureChanges() {
+        JobStore store = store();
+        Job j = Job.builder()
+                .spec(JobSpec.of("com.example.OldHandler", new JobArgument("java.lang.String", "\"x\"")))
+                .build();
+        store.insert(j);
+
+        var sync = adminConnection.sync();
+        assertThat(sync.smembers(RedisKeys.byHandler("com.example.OldHandler"))).containsExactly(j.id().toString());
+        assertThat(sync.smembers(RedisKeys.byHandler("com.example.NewHandler"))).doesNotContain(j.id().toString());
+
+        var newSpec = JobSpec.of("com.example.NewHandler", new JobArgument("java.lang.String", "\"x\""));
+        assertThat(store.replaceJob(j.id(), j.version(), JobReplacement.ofSpec(newSpec)))
+                .isTrue();
+
+        assertThat(sync.smembers(RedisKeys.byHandler("com.example.OldHandler"))).doesNotContain(j.id().toString());
+        assertThat(sync.smembers(RedisKeys.byHandler("com.example.NewHandler"))).containsExactly(j.id().toString());
+        assertThat(store.findByHandlerSignature("com.example.OldHandler", 10)).isEmpty();
+        assertThat(store.findByHandlerSignature("com.example.NewHandler", 10))
+                .extracting(loaded -> loaded.id().toString())
+                .containsExactly(j.id().toString());
+    }
+
+    @Test
+    void replaceJobLeavesByHandlerIndexUnchangedWhenHandlerSignatureIsSame() {
+        JobStore store = store();
+        Job j = Job.builder()
+                .spec(JobSpec.of("com.example.SameHandler", new JobArgument("java.lang.String", "\"a\"")))
+                .build();
+        store.insert(j);
+
+        var sameHandlerNewPayload = JobSpec.of("com.example.SameHandler", new JobArgument("java.lang.String", "\"b\""));
+        assertThat(store.replaceJob(j.id(), j.version(), JobReplacement.ofSpec(sameHandlerNewPayload)))
+                .isTrue();
+
+        assertThat(adminConnection.sync().smembers(RedisKeys.byHandler("com.example.SameHandler")))
+                .containsExactly(j.id().toString());
     }
 
     @Test

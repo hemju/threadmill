@@ -14,9 +14,13 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.locks.LockSupport;
 
 import io.lettuce.core.AbstractRedisClient;
+import io.lettuce.core.Limit;
+import io.lettuce.core.Range;
 import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisCommandExecutionException;
 import io.lettuce.core.RedisURI;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.SetArgs;
@@ -29,6 +33,7 @@ import io.lettuce.core.cluster.api.sync.RedisClusterCommands;
 import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.EnqueueResult;
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobEngineFatalException;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobReplacement;
 import com.hemju.threadmill.core.JobReplacements;
@@ -38,9 +43,13 @@ import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.StaleJobException;
+import com.hemju.threadmill.core.StoreCapacityExceededException;
+import com.hemju.threadmill.core.schedule.CronExpression;
+import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.Mutexes;
@@ -98,17 +107,41 @@ public final class RedisJobStore implements JobStore {
     private final JobSerializer serializer;
     private final JobStoreCapabilities capabilities;
     private final boolean ownsClient;
+    private final RedisStoreConfig.RedisSafetyValidation safetyValidation;
 
     public RedisJobStore(RedisURI uri) {
-        this(connectStandalone(RedisClient.create(uri)), new JsonJobSerializer(), defaultCapabilities(), true);
+        this(
+                connectStandalone(RedisClient.create(uri)),
+                new JsonJobSerializer(),
+                defaultCapabilities(),
+                true,
+                RedisStoreConfig.RedisSafetyValidation.strict());
     }
 
     public RedisJobStore(RedisStoreConfig config) {
-        this(connect(config), new JsonJobSerializer(), defaultCapabilities(), true);
+        this(connect(config), new JsonJobSerializer(), defaultCapabilities(), true, config.safetyValidation());
     }
 
     public RedisJobStore(RedisClient client, JobSerializer serializer, JobStoreCapabilities capabilities) {
-        this(connectStandalone(Objects.requireNonNull(client, "client")), serializer, capabilities, false);
+        this(
+                connectStandalone(Objects.requireNonNull(client, "client")),
+                serializer,
+                capabilities,
+                false,
+                RedisStoreConfig.RedisSafetyValidation.strict());
+    }
+
+    public RedisJobStore(
+            RedisClient client,
+            JobSerializer serializer,
+            JobStoreCapabilities capabilities,
+            RedisStoreConfig.RedisSafetyValidation safetyValidation) {
+        this(
+                connectStandalone(Objects.requireNonNull(client, "client")),
+                serializer,
+                capabilities,
+                false,
+                safetyValidation);
     }
 
     private record ConnectionHandle(
@@ -153,13 +186,19 @@ public final class RedisJobStore implements JobStore {
     }
 
     private RedisJobStore(
-            ConnectionHandle handle, JobSerializer serializer, JobStoreCapabilities capabilities, boolean ownsClient) {
+            ConnectionHandle handle,
+            JobSerializer serializer,
+            JobStoreCapabilities capabilities,
+            boolean ownsClient,
+            RedisStoreConfig.RedisSafetyValidation safetyValidation) {
         this.client = handle.client();
         this.connection = handle.connection();
         this.commands = handle.commands();
         this.serializer = Objects.requireNonNull(serializer, "serializer");
         this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
         this.ownsClient = ownsClient;
+        this.safetyValidation = Objects.requireNonNull(safetyValidation, "safetyValidation");
+        validateRedisSafety();
     }
 
     /** Closes the underlying connection (and the client, if this instance owns it). */
@@ -175,6 +214,18 @@ public final class RedisJobStore implements JobStore {
     @Override
     public JobStoreCapabilities capabilities() {
         return capabilities;
+    }
+
+    @Override
+    public void verifyWritable() {
+        RedisClusterCommands<String, String> r = sync();
+        String key = RedisKeys.PREFIX + "probe:writable";
+        try {
+            r.set(key, Long.toString(System.nanoTime()), SetArgs.Builder.px(1000));
+            r.del(key);
+        } catch (RuntimeException e) {
+            throw translateCapacity(e);
+        }
     }
 
     // ---------------------------------------------------------------- insert
@@ -249,12 +300,16 @@ public final class RedisJobStore implements JobStore {
             Long.toString(toEpochMicros(stateAt))
         };
 
-        String result = r.eval(LuaScripts.insert(), ScriptOutputType.VALUE, keys, args);
-        if ("EXISTS".equals(result)) {
-            throw new IllegalStateException("Job already exists: " + snapshot.id());
-        }
-        if (snapshot.currentState() == JobState.ENQUEUED) {
-            r.sadd(RedisKeys.QUEUES, snapshot.queue());
+        try {
+            String result = r.eval(LuaScripts.insert(), ScriptOutputType.VALUE, keys, args);
+            if ("EXISTS".equals(result)) {
+                throw new IllegalStateException("Job already exists: " + snapshot.id());
+            }
+            if (snapshot.currentState() == JobState.ENQUEUED) {
+                r.sadd(RedisKeys.QUEUES, snapshot.queue());
+            }
+        } catch (RuntimeException e) {
+            throw translateCapacity(e);
         }
     }
 
@@ -357,22 +412,26 @@ public final class RedisJobStore implements JobStore {
                 argList.add(concurrencyPendingMember(snap));
                 argList.add(Long.toString(toEpochMicros(stateAt)));
             }
-            String result = r.eval(
-                    LuaScripts.insertAll(),
-                    ScriptOutputType.VALUE,
-                    keyList.toArray(new String[0]),
-                    argList.toArray(new String[0]));
-            if (result != null && result.startsWith("EXISTS:")) {
-                int idx = Integer.parseInt(result.substring("EXISTS:".length()));
-                throw new IllegalStateException("Duplicate job id in batch at index " + idx + ": "
-                        + snapshots.get(idx).id());
-            }
-
-            // Add queue names to the QUEUES set for any ENQUEUED jobs.
-            for (JobSnapshot snap : snapshots) {
-                if (snap.currentState() == JobState.ENQUEUED) {
-                    r.sadd(RedisKeys.QUEUES, snap.queue());
+            try {
+                String result = r.eval(
+                        LuaScripts.insertAll(),
+                        ScriptOutputType.VALUE,
+                        keyList.toArray(new String[0]),
+                        argList.toArray(new String[0]));
+                if (result != null && result.startsWith("EXISTS:")) {
+                    int idx = Integer.parseInt(result.substring("EXISTS:".length()));
+                    throw new IllegalStateException("Duplicate job id in batch at index " + idx + ": "
+                            + snapshots.get(idx).id());
                 }
+
+                // Add queue names to the QUEUES set for any ENQUEUED jobs.
+                for (JobSnapshot snap : snapshots) {
+                    if (snap.currentState() == JobState.ENQUEUED) {
+                        r.sadd(RedisKeys.QUEUES, snap.queue());
+                    }
+                }
+            } catch (RuntimeException e) {
+                throw translateCapacity(e);
             }
         } finally {
             releaseClaimLocks(r, locks);
@@ -428,50 +487,55 @@ public final class RedisJobStore implements JobStore {
         Instant stateAt = lastTransitionTime(snapshot, snapshot.currentState());
         String activeKey = activeKeyFor(snapshot.currentState(), snapshot.queue(), snapshot.ownerNodeId());
         double activeScore = activeScoreFor(snapshot, stateAt);
-        String reply = r.eval(
-                LuaScripts.enqueueIfAbsent(),
-                ScriptOutputType.VALUE,
-                new String[] {
-                    RedisKeys.dedup(snapshot.queue(), dedupKey),
-                    RedisKeys.job(snapshot.id()),
-                    activeKey == null ? "" : activeKey,
-                    RedisKeys.byStateTime(snapshot.currentState()),
-                    RedisKeys.byHandler(snapshot.spec().handlerType()),
-                    RedisKeys.COUNTS,
-                    RedisKeys.dedupExpiry(),
-                    concurrencyPendingKey(snapshot),
-                    concurrencyWorkflowsKey(snapshot.concurrencyKey()),
-                    concurrencyWorkflowCountsKey(snapshot.concurrencyKey())
-                },
-                snapshot.id().toString(),
-                body,
-                snapshot.currentState().name(),
-                snapshot.queue(),
-                snapshot.spec().handlerType(),
-                Integer.toString(snapshot.priority()),
-                snapshot.scheduledFor() == null
-                        ? ""
-                        : Long.toString(snapshot.scheduledFor().toEpochMilli()),
-                snapshot.ownerNodeId() == null ? "" : snapshot.ownerNodeId().toString(),
-                snapshot.ownerHeartbeatAt() == null
-                        ? ""
-                        : Long.toString(snapshot.ownerHeartbeatAt().toEpochMilli()),
-                snapshot.lastCheckinAt() == null
-                        ? ""
-                        : Long.toString(snapshot.lastCheckinAt().toEpochMilli()),
-                Long.toString(stateAt.toEpochMilli()),
-                Long.toString(snapshot.createdAt().toEpochMilli()),
-                Double.toString(activeScore),
-                Long.toString(now.plus(ttl).toEpochMilli()),
-                Long.toString(now.toEpochMilli()),
-                RedisKeys.PREFIX + "job:",
-                snapshot.workflowRootId().toString(),
-                snapshot.concurrencyKey() == null ? "" : snapshot.concurrencyKey(),
-                snapshot.concurrencyMode() == null
-                        ? ""
-                        : snapshot.concurrencyMode().name(),
-                concurrencyPendingMember(snapshot),
-                Long.toString(toEpochMicros(stateAt)));
+        String reply;
+        try {
+            reply = r.eval(
+                    LuaScripts.enqueueIfAbsent(),
+                    ScriptOutputType.VALUE,
+                    new String[] {
+                        RedisKeys.dedup(snapshot.queue(), dedupKey),
+                        RedisKeys.job(snapshot.id()),
+                        activeKey == null ? "" : activeKey,
+                        RedisKeys.byStateTime(snapshot.currentState()),
+                        RedisKeys.byHandler(snapshot.spec().handlerType()),
+                        RedisKeys.COUNTS,
+                        RedisKeys.dedupExpiry(),
+                        concurrencyPendingKey(snapshot),
+                        concurrencyWorkflowsKey(snapshot.concurrencyKey()),
+                        concurrencyWorkflowCountsKey(snapshot.concurrencyKey())
+                    },
+                    snapshot.id().toString(),
+                    body,
+                    snapshot.currentState().name(),
+                    snapshot.queue(),
+                    snapshot.spec().handlerType(),
+                    Integer.toString(snapshot.priority()),
+                    snapshot.scheduledFor() == null
+                            ? ""
+                            : Long.toString(snapshot.scheduledFor().toEpochMilli()),
+                    snapshot.ownerNodeId() == null ? "" : snapshot.ownerNodeId().toString(),
+                    snapshot.ownerHeartbeatAt() == null
+                            ? ""
+                            : Long.toString(snapshot.ownerHeartbeatAt().toEpochMilli()),
+                    snapshot.lastCheckinAt() == null
+                            ? ""
+                            : Long.toString(snapshot.lastCheckinAt().toEpochMilli()),
+                    Long.toString(stateAt.toEpochMilli()),
+                    Long.toString(snapshot.createdAt().toEpochMilli()),
+                    Double.toString(activeScore),
+                    Long.toString(now.plus(ttl).toEpochMilli()),
+                    Long.toString(now.toEpochMilli()),
+                    RedisKeys.PREFIX + "job:",
+                    snapshot.workflowRootId().toString(),
+                    snapshot.concurrencyKey() == null ? "" : snapshot.concurrencyKey(),
+                    snapshot.concurrencyMode() == null
+                            ? ""
+                            : snapshot.concurrencyMode().name(),
+                    concurrencyPendingMember(snapshot),
+                    Long.toString(toEpochMicros(stateAt)));
+        } catch (RuntimeException e) {
+            throw translateCapacity(e);
+        }
         if (reply != null && reply.startsWith("COALESCED:")) {
             return new EnqueueResult.Coalesced(JobId.parse(reply.substring("COALESCED:".length())));
         }
@@ -479,7 +543,11 @@ public final class RedisJobStore implements JobStore {
             throw new IllegalStateException("Job already exists: " + job.id());
         }
         if (snapshot.currentState() == JobState.ENQUEUED) {
-            r.sadd(RedisKeys.QUEUES, snapshot.queue());
+            try {
+                r.sadd(RedisKeys.QUEUES, snapshot.queue());
+            } catch (RuntimeException e) {
+                throw translateCapacity(e);
+            }
         }
         job.adoptVersion(version);
         return new EnqueueResult.Created(job.id());
@@ -578,12 +646,21 @@ public final class RedisJobStore implements JobStore {
             Long.toString(toEpochMicros(stateAt))
         };
 
-        String result = r.eval(LuaScripts.saveAtomic(), ScriptOutputType.VALUE, keys, args);
+        String result;
+        try {
+            result = r.eval(LuaScripts.saveAtomic(), ScriptOutputType.VALUE, keys, args);
+        } catch (RuntimeException e) {
+            throw translateCapacity(e);
+        }
         if ("VANISHED".equals(result) || "STALE".equals(result)) {
             throw new StaleJobException(job.id(), expectedVersion);
         }
         if (snapshot.currentState() == JobState.ENQUEUED) {
-            r.sadd(RedisKeys.QUEUES, snapshot.queue());
+            try {
+                r.sadd(RedisKeys.QUEUES, snapshot.queue());
+            } catch (RuntimeException e) {
+                throw translateCapacity(e);
+            }
         }
         job.adoptVersion(nextVersion);
     }
@@ -742,8 +819,7 @@ public final class RedisJobStore implements JobStore {
             if (!result.isEmpty() || !blocked) {
                 return result;
             }
-            java.util.concurrent.locks.LockSupport.parkNanos(
-                    Duration.ofMillis(2).toNanos());
+            LockSupport.parkNanos(Duration.ofMillis(2).toNanos());
         }
         return result;
     }
@@ -817,8 +893,12 @@ public final class RedisJobStore implements JobStore {
     @Override
     public void recordNodeHeartbeat(NodeId nodeId, Instant now) {
         RedisClusterCommands<String, String> r = sync();
-        r.set(RedisKeys.nodeHeartbeat(nodeId), Long.toString(now.toEpochMilli()), SetArgs.Builder.ex(60));
-        r.sadd(RedisKeys.NODES, nodeId.toString());
+        try {
+            r.set(RedisKeys.nodeHeartbeat(nodeId), Long.toString(now.toEpochMilli()), SetArgs.Builder.ex(60));
+            r.sadd(RedisKeys.NODES, nodeId.toString());
+        } catch (RuntimeException e) {
+            throw translateCapacity(e);
+        }
     }
 
     @Override
@@ -864,8 +944,8 @@ public final class RedisJobStore implements JobStore {
         if (max <= 0) return List.of();
         List<String> ids = sync().zrangebyscore(
                         RedisKeys.SCHEDULED,
-                        io.lettuce.core.Range.create(Double.NEGATIVE_INFINITY, (double) now.toEpochMilli()),
-                        io.lettuce.core.Limit.create(0, max));
+                        Range.create(Double.NEGATIVE_INFINITY, (double) now.toEpochMilli()),
+                        Limit.create(0, max));
         return loadJobs(ids);
     }
 
@@ -875,8 +955,8 @@ public final class RedisJobStore implements JobStore {
         if (max <= 0) return List.of();
         List<String> ids = sync().zrangebyscore(
                         RedisKeys.PROCESSING_ALL,
-                        io.lettuce.core.Range.create(Double.NEGATIVE_INFINITY, (double) heartbeatExpiry.toEpochMilli()),
-                        io.lettuce.core.Limit.create(0, max));
+                        Range.create(Double.NEGATIVE_INFINITY, (double) heartbeatExpiry.toEpochMilli()),
+                        Limit.create(0, max));
         return loadJobs(ids);
     }
 
@@ -977,8 +1057,8 @@ public final class RedisJobStore implements JobStore {
         RedisClusterCommands<String, String> r = sync();
         List<String> keys = r.zrangebyscore(
                 RedisKeys.dedupExpiry(),
-                io.lettuce.core.Range.create(Double.NEGATIVE_INFINITY, (double) now.toEpochMilli()),
-                io.lettuce.core.Limit.create(0, max));
+                Range.create(Double.NEGATIVE_INFINITY, (double) now.toEpochMilli()),
+                Limit.create(0, max));
         long removed = 0L;
         for (String key : keys) {
             String jobId = r.hget(key, "job_id");
@@ -1015,8 +1095,8 @@ public final class RedisJobStore implements JobStore {
         RedisClusterCommands<String, String> r = sync();
         List<String> ids = r.zrangebyscore(
                 RedisKeys.byStateTime(state),
-                io.lettuce.core.Range.create(Double.NEGATIVE_INFINITY, (double) cutoff.toEpochMilli()),
-                io.lettuce.core.Limit.create(0, max));
+                Range.create(Double.NEGATIVE_INFINITY, (double) cutoff.toEpochMilli()),
+                Limit.create(0, max));
         if (ids.isEmpty()) return 0L;
         long removed = 0;
         for (String idStr : ids) {
@@ -1094,6 +1174,7 @@ public final class RedisJobStore implements JobStore {
         if (currentVersion != expectedVersion) {
             throw new StaleJobException(id, expectedVersion);
         }
+        String oldHandler = hash.get("handler_signature");
         String oldQueue = hash.get("queue");
         String oldConcurrencyKey = blankToNull(hash.get("concurrency_key"));
         String oldConcurrencyMode = blankToNull(hash.get("concurrency_mode"));
@@ -1117,7 +1198,9 @@ public final class RedisJobStore implements JobStore {
             oldActive == null ? "" : oldActive,
             RedisKeys.byStateTime(state),
             concurrencyPendingKey(oldConcurrencyKey),
-            concurrencyPendingKey(snap)
+            concurrencyPendingKey(snap),
+            RedisKeys.byHandler(oldHandler),
+            RedisKeys.byHandler(snap.spec().handlerType())
         };
         var args = new String[] {
             id.toString(),
@@ -1137,10 +1220,21 @@ public final class RedisJobStore implements JobStore {
             concurrencyPendingMember(snap),
             Long.toString(toEpochMicros(stateAt))
         };
-        String reply = r.eval(LuaScripts.replaceJob(), ScriptOutputType.VALUE, keys, args);
+        String reply;
+        try {
+            reply = r.eval(LuaScripts.replaceJob(), ScriptOutputType.VALUE, keys, args);
+        } catch (RuntimeException e) {
+            throw translateCapacity(e);
+        }
         if ("STALE".equals(reply)) throw new StaleJobException(id, expectedVersion);
         if ("OK".equals(reply)) {
-            if (state == JobState.ENQUEUED) r.sadd(RedisKeys.QUEUES, snap.queue());
+            if (state == JobState.ENQUEUED) {
+                try {
+                    r.sadd(RedisKeys.QUEUES, snap.queue());
+                } catch (RuntimeException e) {
+                    throw translateCapacity(e);
+                }
+            }
             return true;
         }
         return false;
@@ -1154,7 +1248,7 @@ public final class RedisJobStore implements JobStore {
         // Compare-and-delete via Lua so we don't race a new acquirer.
         sync().eval(
                         "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
-                        io.lettuce.core.ScriptOutputType.INTEGER,
+                        ScriptOutputType.INTEGER,
                         new String[] {key},
                         holder);
     }
@@ -1162,43 +1256,48 @@ public final class RedisJobStore implements JobStore {
     // ---------------------------------------------------------------- cron tasks
 
     private static final String CRON_TASKS_INDEX = RedisKeys.PREFIX + "cron_tasks";
+    private static final String CRON_TASK_NAMESPACES = RedisKeys.PREFIX + "cron_task_namespaces";
 
     @Override
-    public void upsertCronTask(com.hemju.threadmill.core.schedule.CronTask task) {
+    public void upsertCronTask(CronTask task) {
         Objects.requireNonNull(task, "task");
         Names.requireName("cronTask", task.name());
         Names.requireName("queue", task.queue());
         String kind;
         String value;
         var trigger = task.trigger();
-        if (trigger instanceof com.hemju.threadmill.core.schedule.CronTask.Trigger.CronExpr ce) {
+        if (trigger instanceof CronTask.Trigger.CronExpr ce) {
             kind = "CRON";
             value = ce.expression().expression();
-        } else if (trigger instanceof com.hemju.threadmill.core.schedule.CronTask.Trigger.Interval iv) {
+        } else if (trigger instanceof CronTask.Trigger.Interval iv) {
             kind = "INTERVAL";
             value = iv.interval().toString();
         } else {
             throw new IllegalStateException("Unknown trigger: " + trigger);
         }
         RedisClusterCommands<String, String> r = sync();
-        r.hset(
-                RedisKeys.userKey("cron_task", task.name()),
-                Map.of(
-                        "trigger_kind", kind,
-                        "trigger_value", value,
-                        "handler_signature", task.handlerType(),
-                        "payload_type_tag", task.payloadArgument().typeTag(),
-                        "payload_serialized", task.payloadArgument().serialized(),
-                        "queue", task.queue(),
-                        "priority", Integer.toString(task.priority()),
-                        "missed_run_policy", task.missedRunPolicy().name(),
-                        "time_zone", task.zone().getId(),
-                        "enabled", Boolean.toString(task.enabled())));
-        r.sadd(CRON_TASKS_INDEX, task.name());
+        try {
+            r.hset(
+                    RedisKeys.userKey("cron_task", task.name()),
+                    Map.of(
+                            "trigger_kind", kind,
+                            "trigger_value", value,
+                            "handler_signature", task.handlerType(),
+                            "payload_type_tag", task.payloadArgument().typeTag(),
+                            "payload_serialized", task.payloadArgument().serialized(),
+                            "queue", task.queue(),
+                            "priority", Integer.toString(task.priority()),
+                            "missed_run_policy", task.missedRunPolicy().name(),
+                            "time_zone", task.zone().getId(),
+                            "enabled", Boolean.toString(task.enabled())));
+            r.sadd(CRON_TASKS_INDEX, task.name());
+        } catch (RuntimeException e) {
+            throw translateCapacity(e);
+        }
     }
 
     @Override
-    public Optional<com.hemju.threadmill.core.schedule.CronTask> findCronTask(String name) {
+    public Optional<CronTask> findCronTask(String name) {
         Names.requireName("cronTask", name);
         Map<String, String> hash = sync().hgetall(RedisKeys.userKey("cron_task", name));
         if (hash == null || hash.isEmpty()) return Optional.empty();
@@ -1206,8 +1305,8 @@ public final class RedisJobStore implements JobStore {
     }
 
     @Override
-    public List<com.hemju.threadmill.core.schedule.CronTask> listCronTasks() {
-        List<com.hemju.threadmill.core.schedule.CronTask> out = new ArrayList<>();
+    public List<CronTask> listCronTasks() {
+        List<CronTask> out = new ArrayList<>();
         for (String name : sync().smembers(CRON_TASKS_INDEX)) {
             findCronTask(name).ifPresent(out::add);
         }
@@ -1221,6 +1320,29 @@ public final class RedisJobStore implements JobStore {
         r.del(RedisKeys.userKey("cron_task", name));
         r.del(RedisKeys.userKey("cron_task_state", name));
         r.srem(CRON_TASKS_INDEX, name);
+        for (String namespace : r.smembers(CRON_TASK_NAMESPACES)) {
+            r.srem(RedisKeys.cronTaskNamespace(namespace), name);
+        }
+    }
+
+    @Override
+    public void recordCronTaskOwnership(String namespace, String taskName) {
+        Names.requireName("cronTaskNamespace", namespace);
+        Names.requireName("cronTask", taskName);
+        RedisClusterCommands<String, String> r = sync();
+        try {
+            r.sadd(CRON_TASK_NAMESPACES, namespace);
+            r.sadd(RedisKeys.cronTaskNamespace(namespace), taskName);
+        } catch (RuntimeException e) {
+            throw translateCapacity(e);
+        }
+    }
+
+    @Override
+    public Set<String> listCronTaskNamesOwnedBy(String namespace) {
+        Names.requireName("cronTaskNamespace", namespace);
+        Set<String> names = sync().smembers(RedisKeys.cronTaskNamespace(namespace));
+        return names == null ? Set.of() : Set.copyOf(names);
     }
 
     @Override
@@ -1238,8 +1360,12 @@ public final class RedisJobStore implements JobStore {
             fields.put("in_flight_job_id", state.inFlightJobId().toString());
         RedisClusterCommands<String, String> r = sync();
         String key = RedisKeys.userKey("cron_task_state", state.taskName());
-        r.del(key); // overwrite semantics so cleared fields actually clear
-        if (!fields.isEmpty()) r.hset(key, fields);
+        try {
+            r.del(key); // overwrite semantics so cleared fields actually clear
+            if (!fields.isEmpty()) r.hset(key, fields);
+        } catch (RuntimeException e) {
+            throw translateCapacity(e);
+        }
     }
 
     @Override
@@ -1260,25 +1386,23 @@ public final class RedisJobStore implements JobStore {
                 hash.containsKey("in_flight_job_id") ? UUID.fromString(hash.get("in_flight_job_id")) : null));
     }
 
-    private com.hemju.threadmill.core.schedule.CronTask readCronTask(String name, Map<String, String> hash) {
+    private CronTask readCronTask(String name, Map<String, String> hash) {
         String kind = hash.get("trigger_kind");
         String value = hash.get("trigger_value");
-        com.hemju.threadmill.core.schedule.CronTask.Trigger trigger;
+        CronTask.Trigger trigger;
         if ("CRON".equals(kind)) {
-            trigger = new com.hemju.threadmill.core.schedule.CronTask.Trigger.CronExpr(
-                    com.hemju.threadmill.core.schedule.CronExpression.parse(value));
+            trigger = new CronTask.Trigger.CronExpr(CronExpression.parse(value));
         } else {
-            trigger = new com.hemju.threadmill.core.schedule.CronTask.Trigger.Interval(Duration.parse(value));
+            trigger = new CronTask.Trigger.Interval(Duration.parse(value));
         }
-        return new com.hemju.threadmill.core.schedule.CronTask(
+        return new CronTask(
                 name,
                 trigger,
                 hash.get("handler_signature"),
-                new com.hemju.threadmill.core.spec.JobArgument(
-                        hash.get("payload_type_tag"), hash.get("payload_serialized")),
+                new JobArgument(hash.get("payload_type_tag"), hash.get("payload_serialized")),
                 hash.get("queue"),
                 Integer.parseInt(hash.get("priority")),
-                com.hemju.threadmill.core.schedule.CronTask.MissedRunPolicy.valueOf(hash.get("missed_run_policy")),
+                CronTask.MissedRunPolicy.valueOf(hash.get("missed_run_policy")),
                 ZoneId.of(hash.get("time_zone")),
                 Boolean.parseBoolean(hash.get("enabled")));
     }
@@ -1287,6 +1411,57 @@ public final class RedisJobStore implements JobStore {
 
     private RedisClusterCommands<String, String> sync() {
         return commands;
+    }
+
+    private void validateRedisSafety() {
+        if (!safetyValidation.requireNoEviction() || safetyValidation.externallyValidated()) {
+            return;
+        }
+        try {
+            Map<String, String> config = commands.configGet("maxmemory-policy");
+            String policy = config == null ? null : config.get("maxmemory-policy");
+            if (!"noeviction".equals(policy)) {
+                throw new JobEngineFatalException("Redis maxmemory-policy must be noeviction for Threadmill job-store "
+                        + "usage, but was "
+                        + policy
+                        + ". Eviction can delete coordinated job hashes, indexes, counts, leases, or heartbeats. "
+                        + "Use a no-eviction Redis or configure RedisSafetyValidation.externallyValidated() for "
+                        + "managed Redis where CONFIG GET is unavailable.");
+            }
+        } catch (JobEngineFatalException fatal) {
+            throw fatal;
+        } catch (RuntimeException e) {
+            throw new JobEngineFatalException(
+                    "Could not verify Redis maxmemory-policy. Threadmill requires "
+                            + "noeviction for Redis-backed jobs; use RedisSafetyValidation.externallyValidated() only "
+                            + "after validating the managed Redis configuration externally.",
+                    e);
+        }
+    }
+
+    private static RuntimeException translateCapacity(RuntimeException e) {
+        if (isCapacityFailure(e)) {
+            return new StoreCapacityExceededException(
+                    "Redis rejected a Threadmill write because maxmemory was reached", e);
+        }
+        return e;
+    }
+
+    private static boolean isCapacityFailure(Throwable t) {
+        Throwable current = t;
+        while (current != null) {
+            if (current instanceof RedisCommandExecutionException) {
+                String message = current.getMessage();
+                if (message != null
+                        && (message.contains("OOM")
+                                || message.contains("maxmemory")
+                                || message.contains("command not allowed"))) {
+                    return true;
+                }
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 
     private List<Job> loadJobs(List<String> ids) {
@@ -1409,8 +1584,7 @@ public final class RedisJobStore implements JobStore {
             if (System.nanoTime() >= deadline) {
                 throw new IllegalStateException("Timed out waiting for concurrency claim lock");
             }
-            java.util.concurrent.locks.LockSupport.parkNanos(
-                    Duration.ofMillis(2).toNanos());
+            LockSupport.parkNanos(Duration.ofMillis(2).toNanos());
         }
     }
 

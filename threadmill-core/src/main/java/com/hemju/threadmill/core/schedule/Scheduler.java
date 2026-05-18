@@ -4,6 +4,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
@@ -219,6 +221,30 @@ public final class Scheduler {
 
     public void deleteCronTask(String name) {
         store.deleteCronTask(name);
+    }
+
+    /**
+     * Reconcile a namespace-owned recurring-task set with the currently desired
+     * definitions. Tasks previously recorded as owned by {@code namespace} but
+     * missing from {@code desiredTasks} are deleted with their schedule state.
+     */
+    public void reconcileRecurring(String namespace, Collection<CronTask> desiredTasks) {
+        Objects.requireNonNull(namespace, "namespace");
+        Objects.requireNonNull(desiredTasks, "desiredTasks");
+        if (namespace.isBlank()) {
+            throw new IllegalArgumentException("namespace must not be blank");
+        }
+        Set<String> desiredNames = new HashSet<>();
+        for (CronTask task : desiredTasks) {
+            desiredNames.add(task.name());
+            upsertCron(task);
+            store.recordCronTaskOwnership(namespace, task.name());
+        }
+        for (String owned : store.listCronTaskNamesOwnedBy(namespace)) {
+            if (!desiredNames.contains(owned)) {
+                store.deleteCronTask(owned);
+            }
+        }
     }
 
     /**

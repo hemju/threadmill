@@ -310,12 +310,22 @@ public class ThreadmillProperties {
          */
         private boolean enqueueAfterCommit = true;
 
+        private String recurringNamespace;
+
         public boolean isEnqueueAfterCommit() {
             return enqueueAfterCommit;
         }
 
         public void setEnqueueAfterCommit(boolean enqueueAfterCommit) {
             this.enqueueAfterCommit = enqueueAfterCommit;
+        }
+
+        public String getRecurringNamespace() {
+            return recurringNamespace;
+        }
+
+        public void setRecurringNamespace(String recurringNamespace) {
+            this.recurringNamespace = recurringNamespace;
         }
     }
 
@@ -355,6 +365,7 @@ public class ThreadmillProperties {
     public static final class RedisProperties {
         private String mode = "standalone";
         private String uri;
+        private boolean noEvictionExternallyValidated;
         private SentinelProperties sentinel = new SentinelProperties();
         private ClusterProperties cluster = new ClusterProperties();
 
@@ -378,6 +389,14 @@ public class ThreadmillProperties {
 
         public void setUri(String uri) {
             this.uri = uri;
+        }
+
+        public boolean isNoEvictionExternallyValidated() {
+            return noEvictionExternallyValidated;
+        }
+
+        public void setNoEvictionExternallyValidated(boolean noEvictionExternallyValidated) {
+            this.noEvictionExternallyValidated = noEvictionExternallyValidated;
         }
 
         public SentinelProperties getSentinel() {

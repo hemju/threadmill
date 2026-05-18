@@ -50,3 +50,24 @@ distribution of Threadmill job keys across masters.
 For production durability, enable Redis AOF, for example `appendonly yes`.
 Threadmill's durability on Redis is bounded by the Redis persistence policy you
 choose.
+
+## Memory Policy
+
+Threadmill requires Redis `maxmemory-policy noeviction`. Redis configured as a
+cache (`allkeys-*` or `volatile-*`) is not a safe job store:
+
+- `allkeys-*` can evict job hashes while leaving queue indexes, counts, or
+  handler indexes behind.
+- `volatile-*` can evict TTL-backed operational keys such as node heartbeats,
+  maintenance leases, mutexes, and short claim locks.
+
+`RedisJobStore` validates the policy at startup with `CONFIG GET
+maxmemory-policy` and refuses to start when the policy is not `noeviction`. For
+managed Redis products that block `CONFIG GET`, set
+`threadmill.store.redis.no-eviction-externally-validated=true` only after
+verifying the policy externally.
+
+Monitor `evicted_keys`, `current_eviction_exceeded_time`, and rejected write
+commands. If Redis runs out of memory under `noeviction`, Threadmill treats the
+write failure as a store outage and dispatcher recovery probes perform a small
+write before processing resumes.

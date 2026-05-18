@@ -144,4 +144,36 @@ class JsonJobSerializerTest {
         assertThat(back.name).isEqualTo("widgets");
         assertThat(back.count).isEqualTo(7);
     }
+
+    @Test
+    void payloadAliasDeserializesCompatibleOldTypeTag() {
+        var aliases = TypeNameAliases.builder()
+                .alias("com.example.OldPayload", SamplePayload.class.getName())
+                .build();
+        var aliased = new JsonJobSerializer(aliases);
+
+        Object back =
+                aliased.deserializeArgument(new JobArgument("com.example.OldPayload", "{\"name\":\"w\",\"count\":3}"));
+
+        assertThat(back).isInstanceOf(SamplePayload.class);
+        assertThat(((SamplePayload) back).name).isEqualTo("w");
+    }
+
+    @Test
+    void payloadMigrationRewritesOldJsonBeforeDeserialization() {
+        var migrations = PayloadMigrations.builder()
+                .migration(
+                        "com.example.LegacyPayload",
+                        old -> new JobArgument(SamplePayload.class.getName(), "{\"name\":\"migrated\",\"count\":9}"))
+                .build();
+        var migrating = new JsonJobSerializer(JsonJobSerializer.defaultMapper(), TypeNameAliases.empty(), migrations);
+
+        JobArgument migrated =
+                migrating.migrateArgument(new JobArgument("com.example.LegacyPayload", "{\"ignored\":true}"));
+        SamplePayload back = migrating.deserializePayload(migrated, SamplePayload.class);
+
+        assertThat(migrated.typeTag()).isEqualTo(SamplePayload.class.getName());
+        assertThat(back.name).isEqualTo("migrated");
+        assertThat(back.count).isEqualTo(9);
+    }
 }

@@ -319,6 +319,18 @@ class StoreOutageTest {
         }
 
         @Override
+        public void recordCronTaskOwnership(String namespace, String taskName) {
+            check();
+            delegate.recordCronTaskOwnership(namespace, taskName);
+        }
+
+        @Override
+        public Set<String> listCronTaskNamesOwnedBy(String namespace) {
+            check();
+            return delegate.listCronTaskNamesOwnedBy(namespace);
+        }
+
+        @Override
         public void upsertCronTaskState(com.hemju.threadmill.core.schedule.CronTaskScheduleState s) {
             check();
             delegate.upsertCronTaskState(s);

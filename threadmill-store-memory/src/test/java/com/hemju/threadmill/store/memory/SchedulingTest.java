@@ -5,6 +5,7 @@ import static org.awaitility.Awaitility.await;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
@@ -20,11 +21,13 @@ import com.hemju.threadmill.core.engine.QueueLane;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.schedule.RecurringMaterializer;
 import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.spec.JobArgument;
 
 /**
  * End-to-end tests for the scheduling API, recurring tasks (interval +
@@ -286,6 +289,55 @@ class SchedulingTest {
                 .build();
         node.start();
         await().atMost(Duration.ofSeconds(5)).until(() -> RecorderHandler.RECORD.size() == 2);
+    }
+
+    @Test
+    void reconcileRecurringForOneNamespaceLeavesOtherNamespaceAndManualTasksUntouched() {
+        store.upsertCronTask(cronTaskNamed("task-A"));
+        store.upsertCronTask(cronTaskNamed("task-B"));
+        store.upsertCronTask(cronTaskNamed("task-M"));
+        store.recordCronTaskOwnership("A", "task-A");
+        store.recordCronTaskOwnership("B", "task-B");
+
+        scheduler.reconcileRecurring("A", List.of(cronTaskNamed("task-A-new")));
+
+        assertThat(store.findCronTask("task-A")).isEmpty();
+        assertThat(store.findCronTask("task-A-new")).isPresent();
+        assertThat(store.listCronTaskNamesOwnedBy("A")).containsExactly("task-A-new");
+
+        assertThat(store.findCronTask("task-B")).isPresent();
+        assertThat(store.listCronTaskNamesOwnedBy("B")).containsExactly("task-B");
+
+        assertThat(store.findCronTask("task-M")).isPresent();
+    }
+
+    @Test
+    void reconcileRecurringWithEmptyDesiredSetDeletesAllTasksOwnedByThatNamespace() {
+        store.upsertCronTask(cronTaskNamed("a1"));
+        store.upsertCronTask(cronTaskNamed("a2"));
+        store.upsertCronTask(cronTaskNamed("unowned"));
+        store.recordCronTaskOwnership("A", "a1");
+        store.recordCronTaskOwnership("A", "a2");
+
+        scheduler.reconcileRecurring("A", List.of());
+
+        assertThat(store.findCronTask("a1")).isEmpty();
+        assertThat(store.findCronTask("a2")).isEmpty();
+        assertThat(store.listCronTaskNamesOwnedBy("A")).isEmpty();
+        assertThat(store.findCronTask("unowned")).isPresent();
+    }
+
+    private static CronTask cronTaskNamed(String name) {
+        return new CronTask(
+                name,
+                new CronTask.Trigger.CronExpr(CronExpression.parse("* * * * *")),
+                "com.example.Handler",
+                new JobArgument("com.example.Payload", "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
     }
 
     private ProcessingNodeConfig fastConfig() {

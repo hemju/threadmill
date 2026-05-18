@@ -30,7 +30,7 @@ import com.hemju.threadmill.core.store.JobStore;
  *
  * <p>The loop is robust against transient store outages: a thrown
  * exception trips the circuit breaker, the loop pauses, and a probe
- * thread re-attempts {@link JobStore#capabilities()} until it succeeds —
+ * thread re-attempts {@link JobStore#verifyWritable()} until it succeeds —
  * at which point processing resumes automatically.
  */
 public final class Dispatcher {
@@ -327,7 +327,7 @@ public final class Dispatcher {
 
     private boolean probeStore() {
         try {
-            store.capabilities();
+            store.verifyWritable();
             return true;
         } catch (Throwable t) {
             return false;

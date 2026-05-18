@@ -55,6 +55,15 @@ public interface JobStore {
     /** Returns the static capabilities of this store. */
     JobStoreCapabilities capabilities();
 
+    /**
+     * Lightweight writable probe used after capacity-related store failures.
+     * Implementations with a meaningful no-op write can override this method;
+     * the default preserves the historical read-only probe.
+     */
+    default void verifyWritable() {
+        capabilities();
+    }
+
     // ---------------------------------------------------------------- single-job ops
 
     /**
@@ -296,7 +305,7 @@ public interface JobStore {
      *     "already-expired" means at acquire time. Surfaced eagerly at the
      *     call site.
      */
-    boolean tryAcquireMutex(String name, String holder, java.time.Duration leaseDuration);
+    boolean tryAcquireMutex(String name, String holder, Duration leaseDuration);
 
     /** Release a named mutex iff currently held by {@code holder}. */
     void releaseMutex(String name, String holder);
@@ -341,6 +350,12 @@ public interface JobStore {
 
     /** Delete a cron task and its schedule-state. */
     void deleteCronTask(String name);
+
+    /** Record that {@code namespace} owns the durable cron task {@code taskName}. */
+    void recordCronTaskOwnership(String namespace, String taskName);
+
+    /** List task names currently owned by {@code namespace}. */
+    Set<String> listCronTaskNamesOwnedBy(String namespace);
 
     /** Insert or update the schedule-state for a cron task. */
     void upsertCronTaskState(CronTaskScheduleState state);

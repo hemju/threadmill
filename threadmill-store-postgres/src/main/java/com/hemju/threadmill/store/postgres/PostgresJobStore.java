@@ -1446,6 +1446,46 @@ public final class PostgresJobStore implements JobStore {
     }
 
     @Override
+    public void recordCronTaskOwnership(String namespace, String taskName) {
+        Names.requireName("cronTaskNamespace", namespace);
+        Names.requireName("cronTask", taskName);
+        try {
+            DeadlockRetry.run(() -> {
+                try (Connection conn = dataSource.getConnection();
+                        PreparedStatement ps = conn.prepareStatement(
+                                "INSERT INTO threadmill_cron_task_ownership (namespace, task_name) VALUES (?, ?) "
+                                        + "ON CONFLICT (namespace, task_name) DO NOTHING")) {
+                    ps.setString(1, namespace);
+                    ps.setString(2, taskName);
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("recordCronTaskOwnership failed", e);
+        }
+    }
+
+    @Override
+    public Set<String> listCronTaskNamesOwnedBy(String namespace) {
+        Names.requireName("cronTaskNamespace", namespace);
+        Set<String> out = new HashSet<>();
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement(
+                        "SELECT task_name FROM threadmill_cron_task_ownership WHERE namespace = ?")) {
+            ps.setString(1, namespace);
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    out.add(rs.getString(1));
+                }
+            }
+            return Set.copyOf(out);
+        } catch (SQLException e) {
+            throw new JdbcException("listCronTaskNamesOwnedBy failed", e);
+        }
+    }
+
+    @Override
     public void upsertCronTaskState(CronTaskScheduleState state) {
         Objects.requireNonNull(state, "state");
         try {

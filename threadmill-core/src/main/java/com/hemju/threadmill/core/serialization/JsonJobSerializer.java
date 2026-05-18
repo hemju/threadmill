@@ -49,9 +49,11 @@ import com.hemju.threadmill.core.store.JobStoreCapabilities;
 public final class JsonJobSerializer implements JobSerializer {
 
     private final ObjectMapper mapper;
+    private final TypeNameAliases typeNameAliases;
+    private final PayloadMigrations payloadMigrations;
 
     public JsonJobSerializer() {
-        this(defaultMapper());
+        this(defaultMapper(), TypeNameAliases.empty(), PayloadMigrations.empty());
     }
 
     /**
@@ -60,10 +62,29 @@ public final class JsonJobSerializer implements JobSerializer {
      * application, avoiding two competing Jackson configurations.
      */
     public JsonJobSerializer(ObjectMapper mapper) {
-        this.mapper = Objects.requireNonNull(mapper, "mapper");
+        this(mapper, TypeNameAliases.empty(), PayloadMigrations.empty());
     }
 
-    private static ObjectMapper defaultMapper() {
+    public JsonJobSerializer(TypeNameAliases typeNameAliases) {
+        this(defaultMapper(), typeNameAliases, PayloadMigrations.empty());
+    }
+
+    public JsonJobSerializer(TypeNameAliases typeNameAliases, PayloadMigrations payloadMigrations) {
+        this(defaultMapper(), typeNameAliases, payloadMigrations);
+    }
+
+    public JsonJobSerializer(ObjectMapper mapper, TypeNameAliases typeNameAliases) {
+        this(mapper, typeNameAliases, PayloadMigrations.empty());
+    }
+
+    public JsonJobSerializer(
+            ObjectMapper mapper, TypeNameAliases typeNameAliases, PayloadMigrations payloadMigrations) {
+        this.mapper = Objects.requireNonNull(mapper, "mapper");
+        this.typeNameAliases = Objects.requireNonNull(typeNameAliases, "typeNameAliases");
+        this.payloadMigrations = Objects.requireNonNull(payloadMigrations, "payloadMigrations");
+    }
+
+    public static ObjectMapper defaultMapper() {
         return new ObjectMapper()
                 .registerModule(new JavaTimeModule())
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
@@ -327,14 +348,25 @@ public final class JsonJobSerializer implements JobSerializer {
     @Override
     public Object deserializeArgument(JobArgument argument) {
         Objects.requireNonNull(argument, "argument");
+        JobArgument migrated = migrateArgument(argument);
         try {
-            Class<?> type = Class.forName(argument.typeTag());
-            return mapper.readValue(argument.serialized(), type);
+            Class<?> type = Class.forName(resolveTypeTag(migrated.typeTag()));
+            return mapper.readValue(migrated.serialized(), type);
         } catch (ClassNotFoundException notFound) {
-            throw new SerializationException("Unknown argument type: " + argument.typeTag(), notFound);
+            throw new SerializationException("Unknown argument type: " + migrated.typeTag(), notFound);
         } catch (IOException io) {
             throw new SerializationException("Failed to deserialize argument", io);
         }
+    }
+
+    @Override
+    public String resolveTypeTag(String typeTag) {
+        return typeNameAliases.resolve(typeTag);
+    }
+
+    @Override
+    public JobArgument migrateArgument(JobArgument argument) {
+        return payloadMigrations.migrate(argument).orElse(argument);
     }
 
     @Override
@@ -347,8 +379,9 @@ public final class JsonJobSerializer implements JobSerializer {
     public <P extends JobPayload> P deserializePayload(JobArgument argument, Class<P> type) {
         Objects.requireNonNull(argument, "argument");
         Objects.requireNonNull(type, "type");
+        JobArgument migrated = migrateArgument(argument);
         try {
-            return mapper.readValue(argument.serialized(), type);
+            return mapper.readValue(migrated.serialized(), type);
         } catch (IOException io) {
             throw new SerializationException("Failed to deserialize payload", io);
         }

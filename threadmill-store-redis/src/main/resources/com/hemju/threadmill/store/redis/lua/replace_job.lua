@@ -8,6 +8,8 @@
 --   [4] new by_state_time                   (always the same state — only updated for the score)
 --   [5] old concurrency pending ZSET, or empty
 --   [6] new concurrency pending ZSET, or empty
+--   [7] old by_handler SET
+--   [8] new by_handler SET
 --
 -- ARGV:
 --   [1] job id (string member of zsets)
@@ -35,6 +37,8 @@ local old_active    = KEYS[3]
 local state_time_k  = KEYS[4]
 local old_pending_k = KEYS[5]
 local new_pending_k = KEYS[6]
+local old_handler_k = KEYS[7]
+local new_handler_k = KEYS[8]
 
 local job_id        = ARGV[1]
 local expected_ver  = tonumber(ARGV[2])
@@ -77,6 +81,10 @@ if old_pending_k ~= '' and old_pending_member ~= '' then
 end
 if concurrency_key ~= '' and new_pending_k ~= '' and new_pending_member ~= '' then
     redis.call('ZADD', new_pending_k, new_pending_score, new_pending_member)
+end
+if old_handler_k ~= new_handler_k then
+    redis.call('SREM', old_handler_k, job_id)
+    redis.call('SADD', new_handler_k, job_id)
 end
 -- Rescore in the by_state_time index too (state is unchanged).
 redis.call('ZADD', state_time_k, new_state_at, job_id)

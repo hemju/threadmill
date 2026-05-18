@@ -8,6 +8,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -114,7 +115,7 @@ public final class JobRunner {
         }
 
         Thread carrier = Thread.currentThread();
-        java.util.concurrent.atomic.AtomicBoolean timedOut = new java.util.concurrent.atomic.AtomicBoolean(false);
+        AtomicBoolean timedOut = new AtomicBoolean(false);
         ScheduledFuture<?> watchdog = timeoutExecutor.scheduleAtFixedRate(
                 () -> {
                     var now = Instant.now();
@@ -251,11 +252,12 @@ public final class JobRunner {
         if (job.spec().arguments().isEmpty()) {
             return new EmptyPayload();
         }
-        JobArgument first = job.spec().arguments().get(0);
+        JobArgument first = serializer.migrateArgument(job.spec().arguments().get(0));
+        String resolvedType = serializer.resolveTypeTag(first.typeTag());
         try {
-            Class<?> klass = Class.forName(first.typeTag());
+            Class<?> klass = Class.forName(resolvedType);
             if (!JobPayload.class.isAssignableFrom(klass)) {
-                throw new SerializationException("Argument type is not a JobPayload: " + first.typeTag());
+                throw new SerializationException("Argument type is not a JobPayload: " + resolvedType);
             }
             return serializer.deserializePayload(first, (Class<JobPayload>) klass);
         } catch (ClassNotFoundException cnf) {

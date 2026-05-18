@@ -7,6 +7,7 @@ import org.springframework.context.ApplicationContext;
 
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
+import com.hemju.threadmill.core.serialization.TypeNameAliases;
 
 /**
  * {@link JobHandlerResolver} backed by the Spring {@link ApplicationContext}.
@@ -25,18 +26,25 @@ import com.hemju.threadmill.core.handler.JobHandlerResolver;
 public final class SpringJobHandlerResolver implements JobHandlerResolver {
 
     private final ApplicationContext context;
+    private final TypeNameAliases aliases;
 
     public SpringJobHandlerResolver(ApplicationContext context) {
+        this(context, TypeNameAliases.empty());
+    }
+
+    public SpringJobHandlerResolver(ApplicationContext context, TypeNameAliases aliases) {
         this.context = Objects.requireNonNull(context, "context");
+        this.aliases = Objects.requireNonNull(aliases, "aliases");
     }
 
     @Override
     public JobHandler<?> resolve(String handlerTypeName) throws HandlerResolutionException {
         Objects.requireNonNull(handlerTypeName, "handlerTypeName");
+        String resolvedName = aliases.resolve(handlerTypeName);
         try {
-            Class<?> type = Class.forName(handlerTypeName);
+            Class<?> type = Class.forName(resolvedName);
             if (!JobHandler.class.isAssignableFrom(type)) {
-                throw new HandlerResolutionException("Type " + handlerTypeName + " does not implement JobHandler");
+                throw new HandlerResolutionException("Type " + resolvedName + " does not implement JobHandler");
             }
             try {
                 Object bean = context.getBean(type);

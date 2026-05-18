@@ -103,6 +103,7 @@ public final class InMemoryJobStore implements JobStore {
     private final ConcurrentHashMap<NodeId, Instant> nodeHeartbeats = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CronTask> cronTasks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CronTaskScheduleState> cronTaskStates = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Set<String>> cronTaskOwners = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<DedupKey, DedupRecord> dedupKeys = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, QueuePause> queuePauses = new ConcurrentHashMap<>();
     private final Object claimMutex = new Object();
@@ -668,6 +669,23 @@ public final class InMemoryJobStore implements JobStore {
     public void deleteCronTask(String name) {
         cronTasks.remove(name);
         cronTaskStates.remove(name);
+        cronTaskOwners.values().forEach(tasks -> tasks.remove(name));
+    }
+
+    @Override
+    public void recordCronTaskOwnership(String namespace, String taskName) {
+        Names.requireName("cronTaskNamespace", namespace);
+        Names.requireName("cronTask", taskName);
+        cronTaskOwners
+                .computeIfAbsent(namespace, ignored -> ConcurrentHashMap.newKeySet())
+                .add(taskName);
+    }
+
+    @Override
+    public Set<String> listCronTaskNamesOwnedBy(String namespace) {
+        Names.requireName("cronTaskNamespace", namespace);
+        Set<String> owned = cronTaskOwners.get(namespace);
+        return owned == null ? Set.of() : Set.copyOf(owned);
     }
 
     @Override

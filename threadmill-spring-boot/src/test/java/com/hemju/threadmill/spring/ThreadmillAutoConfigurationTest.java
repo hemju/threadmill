@@ -2,6 +2,8 @@ package com.hemju.threadmill.spring;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.time.ZoneId;
+
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -14,7 +16,11 @@ import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.handler.NoPayload;
+import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
+import com.hemju.threadmill.core.spec.JobArgument;
+import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.store.memory.InMemoryJobStore;
 
 class ThreadmillAutoConfigurationTest {
 
@@ -137,6 +143,93 @@ class ThreadmillAutoConfigurationTest {
     }
 
     @Test
+    void recurringNamespaceDeletesStaleOwnedTasks() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
+                .withBean(JobStore.class, () -> {
+                    var store = new InMemoryJobStore();
+                    store.upsertCronTask(testCronTask("stale-task"));
+                    store.recordCronTaskOwnership("billing", "stale-task");
+                    return store;
+                })
+                .withBean(RecurringIntervalHandler.class)
+                .withPropertyValues("spring.application.name=billing", "threadmill.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    JobStore store = context.getBean(JobStore.class);
+                    assertThat(store.findCronTask("stale-task")).isEmpty();
+                    assertThat(store.listCronTaskNamesOwnedBy("billing"))
+                            .containsExactly(RecurringIntervalHandler.class.getName());
+                });
+    }
+
+    @Test
+    void explicitRecurringNameReconcilesWithoutCreatingSecondTask() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
+                .withBean(JobStore.class, () -> {
+                    var store = new InMemoryJobStore();
+                    store.upsertCronTask(testCronTask("locked-name"));
+                    store.recordCronTaskOwnership("billing", "locked-name");
+                    return store;
+                })
+                .withBean(NamedRecurringHandler.class)
+                .withPropertyValues("threadmill.spring.recurring-namespace=billing", "threadmill.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    JobStore store = context.getBean(JobStore.class);
+                    assertThat(store.findCronTask("locked-name")).isPresent();
+                    assertThat(store.listCronTasks()).extracting(CronTask::name).containsExactly("locked-name");
+                });
+    }
+
+    @Test
+    void missingRecurringNamespaceLeavesStaleTasksUntouched() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
+                .withBean(JobStore.class, () -> {
+                    var store = new InMemoryJobStore();
+                    store.upsertCronTask(testCronTask("stale-task"));
+                    store.recordCronTaskOwnership("billing", "stale-task");
+                    return store;
+                })
+                .withBean(RecurringIntervalHandler.class)
+                .withPropertyValues("threadmill.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(JobStore.class).findCronTask("stale-task"))
+                            .isPresent();
+                });
+    }
+
+    @Test
+    void renamingARecurringHandlerWithoutAnExplicitNameDeletesTheOldOwnedTaskAndRegistersTheNew() {
+        // Simulates: a previous deployment registered a @Recurring handler whose default name was
+        // com.example.OldReportHandler. The class was renamed to com.example.NewReportHandler and
+        // the new deployment registers it again. Without an explicit recurringName, the old row
+        // is now an orphan that would fire forever. The auto-prune path must delete it.
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
+                .withBean(JobStore.class, () -> {
+                    var store = new InMemoryJobStore();
+                    store.upsertCronTask(testCronTask("com.example.OldReportHandler"));
+                    store.recordCronTaskOwnership("billing", "com.example.OldReportHandler");
+                    return store;
+                })
+                .withBean(RecurringIntervalHandler.class)
+                .withPropertyValues("spring.application.name=billing", "threadmill.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    JobStore store = context.getBean(JobStore.class);
+                    String currentHandlerName = RecurringIntervalHandler.class.getName();
+                    assertThat(store.findCronTask("com.example.OldReportHandler"))
+                            .isEmpty();
+                    assertThat(store.findCronTask(currentHandlerName)).isPresent();
+                    assertThat(store.listCronTaskNamesOwnedBy("billing")).containsExactly(currentHandlerName);
+                });
+    }
+
+    @Test
     void intervalAndCronTogetherFailsStartup() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
@@ -230,6 +323,19 @@ class ThreadmillAutoConfigurationTest {
     public static final class PayloadC implements JobPayload {}
 
     public static final class PayloadD implements JobPayload {}
+
+    private static CronTask testCronTask(String name) {
+        return new CronTask(
+                name,
+                new CronTask.Trigger.CronExpr(CronExpression.parse("* * * * *")),
+                "com.example.OldHandler",
+                new JobArgument(NoPayload.class.getName(), "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
+    }
 
     @Job
     static final class FirstHandler implements JobHandler<Payload> {

@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
@@ -35,6 +36,8 @@ import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.engine.JobInterceptor;
 import com.hemju.threadmill.core.engine.WorkflowInterceptor;
+import com.hemju.threadmill.core.schedule.CronExpression;
+import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
@@ -1253,6 +1256,10 @@ public abstract class AbstractJobStoreContractTest {
         assertThat(loaded.queue()).isEqualTo("high");
         assertThat(loaded.priority()).isEqualTo(7);
         assertThat(loaded.currentState()).isEqualTo(JobState.ENQUEUED);
+        assertThat(store.findByHandlerSignature("com.example.Original", 10)).isEmpty();
+        assertThat(store.findByHandlerSignature("com.example.Replacement", 10))
+                .extracting(j2 -> j2.id())
+                .containsExactly(j.id());
     }
 
     @Test
@@ -1293,6 +1300,24 @@ public abstract class AbstractJobStoreContractTest {
                 .isFalse();
     }
 
+    // ================================================================ recurring ownership
+
+    @Test
+    @DisplayName("cron-task ownership tracks namespace-owned tasks")
+    void cronTaskOwnershipTracksNamespace() {
+        store.upsertCronTask(cronTask("owned-a"));
+        store.upsertCronTask(cronTask("owned-b"));
+        store.upsertCronTask(cronTask("manual"));
+        store.recordCronTaskOwnership("app-a", "owned-a");
+        store.recordCronTaskOwnership("app-a", "owned-b");
+
+        assertThat(store.listCronTaskNamesOwnedBy("app-a")).containsExactlyInAnyOrder("owned-a", "owned-b");
+
+        store.deleteCronTask("owned-a");
+        assertThat(store.listCronTaskNamesOwnedBy("app-a")).containsExactly("owned-b");
+        assertThat(store.findCronTask("manual")).isPresent();
+    }
+
     // ================================================================ capabilities
 
     @Test
@@ -1308,6 +1333,19 @@ public abstract class AbstractJobStoreContractTest {
         job.transitionTo(terminalState, Instant.now(), "test.finish", null);
         job.clearOwner();
         store.saveAtomic(job, version);
+    }
+
+    private static CronTask cronTask(String name) {
+        return new CronTask(
+                name,
+                new CronTask.Trigger.CronExpr(CronExpression.parse("* * * * *")),
+                "com.example.Handler",
+                new JobArgument("com.example.Payload", "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
     }
 
     private void promote(JobId id) {
