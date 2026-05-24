@@ -405,6 +405,33 @@ class RedisJobStoreRegressionTest {
     }
 
     @Test
+    void blockedConcurrencyClaimLeavesPendingJobEnqueuedAndIndexesIntact() {
+        JobStore store = store();
+        String key = "project:blocking";
+        Job exclusive = keyedJob("com.example.Exclusive", key, ConcurrencyMode.EXCLUSIVE);
+        Job shared = keyedJob("com.example.Shared", key, ConcurrencyMode.SHARED);
+        store.insert(exclusive);
+        store.insert(shared);
+
+        Job claimedExclusive =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        assertThat(claimedExclusive.id()).isEqualTo(exclusive.id());
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .as("shared job must wait behind active exclusive")
+                .isEmpty();
+
+        RedisCommands<String, String> r = adminConnection.sync();
+        assertThat(r.hget(RedisKeys.job(shared.id()), "state")).isEqualTo("ENQUEUED");
+        assertThat(r.zscore(RedisKeys.queue("default"), shared.id().toString())).isNotNull();
+        assertThat(r.zscore(
+                        RedisKeys.concurrencyPending(key),
+                        RedisKeys.concurrencyPendingMember(ConcurrencyMode.SHARED, shared.id())))
+                .isNotNull();
+        assertThat(r.hget(RedisKeys.COUNTS, "ENQUEUED")).isEqualTo("1");
+        assertThat(r.hget(RedisKeys.COUNTS, "PROCESSING")).isEqualTo("1");
+    }
+
+    @Test
     void serializerFailureDuringClaimLeavesJobEnqueuedAndConsistent() {
         var client = RedisClient.create(uri);
         try {

@@ -18,12 +18,7 @@ the node id, store identity (e.g. `PostgreSQL 18.1 @ threadmill`,
 `Redis standalone host=localhost port=6379`, or
 `In-Memory (volatile, single-JVM)`), capability flags, lane / worker
 breakdown, and the polling / maintenance cadences. It's the operator's
-equivalent of Quartz's scheduler meta-data block — one place to confirm
-"which engine, which store, which lanes" at boot time.
-
-Coming from Quartz? See [docs/threadmill-vs-quartz.md](../docs/threadmill-vs-quartz.md)
-for a side-by-side covering cluster model, payload typing, missed-run
-handling, why there is no standby mode, and what to expect when migrating.
+single place to confirm "which engine, which store, which lanes" at boot time.
 
 ## Quick start
 
@@ -85,10 +80,11 @@ You don't need to do anything to use this — `ProcessingNode.start()` is called
 when the context completes startup; `node.close()` is called as part of
 graceful shutdown.
 
-## Transactional enqueue (`enqueue-after-commit`)
+## Transactional enqueue (`enqueue-mode`)
 
-Default is **`true`** — a job enqueued inside an open Spring transaction is
-held until the transaction commits. A rollback discards the enqueue.
+Default is **`after_commit`** — a job enqueued inside an open Spring
+transaction is held until the transaction commits. A rollback discards the
+enqueue.
 
 ```java
 @Transactional
@@ -105,19 +101,30 @@ actual `store.insert(...)` via `TransactionSynchronizationManager`. If no
 synchronisation is active, the insert is immediate — identical to the
 non-Spring path.
 
-Disable with:
+Use immediate writes with:
 
 ```yaml
 threadmill:
   spring:
-    enqueue-after-commit: false
+    enqueue-mode: immediate
 ```
 
-Two parts of the API stay immediate by design:
+Use caller-transaction participation with Spring + Postgres:
 
-- `enqueueIfAbsent(...)` — must return a meaningful `EnqueueResult.Created` /
-  `EnqueueResult.Coalesced` synchronously.
-- `enqueueRecurring(...)` — cron-task definitions are configuration, not work.
+```yaml
+threadmill:
+  spring:
+    enqueue-mode: join_transaction
+```
+
+`join_transaction` wires `PostgresJobStore` with a Spring transaction-bound
+connection strategy. Job inserts and dedup rows commit or roll back with the
+application transaction; local worker wakeups still fire only after commit.
+Redis and custom stores cannot join a SQL transaction and fail fast if this
+mode is requested.
+
+`enqueueRecurring(...)` stays immediate because cron-task definitions are
+configuration, not work.
 
 See [`docs/transactions.md`](../docs/transactions.md) for the full
 deep-dive (atomic boundaries per backend, handler-is-not-in-our-transaction,
@@ -137,7 +144,7 @@ list). The most common:
 | `threadmill.retentionInterval` | `PT1H` | Master-only retention cadence for succeeded jobs, dedup keys, and stale node records. |
 | `threadmill.defaultMaxAttempts` | `5` | Per-job retry budget (including first attempt). |
 | `threadmill.jobTimeout` | `PT5M` | Per-job timeout. |
-| `threadmill.spring.enqueue-after-commit` | `true` | Defer enqueue to `afterCommit` when a Spring transaction is active. |
+| `threadmill.spring.enqueue-mode` | `after_commit` | `after_commit`, `join_transaction`, or `immediate`. |
 | `threadmill.store.redis.mode` | `standalone` | `standalone` / `sentinel` / `cluster`. |
 | `threadmill.store.redis.uri` | — | `redis://host:port` for standalone mode. |
 

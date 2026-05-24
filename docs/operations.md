@@ -30,6 +30,9 @@ scripts for multi-key transitions. All keys use one `{threadmill}` Cluster slot:
 Cluster gives topology/failover support in this version, not sharded job-key
 distribution. Run Redis with AOF enabled, for example `appendonly yes` and a
 durability policy appropriate for the application.
+Redis must use `maxmemory-policy noeviction`; alert on rejected writes,
+oldest processing heartbeat age, orphan reclaim count, claim failures, queue
+depth, and Redis persistence/replication health.
 
 ## Deduplication
 

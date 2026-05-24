@@ -19,6 +19,7 @@ dependencies {
     compileOnly(project(":threadmill-store-postgres"))
     compileOnly(libs.spring.boot.autoconfigure)
     compileOnly(libs.spring.context)
+    compileOnly(libs.spring.jdbc)
     compileOnly(libs.spring.tx)
     annotationProcessor(
         "org.springframework.boot:spring-boot-configuration-processor:$springBootVersion"
@@ -27,11 +28,16 @@ dependencies {
     testImplementation(project(":threadmill-store-postgres"))
     testImplementation(libs.spring.boot.autoconfigure)
     testImplementation(libs.spring.context)
+    testImplementation(libs.spring.jdbc)
     testImplementation(libs.spring.tx)
+    testImplementation(libs.postgresql.jdbc)
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)
     testImplementation(libs.assertj.core)
     testImplementation(libs.awaitility)
+    testImplementation(platform(libs.testcontainers.bom))
+    testImplementation(libs.testcontainers.junit.jupiter)
+    testImplementation(libs.testcontainers.postgresql)
 }

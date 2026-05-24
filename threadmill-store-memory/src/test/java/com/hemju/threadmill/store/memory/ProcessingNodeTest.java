@@ -541,7 +541,7 @@ class ProcessingNodeTest {
 
     @Test
     void queueFamilyUniformWeightsSpreadFirstClaimsAcrossMatchingQueues() {
-        Map<String, java.util.List<Job>> jobsByQueue = new LinkedHashMap<>();
+        Map<String, List<Job>> jobsByQueue = new LinkedHashMap<>();
         for (int queue = 0; queue < 10; queue++) {
             String queueName = "project:" + queue;
             var jobs = new ArrayList<Job>();
@@ -892,6 +892,56 @@ class ProcessingNodeTest {
     }
 
     @Test
+    void mixedWorkloadQueueFamilyDrainsAndLeavesNoConcurrencyHoldBehind() {
+        var mixedConfig = fastConfig.toBuilder()
+                .workerCount(8)
+                .claimBatchSize(8)
+                .pollInterval(Duration.ofMillis(10))
+                .jobTimeout(Duration.ofSeconds(5))
+                .defaultMaxAttempts(1)
+                .queueFamilyDiscoveryInterval(Duration.ofMillis(20))
+                .build();
+        int resourceCount = 20;
+        int total = 220;
+        for (int i = 0; i < total; i++) {
+            int resource = i % resourceCount;
+            String queue = "project:" + resource;
+            String key = "project:" + resource;
+            boolean exclusive = i % 10 == 0;
+            enqueueHello(
+                    exclusive ? EngineTestHandlers.SlowHandler.class : EngineTestHandlers.CountingHandler.class,
+                    queue,
+                    key,
+                    exclusive ? ConcurrencyMode.EXCLUSIVE : ConcurrencyMode.SHARED);
+        }
+
+        node = ProcessingNode.builder(store)
+                .config(mixedConfig)
+                .lane("project:*", 8, QueueWeights.uniform())
+                .build();
+        node.start();
+
+        await().atMost(Duration.ofSeconds(30))
+                .untilAsserted(() -> assertThat(activeJobs()).as("active jobs").isZero());
+        assertThat(store.findOrphaned(Instant.now().plus(Duration.ofSeconds(1)), 10))
+                .isEmpty();
+
+        node.close();
+        node = null;
+
+        for (int resource = 0; resource < resourceCount; resource++) {
+            String queue = "project:" + resource;
+            String key = "project:" + resource;
+            Job sentinel =
+                    enqueueHello(EngineTestHandlers.CountingHandler.class, queue, key, ConcurrencyMode.EXCLUSIVE);
+            assertThat(store.claimReady(NodeId.newId(), queue, 1, Instant.now()))
+                    .as("concurrency key released for " + key)
+                    .extracting(Job::id)
+                    .containsExactly(sentinel.id());
+        }
+    }
+
+    @Test
     void oversizedExceptionTraceDoesNotBlockFailedTransition() {
         // Audit §6.3 — a handler that throws an exception with a 200KB
         // message must still produce a FAILED save without throwing
@@ -910,6 +960,14 @@ class ProcessingNodeTest {
             assertThat(loaded.stateHistory())
                     .anySatisfy(e -> assertThat(e.message()).startsWith("big-error:"));
         });
+    }
+
+    private long activeJobs() {
+        Map<JobState, Long> counts = store.countsByState();
+        return counts.getOrDefault(JobState.ENQUEUED, 0L)
+                + counts.getOrDefault(JobState.SCHEDULED, 0L)
+                + counts.getOrDefault(JobState.AWAITING, 0L)
+                + counts.getOrDefault(JobState.PROCESSING, 0L);
     }
 
     private static void pauseForOrdering() {

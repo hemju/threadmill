@@ -3,6 +3,7 @@ package com.hemju.threadmill.spring;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.ZoneId;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -37,14 +38,24 @@ class ThreadmillAutoConfigurationTest {
     }
 
     @Test
-    void enqueueAfterCommitFalseUsesPlainJobScheduler() {
+    void immediateEnqueueModeUsesPlainJobScheduler() {
         contextRunner
-                .withPropertyValues("threadmill.spring.enqueue-after-commit=false")
+                .withPropertyValues("threadmill.spring.enqueue-mode=immediate")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context.getBean(JobScheduler.class))
                             .isInstanceOf(JobScheduler.class)
                             .isNotInstanceOf(TransactionAwareJobScheduler.class);
+                });
+    }
+
+    @Test
+    void joinTransactionModeFailsFastWithoutPostgresStore() {
+        contextRunner
+                .withPropertyValues("threadmill.spring.enqueue-mode=join_transaction")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasMessageContaining("join_transaction requires");
                 });
     }
 
@@ -259,11 +270,11 @@ class ThreadmillAutoConfigurationTest {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
                 .withBean(QueueAHandler.class)
-                .withPropertyValues("threadmill.spring.enqueue-after-commit=false")
+                .withPropertyValues("threadmill.spring.enqueue-mode=immediate")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     var bus = context.getBean(LocalWakeBus.class);
-                    var calls = new java.util.concurrent.CopyOnWriteArrayList<String>();
+                    var calls = new CopyOnWriteArrayList<String>();
                     bus.register(calls::add);
 
                     var scheduler = context.getBean(JobScheduler.class);

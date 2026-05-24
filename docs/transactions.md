@@ -75,7 +75,9 @@ Two consequences worth calling out:
 
 ## How does enqueueing inside a `@Transactional` method behave?
 
-With the Spring adapter's default (`threadmill.spring.enqueue-after-commit=true`):
+Spring exposes three enqueue modes through `threadmill.spring.enqueue-mode`.
+
+### `after_commit` (default)
 
 - **`JobId` is reserved synchronously** at the call (UUIDv7, generated
   client-side).
@@ -95,27 +97,54 @@ public void sendWelcome(User u) {
 ```
 
 `findById(id)` returns empty until the transaction commits — the id is
-reserved, but the row doesn't exist yet. Code that depends on
-`findById(id)` succeeding immediately after `enqueue()` returns should set
-`threadmill.spring.enqueue-after-commit=false` and accept the trade-off
-(jobs visible to workers before the transaction commits; if the
-transaction rolls back, the workers see a job that references a non-existent
-parent row).
+reserved, but the row doesn't exist yet. This mode avoids jobs that point to
+rolled-back application rows, but it has one remaining failure window: the
+business transaction can commit and the after-commit job insert can still fail.
+
+### `join_transaction`
+
+Postgres + Spring can make scheduling part of the caller's SQL transaction:
+
+```yaml
+threadmill:
+  spring:
+    enqueue-mode: join_transaction
+```
+
+In this mode normal enqueue, scheduled enqueue, bulk enqueue, and
+`enqueueIfAbsent(...)` write through the same Spring-bound JDBC connection as
+the application transaction. Commit makes both the application rows and the
+Threadmill job visible; rollback removes both. Local worker wakeups still run
+only after commit so workers never race an uncommitted row.
+
+This mode is intentionally limited to the Spring auto-configured
+`PostgresJobStore` using the same `DataSource` as the caller transaction.
+Redis cannot join a SQL transaction; unsupported combinations fail fast at
+startup.
+
+### `immediate`
+
+```yaml
+threadmill:
+  spring:
+    enqueue-mode: immediate
+```
+
+Immediate mode writes jobs as soon as `enqueue()` is called, regardless of
+transaction state. Use it only when jobs may safely run against application
+state that is not committed yet. If the application transaction rolls back,
+the job can reference rows that never existed.
 
 ## What about jobs enqueued from a non-transactional context?
 
-Immediate insert. The `TransactionAwareJobScheduler` checks
-`TransactionSynchronizationManager.isSynchronizationActive()` and, when no
-synchronisation is active, falls through to the underlying `Scheduler.enqueue(...)`
-path — identical to the pre-after-commit behaviour.
+Immediate insert. `after_commit` and `join_transaction` both fall through to a
+normal store-owned transaction when no Spring transaction is active.
 
-## Two paths that stay immediate by design
+## Recurring definitions stay immediate by design
 
-- **`enqueueIfAbsent(...)`** — dedup must return a meaningful
-  `EnqueueResult.Created` / `EnqueueResult.Coalesced` synchronously. We can't
-  defer the actual write without changing the API.
-- **`enqueueRecurring(...)`** — cron-task definitions are configuration, not
-  work. Registering them on rollback would be surprising.
+`enqueueRecurring(...)` writes cron-task definitions immediately. Cron-task
+definitions are configuration, not work. Registering them on rollback would be
+surprising.
 
 ## Connection-pool sharing
 
@@ -237,9 +266,12 @@ engine remembers what it did.
 
 ### How does Threadmill hook into Spring's transaction synchronization?
 
-Via `TransactionSynchronizationManager`. `TransactionAwareJobScheduler` checks
-`isSynchronizationActive()`; when true, it registers a synchronization whose
-`afterCommit()` runs the actual `store.insert(...)`.
+Via `TransactionSynchronizationManager`. In `after_commit` mode,
+`TransactionAwareJobScheduler` registers a synchronization whose
+`afterCommit()` runs the actual `store.insert(...)`. In `join_transaction`
+mode, `TransactionJoinedJobScheduler` writes immediately through a
+Spring-bound PostgreSQL connection and registers only the local wake signal for
+`afterCommit()`.
 
 ### `SmartLifecycle` phase
 
@@ -259,7 +291,7 @@ Don't persist the `JobId` for later lookup until the transaction commits.
 ```yaml
 threadmill:
   spring:
-    enqueue-after-commit: false
+    enqueue-mode: immediate
 ```
 
 Restores the pre-after-commit behaviour: jobs visible to workers as soon as

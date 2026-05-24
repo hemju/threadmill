@@ -71,3 +71,17 @@ Monitor `evicted_keys`, `current_eviction_exceeded_time`, and rejected write
 commands. If Redis runs out of memory under `noeviction`, Threadmill treats the
 write failure as a store outage and dispatcher recovery probes perform a small
 write before processing resumes.
+
+## Reliability Model
+
+Threadmill's Redis backend uses reliable-fetch semantics: claiming work never
+destructively pops a payload. Java prepares the `PROCESSING` body, then
+`claim_commit.lua` atomically verifies the current version/state/queue and
+moves the job hash plus every index/count to `PROCESSING`. A crash before the
+script leaves the job `ENQUEUED`; a crash after the script leaves a complete
+`PROCESSING` record for orphan recovery.
+
+Threadmill treats Redis as first-class durable storage, but only with the
+production constraints above: AOF enabled, `noeviction`, and alerts on oldest
+processing heartbeat, reclaim count, claim failures, rejected writes, and
+queue depth.

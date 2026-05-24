@@ -65,4 +65,5 @@ Redis Cluster uses one `{threadmill}` hash slot. See
 
 | Setting | Default | Notes |
 |---|---:|---|
+| `threadmill.spring.enqueue-mode` | `after_commit` | `after_commit`, `join_transaction`, or `immediate`. `join_transaction` is Spring + Postgres only. |
 | `threadmill.spring.recurring-namespace` | `spring.application.name` | Namespace whose annotation-driven recurring tasks are reconciled at startup. If neither value is set, Threadmill only upserts discovered tasks and does not delete stale ones. |

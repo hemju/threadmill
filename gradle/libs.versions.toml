@@ -22,6 +22,7 @@ spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
 spring-boot-autoconfigure = { module = "org.springframework.boot:spring-boot-autoconfigure", version.ref = "springBoot" }
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test", version.ref = "springBoot" }
 spring-context = { module = "org.springframework:spring-context", version.ref = "springFramework" }
+spring-jdbc = { module = "org.springframework:spring-jdbc", version.ref = "springFramework" }
 spring-tx = { module = "org.springframework:spring-tx", version.ref = "springFramework" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 jackson-datatype-jsr310 = { module = "com.fasterxml.jackson.datatype:jackson-datatype-jsr310", version.ref = "jackson" }

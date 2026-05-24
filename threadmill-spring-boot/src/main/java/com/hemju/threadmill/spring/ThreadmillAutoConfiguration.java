@@ -24,9 +24,11 @@ import com.hemju.threadmill.core.handler.JobHandlerResolver;
 import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JobSerializers;
+import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.serialization.PayloadMigrations;
 import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 import com.hemju.threadmill.store.postgres.PostgresJobStore;
 import com.hemju.threadmill.store.redis.RedisJobStore;
@@ -90,6 +92,13 @@ public class ThreadmillAutoConfiguration {
         DataSource dataSource = lookupOptionalBean(context, DataSource.class);
         if (dataSource != null && isPostgresOnClasspath()) {
             LOG.info("Threadmill: using Postgres store wired from the application's DataSource");
+            if (properties.getSpring().getEnqueueMode() == SpringEnqueueMode.JOIN_TRANSACTION) {
+                return new PostgresJobStore(
+                        dataSource,
+                        new JsonJobSerializer(),
+                        JobStoreCapabilities.defaults(),
+                        new SpringPostgresTransactionBoundary(dataSource));
+            }
             return new PostgresJobStore(dataSource);
         }
         LOG.warn("Threadmill: using in-memory store — jobs will not survive restart. Configure"
@@ -213,10 +222,19 @@ public class ThreadmillAutoConfiguration {
             ProcessingNodeConfig config,
             ThreadmillProperties properties,
             LocalWakeBus wakeBus) {
-        if (properties.getSpring().isEnqueueAfterCommit()) {
-            return new TransactionAwareJobScheduler(store, serializer, registry, config, wakeBus);
-        }
-        return new JobScheduler(store, serializer, registry, config, wakeBus);
+        return switch (properties.getSpring().getEnqueueMode()) {
+            case AFTER_COMMIT -> new TransactionAwareJobScheduler(store, serializer, registry, config, wakeBus);
+            case IMMEDIATE -> new JobScheduler(store, serializer, registry, config, wakeBus);
+            case JOIN_TRANSACTION -> {
+                if (!(store instanceof PostgresJobStore postgresStore)
+                        || !postgresStore.supportsExternalTransactions()) {
+                    throw new IllegalStateException(
+                            "threadmill.spring.enqueue-mode=join_transaction requires the Spring auto-configured"
+                                    + " PostgresJobStore using the same DataSource as the caller's transaction");
+                }
+                yield new TransactionJoinedJobScheduler(store, serializer, registry, config, wakeBus);
+            }
+        };
     }
 
     @Bean

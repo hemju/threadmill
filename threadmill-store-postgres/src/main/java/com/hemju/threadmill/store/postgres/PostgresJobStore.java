@@ -77,6 +77,7 @@ public final class PostgresJobStore implements JobStore {
     static final int MINIMUM_SERVER_VERSION_NUM = 180000;
 
     private final DataSource dataSource;
+    private final PostgresTransactionBoundary transactionBoundary;
     private final JobSerializer serializer;
     private final JobStoreCapabilities capabilities;
     private final String serverVersion;
@@ -87,7 +88,16 @@ public final class PostgresJobStore implements JobStore {
     }
 
     public PostgresJobStore(DataSource dataSource, JobSerializer serializer, JobStoreCapabilities capabilities) {
+        this(dataSource, serializer, capabilities, PostgresTransactionBoundary.owning(dataSource));
+    }
+
+    public PostgresJobStore(
+            DataSource dataSource,
+            JobSerializer serializer,
+            JobStoreCapabilities capabilities,
+            PostgresTransactionBoundary transactionBoundary) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this.transactionBoundary = Objects.requireNonNull(transactionBoundary, "transactionBoundary");
         this.serializer = Objects.requireNonNull(serializer, "serializer");
         this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
         var identity = requirePostgresEighteen(this.dataSource);
@@ -150,6 +160,17 @@ public final class PostgresJobStore implements JobStore {
         return "PostgreSQL " + serverVersion + " @ " + databaseName;
     }
 
+    public boolean supportsExternalTransactions() {
+        return transactionBoundary.supportsExternalTransactions();
+    }
+
+    private <T> T writeTransaction(PostgresConnectionWork<T> work) throws SQLException {
+        if (transactionBoundary.externallyManagedTransactionActive()) {
+            return transactionBoundary.inTransaction(work);
+        }
+        return DeadlockRetry.run(() -> transactionBoundary.inTransaction(work));
+    }
+
     // ---------------------------------------------------------------- single-job
 
     @Override
@@ -159,24 +180,13 @@ public final class PostgresJobStore implements JobStore {
         long version = 1L;
 
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection()) {
-                    conn.setAutoCommit(false);
-                    try {
-                        JobSnapshot snapshot = snapshotForInsert(conn, job, version);
-                        String body = serializer.serializeJob(snapshot, capabilities);
-                        Instant currentStateAt = lastTransitionTime(snapshot, snapshot.currentState());
-                        insertSnapshot(conn, snapshot, body, currentStateAt, version);
-                        noteInsertedWorkflowDescendant(conn, snapshot);
-                        conn.commit();
-                        return null;
-                    } catch (RuntimeException | SQLException e) {
-                        conn.rollback();
-                        throw e;
-                    } finally {
-                        conn.setAutoCommit(true);
-                    }
-                }
+            writeTransaction(conn -> {
+                JobSnapshot snapshot = snapshotForInsert(conn, job, version);
+                String body = serializer.serializeJob(snapshot, capabilities);
+                Instant currentStateAt = lastTransitionTime(snapshot, snapshot.currentState());
+                insertSnapshot(conn, snapshot, body, currentStateAt, version);
+                noteInsertedWorkflowDescendant(conn, snapshot);
+                return null;
             });
         } catch (SQLException e) {
             if ("23505".equals(e.getSQLState())) {
@@ -209,66 +219,55 @@ public final class PostgresJobStore implements JobStore {
 
         long version = 1L;
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection()) {
-                    conn.setAutoCommit(false);
-                    try {
-                        // Re-snapshot inside the txn so workflow_root_id is resolved
-                        // against the live store state; re-serialize matches.
-                        var finalSnapshots = new ArrayList<JobSnapshot>(prepared.size());
-                        var finalBodies = new ArrayList<String>(prepared.size());
-                        var finalStateAt = new ArrayList<Instant>(prepared.size());
-                        for (var p : prepared) {
-                            JobSnapshot snap = snapshotForInsert(conn, p.job, version);
-                            String body = serializer.serializeJob(snap, capabilities);
-                            finalSnapshots.add(snap);
-                            finalBodies.add(body);
-                            finalStateAt.add(lastTransitionTime(snap, snap.currentState()));
-                        }
-                        try (PreparedStatement ps = conn.prepareStatement(
-                                "INSERT INTO threadmill_jobs (id, state, queue, priority, handler_signature, "
-                                        + "scheduled_at, owner_node_id, owner_heartbeat_at, last_checkin_at, current_state_at, "
-                                        + "version, body, created_at, concurrency_key, concurrency_mode, workflow_root_id, "
-                                        + "parent_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
-                            for (int i = 0; i < finalSnapshots.size(); i++) {
-                                JobSnapshot snap = finalSnapshots.get(i);
-                                ps.setObject(1, snap.id().asUuid());
-                                ps.setString(2, snap.currentState().name());
-                                ps.setString(3, snap.queue());
-                                ps.setInt(4, snap.priority());
-                                ps.setString(5, snap.spec().handlerType());
-                                setNullableTimestamp(ps, 6, snap.scheduledFor());
-                                setNullableUuid(
-                                        ps,
-                                        7,
-                                        snap.ownerNodeId() == null
-                                                ? null
-                                                : snap.ownerNodeId().asUuid());
-                                setNullableTimestamp(ps, 8, snap.ownerHeartbeatAt());
-                                setNullableTimestamp(ps, 9, snap.lastCheckinAt());
-                                ps.setTimestamp(10, Timestamp.from(finalStateAt.get(i)));
-                                ps.setLong(11, version);
-                                ps.setString(12, finalBodies.get(i));
-                                ps.setTimestamp(13, Timestamp.from(snap.createdAt()));
-                                setNullableConcurrency(ps, 14, snap.concurrencyKey(), snap.concurrencyMode());
-                                ps.setObject(16, snap.workflowRootId().asUuid());
-                                setNullableParentJobId(ps, 17, snap);
-                                ps.addBatch();
-                            }
-                            ps.executeBatch();
-                        }
-                        for (JobSnapshot snap : finalSnapshots) {
-                            noteInsertedWorkflowDescendant(conn, snap);
-                        }
-                        conn.commit();
-                        return null;
-                    } catch (RuntimeException | SQLException e) {
-                        conn.rollback();
-                        throw e;
-                    } finally {
-                        conn.setAutoCommit(true);
-                    }
+            writeTransaction(conn -> {
+                // Re-snapshot inside the txn so workflow_root_id is resolved
+                // against the live store state; re-serialize matches.
+                var finalSnapshots = new ArrayList<JobSnapshot>(prepared.size());
+                var finalBodies = new ArrayList<String>(prepared.size());
+                var finalStateAt = new ArrayList<Instant>(prepared.size());
+                for (var p : prepared) {
+                    JobSnapshot snap = snapshotForInsert(conn, p.job, version);
+                    String body = serializer.serializeJob(snap, capabilities);
+                    finalSnapshots.add(snap);
+                    finalBodies.add(body);
+                    finalStateAt.add(lastTransitionTime(snap, snap.currentState()));
                 }
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "INSERT INTO threadmill_jobs (id, state, queue, priority, handler_signature, "
+                                + "scheduled_at, owner_node_id, owner_heartbeat_at, last_checkin_at, current_state_at, "
+                                + "version, body, created_at, concurrency_key, concurrency_mode, workflow_root_id, "
+                                + "parent_job_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")) {
+                    for (int i = 0; i < finalSnapshots.size(); i++) {
+                        JobSnapshot snap = finalSnapshots.get(i);
+                        ps.setObject(1, snap.id().asUuid());
+                        ps.setString(2, snap.currentState().name());
+                        ps.setString(3, snap.queue());
+                        ps.setInt(4, snap.priority());
+                        ps.setString(5, snap.spec().handlerType());
+                        setNullableTimestamp(ps, 6, snap.scheduledFor());
+                        setNullableUuid(
+                                ps,
+                                7,
+                                snap.ownerNodeId() == null
+                                        ? null
+                                        : snap.ownerNodeId().asUuid());
+                        setNullableTimestamp(ps, 8, snap.ownerHeartbeatAt());
+                        setNullableTimestamp(ps, 9, snap.lastCheckinAt());
+                        ps.setTimestamp(10, Timestamp.from(finalStateAt.get(i)));
+                        ps.setLong(11, version);
+                        ps.setString(12, finalBodies.get(i));
+                        ps.setTimestamp(13, Timestamp.from(snap.createdAt()));
+                        setNullableConcurrency(ps, 14, snap.concurrencyKey(), snap.concurrencyMode());
+                        ps.setObject(16, snap.workflowRootId().asUuid());
+                        setNullableParentJobId(ps, 17, snap);
+                        ps.addBatch();
+                    }
+                    ps.executeBatch();
+                }
+                for (JobSnapshot snap : finalSnapshots) {
+                    noteInsertedWorkflowDescendant(conn, snap);
+                }
+                return null;
             });
         } catch (SQLException e) {
             if ("23505".equals(e.getSQLState())) {
@@ -295,47 +294,39 @@ public final class PostgresJobStore implements JobStore {
         }
         long version = 1L;
         try {
-            return DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection()) {
-                    conn.setAutoCommit(false);
-                    try {
-                        JobSnapshot snapshot = snapshotForInsert(conn, job, version);
-                        String body = serializer.serializeJob(snapshot, capabilities);
-                        Instant currentStateAt = lastTransitionTime(snapshot, snapshot.currentState());
-                        Optional<JobId> existing = findActiveDedup(conn, job.queue(), dedupKey, now);
-                        if (existing.isPresent()) {
-                            conn.commit();
-                            return new EnqueueResult.Coalesced(existing.get());
-                        }
-                        insertSnapshot(conn, snapshot, body, currentStateAt, version);
-                        noteInsertedWorkflowDescendant(conn, snapshot);
-                        try (PreparedStatement ps = conn.prepareStatement(
-                                "INSERT INTO threadmill_dedup_keys (queue, dedup_key, job_id, expires_at) VALUES (?, ?, ?, ?)")) {
-                            ps.setString(1, job.queue());
-                            ps.setString(2, dedupKey);
-                            ps.setObject(3, job.id().asUuid());
-                            ps.setTimestamp(4, Timestamp.from(now.plus(ttl)));
-                            ps.executeUpdate();
-                        }
-                        conn.commit();
-                        job.adoptVersion(version);
-                        return new EnqueueResult.Created(job.id());
-                    } catch (SQLException e) {
-                        conn.rollback();
-                        if ("23505".equals(e.getSQLState())) {
-                            Optional<JobId> existing = findActiveDedup(conn, job.queue(), dedupKey, now);
-                            if (existing.isPresent()) return new EnqueueResult.Coalesced(existing.get());
-                        }
-                        throw e;
-                    } catch (RuntimeException e) {
-                        conn.rollback();
-                        throw e;
-                    } finally {
-                        conn.setAutoCommit(true);
-                    }
+            EnqueueResult result = writeTransaction(conn -> {
+                JobSnapshot snapshot = snapshotForInsert(conn, job, version);
+                String body = serializer.serializeJob(snapshot, capabilities);
+                Instant currentStateAt = lastTransitionTime(snapshot, snapshot.currentState());
+                Optional<JobId> existing = findActiveDedup(conn, job.queue(), dedupKey, now);
+                if (existing.isPresent()) {
+                    return new EnqueueResult.Coalesced(existing.get());
                 }
+                insertSnapshot(conn, snapshot, body, currentStateAt, version);
+                noteInsertedWorkflowDescendant(conn, snapshot);
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "INSERT INTO threadmill_dedup_keys (queue, dedup_key, job_id, expires_at) VALUES (?, ?, ?, ?)")) {
+                    ps.setString(1, job.queue());
+                    ps.setString(2, dedupKey);
+                    ps.setObject(3, job.id().asUuid());
+                    ps.setTimestamp(4, Timestamp.from(now.plus(ttl)));
+                    ps.executeUpdate();
+                }
+                return new EnqueueResult.Created(job.id());
             });
+            if (result instanceof EnqueueResult.Created) {
+                job.adoptVersion(version);
+            }
+            return result;
         } catch (SQLException e) {
+            if ("23505".equals(e.getSQLState()) && !transactionBoundary.externallyManagedTransactionActive()) {
+                try {
+                    Optional<JobId> existing = findActiveDedup(job.queue(), dedupKey, now);
+                    if (existing.isPresent()) return new EnqueueResult.Coalesced(existing.get());
+                } catch (SQLException lookupFailure) {
+                    e.addSuppressed(lookupFailure);
+                }
+            }
             throw new JdbcException("enqueueIfAbsent failed", e);
         }
     }
@@ -1626,6 +1617,12 @@ public final class PostgresJobStore implements JobStore {
             ps.executeUpdate();
         }
         return Optional.empty();
+    }
+
+    private Optional<JobId> findActiveDedup(String queue, String dedupKey, Instant now) throws SQLException {
+        try (Connection conn = dataSource.getConnection()) {
+            return findActiveDedup(conn, queue, dedupKey, now);
+        }
     }
 
     private JobSnapshot snapshotForInsert(Connection conn, Job job, long version) throws SQLException {

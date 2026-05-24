@@ -299,25 +299,17 @@ public class ThreadmillProperties {
 
     /** Spring-specific options: transaction integration etc. */
     public static final class SpringProperties {
-        /**
-         * If {@code true} (the default), jobs enqueued inside an active
-         * Spring transaction are deferred until {@code afterCommit}. The
-         * returned {@code JobId} is reserved synchronously, but the row
-         * appears in the store only after the transaction commits — so a
-         * rollback leaves nothing in the queue. Set to {@code false} to
-         * restore the previous behaviour (immediate enqueue regardless of
-         * transaction state).
-         */
-        private boolean enqueueAfterCommit = true;
+        /** How enqueue calls interact with active Spring transactions. */
+        private SpringEnqueueMode enqueueMode = SpringEnqueueMode.AFTER_COMMIT;
 
         private String recurringNamespace;
 
-        public boolean isEnqueueAfterCommit() {
-            return enqueueAfterCommit;
+        public SpringEnqueueMode getEnqueueMode() {
+            return enqueueMode;
         }
 
-        public void setEnqueueAfterCommit(boolean enqueueAfterCommit) {
-            this.enqueueAfterCommit = enqueueAfterCommit;
+        public void setEnqueueMode(SpringEnqueueMode enqueueMode) {
+            this.enqueueMode = enqueueMode;
         }
 
         public String getRecurringNamespace() {

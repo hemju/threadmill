@@ -89,11 +89,12 @@ its own write — disable the wrapper:
 ```yaml
 threadmill:
   spring:
-    enqueue-after-commit: false
+    enqueue-mode: immediate
 ```
 
-Dedup writes (`enqueueIfAbsent`) are always immediate because they must return
-a meaningful `EnqueueResult.Created` / `EnqueueResult.Coalesced` synchronously.
+For Spring + Postgres, `threadmill.spring.enqueue-mode=join_transaction` makes
+normal enqueue, scheduled enqueue, bulk enqueue, and dedup enqueue part of the
+caller's SQL transaction.
 
 ## Configure A Store
 

@@ -37,8 +37,8 @@ import com.hemju.threadmill.core.store.JobStore;
  *       exist.)</li>
  *   <li>The returned {@code JobId} is the reserved id, available before the
  *       row exists. Callers depending on {@code findById(id)} succeeding
- *       immediately after {@code enqueue()} returns should disable this
- *       feature via {@code threadmill.spring.enqueue-after-commit=false}.</li>
+ *       immediately after {@code enqueue()} returns should use
+ *       {@code threadmill.spring.enqueue-mode=immediate}.</li>
  * </ul>
  *
  * <p>Recurring tasks defined through {@link #enqueueRecurring(Class, JobPayload, String)}

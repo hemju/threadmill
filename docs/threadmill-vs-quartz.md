@@ -20,7 +20,7 @@ not to argue one is universally better.
 | Storage backends | JDBC (`QRTZ_*` tables across many vendors) or RAM | PostgreSQL 18+, Redis (standalone / Sentinel / Cluster), in-memory |
 | Threading | Configurable thread pool of platform threads | Virtual threads (Java 25) per worker; lanes give per-queue capacity |
 | Result of a run | Write-back through `JobDataMap` | Typed `JobResult` slot persisted on `SUCCEEDED` |
-| Transactional enqueue | Manual — open the same JDBC connection or use `JobStoreCMT` | Default-on `TransactionAwareJobScheduler` fires `store.insert` on `afterCommit` |
+| Transactional enqueue | `JobStoreTX` owns a transaction; `JobStoreCMT` joins a managed transaction | `after_commit` by default; Spring + Postgres can use `join_transaction` to commit jobs with the caller transaction |
 | Per-key concurrency | Manual via `@DisallowConcurrentExecution` on the `JobDetail` class | First-class `EXCLUSIVE` / `SHARED` modes per `concurrencyKey`, inherited through workflows |
 | Workflows / chaining | Application code | Built-in `WorkflowInterceptor` — `AWAITING` children promote when parent succeeds; concurrency key inherited |
 | Long-running jobs | Hard `JobRunShell` timeout, no progress channel | `ctx.checkIn()` + `noProgressTimeout` — wall-clock budget switches to "no progress in N" once the handler reports liveness |
