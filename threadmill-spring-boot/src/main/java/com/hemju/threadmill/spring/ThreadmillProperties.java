@@ -86,6 +86,9 @@ public class ThreadmillProperties {
     /** Queue-family lane discovery configuration. */
     private QueueFamilyProperties queueFamily = new QueueFamilyProperties();
 
+    /** Cross-node wake notification configuration. */
+    private RemoteWakeProperties remoteWake = new RemoteWakeProperties();
+
     /** Spring-specific configuration (transaction integration). */
     private SpringProperties spring = new SpringProperties();
 
@@ -289,6 +292,14 @@ public class ThreadmillProperties {
         this.queueFamily = queueFamily;
     }
 
+    public RemoteWakeProperties getRemoteWake() {
+        return remoteWake;
+    }
+
+    public void setRemoteWake(RemoteWakeProperties remoteWake) {
+        this.remoteWake = remoteWake;
+    }
+
     public SpringProperties getSpring() {
         return spring;
     }
@@ -339,6 +350,18 @@ public class ThreadmillProperties {
 
         public void setRetentionAfterEmpty(Duration retentionAfterEmpty) {
             this.retentionAfterEmpty = retentionAfterEmpty;
+        }
+    }
+
+    public static final class RemoteWakeProperties {
+        private boolean enabled = true;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
         }
     }
 

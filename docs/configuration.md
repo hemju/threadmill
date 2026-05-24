@@ -61,6 +61,15 @@ Spring can auto-create a Redis store when `threadmill.store.redis.*` is set.
 Redis Cluster uses one `{threadmill}` hash slot. See
 [redis-topologies.md](redis-topologies.md).
 
+## Remote Wake Properties
+
+Remote wake is a latency hint for cross-node workers. Polling remains the
+correctness fallback.
+
+| Setting | Default | Notes |
+|---|---:|---|
+| `threadmill.remote-wake.enabled` | `true` | Auto-create Postgres `LISTEN`/`NOTIFY` or Redis Pub/Sub wake hints for Spring auto-configured durable stores. In-memory and custom stores stay local-wake only unless the application provides a `RemoteWakeChannel` bean. |
+
 ## Spring Recurring Properties
 
 | Setting | Default | Notes |

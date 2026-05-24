@@ -9,17 +9,21 @@ import javax.sql.DataSource;
 import io.lettuce.core.RedisURI;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.AutoConfigureAfter;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 
+import com.hemju.threadmill.core.engine.JobInterceptor;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
+import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
 import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JobSerializer;
@@ -31,7 +35,9 @@ import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 import com.hemju.threadmill.store.postgres.PostgresJobStore;
+import com.hemju.threadmill.store.postgres.PostgresRemoteWakeChannel;
 import com.hemju.threadmill.store.redis.RedisJobStore;
+import com.hemju.threadmill.store.redis.RedisRemoteWakeChannel;
 import com.hemju.threadmill.store.redis.RedisStoreConfig;
 
 /**
@@ -158,6 +164,41 @@ public class ThreadmillAutoConfiguration {
 
     @Bean
     @ConditionalOnMissingBean
+    @ConditionalOnProperty(
+            prefix = "threadmill.remote-wake",
+            name = "enabled",
+            havingValue = "true",
+            matchIfMissing = true)
+    public ThreadmillRemoteWakeChannels threadmillRemoteWakeChannels(
+            ThreadmillProperties properties,
+            ApplicationContext context,
+            JobStore store,
+            ObjectProvider<RemoteWakeChannel> customChannel) {
+        RemoteWakeChannel provided = customChannel.getIfAvailable();
+        if (provided != null) {
+            return ThreadmillRemoteWakeChannels.of(provided);
+        }
+        if (store instanceof RedisJobStore && properties.getStore().getRedis().isConfigured()) {
+            return ThreadmillRemoteWakeChannels.of(new RedisRemoteWakeChannel(
+                    redisStoreConfig(properties.getStore().getRedis())));
+        }
+        DataSource dataSource = lookupOptionalBean(context, DataSource.class);
+        if (store instanceof PostgresJobStore && dataSource != null) {
+            return ThreadmillRemoteWakeChannels.of(new PostgresRemoteWakeChannel(dataSource));
+        }
+        return ThreadmillRemoteWakeChannels.none();
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnBean(ThreadmillRemoteWakeChannels.class)
+    public ThreadmillRemoteWakePublisher threadmillRemoteWakePublisher(
+            LocalWakeBus wakeBus, ThreadmillRemoteWakeChannels remoteWakeChannels) {
+        return new ThreadmillRemoteWakePublisher(wakeBus, remoteWakeChannels);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
     public Scheduler threadmillScheduler(JobStore store, JobSerializer serializer, LocalWakeBus wakeBus) {
         return new Scheduler(store, serializer, wakeBus);
     }
@@ -246,13 +287,17 @@ public class ThreadmillAutoConfiguration {
             JobHandlerResolver resolver,
             ProcessingNodeConfig config,
             ThreadmillJobRegistry registry,
-            LocalWakeBus wakeBus) {
+            LocalWakeBus wakeBus,
+            List<JobInterceptor> interceptors) {
         List<String> queues = resolveQueues(config, registry);
         var builder = ProcessingNode.builder(store)
                 .config(config)
                 .serializer(serializer)
                 .handlerResolver(resolver)
                 .wakeBus(wakeBus);
+        for (JobInterceptor interceptor : interceptors) {
+            builder.interceptor(interceptor);
+        }
         for (String queue : queues) {
             builder.lane(queue, config.workerCount());
         }
@@ -308,6 +353,15 @@ public class ThreadmillAutoConfiguration {
     @ConditionalOnProperty(prefix = "threadmill", name = "enabled", havingValue = "true", matchIfMissing = true)
     public ThreadmillLifecycle threadmillLifecycle(ProcessingNode node) {
         return new ThreadmillLifecycle(node);
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    @ConditionalOnBean(ThreadmillRemoteWakeChannels.class)
+    @ConditionalOnProperty(prefix = "threadmill", name = "enabled", havingValue = "true", matchIfMissing = true)
+    public ThreadmillRemoteWakeLifecycle threadmillRemoteWakeLifecycle(
+            ThreadmillRemoteWakeChannels remoteWakeChannels, ProcessingNode node) {
+        return new ThreadmillRemoteWakeLifecycle(remoteWakeChannels, node);
     }
 
     private static RedisStoreConfig redisStoreConfig(ThreadmillProperties.RedisProperties redis) {

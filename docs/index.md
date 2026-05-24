@@ -49,6 +49,8 @@ operational notes:
   store auto-detection, `SmartLifecycle` phase choice, transactional enqueue.
 - [`threadmill-metrics`](../threadmill-metrics/README.md) — every meter name,
   recommended alerts.
+- [`threadmill-tracing`](../threadmill-tracing/README.md) — optional
+  OpenTelemetry spans.
 - [`threadmill-dashboard`](../threadmill-dashboard/README.md) — `EngineSnapshot`
   shape.
 - [`threadmill-soak`](../threadmill-soak/README.md) — sustained throughput,

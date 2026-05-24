@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.ZoneId;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
@@ -12,6 +14,7 @@ import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.QueueLane;
+import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.handler.JobAction;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
@@ -288,6 +291,56 @@ class ThreadmillAutoConfigurationTest {
     }
 
     @Test
+    void localWakePublishesToConfiguredRemoteWakeChannel() {
+        var remote = new RecordingRemoteWakeChannel();
+        contextRunner
+                .withBean(RemoteWakeChannel.class, () -> remote)
+                .withBean(QueueAHandler.class)
+                .withPropertyValues("threadmill.spring.enqueue-mode=immediate")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+
+                    var scheduler = context.getBean(JobScheduler.class);
+                    scheduler.enqueue(QueueAHandler.class, new PayloadA());
+
+                    assertThat(remote.published).contains("alpha");
+                    assertThat(remote.started.get()).isZero();
+                });
+    }
+
+    @Test
+    void remoteWakeDisabledDoesNotCreateChannel() {
+        contextRunner.withPropertyValues("threadmill.remote-wake.enabled=false").run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).doesNotHaveBean(RemoteWakeChannel.class);
+        });
+    }
+
+    @Test
+    void inMemoryStoreDoesNotAutoCreateRemoteWakeChannel() {
+        contextRunner.run(context -> {
+            assertThat(context).hasNotFailed();
+            assertThat(context).doesNotHaveBean(RemoteWakeChannel.class);
+        });
+    }
+
+    @Test
+    void remoteWakeLifecycleStartsListenerOnlyWhenNodeRuns() {
+        var remote = new RecordingRemoteWakeChannel();
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
+                .withBean(RemoteWakeChannel.class, () -> remote)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(remote.started.get()).isEqualTo(1);
+
+                    remote.wakeSink.accept("default");
+
+                    assertThat(remote.receivedBySink).contains("default");
+                });
+    }
+
+    @Test
     void rawJobHandlerIsRejectedWithGuidance() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
@@ -334,6 +387,30 @@ class ThreadmillAutoConfigurationTest {
     public static final class PayloadC implements JobPayload {}
 
     public static final class PayloadD implements JobPayload {}
+
+    private static final class RecordingRemoteWakeChannel implements RemoteWakeChannel {
+        private final CopyOnWriteArrayList<String> published = new CopyOnWriteArrayList<>();
+        private final CopyOnWriteArrayList<String> receivedBySink = new CopyOnWriteArrayList<>();
+        private final AtomicInteger started = new AtomicInteger();
+        private Consumer<String> wakeSink;
+
+        @Override
+        public void publish(String queue) {
+            published.add(queue);
+        }
+
+        @Override
+        public void start(Consumer<String> wakeSink) {
+            this.wakeSink = queue -> {
+                wakeSink.accept(queue);
+                receivedBySink.add(queue);
+            };
+            started.incrementAndGet();
+        }
+
+        @Override
+        public void close() {}
+    }
 
     private static CronTask testCronTask(String name) {
         return new CronTask(

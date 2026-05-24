@@ -8,7 +8,11 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -207,6 +211,7 @@ class RedisJobStoreRegressionTest {
         assertThat(orphans)
                 .extracting(o -> o.id().toString())
                 .containsExactly(claimed.get(0).id().toString());
+        assertRedisIndexesConsistent();
     }
 
     @Test
@@ -305,6 +310,7 @@ class RedisJobStoreRegressionTest {
         assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
                 .extracting(Job::id)
                 .containsExactly(outsider.id());
+        assertRedisIndexesConsistent();
     }
 
     @Test
@@ -337,6 +343,7 @@ class RedisJobStoreRegressionTest {
         finish(store, claimedChildren.get(1), JobState.SUCCEEDED);
         assertWorkflowCount("project:counts", root.id(), null);
         assertActiveWorkflowHold("project:counts", root.id(), null);
+        assertRedisIndexesConsistent();
     }
 
     @Test
@@ -364,6 +371,7 @@ class RedisJobStoreRegressionTest {
         finish(store, reclaimed, JobState.SUCCEEDED);
         assertWorkflowCount("project:retry", job.id(), null);
         assertActiveWorkflowHold("project:retry", job.id(), null);
+        assertRedisIndexesConsistent();
     }
 
     @Test
@@ -377,6 +385,7 @@ class RedisJobStoreRegressionTest {
 
         assertWorkflowCount("project:delete", job.id(), null);
         assertActiveWorkflowHold("project:delete", job.id(), null);
+        assertRedisIndexesConsistent();
     }
 
     @Test
@@ -402,6 +411,7 @@ class RedisJobStoreRegressionTest {
         // Body has the updated state too (claim_commit writes it atomically).
         Job loaded = store.findById(j.id()).orElseThrow();
         assertThat(loaded.currentState()).isEqualTo(JobState.PROCESSING);
+        assertRedisIndexesConsistent();
     }
 
     @Test
@@ -429,6 +439,7 @@ class RedisJobStoreRegressionTest {
                 .isNotNull();
         assertThat(r.hget(RedisKeys.COUNTS, "ENQUEUED")).isEqualTo("1");
         assertThat(r.hget(RedisKeys.COUNTS, "PROCESSING")).isEqualTo("1");
+        assertRedisIndexesConsistent();
     }
 
     @Test
@@ -455,6 +466,7 @@ class RedisJobStoreRegressionTest {
 
             List<Job> claimed = new RedisJobStore(uri).claimReady(NodeId.newId(), "default", 1, Instant.now());
             assertThat(claimed).hasSize(1);
+            assertRedisIndexesConsistent();
         } finally {
             client.shutdown();
         }
@@ -499,6 +511,7 @@ class RedisJobStoreRegressionTest {
         // Counts reflect the moves all the way through.
         assertThat(r.hget(RedisKeys.COUNTS, "PROCESSING")).isEqualTo("0");
         assertThat(r.hget(RedisKeys.COUNTS, "SUCCEEDED")).isEqualTo("1");
+        assertRedisIndexesConsistent();
     }
 
     @Test
@@ -522,6 +535,7 @@ class RedisJobStoreRegressionTest {
         assertThat(r.hget(RedisKeys.COUNTS, "PROCESSING")).isEqualTo("0");
         assertThat(r.hget(RedisKeys.COUNTS, "DELETED")).isEqualTo("1");
         assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.DELETED);
+        assertRedisIndexesConsistent();
     }
 
     @Test
@@ -594,6 +608,201 @@ class RedisJobStoreRegressionTest {
     private static void assertActiveWorkflowHold(String key, JobId rootId, Integer expected) {
         assertThat(adminConnection.sync().hget(RedisKeys.concurrencyWorkflows(key), rootId.toString()))
                 .isEqualTo(expected == null ? null : expected.toString());
+    }
+
+    private static void assertRedisIndexesConsistent() {
+        RedisCommands<String, String> r = adminConnection.sync();
+        var serializer = new JsonJobSerializer();
+        var expectedCounts = new EnumMap<JobState, Long>(JobState.class);
+        for (JobState state : JobState.values()) expectedCounts.put(state, 0L);
+        var expectedPending = new HashMap<String, Set<String>>();
+        var expectedSharedInFlight = new HashMap<String, Long>();
+        var expectedExclusiveInFlight = new HashMap<String, Long>();
+        var expectedWorkflowCounts = new HashMap<String, Map<String, Long>>();
+        var expectedWorkflowHolds = new HashMap<String, Map<String, Long>>();
+
+        for (String jobKey : r.keys(RedisKeys.PREFIX + "job:*")) {
+            Map<String, String> hash = r.hgetall(jobKey);
+            var id = JobId.parse(jobKey.substring((RedisKeys.PREFIX + "job:").length()));
+            JobState state = JobState.valueOf(hash.get("state"));
+            Job body = serializer.deserializeJob(hash.get("body"));
+            assertThat(body.currentState()).as("body state for " + id).isEqualTo(state);
+            expectedCounts.merge(state, 1L, Long::sum);
+            assertThat(r.zscore(RedisKeys.byStateTime(state), id.toString()))
+                    .as("by-state index for " + id)
+                    .isNotNull();
+            for (JobState otherState : JobState.values()) {
+                if (otherState == state) continue;
+                assertThat(r.zscore(RedisKeys.byStateTime(otherState), id.toString()))
+                        .as("by-state index leak for " + id + " in " + otherState)
+                        .isNull();
+            }
+
+            String queue = hash.get("queue");
+            assertActiveStateMembership(r, id, state, queue, hash.get("owner_node_id"));
+            assertConcurrencyMembership(
+                    r,
+                    id,
+                    state,
+                    hash.get("concurrency_key"),
+                    hash.get("concurrency_mode"),
+                    hash.get("workflow_root_id"),
+                    expectedPending,
+                    expectedSharedInFlight,
+                    expectedExclusiveInFlight,
+                    expectedWorkflowCounts,
+                    expectedWorkflowHolds);
+        }
+
+        for (JobState state : JobState.values()) {
+            assertThat(parseLong(r.hget(RedisKeys.COUNTS, state.name())))
+                    .as("count for " + state)
+                    .isEqualTo(expectedCounts.get(state));
+        }
+        assertConcurrencyStructures(
+                r,
+                expectedPending,
+                expectedSharedInFlight,
+                expectedExclusiveInFlight,
+                expectedWorkflowCounts,
+                expectedWorkflowHolds);
+    }
+
+    private static void assertActiveStateMembership(
+            RedisCommands<String, String> r, JobId id, JobState state, String queue, String ownerNodeId) {
+        if (state == JobState.ENQUEUED) {
+            assertThat(r.zscore(RedisKeys.queue(queue), id.toString()))
+                    .as("queue index for " + id)
+                    .isNotNull();
+        } else {
+            assertThat(r.zscore(RedisKeys.queue(queue), id.toString()))
+                    .as("queue index leak for " + id)
+                    .isNull();
+        }
+        if (state == JobState.SCHEDULED) {
+            assertThat(r.zscore(RedisKeys.SCHEDULED, id.toString()))
+                    .as("scheduled index for " + id)
+                    .isNotNull();
+        } else {
+            assertThat(r.zscore(RedisKeys.SCHEDULED, id.toString()))
+                    .as("scheduled index leak for " + id)
+                    .isNull();
+        }
+        if (state == JobState.AWAITING) {
+            assertThat(r.zscore(RedisKeys.AWAITING, id.toString()))
+                    .as("awaiting index for " + id)
+                    .isNotNull();
+        } else {
+            assertThat(r.zscore(RedisKeys.AWAITING, id.toString()))
+                    .as("awaiting index leak for " + id)
+                    .isNull();
+        }
+        if (state == JobState.PROCESSING) {
+            assertThat(r.zscore(RedisKeys.PROCESSING_ALL, id.toString()))
+                    .as("processing index for " + id)
+                    .isNotNull();
+            assertThat(r.zscore(RedisKeys.processingFor(NodeId.of(UUID.fromString(ownerNodeId))), id.toString()))
+                    .as("owner processing index for " + id)
+                    .isNotNull();
+        } else {
+            assertThat(r.zscore(RedisKeys.PROCESSING_ALL, id.toString()))
+                    .as("processing index leak for " + id)
+                    .isNull();
+        }
+    }
+
+    private static void assertConcurrencyMembership(
+            RedisCommands<String, String> r,
+            JobId id,
+            JobState state,
+            String key,
+            String mode,
+            String workflowRootId,
+            Map<String, Set<String>> expectedPending,
+            Map<String, Long> expectedSharedInFlight,
+            Map<String, Long> expectedExclusiveInFlight,
+            Map<String, Map<String, Long>> expectedWorkflowCounts,
+            Map<String, Map<String, Long>> expectedWorkflowHolds) {
+        if (key == null || key.isBlank()) return;
+        var concurrencyMode = ConcurrencyMode.valueOf(mode);
+        expectedPending.computeIfAbsent(key, ignored -> new HashSet<>());
+        expectedSharedInFlight.putIfAbsent(key, 0L);
+        expectedExclusiveInFlight.putIfAbsent(key, 0L);
+        expectedWorkflowCounts.computeIfAbsent(key, ignored -> new HashMap<>());
+        expectedWorkflowHolds.computeIfAbsent(key, ignored -> new HashMap<>());
+        String member = RedisKeys.concurrencyPendingMember(concurrencyMode, id);
+        if (state == JobState.ENQUEUED || state == JobState.SCHEDULED || state == JobState.AWAITING) {
+            assertThat(r.zscore(RedisKeys.concurrencyPending(key), member))
+                    .as("concurrency pending member for " + id)
+                    .isNotNull();
+            expectedPending.get(key).add(member);
+        } else {
+            assertThat(r.zscore(RedisKeys.concurrencyPending(key), member))
+                    .as("concurrency pending leak for " + id)
+                    .isNull();
+        }
+        if (state == JobState.PROCESSING) {
+            if (concurrencyMode == ConcurrencyMode.SHARED) {
+                expectedSharedInFlight.merge(key, 1L, Long::sum);
+            } else {
+                expectedExclusiveInFlight.merge(key, 1L, Long::sum);
+            }
+            expectedWorkflowHolds.get(key).merge(workflowRootId, 1L, Long::sum);
+        }
+        if (!isTerminal(state)) {
+            expectedWorkflowCounts.get(key).merge(workflowRootId, 1L, Long::sum);
+        }
+    }
+
+    private static void assertConcurrencyStructures(
+            RedisCommands<String, String> r,
+            Map<String, Set<String>> expectedPending,
+            Map<String, Long> expectedSharedInFlight,
+            Map<String, Long> expectedExclusiveInFlight,
+            Map<String, Map<String, Long>> expectedWorkflowCounts,
+            Map<String, Map<String, Long>> expectedWorkflowHolds) {
+        var keys = new HashSet<String>();
+        keys.addAll(expectedPending.keySet());
+        keys.addAll(expectedSharedInFlight.keySet());
+        keys.addAll(expectedExclusiveInFlight.keySet());
+        keys.addAll(expectedWorkflowCounts.keySet());
+        keys.addAll(expectedWorkflowHolds.keySet());
+        for (String key : keys) {
+            assertThat(r.zrange(RedisKeys.concurrencyPending(key), 0, -1))
+                    .as("pending index for " + key)
+                    .containsExactlyInAnyOrderElementsOf(expectedPending.getOrDefault(key, Set.of()));
+            assertThat(parseLong(r.hget(RedisKeys.concurrencyCounters(key), "shared_in_flight")))
+                    .as("shared in-flight for " + key)
+                    .isEqualTo(expectedSharedInFlight.getOrDefault(key, 0L));
+            assertThat(parseLong(r.hget(RedisKeys.concurrencyCounters(key), "exclusive_in_flight")))
+                    .as("exclusive in-flight for " + key)
+                    .isEqualTo(expectedExclusiveInFlight.getOrDefault(key, 0L));
+            assertLongHashEquals(
+                    r.hgetall(RedisKeys.concurrencyWorkflowCounts(key)),
+                    expectedWorkflowCounts.getOrDefault(key, Map.of()));
+            assertLongHashEquals(
+                    r.hgetall(RedisKeys.concurrencyWorkflows(key)), expectedWorkflowHolds.getOrDefault(key, Map.of()));
+        }
+    }
+
+    private static void assertLongHashEquals(Map<String, String> actual, Map<String, Long> expected) {
+        var parsed = new HashMap<String, Long>();
+        for (var entry : actual.entrySet()) {
+            long value = Long.parseLong(entry.getValue());
+            if (value != 0L) parsed.put(entry.getKey(), value);
+        }
+        assertThat(parsed).containsExactlyInAnyOrderEntriesOf(expected);
+    }
+
+    private static long parseLong(String value) {
+        return value == null ? 0L : Long.parseLong(value);
+    }
+
+    private static boolean isTerminal(JobState state) {
+        return state == JobState.SUCCEEDED
+                || state == JobState.FAILED
+                || state == JobState.DELETED
+                || state == JobState.QUARANTINED;
     }
 
     private static void finish(JobStore store, Job job, JobState state) {

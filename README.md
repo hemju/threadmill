@@ -70,6 +70,7 @@ See [docs/quickstart.md](docs/quickstart.md) for a complete Spring walkthrough, 
 | `threadmill-store-redis` | Redis backend (reliable-fetch via Lua, per-job HASH + per-queue ZSET + counts HASH). |
 | `threadmill-spring-boot` | Spring Boot 4.x auto-configuration. |
 | `threadmill-metrics` | Micrometer integration: jobs-per-state gauges, processed/failed counters, processing-time timer. |
+| `threadmill-tracing` | Optional OpenTelemetry API integration for processing and store-operation spans. |
 | `threadmill-dashboard` | Data-first observability API + (optional) mountable UI. |
 | `threadmill-test-support` | The abstract `JobStore` contract test every backend passes. |
 
@@ -156,6 +157,7 @@ binder or directly via `ProcessingNodeConfig.builder()`.
 | `threadmill.retryInitialBackoff` | 5s | First retry's backoff |
 | `threadmill.claimBatchSize` | 10 | Maximum claim per dispatcher tick |
 | `threadmill.defaultQueue` | `"default"` | Queue name when none is specified |
+| `threadmill.remote-wake.enabled` | `true` | Spring auto-configured durable stores publish cross-node wake hints; dispatcher polling remains the fallback |
 | `threadmill.checkInMinInterval` | 5s | Minimum persisted check-in/progress flush interval |
 | `threadmill.noProgressTimeout` | 15m | Timeout after the last check-in |
 | `threadmill.maxDedupTtl` | 30d | Maximum producer-side deduplication window |
@@ -193,8 +195,10 @@ Shipped in v1:
   cross-cluster mutexes with lease semantics, node tags, atomic job
   replacement, producer-side deduplication, and long-running job check-ins.
 - Framework adapter: Spring Boot auto-configuration with `@Job`
-  handler discovery and `JobScheduler`.
-- Observability: Micrometer integration; data-first dashboard snapshot.
+  handler discovery, `JobScheduler`, transaction-aware enqueue modes, and
+  remote wake hints for durable stores.
+- Observability: Micrometer integration; optional OpenTelemetry tracing;
+  data-first dashboard snapshot.
 - Soak / load suite (separate from `check`) for sustained throughput,
   recurring no-skip, and induced store-outage recovery on all three
   backends.
@@ -203,8 +207,7 @@ Not yet in v1 (design-compatible, additive when needed):
 
 - Batches; external-trigger jobs (the `PROCESSED` state is reserved);
   rate limiters; richer cron expressions (business-day, last-of-month).
-- Mountable dashboard UI; OpenTelemetry tracing; pluggable auth for the
-  dashboard.
+- Mountable dashboard UI; pluggable auth for the dashboard.
 - Reproducible production-grade benchmarks; Maven Central publishing
   automation.
 

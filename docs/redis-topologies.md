@@ -72,6 +72,12 @@ commands. If Redis runs out of memory under `noeviction`, Threadmill treats the
 write failure as a store outage and dispatcher recovery probes perform a small
 write before processing resumes.
 
+For managed Redis products that block `CONFIG GET`, document the external
+validation in the application's runbook before setting the override. The
+minimum operator checklist is: AOF persistence enabled, `maxmemory-policy
+noeviction`, persistence/replication health alerts, rejected-write alerts, and
+enough memory headroom for peak queued jobs plus retained terminal jobs.
+
 ## Reliability Model
 
 Threadmill's Redis backend uses reliable-fetch semantics: claiming work never

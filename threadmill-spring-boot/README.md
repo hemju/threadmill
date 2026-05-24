@@ -130,6 +130,48 @@ See [`docs/transactions.md`](../docs/transactions.md) for the full
 deep-dive (atomic boundaries per backend, handler-is-not-in-our-transaction,
 at-least-once + idempotency, outbox pattern).
 
+## Remote wake
+
+Durable auto-configured stores publish remote wake hints by default:
+
+- Postgres: `LISTEN`/`NOTIFY` on `threadmill_wake`.
+- Redis: Pub/Sub on `{threadmill}:wake`.
+
+The listener calls `ProcessingNode.wake(queue)` on matching local dispatchers.
+This is a latency optimization only; polling remains the fallback when a
+notification is missed or the pub/sub channel is temporarily unavailable.
+
+Disable it with:
+
+```yaml
+threadmill:
+  remote-wake:
+    enabled: false
+```
+
+Custom stores can participate by exposing a `RemoteWakeChannel` bean.
+
+## Tracing
+
+User-provided `JobInterceptor` beans are added to the auto-configured
+`ProcessingNode`, so the tracing module can be wired without replacing the
+node:
+
+```java
+@Bean
+ThreadmillTracing threadmillTracing(OpenTelemetry openTelemetry) {
+    return ThreadmillTracing.of(openTelemetry);
+}
+
+@Bean
+JobInterceptor threadmillTracingInterceptor(ThreadmillTracing tracing) {
+    return tracing.asInterceptor();
+}
+```
+
+Applications that create their own `JobStore` bean can also wrap it with
+`tracing.wrapStore(store)` to emit store-operation spans.
+
 ## Properties reference
 
 Bound under `threadmill.*` (see `ThreadmillProperties` for the full
@@ -144,6 +186,7 @@ list). The most common:
 | `threadmill.retentionInterval` | `PT1H` | Master-only retention cadence for succeeded jobs, dedup keys, and stale node records. |
 | `threadmill.defaultMaxAttempts` | `5` | Per-job retry budget (including first attempt). |
 | `threadmill.jobTimeout` | `PT5M` | Per-job timeout. |
+| `threadmill.remote-wake.enabled` | `true` | Publish cross-node wake hints for auto-configured Postgres / Redis stores. |
 | `threadmill.spring.enqueue-mode` | `after_commit` | `after_commit`, `join_transaction`, or `immediate`. |
 | `threadmill.store.redis.mode` | `standalone` | `standalone` / `sentinel` / `cluster`. |
 | `threadmill.store.redis.uri` | — | `redis://host:port` for standalone mode. |

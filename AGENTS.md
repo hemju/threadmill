@@ -2,7 +2,7 @@
 
 This is the standing brief for any AI agent (or human) working on Threadmill. Read it fully before touching the repository.
 
-**Project status:** v1 feature-complete, ready for first release. Three storage backends (in-memory, PostgreSQL 18+, Redis with standalone/Sentinel/Cluster), the processing engine, scheduling and recurring APIs, the per-queue pause primitive, the bulk-enqueue path, claim-time per-key concurrency with workflow inheritance, queue-family lanes, Spring Boot integration with explicit enqueue transaction modes (`after_commit`, `join_transaction`, `immediate`), Micrometer metrics, the data-first dashboard API, docs, examples, and a soak/load module are all in place. Store-backed maintenance leadership, crash-safe Redis claim, producer-side deduplication, long-running job check-ins, idle-worker wake signal, and failure-detail truncation are part of the production-readiness baseline.
+**Project status:** v1 feature-complete, ready for first release. Three storage backends (in-memory, PostgreSQL 18+, Redis with standalone/Sentinel/Cluster), the processing engine, scheduling and recurring APIs, the per-queue pause primitive, the bulk-enqueue path, claim-time per-key concurrency with workflow inheritance, queue-family lanes, Spring Boot integration with explicit enqueue transaction modes (`after_commit`, `join_transaction`, `immediate`), Micrometer metrics, optional OpenTelemetry tracing, the data-first dashboard API, docs, examples, and a soak/load module are all in place. Store-backed maintenance leadership, crash-safe Redis claim, producer-side deduplication, long-running job check-ins, idle-worker wake signal, cross-node remote wake hints, and failure-detail truncation are part of the production-readiness baseline.
 
 ---
 
@@ -43,6 +43,7 @@ Modules are physically separate. No storage implementation and no UI may ever be
 | `threadmill-spring-boot` | `com.hemju.threadmill.spring` | Spring Boot 4.x auto-configuration. |
 | `threadmill-test-support` | `com.hemju.threadmill.test` | Abstract `JobStore` contract test plus shared fixtures. |
 | `threadmill-metrics` | `com.hemju.threadmill.metrics` | Micrometer integration: per-state gauges, processed / failed counters, processing-time timer. |
+| `threadmill-tracing` | `com.hemju.threadmill.tracing` | Optional OpenTelemetry API integration: processing spans and a tracing `JobStore` decorator. |
 | `threadmill-dashboard` | `com.hemju.threadmill.dashboard` | Data-first observability API (`EngineSnapshot`); UI is additive. |
 | `threadmill-soak` | `com.hemju.threadmill.soak` | Fixed soak regression suite plus tunable sustained load/performance harnesses. Tagged regression tests are excluded from `check`; harness artifacts live under `build/soak/`. |
 | `threadmill-simulation` | `com.hemju.threadmill.simulation` | Correctness simulations: short fixed invariant verifier for all three stores, plus worker-churn simulations against shared Postgres / Redis. JSON-lines traces live under `build/simulation/`. |
@@ -76,6 +77,7 @@ Use these terms for these concepts. Refining a name during implementation is all
 | Cluster membership: heartbeat, registry, master election | `NodeRegistry` |
 | A queue with reserved capacity inside one node | `QueueLane` |
 | The persistence SPI | `JobStore` |
+| Cross-node wake hint SPI | `RemoteWakeChannel` |
 | In-memory / Postgres / Redis stores | `InMemoryJobStore`, `PostgresJobStore`, `RedisJobStore` |
 | Serialized description of the work to run | `JobSpec` |
 | A typed argument inside the spec | `JobArgument` |
@@ -255,7 +257,7 @@ This section is the project's memory: the load-bearing decisions worth knowing b
 - **Maintenance work has independent cadences.** `maintenancePollInterval` drives latency-sensitive recurring materialization, scheduled promotion, and orphan reclaim. `claimHeartbeat` refreshes owner heartbeats. `retentionInterval` drives slow cleanup of succeeded jobs, expired dedup keys, and stale node records.
 - **Scoped values, not ThreadLocal.** `EngineScopedValues.CURRENT` is bound around `handler.run(...)`; virtual threads the handler spawns inherit it.
 - **Storage fault tolerance.** The `Dispatcher`'s `CircuitBreaker` pauses the loop on a failure-count threshold and probes `store.capabilities()` to detect recovery. The cluster pauses, never crashes.
-- **Local wakeups are latency hints, not correctness.** `LocalWakeBus` connects same-JVM schedulers, recurring materialization, and scheduled-job promotion to matching dispatchers so claimable work does not wait out `pollInterval`; Spring wires the shared bus automatically, while manual core wiring must pass the same bus to `Scheduler` and `ProcessingNode`. Cross-node enqueue still relies on polling, so `pollInterval` remains the correctness fallback.
+- **Wakeups are latency hints, not correctness.** `LocalWakeBus` connects same-JVM schedulers, recurring materialization, and scheduled-job promotion to matching dispatchers so claimable work does not wait out `pollInterval`; Spring wires the shared bus automatically, while manual core wiring must pass the same bus to `Scheduler` and `ProcessingNode`. `RemoteWakeChannel` publishes the same hints across nodes for durable stores: Postgres uses `LISTEN`/`NOTIFY` on `threadmill_wake`, Redis uses Pub/Sub on `{threadmill}:wake`. Wake publish/listen failures are ignored because `pollInterval` remains the correctness fallback.
 - **Quarantine.** Handler-resolution and payload-deserialization failures land in `QUARANTINED`. `RetryInterceptor` deliberately skips `FailureCause.QUARANTINE` so a permanently broken job never causes a retry storm.
 - **Long-running check-ins.** `JobExecutionContext.checkIn`, `updateProgress`, and `log` mutate the live job and are persisted by a per-job coalescing flush path. These writes never bump `version` and are conditional on the job still being `PROCESSING` and owned by the same node. Once a job checks in, `noProgressTimeout` replaces wall-clock `jobTimeout`.
 - **Concurrency release piggybacks on the single terminal transition.** Success, exception failure, wall-clock timeout, no-progress timeout, orphan reclaim, and quarantine all leave `PROCESSING` through the persisted save path, so the next job for that key can claim after the transition lands.
@@ -299,6 +301,7 @@ This section is the project's memory: the load-bearing decisions worth knowing b
 
 - **Data first, UI second.** `EngineSnapshot.of(store)` returns counts, queue depths, oldest enqueued times, oldest processing heartbeat, node heartbeats, cron tasks, and store capabilities. The mountable UI is additive on top.
 - **Metrics integration via Micrometer.** Per-state gauges, queue-depth gauges, oldest enqueued / processing heartbeat age gauges, processed / failed counters, refresh-error counter, claim-latency timer, and processing-time timer. Wired in via `JobInterceptor` and store operational queries — no special success path in the engine.
+- **Tracing integration via OpenTelemetry API only.** `threadmill-tracing` is optional and does not pull an SDK/exporter. `ThreadmillTracing.asInterceptor()` emits one span per processing attempt, and `TracingJobStore` decorates store operations without changing behaviour. Spring auto-config adds user-provided `JobInterceptor` beans to the node.
 
 ### Formatting
 
@@ -388,10 +391,13 @@ Every hard-won failure mode that has come up during development, and the test th
 | `JobDefinitionMigrator` rewrites only replaceable-state jobs (ENQUEUED / SCHEDULED / AWAITING), enforces the new handler type, respects `max`, and rejects nulls | `JobDefinitionMigratorTest.rewritesEnqueuedScheduledAndAwaitingJobsToNewHandlerSignature` + `leavesProcessingAndTerminalJobsUntouched` + `appliesPayloadSpecMigrationBeforeRewritingHandler` + `newHandlerTypeOverridesAnythingTheSpecMigrationReturned` + `respectsMaxBatchSizeAndReturnsZeroForNonPositiveMax` + `nullArgsAreRejected` |
 | Redis `replace_job.lua` updates the `by_handler` SET when handler signature changes, leaves it alone otherwise | `RedisJobStoreRegressionTest.replaceJobMovesIdAcrossByHandlerIndexWhenHandlerSignatureChanges` + `replaceJobLeavesByHandlerIndexUnchangedWhenHandlerSignatureIsSame` |
 | Redis concurrency-blocked claim corrupts queue, counts, or pending indexes | `RedisJobStoreRegressionTest.blockedConcurrencyClaimLeavesPendingJobEnqueuedAndIndexesIntact` |
+| Redis active-state / count / concurrency indexes drift after reliable-fetch transitions | `RedisJobStoreRegressionTest.assertRedisIndexesConsistent` applied across claim, blocked claim, serializer failure, terminal transition, orphan reclaim, replace, retry, and delete regressions |
 | Every standard Redis eviction policy (`allkeys-*`, `volatile-*`) fails Threadmill startup | `RedisJobStoreRegressionTest.startupRejectsEvictionPolicy` (parameterized over 7 policies) |
 | `RedisSafetyValidation.externallyValidatedMode` bypasses the eviction-policy gate for managed Redis where `CONFIG GET` is unavailable | `RedisJobStoreRegressionTest.externallyValidatedModeAllowsStartupAgainstEvictionPolicy` |
 | `Scheduler.reconcileRecurring` for one namespace deletes only that namespace's stale tasks and leaves other namespaces and unowned tasks alone | `SchedulingTest.reconcileRecurringForOneNamespaceLeavesOtherNamespaceAndManualTasksUntouched` + `reconcileRecurringWithEmptyDesiredSetDeletesAllTasksOwnedByThatNamespace` |
 | Class-renamed `@Recurring` handler with default name deletes the old owned task and registers the new one | `ThreadmillAutoConfigurationTest.renamingARecurringHandlerWithoutAnExplicitNameDeletesTheOldOwnedTaskAndRegistersTheNew` |
+| Remote wake publish/listen regresses or Spring stops wiring wake publishers/listeners | `PostgresRemoteWakeChannelTest.publishDeliversWakeToListener` + `RedisRemoteWakeChannelTest.publishDeliversWakeToListener` + `ThreadmillAutoConfigurationTest.localWakePublishesToConfiguredRemoteWakeChannel` + `remoteWakeDisabledDoesNotCreateChannel` + `remoteWakeLifecycleStartsListenerOnlyWhenNodeRuns` |
+| OpenTelemetry tracing misses processing/store span attributes or exceptions | `ThreadmillTracingTest.processingSpanIsCurrentAndRecordsSuccessAttributes` + `processingFailureRecordsExceptionAndCause` + `storeDecoratorRecordsClaimCountAndStoreDescription` |
 
 ### Postgres-layer improvements (engagement notes)
 
@@ -400,7 +406,7 @@ A standing audit against a reference Postgres job system flagged five additive i
 - **Bulk-insert atomic-failure pattern.** `JobStore.insertAll` pre-serializes every job in the batch *before* any write — `OversizedJobException` rejects the whole batch with no in-memory `version` mutated on any input. Three concrete impls demonstrate the pattern: in-memory pre-serializes under the claim mutex, Postgres pre-serializes outside the transaction then uses `PreparedStatement.addBatch()` inside, and Redis pre-serializes plus a single `insert_all.lua` that does a two-pass EXISTS-then-write under one atomic Lua call. Concurrency-keyed jobs are NOT a fallback trigger — claim-time concurrency handles them safely.
 - **Spring enqueue transaction modes.** `threadmill.spring.enqueue-mode` has three explicit choices: `after_commit` (default) defers job rows until Spring's `afterCommit`, `immediate` writes outside the caller transaction, and `join_transaction` makes normal, scheduled, bulk, and deduplicated enqueues part of the caller's JDBC transaction. `join_transaction` is intentionally Spring + Postgres only and requires the auto-configured `PostgresJobStore` to use `SpringPostgresTransactionBoundary`; Redis cannot join a SQL transaction. Wake signals for joined writes fire only after commit.
 - **Truncation at snapshot time.** `JsonJobSerializer.serializeJob(snapshot, capabilities)` trims `JobLog` from the head and caps FAILED / QUARANTINED state-history messages with a sentinel suffix BEFORE the overall size check. This is the only place in the codebase where the failure-detail policy lives — the single failure code path in `JobRunner.recordFailure` is unchanged. If you add a new state that needs failure detail, add it to `trimFailureMessages` in `JsonJobSerializer`.
-- **Wake-signal pattern.** `WakeSignal` is a single-permit `Semaphore`. The cap and the all-busy → at-least-one-idle gate are both load-bearing: without the cap, many concurrent finishes burn CPU on `release()` calls; without the gate, steady-state high throughput busy-spins. Any future "wake the loop" need (e.g. a remote pub/sub signal) should reach for this primitive rather than rolling its own.
+- **Wake-signal pattern.** `WakeSignal` is a single-permit `Semaphore`. The cap and the all-busy → at-least-one-idle gate are both load-bearing: without the cap, many concurrent finishes burn CPU on `release()` calls; without the gate, steady-state high throughput busy-spins. Remote wake must feed `ProcessingNode.wake(queue)` and the existing dispatcher signal rather than inventing a second local wake primitive.
 - **Per-queue pause primitive.** Threadmill claims by *explicit* queue at the store layer, so we do not inherit the reference's `DISTINCT(queue)` performance footnote. Do not add a wildcard claim selector at the store layer "for parity" — the explicit-queue shape is the win. Pause and resume are idempotent across all backends.
 
 ### Manual soak harness (engagement notes)
@@ -431,7 +437,7 @@ A standing piece of operability work: a per-backend, per-scenario stress harness
 
 ### Build & module-layout decisions worth remembering
 
-- **`buildSrc/` is kept, not inlined.** The convention plugin `threadmill.java-base` holds the Java 25 toolchain config, `-Xlint:all -Werror`, Javadoc strictness, and JUnit Platform wiring. That's ~30 lines shared across 9 modules; inlining would duplicate ~270 lines into the per-module build scripts and lose a single point of truth for compile / test policy. Convention plugins also avoid `buildSrc` re-evaluation surprises that earlier Gradle classpath plumbing had. Don't inline.
+- **`buildSrc/` is kept, not inlined.** The convention plugin `threadmill.java-base` holds the Java 25 toolchain config, `-Xlint:all -Werror`, Javadoc strictness, and JUnit Platform wiring. Keeping that in one place avoids duplicating the same compile / test policy across every module and preserves a single point of truth. Convention plugins also avoid `buildSrc` re-evaluation surprises that earlier Gradle classpath plumbing had. Don't inline.
 - **`MigrationRunner.SHIPPED_MIGRATIONS` is an explicit list, not a classpath scan.** The list is what makes the migration runner native-image friendly and what makes the order deterministic. New migrations go on the end of the list; do not collapse the list into a directory scan.
 - **The convention plugin's `-Werror` is intentional.** A warning is a defect; promoting it to a build break catches it at the cheapest possible moment.
 
@@ -447,5 +453,5 @@ These are deliberately additive and design-compatible with the current model —
 - **Batches.** The child relationship is already in the model; a `BatchCompletionInterceptor` over multiple children is the natural shape.
 - **External-trigger jobs.** The `PROCESSED` state is reserved; this needs an external-signal API plus an escape-hatch timeout.
 - **Rate limiters.** A store-side token-bucket primitive; Redis can use the standard Lua bucket pattern.
-- **Mountable dashboard UI**, OpenTelemetry tracing, and a pluggable auth SPI on top of the existing data-first observability API.
+- **Mountable dashboard UI** and a pluggable auth SPI on top of the existing data-first observability API.
 - **Reproducible production-grade benchmarks** (separate from the soak suite) and artifact publishing automation.

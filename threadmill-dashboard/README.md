@@ -4,9 +4,9 @@ Data-first observability API. The mountable UI is additive — this module
 ships the `EngineSnapshot` value type and the `EngineSnapshot.of(store)`
 factory that builds one from any `JobStore`.
 
-This is the concrete observability win over Quartz: a single
-data-shape any consumer (Spring Boot Actuator endpoint, custom internal
-admin UI, ops dashboard, monitoring script) can render or scrape.
+The concrete observability win is one data shape any consumer (Spring Boot
+Actuator endpoint, custom internal admin UI, ops dashboard, monitoring script)
+can render or scrape.
 
 ## `EngineSnapshot`
 

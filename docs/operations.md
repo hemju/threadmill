@@ -34,6 +34,24 @@ Redis must use `maxmemory-policy noeviction`; alert on rejected writes,
 oldest processing heartbeat age, orphan reclaim count, claim failures, queue
 depth, and Redis persistence/replication health.
 
+## Remote Wake
+
+Each dispatcher still polls its store, but Spring auto-configured durable
+stores also publish cross-node wake hints after local wake timing has already
+decided that work is visible. Postgres uses `LISTEN`/`NOTIFY` on the fixed
+`threadmill_wake` channel. Redis uses Pub/Sub on `{threadmill}:wake` with a
+separate subscription connection.
+
+Remote wake failures are logged at debug level and ignored. A missed
+notification can only add latency up to `threadmill.pollInterval`; it cannot
+skip work or change ownership. Disable the optimization with:
+
+```yaml
+threadmill:
+  remote-wake:
+    enabled: false
+```
+
 ## Deduplication
 
 Producer-side deduplication coalesces duplicate submissions by `(queue,

@@ -17,6 +17,7 @@ include(
     "threadmill-spring-boot",
     "threadmill-test-support",
     "threadmill-metrics",
+    "threadmill-tracing",
     "threadmill-dashboard",
     "threadmill-soak",
     "threadmill-simulation",
