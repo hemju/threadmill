@@ -136,6 +136,11 @@ public final class InMemoryJobStore implements JobStore {
         return capabilities;
     }
 
+    @Override
+    public String describe() {
+        return "In-Memory (volatile, single-JVM)";
+    }
+
     // ---------------------------------------------------------------- single-job
 
     @Override

@@ -74,6 +74,15 @@ public abstract class AbstractJobStoreContractTest {
         store = createStore();
     }
 
+    // ================================================================ store identity
+
+    @Test
+    @DisplayName("describe() returns a non-blank operator-facing identifier")
+    void describeReturnsNonBlankString() {
+        String description = store.describe();
+        assertThat(description).isNotNull().isNotBlank();
+    }
+
     // ================================================================ insert / load
 
     @Test

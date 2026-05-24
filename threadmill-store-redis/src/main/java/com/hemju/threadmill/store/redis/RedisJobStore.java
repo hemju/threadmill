@@ -108,6 +108,7 @@ public final class RedisJobStore implements JobStore {
     private final JobStoreCapabilities capabilities;
     private final boolean ownsClient;
     private final RedisStoreConfig.RedisSafetyValidation safetyValidation;
+    private final String topologyDescription;
 
     public RedisJobStore(RedisURI uri) {
         this(
@@ -115,11 +116,18 @@ public final class RedisJobStore implements JobStore {
                 new JsonJobSerializer(),
                 defaultCapabilities(),
                 true,
-                RedisStoreConfig.RedisSafetyValidation.strict());
+                RedisStoreConfig.RedisSafetyValidation.strict(),
+                describeUri(uri));
     }
 
     public RedisJobStore(RedisStoreConfig config) {
-        this(connect(config), new JsonJobSerializer(), defaultCapabilities(), true, config.safetyValidation());
+        this(
+                connect(config),
+                new JsonJobSerializer(),
+                defaultCapabilities(),
+                true,
+                config.safetyValidation(),
+                describeConfig(config));
     }
 
     public RedisJobStore(RedisClient client, JobSerializer serializer, JobStoreCapabilities capabilities) {
@@ -128,7 +136,8 @@ public final class RedisJobStore implements JobStore {
                 serializer,
                 capabilities,
                 false,
-                RedisStoreConfig.RedisSafetyValidation.strict());
+                RedisStoreConfig.RedisSafetyValidation.strict(),
+                "standalone (client-injected)");
     }
 
     public RedisJobStore(
@@ -141,7 +150,8 @@ public final class RedisJobStore implements JobStore {
                 serializer,
                 capabilities,
                 false,
-                safetyValidation);
+                safetyValidation,
+                "standalone (client-injected)");
     }
 
     private record ConnectionHandle(
@@ -190,7 +200,8 @@ public final class RedisJobStore implements JobStore {
             JobSerializer serializer,
             JobStoreCapabilities capabilities,
             boolean ownsClient,
-            RedisStoreConfig.RedisSafetyValidation safetyValidation) {
+            RedisStoreConfig.RedisSafetyValidation safetyValidation,
+            String topologyDescription) {
         this.client = handle.client();
         this.connection = handle.connection();
         this.commands = handle.commands();
@@ -198,7 +209,24 @@ public final class RedisJobStore implements JobStore {
         this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
         this.ownsClient = ownsClient;
         this.safetyValidation = Objects.requireNonNull(safetyValidation, "safetyValidation");
+        this.topologyDescription = Objects.requireNonNull(topologyDescription, "topologyDescription");
         validateRedisSafety();
+    }
+
+    private static String describeUri(RedisURI uri) {
+        Objects.requireNonNull(uri, "uri");
+        return "standalone host=" + uri.getHost() + " port=" + uri.getPort();
+    }
+
+    private static String describeConfig(RedisStoreConfig config) {
+        return switch (config) {
+            case RedisStoreConfig.Standalone standalone -> describeUri(standalone.uri());
+            case RedisStoreConfig.Sentinel sentinel ->
+                "sentinel master=" + sentinel.master() + " nodes="
+                        + sentinel.nodes().size();
+            case RedisStoreConfig.Cluster cluster ->
+                "cluster nodes=" + cluster.nodes().size();
+        };
     }
 
     /** Closes the underlying connection (and the client, if this instance owns it). */
@@ -214,6 +242,11 @@ public final class RedisJobStore implements JobStore {
     @Override
     public JobStoreCapabilities capabilities() {
         return capabilities;
+    }
+
+    @Override
+    public String describe() {
+        return "Redis " + topologyDescription;
     }
 
     @Override

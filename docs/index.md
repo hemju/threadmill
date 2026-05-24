@@ -28,6 +28,8 @@
 - [Operations](operations.md) — production runbook, pause / resume, monitoring.
 - [Troubleshooting](troubleshooting.md) — symptom → cause → fix.
 - [Migration](migration.md) — from Quartz / Solid Queue / custom systems.
+- [Threadmill vs Quartz](threadmill-vs-quartz.md) — side-by-side architecture
+  comparison: cluster model, payload typing, missed-run handling, standby.
 - [Release checklist](release-checklist.md).
 
 ## Per-module deep dive

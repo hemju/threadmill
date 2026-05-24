@@ -4,6 +4,27 @@ Spring Boot auto-configuration for Threadmill. Wires the engine into a Spring
 Boot application with sensible defaults, automatic store selection, lifecycle
 management via `SmartLifecycle`, and transaction-aware enqueue semantics.
 
+## Spring Boot compatibility
+
+Requires **Spring Boot 4.0 or newer**. Earlier majors are **not supported** —
+their bundled ASM cannot parse Java 25 class files (major version 69) and
+crash during `@ComponentScan`. The auto-configuration fails fast with a
+clear message if it detects Spring Boot 3.x or earlier on the classpath.
+
+## Startup banner
+
+On engine start, `ThreadmillLifecycle` logs a single multi-line banner with
+the node id, store identity (e.g. `PostgreSQL 18.1 @ threadmill`,
+`Redis standalone host=localhost port=6379`, or
+`In-Memory (volatile, single-JVM)`), capability flags, lane / worker
+breakdown, and the polling / maintenance cadences. It's the operator's
+equivalent of Quartz's scheduler meta-data block — one place to confirm
+"which engine, which store, which lanes" at boot time.
+
+Coming from Quartz? See [docs/threadmill-vs-quartz.md](../docs/threadmill-vs-quartz.md)
+for a side-by-side covering cluster model, payload typing, missed-run
+handling, why there is no standby mode, and what to expect when migrating.
+
 ## Quick start
 
 ```kotlin
@@ -140,8 +161,8 @@ in the error message.
   still being reorganised; revisit after SB4 GA.
 - **Spring AOT / native-image `RuntimeHints`** — needs a stable actuator
   target.
-- **Per-Spring-Boot-version sample apps** — `threadmill-example/spring-boot-3/`
-  and `spring-boot-4/` are planned for a follow-up release.
+- **Spring Boot 4 sample app** — `threadmill-example/spring-boot-4/` is
+  planned for a follow-up release.
 
 ## Build
 

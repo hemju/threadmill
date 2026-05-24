@@ -56,6 +56,22 @@ public interface JobStore {
     JobStoreCapabilities capabilities();
 
     /**
+     * Human-readable, single-line identification of the backing store —
+     * shown in startup banners and operator-facing logs. Should include the
+     * concrete technology plus enough topology / version detail that an
+     * operator can tell which datastore the engine is pointed at (for
+     * example {@code "PostgreSQL 18.1 @ threadmill"} or
+     * {@code "Redis standalone host=localhost port=6379"}). Implementations
+     * must return this in constant time without any I/O against the store.
+     *
+     * <p>The default returns the implementation's simple class name so
+     * existing third-party stores remain compilable.
+     */
+    default String describe() {
+        return getClass().getSimpleName();
+    }
+
+    /**
      * Lightweight writable probe used after capacity-related store failures.
      * Implementations with a meaningful no-op write can override this method;
      * the default preserves the historical read-only probe.

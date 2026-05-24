@@ -1,12 +1,17 @@
 package com.hemju.threadmill.spring;
 
 import java.util.Objects;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.SmartLifecycle;
 
 import com.hemju.threadmill.core.engine.ProcessingNode;
+import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
+import com.hemju.threadmill.core.engine.QueueLane;
+import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.JobStoreCapabilities;
 
 /**
  * {@link SmartLifecycle} wrapper around a Threadmill {@link ProcessingNode} so the
@@ -45,7 +50,7 @@ public final class ThreadmillLifecycle implements SmartLifecycle {
         if (running) return;
         node.start();
         running = true;
-        LOG.info("Threadmill: ProcessingNode {} started (lifecycle phase {})", node.nodeId(), PHASE);
+        LOG.info("\n{}", renderBanner(node));
     }
 
     @Override
@@ -72,5 +77,63 @@ public final class ThreadmillLifecycle implements SmartLifecycle {
     /** Expose the wrapped node so other auto-configured beans (Actuator, etc.) can read it. */
     public ProcessingNode node() {
         return node;
+    }
+
+    /**
+     * Build the Quartz-inspired startup banner. Package-private so tests can
+     * assert against the exact formatted string without spinning up SLF4J
+     * capture every time.
+     */
+    static String renderBanner(ProcessingNode node) {
+        JobStore store = node.store();
+        ProcessingNodeConfig config = node.config();
+        JobStoreCapabilities caps = store.capabilities();
+        int totalWorkers = node.lanes().stream().mapToInt(QueueLane::workers).sum();
+        String lanesLine = node.lanes().stream()
+                .map(lane -> lane.queue() + " x" + lane.workers())
+                .collect(Collectors.joining("   "));
+
+        var b = new StringBuilder(512);
+        b.append("┌─ Threadmill engine started ───────────────────────────────────────────\n");
+        b.append("│  Node id      : ")
+                .append(node.nodeId())
+                .append("   (lifecycle phase ")
+                .append(PHASE)
+                .append(")\n");
+        b.append("│  Store        : ").append(store.describe()).append('\n');
+        b.append("│                 capabilities: maxJob=")
+                .append(caps.maxSerializedJobBytes())
+                .append("B, maxLog=")
+                .append(caps.maxJobLogBytes())
+                .append("B, exactCounts=")
+                .append(caps.supportsExactCounts())
+                .append(", concurrencyGroups=")
+                .append(caps.supportsConcurrencyGroups())
+                .append('\n');
+        b.append("│  Workers      : ")
+                .append(totalWorkers)
+                .append(" across ")
+                .append(node.lanes().size())
+                .append(" lane(s)\n");
+        b.append("│                 ").append(lanesLine).append('\n');
+        b.append("│  Polling      : poll=")
+                .append(config.pollInterval())
+                .append(", claimBatch=")
+                .append(config.claimBatchSize())
+                .append(", jobTimeout=")
+                .append(config.jobTimeout())
+                .append('\n');
+        b.append("│  Maintenance  : poll=")
+                .append(config.maintenancePollInterval())
+                .append(", heartbeat=")
+                .append(config.claimHeartbeat())
+                .append(", retention=")
+                .append(config.retentionInterval())
+                .append('\n');
+        b.append("│  Master lease : ")
+                .append(config.maintenanceLeaseDuration())
+                .append("  (this node is master-eligible)\n");
+        b.append("└───────────────────────────────────────────────────────────────────────");
+        return b.toString();
     }
 }

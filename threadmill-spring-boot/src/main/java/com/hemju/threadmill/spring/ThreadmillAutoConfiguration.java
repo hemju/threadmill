@@ -65,6 +65,10 @@ public class ThreadmillAutoConfiguration {
 
     private static final Logger LOG = LoggerFactory.getLogger(ThreadmillAutoConfiguration.class);
 
+    public ThreadmillAutoConfiguration() {
+        SpringBootVersionGuard.requireSpringBootFour();
+    }
+
     /**
      * Resolve the {@link JobStore} by classpath and configuration precedence:
      * <ol>

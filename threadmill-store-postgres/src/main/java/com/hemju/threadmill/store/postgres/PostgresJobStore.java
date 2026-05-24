@@ -79,6 +79,8 @@ public final class PostgresJobStore implements JobStore {
     private final DataSource dataSource;
     private final JobSerializer serializer;
     private final JobStoreCapabilities capabilities;
+    private final String serverVersion;
+    private final String databaseName;
 
     public PostgresJobStore(DataSource dataSource) {
         this(dataSource, new JsonJobSerializer(), JobStoreCapabilities.defaults());
@@ -88,7 +90,9 @@ public final class PostgresJobStore implements JobStore {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.serializer = Objects.requireNonNull(serializer, "serializer");
         this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
-        requirePostgresEighteen(this.dataSource);
+        var identity = requirePostgresEighteen(this.dataSource);
+        this.serverVersion = identity.serverVersion();
+        this.databaseName = identity.database();
     }
 
     /**
@@ -97,17 +101,23 @@ public final class PostgresJobStore implements JobStore {
      * supported. The check runs once at construction so a misconfigured host fails fast
      * with an actionable message rather than at the first query.
      *
+     * <p>Also captures the server-version string and database name so {@link #describe()}
+     * can read them later in constant time without re-querying the server.
+     *
      * @throws JobEngineFatalException if the server reports a {@code server_version_num}
      *     below {@value #MINIMUM_SERVER_VERSION_NUM}, or if the version cannot be read.
      */
-    private static void requirePostgresEighteen(DataSource dataSource) {
+    private static ServerIdentity requirePostgresEighteen(DataSource dataSource) {
         try (Connection conn = dataSource.getConnection();
-                Statement st = conn.createStatement();
-                ResultSet rs = st.executeQuery("SHOW server_version_num")) {
-            if (!rs.next()) {
-                throw new JobEngineFatalException("Could not read PostgreSQL server_version_num — refusing to start");
+                Statement st = conn.createStatement()) {
+            int versionNum;
+            try (ResultSet rs = st.executeQuery("SHOW server_version_num")) {
+                if (!rs.next()) {
+                    throw new JobEngineFatalException(
+                            "Could not read PostgreSQL server_version_num — refusing to start");
+                }
+                versionNum = Integer.parseInt(rs.getString(1).trim());
             }
-            int versionNum = Integer.parseInt(rs.getString(1).trim());
             if (versionNum < MINIMUM_SERVER_VERSION_NUM) {
                 int major = versionNum / 10000;
                 throw new JobEngineFatalException(
@@ -115,16 +125,29 @@ public final class PostgresJobStore implements JobStore {
                                 + " (server_version_num=" + versionNum + "). Upgrade the server or use a"
                                 + " different backend (Redis, in-memory).");
             }
+            String version;
+            try (ResultSet rs = st.executeQuery("SHOW server_version")) {
+                version = rs.next() ? rs.getString(1).trim() : Integer.toString(versionNum / 10000);
+            }
+            String database = conn.getCatalog();
+            return new ServerIdentity(version, database == null ? "unknown" : database);
         } catch (SQLException e) {
             throw new JobEngineFatalException("Failed to verify PostgreSQL server version", e);
         }
     }
+
+    private record ServerIdentity(String serverVersion, String database) {}
 
     // ---------------------------------------------------------------- capabilities
 
     @Override
     public JobStoreCapabilities capabilities() {
         return capabilities;
+    }
+
+    @Override
+    public String describe() {
+        return "PostgreSQL " + serverVersion + " @ " + databaseName;
     }
 
     // ---------------------------------------------------------------- single-job

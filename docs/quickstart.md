@@ -4,6 +4,10 @@ Threadmill's Spring Boot integration is the lowest-boilerplate path. It still
 uses at-least-once delivery: handlers must be idempotent because recovery can
 run the same logical job more than once.
 
+> **Spring Boot 4.x.** This module requires Spring Boot 4.0 or newer.
+> Spring Boot 3.x is not supported and will fail fast at application startup
+> with a clear message.
+
 ## Dependencies
 
 Use Java 25 and add the Spring module plus one store:
