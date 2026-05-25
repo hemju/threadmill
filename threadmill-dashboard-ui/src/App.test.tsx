@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 
@@ -61,7 +61,31 @@ const responses: Record<string, unknown> = {
       paused: false,
       oldestEnqueuedAt: "2026-01-01T00:00:00Z"
     }
-  ]
+  ],
+  "/threadmill/api/jobs/018f0000-0000-7000-8000-000000000001": {
+    summary: {
+      id: "018f0000-0000-7000-8000-000000000001",
+      state: "ENQUEUED",
+      queue: "default",
+      priority: 0,
+      handlerType: "com.example.ImportHandler",
+      attempts: 0,
+      version: 1,
+      createdAt: "2026-01-01T00:00:00Z",
+      currentStateAt: "2026-01-01T00:00:00Z",
+      scheduledFor: null,
+      ownerNodeId: null,
+      ownerHeartbeatAt: null,
+      detailsRedacted: true
+    },
+    stateHistory: [{ state: "ENQUEUED", at: "2026-01-01T00:00:00Z", reason: null, detail: null }],
+    arguments: [],
+    metadata: {},
+    log: [],
+    progress: null,
+    result: null,
+    sensitiveDetailsRedacted: true
+  }
 };
 
 beforeEach(() => {
@@ -76,6 +100,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  cleanup();
   vi.unstubAllGlobals();
   window.__THREADMILL_DASHBOARD_CONFIG__ = undefined;
 });
@@ -107,4 +132,16 @@ it("uses the runtime API base path override", async () => {
 
   await waitFor(() => expect(screen.getByText("com.example.ImportHandler")).toBeInTheDocument());
   expect(calls).toContain("/admin/threadmill/api/session");
+});
+
+it("opens job details when the job row is clicked", async () => {
+  render(<App />);
+
+  const row = await screen.findByRole("button", {
+    name: "Open job details for 018f0000-0000-7000-8000-000000000001"
+  });
+  fireEvent.click(row);
+
+  await waitFor(() => expect(screen.getByText("Sensitive details redacted.")).toBeInTheDocument());
+  expect(row).toHaveAttribute("aria-selected", "true");
 });

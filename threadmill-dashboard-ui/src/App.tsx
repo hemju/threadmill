@@ -194,11 +194,7 @@ export default function App() {
       {
         header: "Job",
         accessorKey: "id",
-        cell: ({ row }) => (
-          <button className="font-mono text-xs text-primary" onClick={() => void openJob(row.original)}>
-            {row.original.id}
-          </button>
-        )
+        cell: ({ row }) => <span className="font-mono text-xs text-primary">{row.original.id}</span>
       },
       { header: "Queue", accessorKey: "queue", cell: ({ row }) => <span className="font-mono text-xs">{row.original.queue}</span> },
       {
@@ -217,7 +213,11 @@ export default function App() {
         cell: ({ row }) => {
           const job = row.original;
           return (
-            <div className="flex gap-1">
+            <div
+              className="flex gap-1"
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => event.stopPropagation()}
+            >
               <Button
                 variant="ghost"
                 size="icon"
@@ -339,7 +339,22 @@ export default function App() {
               </thead>
               <tbody>
                 {table.getRowModel().rows.map((row) => (
-                  <tr key={row.id}>
+                  <tr
+                    aria-label={`Open job details for ${row.original.id}`}
+                    aria-selected={selected?.summary.id === row.original.id}
+                    className="job-row"
+                    key={row.id}
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => void openJob(row.original)}
+                    onKeyDown={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        void openJob(row.original);
+                      }
+                    }}
+                  >
                     {row.getVisibleCells().map((cell) => (
                       <Td key={cell.id}>{flexRender(cell.column.columnDef.cell, cell.getContext())}</Td>
                     ))}

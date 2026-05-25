@@ -66,6 +66,23 @@ body {
   color: hsl(var(--muted-foreground));
 }
 
+.job-row {
+  cursor: pointer;
+}
+
+.job-row:hover {
+  background: hsl(var(--muted) / 0.55);
+}
+
+.job-row:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: -2px;
+}
+
+.job-row[aria-selected="true"] {
+  background: hsl(var(--primary) / 0.1);
+}
+
 .state-enqueued {
   color: #1d4ed8;
 }
