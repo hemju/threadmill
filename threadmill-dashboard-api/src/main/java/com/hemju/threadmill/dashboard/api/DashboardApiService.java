@@ -8,9 +8,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
-import org.springframework.http.HttpStatus;
-import org.springframework.web.server.ResponseStatusException;
-
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobReplacement;
@@ -25,7 +22,6 @@ import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
-import com.hemju.threadmill.dashboard.EngineSnapshot;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads.ActionResponse;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads.JobDetail;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads.JobListResponse;
@@ -71,8 +67,7 @@ public final class DashboardApiService {
     public JobListResponse jobs(JobSearch search) {
         if (!store.capabilities().supportsRichSearch()
                 && (search.state() == null || search.queue() != null || search.handlerType() != null)) {
-            throw new ResponseStatusException(
-                    HttpStatus.BAD_REQUEST, "this store supports dashboard job search only by state");
+            throw DashboardApiException.badRequest("this store supports dashboard job search only by state");
         }
         var jobs =
                 store.searchJobs(search).stream().map(job -> summary(job, true)).toList();
@@ -116,7 +111,7 @@ public final class DashboardApiService {
 
     public ActionResponse pauseQueue(String queue, String reason) {
         if (reason != null && reason.getBytes(StandardCharsets.UTF_8).length > MAX_PAUSE_REASON_BYTES) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "pause reason must be at most 256 UTF-8 bytes");
+            throw DashboardApiException.badRequest("pause reason must be at most 256 UTF-8 bytes");
         }
         store.pauseQueue(queue, reason);
         return new ActionResponse("paused", queue);
@@ -159,7 +154,7 @@ public final class DashboardApiService {
 
     public ActionResponse scheduleRetry(JobId id, long expectedVersion, Duration delay) {
         Objects.requireNonNull(delay, "delay");
-        if (delay.isNegative()) throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "delay must not be negative");
+        if (delay.isNegative()) throw DashboardApiException.badRequest("delay must not be negative");
         Job job = load(id);
         requireVersion(job, expectedVersion);
         if (job.currentState() != JobState.FAILED) {
@@ -247,12 +242,11 @@ public final class DashboardApiService {
 
     private static CronTask.Trigger trigger(String kind, String value, CronTask.Trigger fallback) {
         if (kind == null && value == null) return fallback;
-        if (kind == null || value == null)
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "trigger incomplete");
+        if (kind == null || value == null) throw DashboardApiException.badRequest("trigger incomplete");
         return switch (kind.toUpperCase()) {
             case "CRON" -> new CronTask.Trigger.CronExpr(CronExpression.parse(value));
             case "INTERVAL" -> new CronTask.Trigger.Interval(Duration.parse(value));
-            default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "unknown trigger kind");
+            default -> throw DashboardApiException.badRequest("unknown trigger kind");
         };
     }
 
@@ -295,11 +289,11 @@ public final class DashboardApiService {
         if (job.version() != expectedVersion) throw conflict("stale job version");
     }
 
-    private static ResponseStatusException notFound(String message) {
-        return new ResponseStatusException(HttpStatus.NOT_FOUND, message);
+    private static DashboardApiException notFound(String message) {
+        return DashboardApiException.notFound(message);
     }
 
-    private static ResponseStatusException conflict(String message) {
-        return new ResponseStatusException(HttpStatus.CONFLICT, message);
+    private static DashboardApiException conflict(String message) {
+        return DashboardApiException.conflict(message);
     }
 }

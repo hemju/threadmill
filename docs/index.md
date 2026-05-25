@@ -53,8 +53,10 @@ operational notes:
   recommended alerts.
 - [`threadmill-tracing`](../threadmill-tracing/README.md) — optional
   OpenTelemetry spans.
-- [`threadmill-dashboard`](../threadmill-dashboard/README.md) — `EngineSnapshot`
-  shape.
+- [`threadmill-dashboard-api`](../threadmill-dashboard-api/README.md) —
+  portable dashboard contract and `EngineSnapshot` shape.
+- [`threadmill-dashboard-spring`](../threadmill-dashboard-spring/README.md) —
+  Spring MVC/Security dashboard adapter.
 - [`threadmill-soak`](../threadmill-soak/README.md) — sustained throughput,
   container-pause recovery numbers.
 - [`threadmill-test-support`](../threadmill-test-support/README.md) — how to

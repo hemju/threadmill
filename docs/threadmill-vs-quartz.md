@@ -27,7 +27,7 @@ not to argue one is universally better.
 | Bulk enqueue | Loop over `scheduler.scheduleJob` | `insertAll(List<Job>)` is atomic — whole batch rejected on any oversize / duplicate |
 | Producer dedup | Application code | `enqueueIfAbsent(job, dedupKey, ttl)` coalesces concurrent producers at the store level |
 | Listeners / interceptors | `JobListener`, `TriggerListener`, `SchedulerListener` | `JobInterceptor` SPI with `RetryInterceptor` and `WorkflowInterceptor` shipped |
-| Observability | JMX, log lines | `EngineSnapshot` data API + Micrometer integration; mountable dashboard planned |
+| Observability | JMX, log lines | `EngineSnapshot` data API + Micrometer integration + reusable static dashboard UI |
 
 ## Architecture
 

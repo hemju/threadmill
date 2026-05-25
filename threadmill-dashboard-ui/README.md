@@ -8,6 +8,10 @@ components, lucide icons, and TanStack Table. It is designed to be served at
 `/threadmill/api/**`, so Spring Security sessions and CSRF tokens work without
 CORS or separate browser tokens.
 
+The Gradle jar packages the built app under
+`META-INF/resources/threadmill/`. Framework adapters can serve that same jar;
+the Spring adapter mounts it automatically when present.
+
 The API base path can be overridden before the app loads:
 
 ```html

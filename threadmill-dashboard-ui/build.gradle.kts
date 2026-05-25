@@ -1,4 +1,4 @@
-plugins { base }
+plugins { id("threadmill.java-base") }
 
 val npmInstall by
     tasks.registering(Exec::class) {
@@ -31,3 +31,8 @@ val npmBuild by
     }
 
 tasks.named("check") { dependsOn(npmTest, npmBuild) }
+
+tasks.named<ProcessResources>("processResources") {
+    dependsOn(npmBuild)
+    from(layout.projectDirectory.dir("dist")) { into("META-INF/resources/threadmill") }
+}

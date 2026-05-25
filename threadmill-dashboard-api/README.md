@@ -1,48 +1,53 @@
 # threadmill-dashboard-api
 
-Spring MVC JSON API for the Threadmill dashboard.
+Framework-neutral dashboard API contract and service model. This module ships
+the `EngineSnapshot` value type, DTOs used by HTTP adapters, dashboard
+permissions, audit contracts, and the `DashboardApiService` operations over any
+`JobStore`.
 
-The API is mounted at `/threadmill/api/**` by default. Authentication stays in
-the host; Threadmill adds a scoped dashboard security chain, dashboard
-permissions, redaction, audit hooks, and state-machine enforcement for operator
-actions.
+The concrete observability win is one data shape any consumer (Spring Boot
+Actuator endpoint, custom internal admin UI, ops dashboard, monitoring script)
+can render or scrape. The Spring MVC/Security adapter lives in
+`threadmill-dashboard-spring`; the static React operations console lives in
+`threadmill-dashboard-ui`.
 
-## Security
+## `EngineSnapshot`
 
-`DashboardAuthorizer` maps the current Spring `Authentication` to dashboard
-permissions. The default implementation grants permissions from authorities
-named `THREADMILL_<PERMISSION>` or `ROLE_THREADMILL_<PERMISSION>`; `ADMIN` or
-`ROLE_THREADMILL_ADMIN` grants all dashboard permissions.
+```java
+public record EngineSnapshot(
+    Instant takenAt,
+    Map<JobState, Long> countsByState,
+    Map<String, Long> queueDepths,
+    Map<String, Instant> oldestEnqueuedAt,
+    Instant oldestProcessingHeartbeat,
+    List<NodeHeartbeat> nodeHeartbeats,
+    List<CronTask> cronTasks,
+    Set<String> pausedQueues,
+    JobStoreCapabilities capabilities) { … }
+```
 
-By default, Threadmill registers a `SecurityFilterChain` for
-`/threadmill/api/**`. It requires authentication and CSRF tokens for mutating
-requests, using `CookieCsrfTokenRepository.withHttpOnlyFalse()` so the static
-UI can send the token back in the configured header. Set
-`threadmill.dashboard.security.auto-configure=false` to provide a custom chain.
-If no `SecurityFilterChain` exists, startup fails unless unsafe read-only local
-mode is enabled.
+Every field is sourced from a cheap store query — per-state counts come
+from the incrementally-maintained counter (no full table scan); queue
+depths come from per-queue cardinality (constant time on Postgres via
+the partial index, O(1) on Redis via `ZCARD`); the rest are direct
+look-ups.
 
-Sensitive fields are redacted by default: payload arguments, metadata, logs,
-results, and failure messages. Full detail requires both
-`DashboardOptions.exposeSensitiveDetails=true` and
-`VIEW_SENSITIVE_DETAILS`.
+## Use
 
-## Configuration
+```java
+EngineSnapshot snapshot = EngineSnapshot.of(store);
+// Render however you want — JSON, HTML, log, OpenTelemetry trace.
+```
 
-| Property | Default | Purpose |
-|---|---:|---|
-| `threadmill.dashboard.api.base-path` | `/threadmill/api` | Base path for every API endpoint. |
-| `threadmill.dashboard.security.auto-configure` | `true` | Register Threadmill's scoped dashboard security chain. |
-| `threadmill.dashboard.expose-sensitive-details` | `false` | Allow full payload / metadata / log / result exposure when the user also has `VIEW_SENSITIVE_DETAILS`. |
-| `threadmill.dashboard.allow-unsafe-read-only-without-authentication` | `false` | Local-only escape hatch for read-only unauthenticated access. |
+## Capability flags
 
-The default audit sink is a noop and logs a startup warning. Production
-applications should provide a `DashboardAuditSink` bean that writes operator
-actions to the host audit pipeline.
+`capabilities` carries the same `JobStoreCapabilities` the store advertises:
+backend differences (`supportsRichSearch`, `supportsConcurrencyGroups`,
+`maxSerializedJobBytes`, etc.) are visible to dashboards too. The UI can
+gate features the backend can't honour.
 
-## Operator Actions
+## Build
 
-The controller exposes pause/resume queue, requeue, retry scheduling, soft-delete,
-pending-job replacement, recurring trigger/update/delete, and node/queue/job
-read endpoints. Actions always re-check permissions server-side and reject
-illegal state transitions.
+```
+./gradlew :threadmill-dashboard-api:test
+```

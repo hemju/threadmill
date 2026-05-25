@@ -71,9 +71,9 @@ See [docs/quickstart.md](docs/quickstart.md) for a complete Spring walkthrough, 
 | `threadmill-spring-boot` | Spring Boot 4.x auto-configuration. |
 | `threadmill-metrics` | Micrometer integration: jobs-per-state gauges, processed/failed counters, processing-time timer. |
 | `threadmill-tracing` | Optional OpenTelemetry API integration for processing and store-operation spans. |
-| `threadmill-dashboard` | Data-first observability model (`EngineSnapshot`) shared by API/UI consumers. |
-| `threadmill-dashboard-api` | Spring MVC JSON dashboard API with Spring Security based authorization, redaction, audit hooks, and operator actions. |
-| `threadmill-dashboard-ui` | Static React/Tailwind/shadcn operations console intended to be served at `/threadmill` while the API is routed at `/threadmill/api/**`. |
+| `threadmill-dashboard-api` | Spring-free dashboard contract: `EngineSnapshot`, DTOs, service logic, permissions, and audit contracts. |
+| `threadmill-dashboard-ui` | Static React/Tailwind/shadcn operations console packaged as reusable assets under `/threadmill`. |
+| `threadmill-dashboard-spring` | Spring MVC/Security adapter exposing `/threadmill/api/**` and mounting UI assets when present. |
 | `threadmill-test-support` | The abstract `JobStore` contract test every backend passes. |
 
 ## Storage backends
@@ -210,7 +210,7 @@ Not yet in v1 (design-compatible, additive when needed):
 
 - Batches; external-trigger jobs (the `PROCESSED` state is reserved);
   rate limiters; richer cron expressions (business-day, last-of-month).
-- Mountable dashboard UI; pluggable auth for the dashboard.
+- Additional dashboard adapters beyond Spring MVC.
 - Reproducible production-grade benchmarks; Maven Central publishing
   automation.
 

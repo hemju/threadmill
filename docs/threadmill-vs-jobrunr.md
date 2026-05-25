@@ -28,7 +28,7 @@ dashboard](https://www.jobrunr.io/en/documentation/pro/jobrunr-pro-multi-dashboa
 | Batches | Atomic batches are Pro-only | Atomic `insertAll`, but no batch orchestration API yet |
 | Chains / workflows | Job chains are Pro-only | Built-in workflow relationship and interceptor; still intentionally smaller |
 | Runtime rate limiting | Pro-only | Planned store-side token bucket, not implemented yet |
-| Dashboard | Dashboard in OSS; advanced dashboard/search/SSO/multi-cluster are Pro features | Data-first dashboard API only; UI intentionally out of scope for this implementation |
+| Dashboard | Dashboard in OSS; advanced dashboard/search/SSO/multi-cluster are Pro features | Portable dashboard API + reusable static UI, with Spring MVC/Security adapter |
 | Observability | Built-in dashboard and Pro observability features | Micrometer module, optional OpenTelemetry tracing module, data-first snapshot API |
 
 ## Where Threadmill is intentionally different
@@ -54,7 +54,8 @@ features require separate design work.
   and queue-family weights. It does not yet have a time-window or token-bucket
   rate limiter.
 - **Advanced dashboard/search/SSO/multi-cluster dashboard.** Threadmill ships a
-  data API and leaves the UI for a dedicated design discussion.
+  portable API, static UI, and Spring adapter; SSO and multi-cluster operations
+  remain host/framework responsibilities.
 - **Built-in observability.** Threadmill now has Micrometer and optional
   OpenTelemetry, but the host application still owns exporters, dashboards,
   and alert routing.
@@ -73,5 +74,5 @@ commercial operations features, especially dashboard breadth, rate limiting,
 batches, and transaction/plugin polish.
 
 For Threadmill's roadmap, the highest-value follow-ups are: a real batch API,
-a fluent workflow/chain builder, store-side rate limiting, dashboard UI design,
-and richer search on stores that can support it honestly.
+a fluent workflow/chain builder, store-side rate limiting, additional dashboard
+adapters, and richer search on stores that can support it honestly.
