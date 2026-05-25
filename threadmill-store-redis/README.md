@@ -60,6 +60,28 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:concurrency:{key}:workflow_counts` | HASH | Workflow root id → total non-terminal job count. Maintained incrementally so claim does not scan active jobs. |
 | `{threadmill}:concurrency:{key}:claim_lock` | STRING | Short-lived mutex around per-key claim bookkeeping. |
 
+## Development reset
+
+`RedisJobStore.dropThreadmillKeys()` deletes every key matching
+`{threadmill}:*` and leaves non-Threadmill Redis keys alone. It is intended for
+local or ephemeral environments where deleting all Threadmill jobs, recurring
+tasks, dedup records, queue pauses, leases, heartbeats, and concurrency
+bookkeeping is acceptable.
+
+Spring Boot can run the same reset before creating an auto-configured Redis
+store:
+
+```yaml
+threadmill:
+  store:
+    redis:
+      reset-on-start: true
+      allow-destructive-reset: true
+```
+
+Stop other Threadmill nodes before using this in a shared Redis deployment.
+This is not a production cleanup or migration mechanism.
+
 ## Lua script inventory
 
 Located under `src/main/resources/com/hemju/threadmill/store/redis/lua/`,

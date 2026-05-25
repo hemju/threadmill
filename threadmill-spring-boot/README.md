@@ -202,6 +202,8 @@ list). The most common:
 | `threadmill.store.postgres.allow-destructive-schema-reset` | `false` | Required for `drop-and-migrate`; destroys stored Threadmill jobs. |
 | `threadmill.store.redis.mode` | `standalone` | `standalone` / `sentinel` / `cluster`. |
 | `threadmill.store.redis.uri` | — | `redis://host:port` for standalone mode. |
+| `threadmill.store.redis.reset-on-start` | `false` | Delete Threadmill Redis keys before startup; development only. |
+| `threadmill.store.redis.allow-destructive-reset` | `false` | Required for `reset-on-start`; destroys stored Threadmill jobs. |
 
 ## `@Job` annotation
 

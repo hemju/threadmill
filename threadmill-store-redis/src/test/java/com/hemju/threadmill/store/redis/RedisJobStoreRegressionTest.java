@@ -565,6 +565,29 @@ class RedisJobStoreRegressionTest {
     }
 
     @Test
+    void dropThreadmillKeysRemovesOnlyThreadmillNamespace() {
+        long removed;
+        var store = new RedisJobStore(uri);
+        try {
+            Job job = sample();
+            CronTask task = sampleCronTask("nightly-cleanup");
+            store.insert(job);
+            store.upsertCronTask(task);
+            store.recordCronTaskOwnership("billing", task.name());
+            store.pauseQueue("default", "maintenance");
+            adminConnection.sync().set("other-app:keep", "yes");
+
+            removed = store.dropThreadmillKeys();
+        } finally {
+            store.close();
+        }
+
+        assertThat(removed).isPositive();
+        assertThat(adminConnection.sync().keys(RedisKeys.PREFIX + "*")).isEmpty();
+        assertThat(adminConnection.sync().get("other-app:keep")).isEqualTo("yes");
+    }
+
+    @Test
     void mutexLeaseIsExclusiveReentrantAndExpires() throws InterruptedException {
         JobStore store = store();
         assertThat(store.tryAcquireMutex("billing-close", "node-a", Duration.ofMillis(75)))

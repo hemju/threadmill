@@ -116,6 +116,10 @@ public final class RedisKeys {
         return PREFIX + "dedup_expiry";
     }
 
+    public static String resetAnchor() {
+        return PREFIX + "reset_anchor";
+    }
+
     public static String concurrencyClaimLock(String key) {
         Objects.requireNonNull(key, "key");
         return PREFIX + "concurrency:" + userSegment(key) + ":claim_lock";

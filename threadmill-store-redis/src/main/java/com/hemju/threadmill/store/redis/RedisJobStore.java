@@ -102,6 +102,14 @@ public final class RedisJobStore implements JobStore {
             end
             return 0
             """;
+    private static final String DROP_THREADMILL_KEYS = """
+            local keys = redis.call('KEYS', ARGV[1])
+            local removed = 0
+            for i = 1, #keys do
+              removed = removed + redis.call('DEL', keys[i])
+            end
+            return removed
+            """;
 
     private final AbstractRedisClient client;
     private final AutoCloseable connection;
@@ -249,6 +257,16 @@ public final class RedisJobStore implements JobStore {
     @Override
     public String describe() {
         return "Redis " + topologyDescription;
+    }
+
+    /** Delete every Redis key in Threadmill's namespace. Intended for disposable environments. */
+    public long dropThreadmillKeys() {
+        Long removed = sync().eval(
+                        DROP_THREADMILL_KEYS,
+                        ScriptOutputType.INTEGER,
+                        new String[] {RedisKeys.resetAnchor()},
+                        RedisKeys.PREFIX + "*");
+        return removed == null ? 0L : removed;
     }
 
     @Override

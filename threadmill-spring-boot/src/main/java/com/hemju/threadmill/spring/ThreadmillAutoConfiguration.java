@@ -95,7 +95,16 @@ public class ThreadmillAutoConfiguration {
     @ConditionalOnMissingBean
     public JobStore threadmillJobStore(ThreadmillProperties properties, ApplicationContext context) {
         if (properties.getStore().getRedis().isConfigured()) {
-            return new RedisJobStore(redisStoreConfig(properties.getStore().getRedis()));
+            var redis = properties.getStore().getRedis();
+            if (redis.isResetOnStart() && !redis.isAllowDestructiveReset()) {
+                throw new IllegalStateException("threadmill.store.redis.reset-on-start=true requires"
+                        + " threadmill.store.redis.allow-destructive-reset=true");
+            }
+            var store = new RedisJobStore(redisStoreConfig(redis));
+            if (redis.isResetOnStart()) {
+                store.dropThreadmillKeys();
+            }
+            return store;
         }
         DataSource dataSource = lookupOptionalBean(context, DataSource.class);
         if (dataSource != null && isPostgresOnClasspath()) {

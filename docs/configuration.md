@@ -71,6 +71,8 @@ Spring can auto-create a Redis store when `threadmill.store.redis.*` is set.
 | `threadmill.store.redis.cluster.nodes` | | Cluster seed nodes in `host:port` form. |
 | `threadmill.store.redis.cluster.read-policy` | `master` | Only master reads are allowed for engine correctness. |
 | `threadmill.store.redis.no-eviction-externally-validated` | `false` | Set only for managed Redis where `CONFIG GET maxmemory-policy` is unavailable and operators have verified `noeviction` out of band. |
+| `threadmill.store.redis.reset-on-start` | `false` | Delete all keys under Threadmill's Redis namespace before creating the auto-configured store. Intended for disposable development environments only. |
+| `threadmill.store.redis.allow-destructive-reset` | `false` | Must be `true` for `reset-on-start`. This destroys all Threadmill jobs, recurring tasks, dedup records, queue pauses, leases, and concurrency bookkeeping in the Redis namespace. |
 
 Redis Cluster uses one `{threadmill}` hash slot. See
 [redis-topologies.md](redis-topologies.md).

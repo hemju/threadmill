@@ -420,6 +420,8 @@ public class ThreadmillProperties {
         private String mode = "standalone";
         private String uri;
         private boolean noEvictionExternallyValidated;
+        private boolean resetOnStart;
+        private boolean allowDestructiveReset;
         private SentinelProperties sentinel = new SentinelProperties();
         private ClusterProperties cluster = new ClusterProperties();
 
@@ -451,6 +453,22 @@ public class ThreadmillProperties {
 
         public void setNoEvictionExternallyValidated(boolean noEvictionExternallyValidated) {
             this.noEvictionExternallyValidated = noEvictionExternallyValidated;
+        }
+
+        public boolean isResetOnStart() {
+            return resetOnStart;
+        }
+
+        public void setResetOnStart(boolean resetOnStart) {
+            this.resetOnStart = resetOnStart;
+        }
+
+        public boolean isAllowDestructiveReset() {
+            return allowDestructiveReset;
+        }
+
+        public void setAllowDestructiveReset(boolean allowDestructiveReset) {
+            this.allowDestructiveReset = allowDestructiveReset;
         }
 
         public SentinelProperties getSentinel() {

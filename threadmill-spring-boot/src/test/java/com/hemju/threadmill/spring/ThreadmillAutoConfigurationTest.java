@@ -317,6 +317,17 @@ class ThreadmillAutoConfigurationTest {
     }
 
     @Test
+    void redisResetOnStartRequiresExplicitDestructiveResetFlag() {
+        contextRunner
+                .withPropertyValues(
+                        "threadmill.store.redis.uri=redis://localhost:1", "threadmill.store.redis.reset-on-start=true")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasMessageContaining("allow-destructive-reset=true");
+                });
+    }
+
+    @Test
     void inMemoryStoreDoesNotAutoCreateRemoteWakeChannel() {
         contextRunner.run(context -> {
             assertThat(context).hasNotFailed();
