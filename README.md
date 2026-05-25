@@ -83,8 +83,8 @@ denormalize the indexed job state; the body column holds the
 JSON-serialized job. Per-state counts come from a counter table maintained
 by a trigger (so the observability path never contends with the claim
 path). Migrations are applied automatically on startup; an
-`emitPendingSql()` method produces the SQL for teams that prefer
-Flyway/Liquibase.
+`emitPendingSql()` method produces pending SQL for teams that prefer
+Flyway/Liquibase, and `emitCleanInstallSql()` emits the full clean-install DDL.
 
 **Redis** is a fully supported first-class backend. Every multi-key state
 transition is a single atomic Lua script. Standalone, Sentinel, and Cluster

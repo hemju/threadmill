@@ -18,7 +18,7 @@ trigger semantics — without back-compat shims.
 
 ## Schema
 
-Created by `V1__baseline.sql` plus additive migrations under
+Created by the consolidated `V1__baseline.sql` plus future additive migrations under
 `src/main/resources/com/hemju/threadmill/store/postgres/migrations/`. The
 `MigrationRunner` bootstraps `threadmill_schema_history` itself (`CREATE IF NOT
 EXISTS`) before recording shipped migrations.
@@ -56,6 +56,7 @@ columns are denormalised for the engine's hot queries.
 | `threadmill_jobs_processing_idx` | `(owner_heartbeat_at) WHERE state='PROCESSING'` | Orphan recovery. |
 | `threadmill_jobs_handler_idx` | `(handler_signature)` | Find-by-handler. |
 | `threadmill_jobs_state_time_idx` | `(state, current_state_at)` | Retention. |
+| `threadmill_jobs_dashboard_search_idx` | `(state, queue, handler_signature, current_state_at DESC, id)` | Dashboard/API search. |
 | `threadmill_jobs_concurrency_pending_idx` | `(concurrency_key, current_state_at, id) WHERE state IN (ENQUEUED, SCHEDULED, AWAITING)` | Claim-time concurrency pending check. |
 | `threadmill_jobs_workflow_outstanding_idx` | `(concurrency_key, workflow_root_id) WHERE state NOT IN (SUCCEEDED, FAILED, DELETED, QUARANTINED)` | Workflow-root outstanding count. |
 
@@ -124,7 +125,18 @@ and order-deterministic. New migrations append to the list; the runner does
 not classpath-scan.
 
 Hosts that already use Flyway can call `emitPendingSql()` to obtain the SQL
-text and apply it themselves.
+text for still-pending migrations and apply it themselves. Use
+`emitCleanInstallSql()` to emit the full clean-install DDL without touching the
+database. `validate()` checks that the database has exactly the shipped
+migration history. `dropThreadmillObjects()` drops only Threadmill-owned schema
+objects for disposable dev/test reinitialization.
+
+Spring Boot auto-configured Postgres stores run `migrate()` by default. Set
+`threadmill.store.postgres.schema-mode=validate` when your deployment pipeline
+applies DDL separately, `none` to skip schema handling, or `drop-and-migrate`
+with `threadmill.store.postgres.allow-destructive-schema-reset=true` for
+ephemeral environments. `drop-and-migrate` destroys stored Threadmill jobs and
+is not a production upgrade strategy.
 
 ## Connection pool
 
@@ -143,5 +155,4 @@ round-trip win from `JobStore.insertAll(...)`.
 ```
 
 Runs against a `postgres:18-alpine` container via Testcontainers. Requires
-Docker / Podman / Colima / OrbStack. 78 tests: 61 contract + 10 regression +
-6 deadlock-retry + 1 version-gate.
+Docker / Podman / Colima / OrbStack.

@@ -2,7 +2,7 @@
 --
 -- This file is the single consolidated migration for v1. The migration runner
 -- bootstraps threadmill_schema_history itself before recording that this one
--- ran. Future schema changes ship as additive V2__*.sql, V3__*.sql, … files.
+-- ran. Future schema changes ship as additive V2__*.sql, V3__*.sql, ... files.
 --
 -- Body column is the source-of-truth wire form. The other columns are
 -- denormalised, indexed scalars that exist purely so the engine's hot queries
@@ -55,6 +55,10 @@ CREATE INDEX threadmill_jobs_handler_idx ON threadmill_jobs (handler_signature);
 
 -- Retention: WHERE state=? AND current_state_at <= ?.
 CREATE INDEX threadmill_jobs_state_time_idx ON threadmill_jobs (state, current_state_at);
+
+-- Dashboard/API search path: filter by state, queue, handler, then page by state time.
+CREATE INDEX threadmill_jobs_dashboard_search_idx
+    ON threadmill_jobs (state, queue, handler_signature, current_state_at DESC, id);
 
 -- Claim-time concurrency pending check. The engine asks "is there an earlier
 -- pending job for this concurrency key?" before committing a claim; without
@@ -110,6 +114,15 @@ CREATE TABLE threadmill_cron_task_state (
 );
 
 CREATE INDEX threadmill_cron_task_state_due_idx ON threadmill_cron_task_state (next_run_at);
+
+CREATE TABLE threadmill_cron_task_ownership (
+    namespace TEXT NOT NULL,
+    task_name TEXT NOT NULL REFERENCES threadmill_cron_tasks(name) ON DELETE CASCADE,
+    PRIMARY KEY (namespace, task_name)
+);
+
+CREATE INDEX threadmill_cron_task_ownership_task_idx
+    ON threadmill_cron_task_ownership (task_name);
 
 -- Cross-cluster named mutex with a lease. expires_at drives the "dead holder
 -- cannot block forever" rule.

@@ -375,7 +375,16 @@ public class ThreadmillProperties {
     }
 
     public static final class StoreProperties {
+        private PostgresProperties postgres = new PostgresProperties();
         private RedisProperties redis = new RedisProperties();
+
+        public PostgresProperties getPostgres() {
+            return postgres;
+        }
+
+        public void setPostgres(PostgresProperties postgres) {
+            this.postgres = postgres;
+        }
 
         public RedisProperties getRedis() {
             return redis;
@@ -383,6 +392,27 @@ public class ThreadmillProperties {
 
         public void setRedis(RedisProperties redis) {
             this.redis = redis;
+        }
+    }
+
+    public static final class PostgresProperties {
+        private PostgresSchemaMode schemaMode = PostgresSchemaMode.MIGRATE;
+        private boolean allowDestructiveSchemaReset;
+
+        public PostgresSchemaMode getSchemaMode() {
+            return schemaMode;
+        }
+
+        public void setSchemaMode(PostgresSchemaMode schemaMode) {
+            this.schemaMode = schemaMode;
+        }
+
+        public boolean isAllowDestructiveSchemaReset() {
+            return allowDestructiveSchemaReset;
+        }
+
+        public void setAllowDestructiveSchemaReset(boolean allowDestructiveSchemaReset) {
+            this.allowDestructiveSchemaReset = allowDestructiveSchemaReset;
         }
     }
 

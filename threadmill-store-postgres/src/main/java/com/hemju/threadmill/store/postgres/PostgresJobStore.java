@@ -106,6 +106,11 @@ public final class PostgresJobStore implements JobStore {
         this.databaseName = identity.database();
     }
 
+    /** Validate that the supplied {@link DataSource} points at supported PostgreSQL. */
+    public static void requireSupportedServer(DataSource dataSource) {
+        requirePostgresEighteen(dataSource);
+    }
+
     /**
      * Refuse to start against pre-PostgreSQL-18 servers. Threadmill's schema, queries, and
      * migration runner target PostgreSQL 18+ only; older majors are not tested and are not

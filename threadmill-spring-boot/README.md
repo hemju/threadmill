@@ -59,7 +59,9 @@ start; `JobScheduler` verifies the handler/payload pair at enqueue time.
 
 1. **Explicit Redis config** (`threadmill.store.redis.*` populated) → `RedisJobStore`.
 2. **DataSource present + Postgres store on classpath** → `PostgresJobStore`
-   wired from the application's existing `DataSource`.
+   wired from the application's existing `DataSource`. The auto-configured
+   store applies pending Threadmill schema migrations by default before it is
+   created.
 3. **Otherwise** → `InMemoryJobStore` with a loud warning that jobs won't
    survive restart.
 
@@ -196,6 +198,8 @@ list). The most common:
 | `threadmill.remote-wake.enabled` | `true` | Publish cross-node wake hints for auto-configured Postgres / Redis stores. |
 | `threadmill.remote-wake.channel` | backend default | Optional channel override for deployment isolation. |
 | `threadmill.spring.enqueue-mode` | `after_commit` | `after_commit`, `join_transaction`, or `immediate`. |
+| `threadmill.store.postgres.schema-mode` | `migrate` | `migrate`, `validate`, `none`, or `drop-and-migrate`. |
+| `threadmill.store.postgres.allow-destructive-schema-reset` | `false` | Required for `drop-and-migrate`; destroys stored Threadmill jobs. |
 | `threadmill.store.redis.mode` | `standalone` | `standalone` / `sentinel` / `cluster`. |
 | `threadmill.store.redis.uri` | — | `redis://host:port` for standalone mode. |
 

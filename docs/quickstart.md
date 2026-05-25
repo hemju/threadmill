@@ -109,5 +109,9 @@ threadmill:
       uri: redis://localhost:6379
 ```
 
-For Postgres, define a `DataSource` and a `PostgresJobStore` bean. Redis can be
-auto-created from `threadmill.store.redis.*`.
+For Postgres, add `threadmill-store-postgres` and define a normal Spring
+`DataSource`. Spring auto-configures `PostgresJobStore` from that `DataSource`
+and runs pending Threadmill schema migrations by default. Use
+`threadmill.store.postgres.schema-mode=validate` if your deployment pipeline
+applies the DDL separately. See [postgres-schema.md](postgres-schema.md) for
+manual SQL and reset guidance.

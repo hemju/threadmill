@@ -24,6 +24,8 @@
 ## Reference
 
 - [Configuration](configuration.md) — every `threadmill.*` property.
+- [PostgreSQL schema](postgres-schema.md) — schema modes, manual DDL, and
+  reset guidance.
 - [Redis topologies](redis-topologies.md) — standalone, Sentinel, Cluster.
 - [Operations](operations.md) — production runbook, pause / resume, monitoring.
 - [Troubleshooting](troubleshooting.md) — symptom → cause → fix.

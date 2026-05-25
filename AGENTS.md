@@ -220,7 +220,7 @@ This section is the project's memory: the load-bearing decisions worth knowing b
 ### Postgres-specific
 
 - **PostgreSQL 18 or later, enforced at startup.** `PostgresJobStore`'s constructor runs `SHOW server_version_num` and throws `JobEngineFatalException` if it's below 180000. The regression test (`PostgresVersionGateTest`) boots a `postgres:17-alpine` container and asserts the refusal. There are no back-compat shims for older majors; the migration SQL and queries are written for PG18 syntax exclusively.
-- **One consolidated baseline plus additive migrations.** The historical `V1__initial_schema.sql` through `V7__queue_pauses.sql` are collapsed into `V1__baseline.sql`; later changes ship as additive migrations (`V2__cron_task_ownership.sql`, `V3__*.sql`, etc.). The `MigrationRunner` and its explicit `SHIPPED_MIGRATIONS` list remain.
+- **One consolidated baseline plus additive migrations.** All pre-release Postgres schema work is collapsed into `V1__baseline.sql`; later changes ship as additive migrations (`V2__*.sql`, `V3__*.sql`, etc.). The `MigrationRunner` and its explicit `SHIPPED_MIGRATIONS` list remain.
 - **Body column is `text`, not `jsonb`.** The body is not queried; the indexed scalar columns are. Text avoids the jsonb parser tax on every write and keeps the on-disk form identical to the wire form.
 - **Indexes are partial, matched to query shapes.** `WHERE state='ENQUEUED'` for the claim path, `WHERE state='SCHEDULED'` for promotion, `WHERE state='PROCESSING'` for orphan recovery. New states that need to be targeted by a query get their own partial index.
 - **Concurrency groups are persisted bookkeeping, not inferred scans.** `threadmill_concurrency_groups` stores per-key in-flight shared/exclusive counts; `threadmill_concurrency_workflow_holds` stores workflow-root outstanding counts. Claim and release update these rows in the same transaction as the job state transition.
@@ -232,6 +232,7 @@ This section is the project's memory: the load-bearing decisions worth knowing b
 - **Deadlocks on busy queue tables are normal.** Every write goes through `DeadlockRetry.run(...)` (recognises SQLSTATE `40P01` / `40001`, exponential backoff with jitter).
 - **Testcontainers ≥ 2.0.** Module names use the `testcontainers-` prefix. `PostgreSQLContainer` lives in `org.testcontainers.postgresql` and is non-generic.
 - **The host owns the connection pool.** The store accepts a `javax.sql.DataSource`; it does not create or close one.
+- **Spring Boot Postgres schema handling is explicit.** Auto-configured Postgres stores run `threadmill.store.postgres.schema-mode=migrate` by default before constructing `PostgresJobStore`. `validate` is for externally-applied DDL, `none` skips schema handling, and `drop-and-migrate` requires `threadmill.store.postgres.allow-destructive-schema-reset=true` because it destroys Threadmill job data.
 
 ### Redis-specific
 

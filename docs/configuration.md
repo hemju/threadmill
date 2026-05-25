@@ -43,6 +43,20 @@ Spring Boot binds most core values directly under `threadmill.*`, for example
 `threadmill.worker-count`, `threadmill.claim-batch-size`, and
 `threadmill.maintenance-lease-duration`.
 
+## PostgreSQL Store Properties
+
+Spring auto-creates a PostgreSQL store when a `DataSource` bean exists and
+`threadmill-store-postgres` is on the classpath, unless the application defines
+its own `JobStore` bean.
+
+| Setting | Default | Notes |
+|---|---:|---|
+| `threadmill.store.postgres.schema-mode` | `migrate` | `migrate`, `validate`, `none`, or `drop-and-migrate`. Auto-configured Postgres stores run this action before `PostgresJobStore` is created. |
+| `threadmill.store.postgres.allow-destructive-schema-reset` | `false` | Must be `true` for `drop-and-migrate`. This drops only Threadmill-owned schema objects and destroys stored jobs. |
+
+See [postgres-schema.md](postgres-schema.md) for manual DDL, validation, and
+reset guidance.
+
 ## Redis Store Properties
 
 Spring can auto-create a Redis store when `threadmill.store.redis.*` is set.

@@ -1,6 +1,7 @@
 package com.hemju.threadmill.store.postgres;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -233,7 +234,7 @@ class PostgresJobStoreRegressionTest {
             st.execute("DROP TABLE IF EXISTS threadmill_schema_history CASCADE");
         }
 
-        String sql = new MigrationRunner(dataSource).emitPendingSql();
+        String sql = new MigrationRunner(dataSource).emitCleanInstallSql();
         assertThat(sql).contains("V1__baseline.sql");
 
         try (Connection conn = dataSource.getConnection();
@@ -241,13 +242,61 @@ class PostgresJobStoreRegressionTest {
             st.execute(sql);
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
-                assertThat(rs.getInt(1)).isEqualTo(3);
+                assertThat(rs.getInt(1)).isEqualTo(1);
             }
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_job_counts")) {
                 assertThat(rs.next()).isTrue();
                 assertThat(rs.getInt(1)).isEqualTo(JobState.values().length);
             }
         }
+    }
+
+    @Test
+    void validationPassesAfterMigrate() {
+        new MigrationRunner(dataSource).validate();
+    }
+
+    @Test
+    void validationFailsWhenHistoryTableIsMissing() throws SQLException {
+        dropSchemaObjects();
+
+        assertThatThrownBy(() -> new MigrationRunner(dataSource).validate())
+                .isInstanceOf(MigrationRunner.MigrationException.class)
+                .hasMessageContaining("threadmill_schema_history");
+    }
+
+    @Test
+    void validationFailsWhenHistoryIsInconsistent() throws SQLException {
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute("UPDATE threadmill_schema_history SET description = 'old baseline' WHERE version = 1");
+        }
+
+        try {
+            assertThatThrownBy(() -> new MigrationRunner(dataSource).validate())
+                    .isInstanceOf(MigrationRunner.MigrationException.class)
+                    .hasMessageContaining("expected 'baseline'");
+        } finally {
+            try (Connection conn = dataSource.getConnection();
+                    Statement st = conn.createStatement()) {
+                st.execute("UPDATE threadmill_schema_history SET description = 'baseline' WHERE version = 1");
+            }
+        }
+    }
+
+    @Test
+    void dropThreadmillObjectsAllowsCleanReinitialize() throws SQLException {
+        new MigrationRunner(dataSource).dropThreadmillObjects();
+
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT to_regclass('threadmill_jobs')")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getString(1)).isNull();
+        }
+
+        new MigrationRunner(dataSource).migrate();
+        new MigrationRunner(dataSource).validate();
     }
 
     @Test
@@ -277,7 +326,7 @@ class PostgresJobStoreRegressionTest {
                 Statement st = conn.createStatement();
                 ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
             assertThat(rs.next()).isTrue();
-            assertThat(rs.getInt(1)).isEqualTo(3);
+            assertThat(rs.getInt(1)).isEqualTo(1);
         }
     }
 

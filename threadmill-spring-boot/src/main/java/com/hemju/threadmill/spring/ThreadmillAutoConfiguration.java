@@ -35,6 +35,7 @@ import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
+import com.hemju.threadmill.store.postgres.MigrationRunner;
 import com.hemju.threadmill.store.postgres.PostgresJobStore;
 import com.hemju.threadmill.store.postgres.PostgresRemoteWakeChannel;
 import com.hemju.threadmill.store.redis.RedisJobStore;
@@ -99,6 +100,8 @@ public class ThreadmillAutoConfiguration {
         DataSource dataSource = lookupOptionalBean(context, DataSource.class);
         if (dataSource != null && isPostgresOnClasspath()) {
             LOG.info("Threadmill: using Postgres store wired from the application's DataSource");
+            PostgresJobStore.requireSupportedServer(dataSource);
+            applyPostgresSchemaMode(dataSource, properties.getStore().getPostgres());
             if (properties.getSpring().getEnqueueMode() == SpringEnqueueMode.JOIN_TRANSACTION) {
                 return new PostgresJobStore(
                         dataSource,
@@ -130,6 +133,24 @@ public class ThreadmillAutoConfiguration {
             return true;
         } catch (ClassNotFoundException notFound) {
             return false;
+        }
+    }
+
+    private static void applyPostgresSchemaMode(
+            DataSource dataSource, ThreadmillProperties.PostgresProperties properties) {
+        var migrations = new MigrationRunner(dataSource);
+        switch (properties.getSchemaMode()) {
+            case MIGRATE -> migrations.migrate();
+            case VALIDATE -> migrations.validate();
+            case NONE -> {}
+            case DROP_AND_MIGRATE -> {
+                if (!properties.isAllowDestructiveSchemaReset()) {
+                    throw new IllegalStateException("threadmill.store.postgres.schema-mode=drop-and-migrate requires"
+                            + " threadmill.store.postgres.allow-destructive-schema-reset=true");
+                }
+                migrations.dropThreadmillObjects();
+                migrations.migrate();
+            }
         }
     }
 
