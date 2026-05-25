@@ -1,12 +1,13 @@
 # threadmill-dashboard
 
-Data-first observability API. The mountable UI is additive — this module
-ships the `EngineSnapshot` value type and the `EngineSnapshot.of(store)`
-factory that builds one from any `JobStore`.
+Data-first observability model. This module ships the `EngineSnapshot`
+value type and the `EngineSnapshot.of(store)` factory that builds one from
+any `JobStore`.
 
 The concrete observability win is one data shape any consumer (Spring Boot
 Actuator endpoint, custom internal admin UI, ops dashboard, monitoring script)
-can render or scrape.
+can render or scrape. The Spring JSON API lives in `threadmill-dashboard-api`;
+the static React operations console lives in `threadmill-dashboard-ui`.
 
 ## `EngineSnapshot`
 

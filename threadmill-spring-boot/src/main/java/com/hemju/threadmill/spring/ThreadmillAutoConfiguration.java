@@ -19,6 +19,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 
+import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.engine.JobInterceptor;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNode;
@@ -178,13 +179,16 @@ public class ThreadmillAutoConfiguration {
         if (provided != null) {
             return ThreadmillRemoteWakeChannels.of(provided);
         }
-        if (store instanceof RedisJobStore && properties.getStore().getRedis().isConfigured()) {
+        JobStore concreteStore = unwrapStore(store);
+        String channel = remoteWakeChannel(properties);
+        if (concreteStore instanceof RedisJobStore
+                && properties.getStore().getRedis().isConfigured()) {
             return ThreadmillRemoteWakeChannels.of(new RedisRemoteWakeChannel(
-                    redisStoreConfig(properties.getStore().getRedis())));
+                    redisStoreConfig(properties.getStore().getRedis()), channel));
         }
         DataSource dataSource = lookupOptionalBean(context, DataSource.class);
-        if (store instanceof PostgresJobStore && dataSource != null) {
-            return ThreadmillRemoteWakeChannels.of(new PostgresRemoteWakeChannel(dataSource));
+        if (concreteStore instanceof PostgresJobStore && dataSource != null) {
+            return ThreadmillRemoteWakeChannels.of(new PostgresRemoteWakeChannel(dataSource, channel));
         }
         return ThreadmillRemoteWakeChannels.none();
     }
@@ -267,7 +271,8 @@ public class ThreadmillAutoConfiguration {
             case AFTER_COMMIT -> new TransactionAwareJobScheduler(store, serializer, registry, config, wakeBus);
             case IMMEDIATE -> new JobScheduler(store, serializer, registry, config, wakeBus);
             case JOIN_TRANSACTION -> {
-                if (!(store instanceof PostgresJobStore postgresStore)
+                JobStore concreteStore = unwrapStore(store);
+                if (!(concreteStore instanceof PostgresJobStore postgresStore)
                         || !postgresStore.supportsExternalTransactions()) {
                     throw new IllegalStateException(
                             "threadmill.spring.enqueue-mode=join_transaction requires the Spring auto-configured"
@@ -416,5 +421,20 @@ public class ThreadmillAutoConfiguration {
         }
         return new RedisStoreConfig.HostAndPort(
                 value.substring(0, colon), Integer.parseInt(value.substring(colon + 1)));
+    }
+
+    private static JobStore unwrapStore(JobStore store) {
+        JobStore current = store;
+        while (true) {
+            JobStore next = current.delegate();
+            if (next == current) return current;
+            current = next;
+        }
+    }
+
+    private static String remoteWakeChannel(ThreadmillProperties properties) {
+        String configured = properties.getRemoteWake().getChannel();
+        if (configured == null || configured.isBlank()) return null;
+        return Names.requireName("threadmill.remote-wake.channel", configured);
     }
 }

@@ -69,6 +69,7 @@ correctness fallback.
 | Setting | Default | Notes |
 |---|---:|---|
 | `threadmill.remote-wake.enabled` | `true` | Auto-create Postgres `LISTEN`/`NOTIFY` or Redis Pub/Sub wake hints for Spring auto-configured durable stores. In-memory and custom stores stay local-wake only unless the application provides a `RemoteWakeChannel` bean. |
+| `threadmill.remote-wake.channel` | backend default | Optional channel override. Defaults to `threadmill_wake` for Postgres and `{threadmill}:wake` for Redis. Set this when multiple isolated Threadmill deployments share one Postgres database or Redis instance. |
 
 ## Spring Recurring Properties
 

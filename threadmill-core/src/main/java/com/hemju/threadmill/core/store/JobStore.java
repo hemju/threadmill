@@ -72,6 +72,19 @@ public interface JobStore {
     }
 
     /**
+     * Return the wrapped store when this instance is a decorator.
+     *
+     * <p>Framework integrations use this hook to discover concrete store
+     * capabilities such as PostgreSQL transaction participation without
+     * forcing optional decorators to leak their implementation type. Concrete
+     * stores return {@code this}; decorators should return their immediate
+     * delegate.
+     */
+    default JobStore delegate() {
+        return this;
+    }
+
+    /**
      * Lightweight writable probe used after capacity-related store failures.
      * Implementations with a meaningful no-op write can override this method;
      * the default preserves the historical read-only probe.
@@ -258,6 +271,12 @@ public interface JobStore {
 
     /** Queue names that currently have at least one ENQUEUED job. */
     List<String> listEnqueuedQueues();
+
+    /**
+     * Bounded dashboard/search query over persisted jobs. Results should be
+     * ordered newest state-transition first, then by id for stable paging.
+     */
+    List<Job> searchJobs(JobSearch search);
 
     /** Oldest currently ENQUEUED job time for the queue, if the queue has jobs. */
     Optional<Instant> oldestEnqueuedAt(String queue);

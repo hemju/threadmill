@@ -2,7 +2,7 @@
 
 This is the standing brief for any AI agent (or human) working on Threadmill. Read it fully before touching the repository.
 
-**Project status:** v1 feature-complete, ready for first release. Three storage backends (in-memory, PostgreSQL 18+, Redis with standalone/Sentinel/Cluster), the processing engine, scheduling and recurring APIs, the per-queue pause primitive, the bulk-enqueue path, claim-time per-key concurrency with workflow inheritance, queue-family lanes, Spring Boot integration with explicit enqueue transaction modes (`after_commit`, `join_transaction`, `immediate`), Micrometer metrics, optional OpenTelemetry tracing, the data-first dashboard API, docs, examples, and a soak/load module are all in place. Store-backed maintenance leadership, crash-safe Redis claim, producer-side deduplication, long-running job check-ins, idle-worker wake signal, cross-node remote wake hints, and failure-detail truncation are part of the production-readiness baseline.
+**Project status:** v1 feature-complete, ready for first release. Three storage backends (in-memory, PostgreSQL 18+, Redis with standalone/Sentinel/Cluster), the processing engine, scheduling and recurring APIs, the per-queue pause primitive, the bulk-enqueue path, claim-time per-key concurrency with workflow inheritance, queue-family lanes, Spring Boot integration with explicit enqueue transaction modes (`after_commit`, `join_transaction`, `immediate`), Micrometer metrics, optional OpenTelemetry tracing, the data-first dashboard model, Spring dashboard API, static React dashboard UI, docs, examples, and a soak/load module are all in place. Store-backed maintenance leadership, crash-safe Redis claim, producer-side deduplication, long-running job check-ins, idle-worker wake signal, cross-node remote wake hints, and failure-detail truncation are part of the production-readiness baseline.
 
 ---
 
@@ -44,7 +44,9 @@ Modules are physically separate. No storage implementation and no UI may ever be
 | `threadmill-test-support` | `com.hemju.threadmill.test` | Abstract `JobStore` contract test plus shared fixtures. |
 | `threadmill-metrics` | `com.hemju.threadmill.metrics` | Micrometer integration: per-state gauges, processed / failed counters, processing-time timer. |
 | `threadmill-tracing` | `com.hemju.threadmill.tracing` | Optional OpenTelemetry API integration: processing spans and a tracing `JobStore` decorator. |
-| `threadmill-dashboard` | `com.hemju.threadmill.dashboard` | Data-first observability API (`EngineSnapshot`); UI is additive. |
+| `threadmill-dashboard` | `com.hemju.threadmill.dashboard` | Data-first observability model (`EngineSnapshot`). |
+| `threadmill-dashboard-api` | `com.hemju.threadmill.dashboard.api` | Spring MVC dashboard API: JSON endpoints, redaction, authorization, audit hooks, and operator actions. |
+| `threadmill-dashboard-ui` | n/a | Static React/Tailwind/shadcn operations console served separately from the API by default. |
 | `threadmill-soak` | `com.hemju.threadmill.soak` | Fixed soak regression suite plus tunable sustained load/performance harnesses. Tagged regression tests are excluded from `check`; harness artifacts live under `build/soak/`. |
 | `threadmill-simulation` | `com.hemju.threadmill.simulation` | Correctness simulations: short fixed invariant verifier for all three stores, plus worker-churn simulations against shared Postgres / Redis. JSON-lines traces live under `build/simulation/`. |
 | `threadmill-example` | `com.example.threadmill` | Compiled user-facing examples only: in-memory getting-started, manual Postgres / Redis workers, and submitter examples. |

@@ -40,6 +40,7 @@ import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
+import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
 
@@ -1111,6 +1112,51 @@ public abstract class AbstractJobStoreContractTest {
         assertThat(store.queueDepths().getOrDefault("high priority", 0L)).isEqualTo(0L);
         assertThat(store.listEnqueuedQueues()).contains("default").doesNotContain("high priority");
         assertThat(store.oldestEnqueuedAt("high priority")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("searchJobs filters jobs and returns stable newest-first pages")
+    void searchJobsFiltersAndPages() {
+        var base = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        Job alpha = Job.builder()
+                .spec(JobSpec.of("com.example.A"))
+                .queue("alpha")
+                .createdAt(base)
+                .build();
+        Job betaOld = Job.builder()
+                .spec(JobSpec.of("com.example.A"))
+                .queue("beta")
+                .createdAt(base.plusSeconds(1))
+                .build();
+        Job betaNew = Job.builder()
+                .spec(JobSpec.of("com.example.A"))
+                .queue("beta")
+                .createdAt(base.plusSeconds(2))
+                .build();
+        Job otherHandler = Job.builder()
+                .spec(JobSpec.of("com.example.B"))
+                .queue("beta")
+                .createdAt(base.plusSeconds(3))
+                .build();
+        store.insert(alpha);
+        store.insert(betaOld);
+        store.insert(betaNew);
+        store.insert(otherHandler);
+
+        if (!store.capabilities().supportsRichSearch()) {
+            var firstPage = store.searchJobs(new JobSearch(JobState.ENQUEUED, null, null, 1, 0));
+            assertThat(firstPage).extracting(Job::id).containsExactly(otherHandler.id());
+
+            var secondPage = store.searchJobs(new JobSearch(JobState.ENQUEUED, null, null, 1, 1));
+            assertThat(secondPage).extracting(Job::id).containsExactly(betaNew.id());
+            return;
+        }
+
+        var firstPage = store.searchJobs(new JobSearch(JobState.ENQUEUED, "beta", "com.example.A", 1, 0));
+        assertThat(firstPage).extracting(Job::id).containsExactly(betaNew.id());
+
+        var secondPage = store.searchJobs(new JobSearch(JobState.ENQUEUED, "beta", "com.example.A", 1, 1));
+        assertThat(secondPage).extracting(Job::id).containsExactly(betaOld.id());
     }
 
     @Test

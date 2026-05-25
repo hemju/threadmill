@@ -140,6 +140,13 @@ Durable auto-configured stores publish remote wake hints by default:
 The listener calls `ProcessingNode.wake(queue)` on matching local dispatchers.
 This is a latency optimization only; polling remains the fallback when a
 notification is missed or the pub/sub channel is temporarily unavailable.
+Set `threadmill.remote-wake.channel` to isolate multiple deployments that share
+one Postgres database or Redis instance.
+
+Postgres `LISTEN` holds one JDBC connection while remote wake is enabled. If
+the listener uses the same application pool, reserve one extra pool slot for
+it. For saturated pools, expose a custom `PostgresRemoteWakeChannel` bean with
+a dedicated one-connection listener `DataSource`.
 
 Disable it with:
 
@@ -187,6 +194,7 @@ list). The most common:
 | `threadmill.defaultMaxAttempts` | `5` | Per-job retry budget (including first attempt). |
 | `threadmill.jobTimeout` | `PT5M` | Per-job timeout. |
 | `threadmill.remote-wake.enabled` | `true` | Publish cross-node wake hints for auto-configured Postgres / Redis stores. |
+| `threadmill.remote-wake.channel` | backend default | Optional channel override for deployment isolation. |
 | `threadmill.spring.enqueue-mode` | `after_commit` | `after_commit`, `join_transaction`, or `immediate`. |
 | `threadmill.store.redis.mode` | `standalone` | `standalone` / `sentinel` / `cluster`. |
 | `threadmill.store.redis.uri` | — | `redis://host:port` for standalone mode. |

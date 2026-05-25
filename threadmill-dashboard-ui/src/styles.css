@@ -1,0 +1,88 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 210 20% 98%;
+  --foreground: 215 25% 14%;
+  --panel: 0 0% 100%;
+  --muted: 210 20% 93%;
+  --muted-foreground: 215 12% 42%;
+  --border: 214 18% 84%;
+  --primary: 172 69% 31%;
+  --primary-foreground: 0 0% 100%;
+  --destructive: 4 70% 48%;
+  --ring: 172 69% 31%;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: 220 17% 10%;
+    --foreground: 210 20% 92%;
+    --panel: 220 15% 13%;
+    --muted: 220 13% 18%;
+    --muted-foreground: 213 11% 67%;
+    --border: 220 12% 24%;
+    --primary: 173 58% 43%;
+    --primary-foreground: 220 17% 10%;
+    --destructive: 4 65% 55%;
+    --ring: 173 58% 43%;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 1024px;
+  font-feature-settings: "tnum";
+}
+
+.state-filter {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 4px;
+  padding: 5px 8px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+
+.state-filter:hover {
+  background: hsl(var(--muted));
+  color: hsl(var(--foreground));
+}
+
+.state-filter:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.state-filter:disabled:hover {
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+}
+
+.state-enqueued {
+  color: #1d4ed8;
+}
+
+.state-processing {
+  color: #a16207;
+}
+
+.state-succeeded {
+  color: #15803d;
+}
+
+.state-failed,
+.state-quarantined {
+  color: #b91c1c;
+}
+
+.state-deleted {
+  color: hsl(var(--muted-foreground));
+}

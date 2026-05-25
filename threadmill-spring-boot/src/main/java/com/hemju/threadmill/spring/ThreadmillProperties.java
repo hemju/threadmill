@@ -355,6 +355,7 @@ public class ThreadmillProperties {
 
     public static final class RemoteWakeProperties {
         private boolean enabled = true;
+        private String channel;
 
         public boolean isEnabled() {
             return enabled;
@@ -362,6 +363,14 @@ public class ThreadmillProperties {
 
         public void setEnabled(boolean enabled) {
             this.enabled = enabled;
+        }
+
+        public String getChannel() {
+            return channel;
+        }
+
+        public void setChannel(String channel) {
+            this.channel = channel;
         }
     }
 

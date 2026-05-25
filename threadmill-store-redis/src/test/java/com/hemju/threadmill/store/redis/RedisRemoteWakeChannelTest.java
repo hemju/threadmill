@@ -55,4 +55,30 @@ class RedisRemoteWakeChannelTest {
             listener.close();
         }
     }
+
+    @Test
+    void customChannelIsIsolated() throws Exception {
+        var listener = new RedisRemoteWakeChannel(uri, "{threadmill}:wake:a");
+        var publisher = new RedisRemoteWakeChannel(uri, "{threadmill}:wake:a");
+        var noise = new RedisRemoteWakeChannel(uri, "{threadmill}:wake:b");
+        var received = new CountDownLatch(1);
+        try {
+            listener.start(queue -> {
+                if ("critical".equals(queue)) {
+                    received.countDown();
+                }
+            });
+            Thread.sleep(200);
+
+            noise.publish("critical");
+            assertThat(received.await(300, TimeUnit.MILLISECONDS)).isFalse();
+
+            publisher.publish("critical");
+            assertThat(received.await(5, TimeUnit.SECONDS)).isTrue();
+        } finally {
+            noise.close();
+            publisher.close();
+            listener.close();
+        }
+    }
 }

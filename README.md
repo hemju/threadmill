@@ -71,7 +71,9 @@ See [docs/quickstart.md](docs/quickstart.md) for a complete Spring walkthrough, 
 | `threadmill-spring-boot` | Spring Boot 4.x auto-configuration. |
 | `threadmill-metrics` | Micrometer integration: jobs-per-state gauges, processed/failed counters, processing-time timer. |
 | `threadmill-tracing` | Optional OpenTelemetry API integration for processing and store-operation spans. |
-| `threadmill-dashboard` | Data-first observability API + (optional) mountable UI. |
+| `threadmill-dashboard` | Data-first observability model (`EngineSnapshot`) shared by API/UI consumers. |
+| `threadmill-dashboard-api` | Spring MVC JSON dashboard API with Spring Security based authorization, redaction, audit hooks, and operator actions. |
+| `threadmill-dashboard-ui` | Static React/Tailwind/shadcn operations console intended to be served at `/threadmill` while the API is routed at `/threadmill/api/**`. |
 | `threadmill-test-support` | The abstract `JobStore` contract test every backend passes. |
 
 ## Storage backends
@@ -158,6 +160,7 @@ binder or directly via `ProcessingNodeConfig.builder()`.
 | `threadmill.claimBatchSize` | 10 | Maximum claim per dispatcher tick |
 | `threadmill.defaultQueue` | `"default"` | Queue name when none is specified |
 | `threadmill.remote-wake.enabled` | `true` | Spring auto-configured durable stores publish cross-node wake hints; dispatcher polling remains the fallback |
+| `threadmill.remote-wake.channel` | backend default | Optional channel override to isolate multiple Threadmill deployments sharing one datastore |
 | `threadmill.checkInMinInterval` | 5s | Minimum persisted check-in/progress flush interval |
 | `threadmill.noProgressTimeout` | 15m | Timeout after the last check-in |
 | `threadmill.maxDedupTtl` | 30d | Maximum producer-side deduplication window |

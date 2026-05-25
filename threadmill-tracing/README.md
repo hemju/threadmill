@@ -22,3 +22,8 @@ Processing spans are named `threadmill.job.process` and carry job id, queue,
 handler type, attempt, node id, final state, and failure cause when present.
 Store spans are named `threadmill.store.*` and carry the store description plus
 operation-specific attributes such as queue, job id, and claimed count.
+
+The processing span scope intentionally spans the handler invocation. That
+relies on Threadmill's `JobRunner` contract that interceptor start,
+handler execution, and interceptor success/failure callbacks run on the same
+execution thread.

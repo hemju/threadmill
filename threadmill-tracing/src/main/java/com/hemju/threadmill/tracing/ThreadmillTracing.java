@@ -71,6 +71,8 @@ public final class ThreadmillTracing {
         @Override
         public void onProcessingStarting(Job job, JobExecutionContext ctx) {
             var span = baseSpan(job, ctx).startSpan();
+            // JobRunner invokes start, handler execution, and finish/failure hooks on the
+            // same execution thread; this Scope intentionally spans the handler call.
             var scope = span.makeCurrent();
             spans.put(job.id().toString(), new ActiveSpan(span, scope));
         }

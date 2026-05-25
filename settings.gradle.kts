@@ -19,6 +19,8 @@ include(
     "threadmill-metrics",
     "threadmill-tracing",
     "threadmill-dashboard",
+    "threadmill-dashboard-api",
+    "threadmill-dashboard-ui",
     "threadmill-soak",
     "threadmill-simulation",
     "threadmill-example",

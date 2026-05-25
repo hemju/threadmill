@@ -27,6 +27,7 @@ import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
+import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
@@ -250,6 +251,12 @@ class StoreOutageTest {
         public List<String> listEnqueuedQueues() {
             check();
             return delegate.listEnqueuedQueues();
+        }
+
+        @Override
+        public List<Job> searchJobs(JobSearch search) {
+            check();
+            return delegate.searchJobs(search);
         }
 
         @Override

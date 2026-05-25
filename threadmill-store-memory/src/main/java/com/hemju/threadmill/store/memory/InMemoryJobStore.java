@@ -32,6 +32,7 @@ import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
@@ -482,6 +483,22 @@ public final class InMemoryJobStore implements JobStore {
                 .map(Map.Entry::getKey)
                 .sorted()
                 .collect(Collectors.toList());
+    }
+
+    @Override
+    public List<Job> searchJobs(JobSearch search) {
+        Objects.requireNonNull(search, "search");
+        return jobs.entrySet().stream()
+                .filter(e -> search.matchesState(e.getValue().state))
+                .filter(e -> search.matchesQueue(e.getValue().queue))
+                .filter(e -> search.matchesHandler(e.getValue().handlerType))
+                .sorted(Comparator.<Map.Entry<JobId, Entry>, Instant>comparing(e -> e.getValue().currentStateAt)
+                        .reversed()
+                        .thenComparing(e -> e.getKey().asUuid()))
+                .skip(search.offset())
+                .limit(search.limit())
+                .map(e -> serializer.deserializeJob(e.getValue().wire))
+                .toList();
     }
 
     @Override

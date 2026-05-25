@@ -241,7 +241,7 @@ class PostgresJobStoreRegressionTest {
             st.execute(sql);
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
-                assertThat(rs.getInt(1)).isEqualTo(2);
+                assertThat(rs.getInt(1)).isEqualTo(3);
             }
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_job_counts")) {
                 assertThat(rs.next()).isTrue();
@@ -277,7 +277,7 @@ class PostgresJobStoreRegressionTest {
                 Statement st = conn.createStatement();
                 ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
             assertThat(rs.next()).isTrue();
-            assertThat(rs.getInt(1)).isEqualTo(2);
+            assertThat(rs.getInt(1)).isEqualTo(3);
         }
     }
 

@@ -42,6 +42,7 @@ import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
+import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.Mutexes;
@@ -1090,6 +1091,33 @@ public final class PostgresJobStore implements JobStore {
         } catch (SQLException e) {
             throw new JdbcException("listEnqueuedQueues failed", e);
         }
+    }
+
+    @Override
+    public List<Job> searchJobs(JobSearch search) {
+        Objects.requireNonNull(search, "search");
+        var sql = new StringBuilder("SELECT body FROM threadmill_jobs WHERE 1=1");
+        var args = new ArrayList<Object>();
+        if (search.state() != null) {
+            sql.append(" AND state = ?");
+            args.add(search.state().name());
+        }
+        if (search.queue() != null) {
+            sql.append(" AND queue = ?");
+            args.add(search.queue());
+        }
+        if (search.handlerType() != null) {
+            sql.append(" AND handler_signature = ?");
+            args.add(search.handlerType());
+        }
+        sql.append(" ORDER BY current_state_at DESC, id ASC LIMIT ? OFFSET ?");
+        args.add(search.limit());
+        args.add(search.offset());
+        return queryJobs(sql.toString(), ps -> {
+            for (int i = 0; i < args.size(); i++) {
+                ps.setObject(i + 1, args.get(i));
+            }
+        });
     }
 
     @Override

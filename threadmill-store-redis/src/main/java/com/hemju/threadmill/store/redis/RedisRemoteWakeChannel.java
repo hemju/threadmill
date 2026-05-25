@@ -37,15 +37,27 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     public RedisRemoteWakeChannel(RedisURI uri) {
-        this(connectStandalone(RedisClient.create(uri)), true);
+        this(uri, CHANNEL);
+    }
+
+    public RedisRemoteWakeChannel(RedisURI uri, String channel) {
+        this(connectStandalone(RedisClient.create(uri), channel), true);
     }
 
     public RedisRemoteWakeChannel(RedisStoreConfig config) {
-        this(connect(Objects.requireNonNull(config, "config")), true);
+        this(config, CHANNEL);
+    }
+
+    public RedisRemoteWakeChannel(RedisStoreConfig config, String channel) {
+        this(connect(Objects.requireNonNull(config, "config"), channel), true);
     }
 
     public RedisRemoteWakeChannel(RedisClient client) {
-        this(connectStandalone(Objects.requireNonNull(client, "client")), false);
+        this(client, CHANNEL);
+    }
+
+    public RedisRemoteWakeChannel(RedisClient client, String channel) {
+        this(connectStandalone(Objects.requireNonNull(client, "client"), channel), false);
     }
 
     private RedisRemoteWakeChannel(ConnectionHandle handle, boolean ownsClient) {
@@ -125,42 +137,44 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
         void unsubscribe();
     }
 
-    private static ConnectionHandle connect(RedisStoreConfig config) {
+    private static ConnectionHandle connect(RedisStoreConfig config, String channel) {
         return switch (config) {
-            case RedisStoreConfig.Standalone standalone -> connectStandalone(RedisClient.create(standalone.uri()));
-            case RedisStoreConfig.Sentinel sentinel -> connectSentinel(sentinel);
-            case RedisStoreConfig.Cluster cluster -> connectCluster(cluster);
+            case RedisStoreConfig.Standalone standalone ->
+                connectStandalone(RedisClient.create(standalone.uri()), channel);
+            case RedisStoreConfig.Sentinel sentinel -> connectSentinel(sentinel, channel);
+            case RedisStoreConfig.Cluster cluster -> connectCluster(cluster, channel);
         };
     }
 
-    private static ConnectionHandle connectStandalone(RedisClient client) {
+    private static ConnectionHandle connectStandalone(RedisClient client, String channel) {
+        String wakeChannel = normalizeChannel(channel);
         StatefulRedisConnection<String, String> commandConnection = client.connect();
         StatefulRedisPubSubConnection<String, String> pubSubConnection = client.connectPubSub();
         return new ConnectionHandle(
                 client,
                 commandConnection,
                 pubSubConnection,
-                queue -> commandConnection.sync().publish(CHANNEL, queue),
+                queue -> commandConnection.sync().publish(wakeChannel, queue),
                 new Subscriber() {
                     @Override
                     public void subscribe(Consumer<String> wakeSink) {
                         pubSubConnection.addListener(new RedisPubSubAdapter<>() {
                             @Override
                             public void message(String channel, String message) {
-                                if (CHANNEL.equals(channel)) wakeSink.accept(message);
+                                if (wakeChannel.equals(channel)) wakeSink.accept(message);
                             }
                         });
-                        pubSubConnection.sync().subscribe(CHANNEL);
+                        pubSubConnection.sync().subscribe(wakeChannel);
                     }
 
                     @Override
                     public void unsubscribe() {
-                        pubSubConnection.sync().unsubscribe(CHANNEL);
+                        pubSubConnection.sync().unsubscribe(wakeChannel);
                     }
                 });
     }
 
-    private static ConnectionHandle connectSentinel(RedisStoreConfig.Sentinel config) {
+    private static ConnectionHandle connectSentinel(RedisStoreConfig.Sentinel config, String channel) {
         var first = config.nodes().getFirst();
         var builder = RedisURI.Builder.sentinel(first.host(), first.port(), config.master());
         for (int i = 1; i < config.nodes().size(); i++) {
@@ -170,10 +184,11 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
         if (config.password() != null && !config.password().isBlank()) {
             builder.withPassword(config.password().toCharArray());
         }
-        return connectStandalone(RedisClient.create(builder.build()));
+        return connectStandalone(RedisClient.create(builder.build()), channel);
     }
 
-    private static ConnectionHandle connectCluster(RedisStoreConfig.Cluster config) {
+    private static ConnectionHandle connectCluster(RedisStoreConfig.Cluster config, String channel) {
+        String wakeChannel = normalizeChannel(channel);
         var uris = config.nodes().stream()
                 .map(node -> RedisURI.Builder.redis(node.host(), node.port()).build())
                 .toList();
@@ -185,23 +200,28 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
                 client,
                 commandConnection,
                 pubSubConnection,
-                queue -> commandConnection.sync().publish(CHANNEL, queue),
+                queue -> commandConnection.sync().publish(wakeChannel, queue),
                 new Subscriber() {
                     @Override
                     public void subscribe(Consumer<String> wakeSink) {
                         pubSubConnection.addListener(new RedisClusterPubSubAdapter<>() {
                             @Override
                             public void message(RedisClusterNode node, String channel, String message) {
-                                if (CHANNEL.equals(channel)) wakeSink.accept(message);
+                                if (wakeChannel.equals(channel)) wakeSink.accept(message);
                             }
                         });
-                        pubSubConnection.sync().subscribe(CHANNEL);
+                        pubSubConnection.sync().subscribe(wakeChannel);
                     }
 
                     @Override
                     public void unsubscribe() {
-                        pubSubConnection.sync().unsubscribe(CHANNEL);
+                        pubSubConnection.sync().unsubscribe(wakeChannel);
                     }
                 });
+    }
+
+    private static String normalizeChannel(String channel) {
+        if (channel == null || channel.isBlank()) return CHANNEL;
+        return Names.requireName("channel", channel);
     }
 }

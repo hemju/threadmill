@@ -38,9 +38,16 @@ depth, and Redis persistence/replication health.
 
 Each dispatcher still polls its store, but Spring auto-configured durable
 stores also publish cross-node wake hints after local wake timing has already
-decided that work is visible. Postgres uses `LISTEN`/`NOTIFY` on the fixed
-`threadmill_wake` channel. Redis uses Pub/Sub on `{threadmill}:wake` with a
-separate subscription connection.
+decided that work is visible. Postgres uses `LISTEN`/`NOTIFY` on
+`threadmill_wake` by default. Redis uses Pub/Sub on `{threadmill}:wake` by
+default. Set `threadmill.remote-wake.channel` when multiple isolated
+Threadmill deployments share one datastore.
+
+The Postgres listener holds one JDBC connection for as long as remote wake is
+enabled. If it uses the same application pool, size that pool with one
+additional connection reserved for the listener. Applications with saturated
+pools can provide a custom `PostgresRemoteWakeChannel` bean with a dedicated
+one-connection listener `DataSource`.
 
 Remote wake failures are logged at debug level and ignored. A missed
 notification can only add latency up to `threadmill.pollInterval`; it cannot

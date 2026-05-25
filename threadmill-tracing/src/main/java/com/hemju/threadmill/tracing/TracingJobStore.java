@@ -22,6 +22,7 @@ import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
+import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
@@ -45,6 +46,11 @@ public final class TracingJobStore implements JobStore {
     @Override
     public String describe() {
         return delegate.describe();
+    }
+
+    @Override
+    public JobStore delegate() {
+        return delegate;
     }
 
     @Override
@@ -209,6 +215,17 @@ public final class TracingJobStore implements JobStore {
     @Override
     public List<String> listEnqueuedQueues() {
         return trace("threadmill.store.list_enqueued_queues", span -> delegate.listEnqueuedQueues());
+    }
+
+    @Override
+    public List<Job> searchJobs(JobSearch search) {
+        return trace("threadmill.store.search_jobs", span -> {
+            if (search.queue() != null) span.setAttribute(ThreadmillTracing.QUEUE, search.queue());
+            if (search.handlerType() != null) span.setAttribute(ThreadmillTracing.HANDLER, search.handlerType());
+            var jobs = delegate.searchJobs(search);
+            span.setAttribute(ThreadmillTracing.JOB_COUNT, jobs.size());
+            return jobs;
+        });
     }
 
     @Override

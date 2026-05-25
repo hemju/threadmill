@@ -4,6 +4,8 @@ spotless = "8.5.0"
 palantirJavaFormat = "2.90.0"
 springBoot = "4.0.4"
 springFramework = "7.0.4"
+springSecurity = "7.0.5"
+servlet = "6.1.0"
 jackson = "2.18.2"
 slf4j = "2.0.16"
 micrometer = "1.14.1"
@@ -22,9 +24,16 @@ spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
 [libraries]
 spring-boot-autoconfigure = { module = "org.springframework.boot:spring-boot-autoconfigure", version.ref = "springBoot" }
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test", version.ref = "springBoot" }
+spring-boot-starter-webmvc = { module = "org.springframework.boot:spring-boot-starter-webmvc", version.ref = "springBoot" }
 spring-context = { module = "org.springframework:spring-context", version.ref = "springFramework" }
 spring-jdbc = { module = "org.springframework:spring-jdbc", version.ref = "springFramework" }
 spring-tx = { module = "org.springframework:spring-tx", version.ref = "springFramework" }
+spring-webmvc = { module = "org.springframework:spring-webmvc", version.ref = "springFramework" }
+spring-security-core = { module = "org.springframework.security:spring-security-core", version.ref = "springSecurity" }
+spring-security-config = { module = "org.springframework.security:spring-security-config", version.ref = "springSecurity" }
+spring-security-test = { module = "org.springframework.security:spring-security-test", version.ref = "springSecurity" }
+spring-security-web = { module = "org.springframework.security:spring-security-web", version.ref = "springSecurity" }
+jakarta-servlet-api = { module = "jakarta.servlet:jakarta.servlet-api", version.ref = "servlet" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 jackson-datatype-jsr310 = { module = "com.fasterxml.jackson.datatype:jackson-datatype-jsr310", version.ref = "jackson" }
 micrometer-core = { module = "io.micrometer:micrometer-core", version.ref = "micrometer" }

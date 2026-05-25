@@ -107,6 +107,14 @@ class ThreadmillTracingTest {
         assertThat(span.getAttributes().get(ThreadmillTracing.CLAIMED_COUNT)).isEqualTo(1L);
     }
 
+    @Test
+    void storeDecoratorExposesDelegateForFrameworkCapabilityDetection() {
+        var backing = new InMemoryJobStore();
+        var store = tracing.wrapStore(backing);
+
+        assertThat(store.delegate()).isSameAs(backing);
+    }
+
     private static Job sample() {
         return Job.builder()
                 .spec(JobSpec.of("com.example.Handler", new JobArgument("java.lang.String", "\"x\"")))

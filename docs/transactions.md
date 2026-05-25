@@ -122,6 +122,13 @@ This mode is intentionally limited to the Spring auto-configured
 Redis cannot join a SQL transaction; unsupported combinations fail fast at
 startup.
 
+One deduplication edge is intentionally different in this mode. If two
+transactions race on the same `(queue, dedupKey)`, the loser receives the
+Postgres unique-constraint failure instead of Threadmill coalescing it into an
+existing job id. Once Postgres aborts a statement inside the caller's
+transaction, Threadmill cannot safely run the fallback lookup without also
+owning the transaction boundary.
+
 ### `immediate`
 
 ```yaml

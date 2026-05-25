@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -50,6 +51,7 @@ import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
+import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.Mutexes;
@@ -1027,6 +1029,42 @@ public final class RedisJobStore implements JobStore {
     @Override
     public List<String> listEnqueuedQueues() {
         return queueDepths().keySet().stream().sorted().toList();
+    }
+
+    @Override
+    public List<Job> searchJobs(JobSearch search) {
+        Objects.requireNonNull(search, "search");
+        var r = sync();
+        var jobs = new ArrayList<Job>();
+        if (search.state() == null) throw new IllegalArgumentException("Redis dashboard search requires a state");
+        long start = search.offset();
+        long stop = (long) search.offset() + search.limit() - 1L;
+        for (String id : r.zrevrange(RedisKeys.byStateTime(search.state()), start, stop)) {
+            appendSearchMatch(search, r, jobs, RedisKeys.job(JobId.parse(id)));
+        }
+        return pageSearchResults(search, jobs);
+    }
+
+    private void appendSearchMatch(
+            JobSearch search, RedisClusterCommands<String, String> r, List<Job> jobs, String jobKey) {
+        Map<String, String> hash = r.hgetall(jobKey);
+        if (hash == null || hash.isEmpty()) return;
+        JobState state = JobState.valueOf(hash.get("state"));
+        if (!search.matchesState(state)) return;
+        if (!search.matchesQueue(hash.get("queue"))) return;
+        if (!search.matchesHandler(hash.get("handler_signature"))) return;
+        String body = hash.get("body");
+        if (body != null) jobs.add(serializer.deserializeJob(body));
+    }
+
+    private static List<Job> pageSearchResults(JobSearch search, List<Job> jobs) {
+        return jobs.stream()
+                .sorted(Comparator.<Job, Instant>comparing(
+                                job -> job.stateHistory().getLast().at())
+                        .reversed()
+                        .thenComparing(job -> job.id().asUuid()))
+                .limit(search.limit())
+                .toList();
     }
 
     @Override

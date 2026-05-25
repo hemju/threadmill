@@ -1,5 +1,6 @@
 package com.hemju.threadmill.store.postgres;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
@@ -26,21 +27,38 @@ public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
 
     private static final Logger LOG = LoggerFactory.getLogger(PostgresRemoteWakeChannel.class);
 
-    private final DataSource dataSource;
+    private final DataSource publisherDataSource;
+    private final DataSource listenerDataSource;
+    private final String channel;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicReference<Connection> listenerConnection = new AtomicReference<>();
     private final AtomicReference<Thread> listenerThread = new AtomicReference<>();
 
     public PostgresRemoteWakeChannel(DataSource dataSource) {
-        this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+        this(dataSource, dataSource, CHANNEL);
+    }
+
+    public PostgresRemoteWakeChannel(DataSource dataSource, String channel) {
+        this(dataSource, dataSource, channel);
+    }
+
+    public PostgresRemoteWakeChannel(DataSource publisherDataSource, DataSource listenerDataSource) {
+        this(publisherDataSource, listenerDataSource, CHANNEL);
+    }
+
+    public PostgresRemoteWakeChannel(DataSource publisherDataSource, DataSource listenerDataSource, String channel) {
+        this.publisherDataSource = Objects.requireNonNull(publisherDataSource, "publisherDataSource");
+        this.listenerDataSource = Objects.requireNonNull(listenerDataSource, "listenerDataSource");
+        this.channel = normalizeChannel(channel);
     }
 
     @Override
     public void publish(String queue) {
         Names.requireName("queue", queue);
-        try (Connection conn = dataSource.getConnection();
-                PreparedStatement ps = conn.prepareStatement("SELECT pg_notify('" + CHANNEL + "', ?)")) {
-            ps.setString(1, queue);
+        try (Connection conn = publisherDataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement("SELECT pg_notify(?, ?)")) {
+            ps.setString(1, channel);
+            ps.setString(2, queue);
             ps.execute();
         } catch (SQLException e) {
             LOG.debug("Threadmill remote wake publish failed; dispatcher polling remains the fallback", e);
@@ -76,11 +94,11 @@ public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
     private void listen(Consumer<String> wakeSink) {
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             Connection current = null;
-            try (Connection conn = dataSource.getConnection();
+            try (Connection conn = listenerDataSource.getConnection();
                     Statement st = conn.createStatement()) {
                 current = conn;
                 listenerConnection.set(conn);
-                st.execute("LISTEN " + CHANNEL);
+                st.execute("LISTEN " + quoteIdentifier(channel));
                 PGConnection pg = conn.unwrap(PGConnection.class);
                 while (running.get() && !Thread.currentThread().isInterrupted()) {
                     PGNotification[] notifications = pg.getNotifications(1000);
@@ -114,5 +132,18 @@ public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
+    }
+
+    private static String normalizeChannel(String channel) {
+        if (channel == null || channel.isBlank()) return CHANNEL;
+        String value = Names.requireName("channel", channel);
+        if (value.getBytes(StandardCharsets.UTF_8).length > 63) {
+            throw new IllegalArgumentException("channel must be at most 63 UTF-8 bytes for PostgreSQL LISTEN");
+        }
+        return value;
+    }
+
+    private static String quoteIdentifier(String value) {
+        return "\"" + value.replace("\"", "\"\"") + "\"";
     }
 }
