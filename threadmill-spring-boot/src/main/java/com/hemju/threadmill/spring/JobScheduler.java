@@ -188,23 +188,26 @@ public class JobScheduler {
     }
 
     /**
-     * Resolve the registration and verify the supplied handler class is the one
-     * registered for {@code payload}. Generics make a mismatch impossible at
-     * compile time, but runtime callers (reflection, mocks, tests) can still
-     * lie; this guard keeps "no handler routed here" out of the consumer side.
+     * Resolve the registration by handler class and verify the supplied
+     * {@code payload} matches the handler's declared payload type. Generics
+     * make a mismatch impossible at compile time, but runtime callers
+     * (reflection, mocks, tests) can still lie; this guard keeps
+     * "wrong handler" out of the consumer side.
+     *
+     * <p>Routing by handler class (rather than payload type) is what lets
+     * multiple handlers share the same payload type — most notably any number
+     * of {@link com.hemju.threadmill.core.handler.JobAction} beans, which all
+     * declare {@code NoPayload}.
      */
     protected <P extends JobPayload> ThreadmillJobRegistry.Registration registrationFor(
             Class<? extends JobHandler<P>> handler, P payload) {
         Objects.requireNonNull(handler, "handler");
         Objects.requireNonNull(payload, "payload");
-        var registration = registry.registrationFor(payload);
-        if (!handler.equals(registration.handlerType())) {
-            throw new IllegalStateException("Handler " + handler.getName()
-                    + " is not the @Job registered for payload "
-                    + payload.getClass().getName()
-                    + " (registered handler: "
-                    + registration.handlerType().getName()
-                    + ")");
+        var registration = registry.registrationFor(handler);
+        if (!registration.payloadType().isInstance(payload)) {
+            throw new IllegalStateException("Payload " + payload.getClass().getName()
+                    + " is not a " + registration.payloadType().getName()
+                    + " (handler " + handler.getName() + " declared that payload type)");
         }
         return registration;
     }

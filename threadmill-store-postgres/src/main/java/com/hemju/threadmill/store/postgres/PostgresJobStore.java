@@ -36,6 +36,7 @@ import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.StaleJobException;
+import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
@@ -166,8 +167,14 @@ public final class PostgresJobStore implements JobStore {
         return "PostgreSQL " + serverVersion + " @ " + databaseName;
     }
 
+    @Override
     public boolean supportsExternalTransactions() {
         return transactionBoundary.supportsExternalTransactions();
+    }
+
+    @Override
+    public Optional<RemoteWakeChannel> createRemoteWakeChannel(String channelName) {
+        return Optional.of(new PostgresRemoteWakeChannel(dataSource, channelName));
     }
 
     private <T> T writeTransaction(PostgresConnectionWork<T> work) throws SQLException {

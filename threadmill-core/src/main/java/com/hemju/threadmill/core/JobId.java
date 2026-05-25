@@ -4,6 +4,9 @@ import java.security.SecureRandom;
 import java.util.Objects;
 import java.util.UUID;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
+
 /**
  * Strongly-typed wrapper for a job's identifier.
  *
@@ -38,6 +41,7 @@ public final class JobId {
     }
 
     /** Parses a string-form {@code JobId} (the wrapped UUID's canonical form). */
+    @JsonCreator
     public static JobId parse(String text) {
         return new JobId(UUID.fromString(text));
     }
@@ -57,6 +61,7 @@ public final class JobId {
     }
 
     @Override
+    @JsonValue
     public String toString() {
         return value.toString();
     }

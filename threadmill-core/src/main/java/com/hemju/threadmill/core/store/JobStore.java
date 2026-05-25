@@ -15,6 +15,7 @@ import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
+import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 
@@ -91,6 +92,43 @@ public interface JobStore {
      */
     default void verifyWritable() {
         capabilities();
+    }
+
+    /**
+     * Whether this store can participate in an externally-managed transaction
+     * (e.g. join a caller's JDBC transaction).
+     *
+     * <p>Returned as a generic capability so framework integrations can route
+     * to a transaction-joined scheduler without instanceof-checking concrete
+     * store classes — which keeps the integration module free of optional
+     * store-implementation class references in its constant pool, so it can
+     * be loaded even when the implementation module is not on the classpath.
+     *
+     * <p>Default is {@code false}. Stores that genuinely support external
+     * transactions (today: {@code PostgresJobStore} configured with an
+     * external transaction boundary) override to return {@code true}.
+     */
+    default boolean supportsExternalTransactions() {
+        return false;
+    }
+
+    /**
+     * Create a {@link com.hemju.threadmill.core.engine.RemoteWakeChannel} that
+     * delivers cross-node wake hints for jobs in this store, if the backing
+     * technology offers a native pub/sub-style notification mechanism.
+     *
+     * <p>Returned as an SPI hook so framework integrations can wire the
+     * channel without instanceof-checking concrete store classes or
+     * referencing optional store-implementation types. The default returns
+     * {@link java.util.Optional#empty()}; backends that have a native
+     * notification path (today: {@code PostgresJobStore} via {@code LISTEN}/
+     * {@code NOTIFY} and {@code RedisJobStore} via Pub/Sub) override.
+     *
+     * @param channelName the name to use for the notification channel; if
+     *                    {@code null} the store may pick a sensible default.
+     */
+    default Optional<RemoteWakeChannel> createRemoteWakeChannel(String channelName) {
+        return Optional.empty();
     }
 
     // ---------------------------------------------------------------- single-job ops

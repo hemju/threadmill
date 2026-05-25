@@ -61,7 +61,8 @@ class SpringRedisResetAutoConfigurationTest {
         adminConnection.sync().set("other-app:keep", "yes");
 
         new ApplicationContextRunner()
-                .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
+                .withConfiguration(AutoConfigurations.of(
+                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
                 .withPropertyValues(
                         "threadmill.enabled=false",
                         "threadmill.remote-wake.enabled=false",

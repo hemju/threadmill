@@ -34,7 +34,8 @@ class SpringPostgresSchemaAutoConfigurationTest {
     private static DataSource dataSource;
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-            .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
+            .withConfiguration(
+                    AutoConfigurations.of(ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
             .withBean(DataSource.class, () -> dataSource)
             .withPropertyValues("threadmill.enabled=false");
 

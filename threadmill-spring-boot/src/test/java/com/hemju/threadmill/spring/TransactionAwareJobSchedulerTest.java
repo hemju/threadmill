@@ -145,10 +145,13 @@ class TransactionAwareJobSchedulerTest {
     @Test
     @SuppressWarnings({"rawtypes", "unchecked"})
     void enqueueAllRejectsMixedPayloadsBeforeWritingAnything() {
+        // Routing is now by handler class, so a wrong payload type for the chosen handler
+        // is the failure mode (rather than the payload itself being unregistered).
         assertThatThrownBy(() -> enqueuer.enqueueAll(
                         (Class) GreetHandler.class, List.of(new GreetPayload("a"), new OtherPayload())))
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("No @Job handler registered");
+                .hasMessageContaining(OtherPayload.class.getName())
+                .hasMessageContaining(GreetPayload.class.getName());
 
         assertThat(store.countsByState().values()).containsOnly(0L);
     }

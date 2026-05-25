@@ -15,6 +15,11 @@ import com.hemju.threadmill.core.schedule.CronTask;
  * runtime payload value, so handlers with a non-trivial payload type must
  * schedule themselves imperatively via {@code Scheduler.defineRecurring}.
  *
+ * <p>Any number of {@code @Recurring} handlers can coexist in the same
+ * application. The registry keys handlers by their implementing class, so
+ * multiple {@code JobAction} beans — all of which declare {@code NoPayload}
+ * as their payload type — register independently without collision.
+ *
  * <p>Exactly one of {@link #interval()} or {@link #cron()} must be set;
  * setting both is rejected at startup. The recurring task's durable identity
  * defaults to the handler's fully-qualified class name — override via

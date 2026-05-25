@@ -4,8 +4,6 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 
-import javax.sql.DataSource;
-
 import io.lettuce.core.RedisURI;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,15 +27,10 @@ import com.hemju.threadmill.core.handler.JobHandlerResolver;
 import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JobSerializers;
-import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.serialization.PayloadMigrations;
 import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.store.JobStore;
-import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
-import com.hemju.threadmill.store.postgres.MigrationRunner;
-import com.hemju.threadmill.store.postgres.PostgresJobStore;
-import com.hemju.threadmill.store.postgres.PostgresRemoteWakeChannel;
 import com.hemju.threadmill.store.redis.RedisJobStore;
 import com.hemju.threadmill.store.redis.RedisRemoteWakeChannel;
 import com.hemju.threadmill.store.redis.RedisStoreConfig;
@@ -80,20 +73,28 @@ public class ThreadmillAutoConfiguration {
     }
 
     /**
-     * Resolve the {@link JobStore} by classpath and configuration precedence:
+     * Default {@link JobStore} when nothing else has provided one. Resolves by
+     * configuration precedence:
      * <ol>
      *   <li>If {@code threadmill.store.redis.*} is explicitly configured, use Redis.</li>
-     *   <li>Else, if a {@link DataSource} bean is present and the Postgres store class is
-     *       on the classpath, use {@link PostgresJobStore}.</li>
-     *   <li>Else, fall back to {@link InMemoryJobStore} with a loud warning.</li>
+     *   <li>Otherwise fall back to {@link InMemoryJobStore} with a loud warning.</li>
      * </ol>
      *
-     * <p>Applications wanting full control define their own {@code JobStore} bean and this
-     * default is skipped.
+     * <p>The Postgres branch lives in {@link ThreadmillPostgresAutoConfiguration},
+     * which is gated by {@code @ConditionalOnClass(PostgresJobStore.class)} and ordered
+     * {@code @AutoConfigureBefore} this class so it wins the
+     * {@link ConditionalOnMissingBean} race when its conditions match. Keeping this
+     * class free of any {@code threadmill-store-postgres} class references means
+     * Java 25 reflection on this configuration (Spring's {@code OnBeanCondition}
+     * deduction path) never has to resolve those types, so applications that
+     * exclude the optional Postgres module can still load this configuration.
+     *
+     * <p>Applications wanting full control define their own {@code JobStore} bean
+     * and this default is skipped.
      */
     @Bean
     @ConditionalOnMissingBean
-    public JobStore threadmillJobStore(ThreadmillProperties properties, ApplicationContext context) {
+    public JobStore threadmillJobStore(ThreadmillProperties properties) {
         if (properties.getStore().getRedis().isConfigured()) {
             var redis = properties.getStore().getRedis();
             if (redis.isResetOnStart() && !redis.isAllowDestructiveReset()) {
@@ -106,61 +107,9 @@ public class ThreadmillAutoConfiguration {
             }
             return store;
         }
-        DataSource dataSource = lookupOptionalBean(context, DataSource.class);
-        if (dataSource != null && isPostgresOnClasspath()) {
-            LOG.info("Threadmill: using Postgres store wired from the application's DataSource");
-            PostgresJobStore.requireSupportedServer(dataSource);
-            applyPostgresSchemaMode(dataSource, properties.getStore().getPostgres());
-            if (properties.getSpring().getEnqueueMode() == SpringEnqueueMode.JOIN_TRANSACTION) {
-                return new PostgresJobStore(
-                        dataSource,
-                        new JsonJobSerializer(),
-                        JobStoreCapabilities.defaults(),
-                        new SpringPostgresTransactionBoundary(dataSource));
-            }
-            return new PostgresJobStore(dataSource);
-        }
         LOG.warn("Threadmill: using in-memory store — jobs will not survive restart. Configure"
                 + " threadmill.store.redis.* or define a DataSource bean for durable storage.");
         return new InMemoryJobStore();
-    }
-
-    private static <T> T lookupOptionalBean(ApplicationContext context, Class<T> type) {
-        try {
-            return context.getBean(type);
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-    private static boolean isPostgresOnClasspath() {
-        try {
-            Class.forName(
-                    "com.hemju.threadmill.store.postgres.PostgresJobStore",
-                    false,
-                    ThreadmillAutoConfiguration.class.getClassLoader());
-            return true;
-        } catch (ClassNotFoundException notFound) {
-            return false;
-        }
-    }
-
-    private static void applyPostgresSchemaMode(
-            DataSource dataSource, ThreadmillProperties.PostgresProperties properties) {
-        var migrations = new MigrationRunner(dataSource);
-        switch (properties.getSchemaMode()) {
-            case MIGRATE -> migrations.migrate();
-            case VALIDATE -> migrations.validate();
-            case NONE -> {}
-            case DROP_AND_MIGRATE -> {
-                if (!properties.isAllowDestructiveSchemaReset()) {
-                    throw new IllegalStateException("threadmill.store.postgres.schema-mode=drop-and-migrate requires"
-                            + " threadmill.store.postgres.allow-destructive-schema-reset=true");
-                }
-                migrations.dropThreadmillObjects();
-                migrations.migrate();
-            }
-        }
     }
 
     @Bean
@@ -201,10 +150,7 @@ public class ThreadmillAutoConfiguration {
             havingValue = "true",
             matchIfMissing = true)
     public ThreadmillRemoteWakeChannels threadmillRemoteWakeChannels(
-            ThreadmillProperties properties,
-            ApplicationContext context,
-            JobStore store,
-            ObjectProvider<RemoteWakeChannel> customChannel) {
+            ThreadmillProperties properties, JobStore store, ObjectProvider<RemoteWakeChannel> customChannel) {
         RemoteWakeChannel provided = customChannel.getIfAvailable();
         if (provided != null) {
             return ThreadmillRemoteWakeChannels.of(provided);
@@ -216,11 +162,12 @@ public class ThreadmillAutoConfiguration {
             return ThreadmillRemoteWakeChannels.of(new RedisRemoteWakeChannel(
                     redisStoreConfig(properties.getStore().getRedis()), channel));
         }
-        DataSource dataSource = lookupOptionalBean(context, DataSource.class);
-        if (concreteStore instanceof PostgresJobStore && dataSource != null) {
-            return ThreadmillRemoteWakeChannels.of(new PostgresRemoteWakeChannel(dataSource, channel));
-        }
-        return ThreadmillRemoteWakeChannels.none();
+        // Postgres-style stores expose their own native pub/sub channel via the
+        // JobStore SPI hook — no postgres class reference is required here.
+        return concreteStore
+                .createRemoteWakeChannel(channel)
+                .map(ThreadmillRemoteWakeChannels::of)
+                .orElseGet(ThreadmillRemoteWakeChannels::none);
     }
 
     @Bean
@@ -301,12 +248,14 @@ public class ThreadmillAutoConfiguration {
             case AFTER_COMMIT -> new TransactionAwareJobScheduler(store, serializer, registry, config, wakeBus);
             case IMMEDIATE -> new JobScheduler(store, serializer, registry, config, wakeBus);
             case JOIN_TRANSACTION -> {
-                JobStore concreteStore = unwrapStore(store);
-                if (!(concreteStore instanceof PostgresJobStore postgresStore)
-                        || !postgresStore.supportsExternalTransactions()) {
+                // Routed through the generic JobStore SPI flag so this method does not
+                // need to reference any postgres-store class — keeping the auto-config
+                // loadable even when threadmill-store-postgres is not on the classpath.
+                if (!unwrapStore(store).supportsExternalTransactions()) {
                     throw new IllegalStateException(
-                            "threadmill.spring.enqueue-mode=join_transaction requires the Spring auto-configured"
-                                    + " PostgresJobStore using the same DataSource as the caller's transaction");
+                            "threadmill.spring.enqueue-mode=join_transaction requires a JobStore that supports"
+                                    + " external transactions (today: the Spring auto-configured PostgresJobStore"
+                                    + " using the same DataSource as the caller's transaction)");
                 }
                 yield new TransactionJoinedJobScheduler(store, serializer, registry, config, wakeBus);
             }
