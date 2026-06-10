@@ -36,6 +36,7 @@ class JsonJobSerializerTest {
                 .relationship(new JobRelationship(JobId.newId(), JobRelationship.Kind.WORKFLOW_STEP))
                 .concurrencyKey("project:42")
                 .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .cronTaskName("nightly-report")
                 .metadata("trace", "abc")
                 .build();
         j.log().info("hello");
@@ -55,6 +56,7 @@ class JsonJobSerializerTest {
         assertThat(loaded.workflowRootId()).isEqualTo(j.workflowRootId());
         assertThat(loaded.concurrencyKey()).contains("project:42");
         assertThat(loaded.concurrencyMode()).contains(ConcurrencyMode.EXCLUSIVE);
+        assertThat(loaded.cronTaskName()).contains("nightly-report");
         assertThat(loaded.metadata().get("trace")).contains("abc");
         assertThat(loaded.log().snapshot()).hasSize(1);
         assertThat(loaded.log().snapshot().get(0).level()).isEqualTo(JobLog.Level.INFO);

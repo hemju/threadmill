@@ -178,7 +178,7 @@ public final class JsonJobSerializer implements JobSerializer {
                 s.queue(),
                 s.priority(),
                 s.createdAt(),
-                s.cronTaskId(),
+                s.cronTaskName(),
                 s.relationship(),
                 s.workflowRootId(),
                 s.concurrencyKey(),
@@ -330,8 +330,8 @@ public final class JsonJobSerializer implements JobSerializer {
             root.put("queue", s.queue());
             root.put("priority", s.priority());
             root.put("createdAt", s.createdAt().toString());
-            if (s.cronTaskId() != null) {
-                root.put("cronTaskId", s.cronTaskId());
+            if (s.cronTaskName() != null) {
+                root.put("cronTaskName", s.cronTaskName());
             }
             if (s.relationship() != null) {
                 root.set("relationship", writeRelationship(s.relationship()));
@@ -395,8 +395,8 @@ public final class JsonJobSerializer implements JobSerializer {
             String queue = root.get("queue").asText();
             int priority = root.get("priority").asInt();
             var createdAt = Instant.parse(root.get("createdAt").asText());
-            Long cronTaskId =
-                    root.hasNonNull("cronTaskId") ? root.get("cronTaskId").asLong() : null;
+            String cronTaskName =
+                    root.hasNonNull("cronTaskName") ? root.get("cronTaskName").asText() : null;
             JobRelationship relationship =
                     root.hasNonNull("relationship") ? readRelationship(root.get("relationship")) : null;
             JobId workflowRootId = root.hasNonNull("workflowRootId")
@@ -429,7 +429,7 @@ public final class JsonJobSerializer implements JobSerializer {
                     .workflowRootId(workflowRootId)
                     .concurrencyKey(concurrencyKey)
                     .concurrencyMode(concurrencyMode);
-            if (cronTaskId != null) b.cronTaskId(cronTaskId);
+            if (cronTaskName != null) b.cronTaskName(cronTaskName);
             if (scheduledFor != null) b.scheduledFor(scheduledFor);
             metadata.forEach(b::metadata);
 

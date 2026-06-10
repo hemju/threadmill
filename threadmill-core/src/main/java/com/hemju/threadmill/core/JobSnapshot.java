@@ -23,7 +23,7 @@ public record JobSnapshot(
         String queue,
         int priority,
         Instant createdAt,
-        Long cronTaskId,
+        String cronTaskName,
         JobRelationship relationship,
         JobId workflowRootId,
         String concurrencyKey,

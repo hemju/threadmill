@@ -44,7 +44,7 @@ public final class Job {
     private final Instant createdAt;
     private final String queue;
     private final int priority;
-    private final Long cronTaskId;
+    private final String cronTaskName;
     private final JobRelationship relationship;
     private final JobId workflowRootId;
     private final String concurrencyKey;
@@ -71,7 +71,7 @@ public final class Job {
         this.createdAt = Objects.requireNonNull(b.createdAt, "createdAt");
         this.queue = b.queue == null ? "default" : b.queue;
         this.priority = b.priority;
-        this.cronTaskId = b.cronTaskId;
+        this.cronTaskName = b.cronTaskName;
         this.relationship = b.relationship;
         this.workflowRootId = b.workflowRootId == null ? this.id : b.workflowRootId;
         this.concurrencyKey = validateConcurrencyKey(b.concurrencyKey);
@@ -113,8 +113,8 @@ public final class Job {
         return priority;
     }
 
-    public Optional<Long> cronTaskId() {
-        return Optional.ofNullable(cronTaskId);
+    public Optional<String> cronTaskName() {
+        return Optional.ofNullable(cronTaskName);
     }
 
     public Optional<JobRelationship> relationship() {
@@ -284,7 +284,7 @@ public final class Job {
                 queue,
                 priority,
                 createdAt,
-                cronTaskId,
+                cronTaskName,
                 relationship,
                 workflowRootId,
                 concurrencyKey,
@@ -313,7 +313,7 @@ public final class Job {
         private Instant createdAt;
         private String queue;
         private int priority;
-        private Long cronTaskId;
+        private String cronTaskName;
         private JobRelationship relationship;
         private JobId workflowRootId;
         private String concurrencyKey;
@@ -348,8 +348,8 @@ public final class Job {
             return this;
         }
 
-        public Builder cronTaskId(Long cronTaskId) {
-            this.cronTaskId = cronTaskId;
+        public Builder cronTaskName(String cronTaskName) {
+            this.cronTaskName = cronTaskName;
             return this;
         }
 

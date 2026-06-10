@@ -99,6 +99,7 @@ public final class RecurringMaterializer {
                 .spec(new JobSpec(task.handlerType(), List.of(task.payloadArgument())))
                 .queue(task.queue())
                 .priority(task.priority())
+                .cronTaskName(task.name())
                 .initialState(JobState.ENQUEUED)
                 .build();
         store.insert(job);

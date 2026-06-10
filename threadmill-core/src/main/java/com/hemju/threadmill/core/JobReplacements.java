@@ -15,7 +15,7 @@ public final class JobReplacements {
     /**
      * Build a new {@link Job} from {@code current} with {@code replacement}
      * applied to spec / queue / priority / scheduled-for. State history,
-     * metadata, log, progress, attempts, relationship, cron-task id,
+     * metadata, log, progress, attempts, relationship, cron-task name,
      * created-at, owner, result, workflow root, concurrency key, and
      * concurrency mode are preserved.
      *
@@ -41,7 +41,7 @@ public final class JobReplacements {
         if (s.concurrencyKey() != null) {
             b.concurrencyKey(s.concurrencyKey()).concurrencyMode(s.concurrencyMode());
         }
-        if (s.cronTaskId() != null) b.cronTaskId(s.cronTaskId());
+        if (s.cronTaskName() != null) b.cronTaskName(s.cronTaskName());
         if (replacement.scheduledForValue().isPresent()) {
             b.scheduledFor(replacement.scheduledForValue().get());
         } else if (s.scheduledFor() != null) {

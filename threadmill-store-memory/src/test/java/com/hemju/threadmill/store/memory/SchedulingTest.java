@@ -13,6 +13,8 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNode;
@@ -198,6 +200,21 @@ class SchedulingTest {
         }
         // Should be a single-digit number, not 600 (one per missed 100ms interval).
         assertThat(RecorderHandler.RECORD.size()).isLessThan(20);
+    }
+
+    @Test
+    void recurringInstancesCarryTheirCronTaskName() {
+        scheduler.defineIntervalTask("linked", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);
+        var existing = store.findCronTaskState("linked").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+
+        new RecurringMaterializer(store).tick(Instant.now());
+
+        var state = store.findCronTaskState("linked").orElseThrow();
+        Job instance = store.findById(JobId.of(state.lastRunJobId())).orElseThrow();
+        // The materialized instance must back-link to its recurring definition.
+        assertThat(instance.cronTaskName()).contains("linked");
     }
 
     @Test
