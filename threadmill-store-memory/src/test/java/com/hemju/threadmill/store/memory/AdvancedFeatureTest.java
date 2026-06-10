@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -18,10 +20,12 @@ import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobRelationship;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.engine.Dispatcher;
+import com.hemju.threadmill.core.engine.JobInterceptor.FailureCause;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.engine.RetryInterceptor;
 import com.hemju.threadmill.core.engine.RetryPolicy;
+import com.hemju.threadmill.core.engine.WorkflowInterceptor;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
@@ -165,6 +169,89 @@ class AdvancedFeatureTest {
         node.start();
 
         await().atMost(Duration.ofSeconds(5)).until(() -> SuccessorHandler.RAN_FOR.contains("s"));
+    }
+
+    @Test
+    void workflowFanOutBeyondOneBatchPromotesEveryChild() {
+        var interceptor = new WorkflowInterceptor(store);
+        JobArgument arg = serializer.serializePayload(new HelloPayload("p"));
+        Job parent = Job.builder()
+                .spec(new JobSpec(ResultProducingHandler.class.getName(), List.of(arg)))
+                .build();
+        store.insert(parent);
+        var childIds = new ArrayList<JobId>();
+        for (int i = 0; i < 250; i++) {
+            Job child = Job.builder()
+                    .spec(new JobSpec(SuccessorHandler.class.getName(), List.of(arg)))
+                    .initialState(JobState.AWAITING)
+                    .relationship(new JobRelationship(parent.id(), JobRelationship.Kind.WORKFLOW_STEP))
+                    .build();
+            store.insert(child);
+            childIds.add(child.id());
+        }
+
+        interceptor.onProcessingSucceeded(parent, null);
+
+        for (JobId id : childIds) {
+            assertThat(store.findById(id).orElseThrow().currentState()).isEqualTo(JobState.ENQUEUED);
+        }
+    }
+
+    @Test
+    void workflowFanOutBeyondOneBatchAbandonsEveryChildOnFailure() {
+        var interceptor = new WorkflowInterceptor(store);
+        JobArgument arg = serializer.serializePayload(new HelloPayload("p"));
+        Job parent = Job.builder()
+                .spec(new JobSpec(AlwaysFailHandler.class.getName(), List.of(arg)))
+                .build();
+        store.insert(parent);
+        var childIds = new ArrayList<JobId>();
+        for (int i = 0; i < 250; i++) {
+            Job child = Job.builder()
+                    .spec(new JobSpec(SuccessorHandler.class.getName(), List.of(arg)))
+                    .initialState(JobState.AWAITING)
+                    .relationship(new JobRelationship(parent.id(), JobRelationship.Kind.WORKFLOW_STEP))
+                    .build();
+            store.insert(child);
+            childIds.add(child.id());
+        }
+        parent.transitionTo(JobState.PROCESSING, Instant.now(), "test", null);
+        parent.transitionTo(JobState.FAILED, Instant.now(), "test", "boom");
+
+        interceptor.onProcessingFailed(parent, null, new IllegalStateException("boom"), FailureCause.EXCEPTION);
+
+        for (JobId id : childIds) {
+            assertThat(store.findById(id).orElseThrow().currentState()).isEqualTo(JobState.DELETED);
+        }
+    }
+
+    @Test
+    void deepWorkflowChainIsAbandonedIterativelyWithoutRecursion() {
+        var interceptor = new WorkflowInterceptor(store);
+        JobArgument arg = serializer.serializePayload(new HelloPayload("p"));
+        Job root = Job.builder()
+                .spec(new JobSpec(AlwaysFailHandler.class.getName(), List.of(arg)))
+                .build();
+        store.insert(root);
+        JobId previous = root.id();
+        JobId last = null;
+        for (int i = 0; i < 3_000; i++) {
+            Job child = Job.builder()
+                    .spec(new JobSpec(SuccessorHandler.class.getName(), List.of(arg)))
+                    .initialState(JobState.AWAITING)
+                    .relationship(new JobRelationship(previous, JobRelationship.Kind.WORKFLOW_STEP))
+                    .build();
+            store.insert(child);
+            previous = child.id();
+            last = child.id();
+        }
+        root.transitionTo(JobState.PROCESSING, Instant.now(), "test", null);
+        root.transitionTo(JobState.FAILED, Instant.now(), "test", "boom");
+
+        // Per-level recursion would risk StackOverflowError on this chain.
+        interceptor.onProcessingFailed(root, null, new IllegalStateException("boom"), FailureCause.EXCEPTION);
+
+        assertThat(store.findById(last).orElseThrow().currentState()).isEqualTo(JobState.DELETED);
     }
 
     // ---------------- Custom retry policies (precedence matrix)

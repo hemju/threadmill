@@ -413,6 +413,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Retry backoff off-by-one, sub-second truncation to zero, malformed retry metadata cancelling retry, racy policy map | `RetryInterceptorTest.firstRetryDelayEqualsInitialBackoff` + `subSecondBackoffIsNotTruncatedToZero` + `malformedRetryMetadataFallsBackToTheDefaultPolicyAndStillRetries` + `concurrentPolicyRegistrationDoesNotBreakTheFailurePath` |
 | Recurring instance loses the back-link to its recurring definition | `SchedulingTest.recurringInstancesCarryTheirCronTaskName` + `JsonJobSerializerTest.jobRoundTripsAllCoreFields` |
 | CATCH_UP instances indistinguishable (nominal fire time discarded) | `SchedulingTest.catchUpInstancesCarryDistinctNominalFireTimes` |
+| Workflow fan-out beyond one batch strands children; deep-chain abandonment recursion | `AdvancedFeatureTest.workflowFanOutBeyondOneBatchPromotesEveryChild` + `workflowFanOutBeyondOneBatchAbandonsEveryChildOnFailure` + `deepWorkflowChainIsAbandonedIterativelyWithoutRecursion` |
 
 ### Postgres-layer improvements (engagement notes)
 

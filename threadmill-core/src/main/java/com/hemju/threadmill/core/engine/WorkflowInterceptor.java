@@ -1,7 +1,10 @@
 package com.hemju.threadmill.core.engine;
 
 import java.time.Instant;
+import java.util.ArrayDeque;
+import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -55,63 +58,70 @@ public final class WorkflowInterceptor implements JobInterceptor {
         abandonAwaitingSuccessorsOf(job.id());
     }
 
+    /** Children are drained in batches of this size until exhausted. */
+    private static final int CHILD_BATCH = 100;
+
     private void promoteAwaitingSuccessorsOf(JobId predecessorId) {
-        // Successors are persisted with relationship.parentId = predecessorId.
-        // We rely on AWAITING being a small slice in steady state and use the
-        // store-side findAwaitingByParent helper rather than a wider scan.
-        for (Job candidate : findAwaitingChildrenOf(predecessorId)) {
-            if (candidate.relationship().isEmpty()) continue;
-            JobRelationship rel = candidate.relationship().get();
-            if (rel.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
-            if (!rel.parentId().equals(predecessorId)) continue;
-            try {
-                long v = candidate.version();
-                candidate.transitionTo(JobState.ENQUEUED, Instant.now(), "engine.workflow-promote", null);
-                store.saveAtomic(candidate, v);
-            } catch (StaleJobException ignored) {
-                // Another node beat us; that's fine.
-            } catch (Throwable t) {
-                LOG.warn("Failed to promote workflow successor {} of {}", candidate.id(), predecessorId, t);
-            }
-        }
+        drainAwaitingChildren(predecessorId, "promote", candidate -> {
+            long v = candidate.version();
+            candidate.transitionTo(JobState.ENQUEUED, Instant.now(), "engine.workflow-promote", null);
+            store.saveAtomic(candidate, v);
+        });
     }
 
-    private void abandonAwaitingSuccessorsOf(JobId predecessorId) {
-        for (Job candidate : findAwaitingChildrenOf(predecessorId)) {
-            if (candidate.relationship().isEmpty()) continue;
-            JobRelationship rel = candidate.relationship().get();
-            if (rel.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
-            if (!rel.parentId().equals(predecessorId)) continue;
-            try {
+    private void abandonAwaitingSuccessorsOf(JobId rootPredecessorId) {
+        // Explicit work queue instead of per-level recursion: a deep chain
+        // must not risk StackOverflowError inside an interceptor.
+        var pending = new ArrayDeque<JobId>();
+        pending.add(rootPredecessorId);
+        while (!pending.isEmpty()) {
+            JobId predecessorId = pending.poll();
+            drainAwaitingChildren(predecessorId, "abandon", candidate -> {
                 long v = candidate.version();
                 candidate.transitionTo(JobState.DELETED, Instant.now(), "engine.workflow-abandon", null);
                 store.saveAtomic(candidate, v);
-                abandonAwaitingSuccessorsOf(candidate.id());
-            } catch (StaleJobException ignored) {
-                // Another node beat us; that's fine.
-            } catch (Throwable t) {
-                LOG.warn("Failed to abandon workflow successor {} of {}", candidate.id(), predecessorId, t);
-            }
+                pending.add(candidate.id());
+            });
         }
     }
 
     /**
-     * Finds AWAITING jobs whose relationship's parentId equals {@code predecessorId}.
-     * Implemented as a linear scan — workflows expect modest fan-out and this is
-     * the simplest correct implementation for now. A store-side index can be
-     * added later if profiling demands.
+     * Apply {@code action} to every AWAITING workflow-step child of
+     * {@code predecessorId}, draining in batches until exhausted. Fan-out
+     * beyond one batch is handled by refetching: every promoted / abandoned
+     * child leaves {@code AWAITING}, so the loop terminates. An iteration
+     * that makes no progress (e.g. persistent save failures) stops the drain
+     * instead of spinning.
      */
-    private Iterable<Job> findAwaitingChildrenOf(JobId predecessorId) {
-        // We don't have a "by parent" SPI method. Iterate jobs by signature
-        // is too narrow. Use a count-by-state hint to short-circuit when there
-        // are no AWAITING jobs at all.
-        if (store.countsByState().getOrDefault(JobState.AWAITING, 0L) == 0L) {
-            return java.util.List.of();
+    private void drainAwaitingChildren(JobId predecessorId, String what, Consumer<Job> action) {
+        // The count short-circuit is only sound when counts are exact; a
+        // store advertising approximate counts could report 0 while a
+        // successor exists, permanently stranding it.
+        if (store.capabilities().supportsExactCounts()
+                && store.countsByState().getOrDefault(JobState.AWAITING, 0L) == 0L) {
+            return;
         }
-        // Fallback: ask the store for AWAITING jobs and filter client-side.
-        // Most stores can answer this via findDueForPromotion semantics — but those
-        // are SCHEDULED-specific. We add a small helper through the new SPI method
-        // findAwaitingByParent later; for now, walk via a wide-ish call.
-        return store.findAwaitingByParent(predecessorId, 100);
+        while (true) {
+            List<Job> batch = store.findAwaitingByParent(predecessorId, CHILD_BATCH);
+            int progressed = 0;
+            for (Job candidate : batch) {
+                if (candidate.relationship().isEmpty()) continue;
+                JobRelationship rel = candidate.relationship().get();
+                if (rel.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
+                if (!rel.parentId().equals(predecessorId)) continue;
+                try {
+                    action.accept(candidate);
+                    progressed++;
+                } catch (StaleJobException ignored) {
+                    // Another node beat us; the refetch sees the fresh state.
+                    progressed++;
+                } catch (Throwable t) {
+                    LOG.warn("Failed to {} workflow successor {} of {}", what, candidate.id(), predecessorId, t);
+                }
+            }
+            if (batch.size() < CHILD_BATCH || progressed == 0) {
+                return;
+            }
+        }
     }
 }
