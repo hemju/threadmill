@@ -9,6 +9,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.EnqueueResult;
@@ -39,9 +43,13 @@ public final class Scheduler {
     public static final String SYSTEM_QUEUE = "system";
     public static final Duration DEFAULT_MAX_DEDUP_TTL = Duration.ofDays(30);
 
+    private static final Logger LOG = LoggerFactory.getLogger(Scheduler.class);
+    private static final Duration CRON_MUTEX_LEASE = Duration.ofSeconds(30);
+
     private final JobStore store;
     private final JobSerializer serializer;
     private final LocalWakeBus wakeBus;
+    private final String cronMutexHolder = UUID.randomUUID().toString();
 
     public Scheduler(JobStore store, JobSerializer serializer) {
         this(store, serializer, new LocalWakeBus());
@@ -374,16 +382,53 @@ public final class Scheduler {
         // re-registration we preserve in-flight job tracking but recompute
         // the next-run from the new trigger relative to now (so a freshly
         // edited cron does not fire stale times).
-        var existingState = store.findCronTaskState(task.name());
-        var now = Instant.now();
-        Instant next = task.trigger().nextAfter(now, task.zone());
-        store.upsertCronTask(task);
-        if (existingState.isEmpty()) {
-            store.upsertCronTaskState(CronTaskScheduleState.initial(task.name(), next));
-        } else {
-            var s = existingState.get();
-            store.upsertCronTaskState(
-                    new CronTaskScheduleState(task.name(), s.lastRunAt(), s.lastRunJobId(), next, s.inFlightJobId()));
+        //
+        // The read-modify-write of the schedule state is guarded by the same
+        // store mutex the materializer takes per task: without it, a
+        // concurrent materializer tick on the maintenance master (a
+        // different JVM during a rolling deploy) could set inFlightJobId
+        // between our read and write, and the re-registration would clobber
+        // it with the stale value — defeating the pile-up guard.
+        String mutex = RecurringMaterializer.taskMutexName(task.name());
+        boolean locked = acquireCronMutex(mutex);
+        try {
+            var existingState = store.findCronTaskState(task.name());
+            var now = Instant.now();
+            Instant next = task.trigger().nextAfter(now, task.zone());
+            store.upsertCronTask(task);
+            if (existingState.isEmpty()) {
+                store.upsertCronTaskState(CronTaskScheduleState.initial(task.name(), next));
+            } else {
+                var s = existingState.get();
+                store.upsertCronTaskState(new CronTaskScheduleState(
+                        task.name(), s.lastRunAt(), s.lastRunJobId(), next, s.inFlightJobId()));
+            }
+        } finally {
+            if (locked) {
+                try {
+                    store.releaseMutex(mutex, cronMutexHolder);
+                } catch (RuntimeException ignored) {
+                    // the lease expires on its own
+                }
+            }
         }
+    }
+
+    private boolean acquireCronMutex(String mutex) {
+        for (int i = 0; i < 100; i++) {
+            if (store.tryAcquireMutex(mutex, cronMutexHolder, CRON_MUTEX_LEASE)) {
+                return true;
+            }
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        // Registration must not fail application startup; the poll-interval
+        // materializer remains the correctness fallback.
+        LOG.warn("Could not acquire recurring-state mutex {} — proceeding unguarded", mutex);
+        return false;
     }
 }

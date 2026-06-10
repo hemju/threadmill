@@ -1,8 +1,10 @@
 package com.hemju.threadmill.core.schedule;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
+import java.util.UUID;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,6 +12,7 @@ import org.slf4j.LoggerFactory;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.spec.JobSpec;
@@ -34,6 +37,27 @@ public final class RecurringMaterializer {
 
     /** Per-tick cap on CATCH_UP materializations; the rest carries over. */
     private static final int MAX_CATCH_UP_PER_TICK = 100;
+
+    /** Lease for the per-task schedule-state mutex. */
+    private static final Duration TASK_MUTEX_LEASE = Duration.ofSeconds(30);
+
+    private final String mutexHolder = UUID.randomUUID().toString();
+
+    /**
+     * The store mutex guarding a recurring task's {@link CronTaskScheduleState}
+     * read-modify-write. Shared between the materializer's tick and
+     * {@code Scheduler.upsertCron} so a re-registration cannot clobber a
+     * concurrently-set {@code inFlightJobId}. Long task names are truncated
+     * with a stable hash suffix to fit the store's name limit.
+     */
+    public static String taskMutexName(String taskName) {
+        String raw = "cron:" + taskName;
+        if (raw.length() <= Names.MAX_LENGTH) {
+            return raw;
+        }
+        String hash = Integer.toHexString(taskName.hashCode());
+        return raw.substring(0, Names.MAX_LENGTH - hash.length() - 1) + ":" + hash;
+    }
 
     private final JobStore store;
     private final LocalWakeBus wakeBus;
@@ -61,20 +85,43 @@ public final class RecurringMaterializer {
     }
 
     private void tickOne(CronTask task, Instant now) {
+        // Guard the schedule-state read-modify-write with the per-task store
+        // mutex shared with Scheduler.upsertCron. If another holder has the
+        // task (a re-registration mid-rolling-deploy), skip this tick — the
+        // next maintenance tick revisits.
+        if (!store.tryAcquireMutex(taskMutexName(task.name()), mutexHolder, TASK_MUTEX_LEASE)) {
+            return;
+        }
+        try {
+            tickOneLocked(task, now);
+        } finally {
+            try {
+                store.releaseMutex(taskMutexName(task.name()), mutexHolder);
+            } catch (RuntimeException ignored) {
+                // the lease expires on its own
+            }
+        }
+    }
+
+    private void tickOneLocked(CronTask task, Instant now) {
         var stateOpt = store.findCronTaskState(task.name());
         if (stateOpt.isEmpty()) return; // not yet initialised
         var state = stateOpt.get();
         if (state.nextRunAt() == null || state.nextRunAt().isAfter(now)) return;
 
-        // Pile-up guard.
+        // Pile-up guard: a non-terminal in-flight instance blocks the next
+        // materialization. FAILED is deliberately treated as non-blocking
+        // even though it is only terminal-pending: a retry-exhausted FAILED
+        // instance must never deadlock the task forever. The cost is a
+        // narrow window — FAILED observed between the failure save and
+        // RetryInterceptor's SCHEDULED save does not block, so a retrying
+        // instance can briefly overlap a fresh one; handlers are required
+        // to be idempotent anyway (at-least-once).
         if (state.inFlightJobId() != null) {
             Job inFlight = store.findById(JobId.of(state.inFlightJobId())).orElse(null);
             if (inFlight != null
                     && !inFlight.currentState().isTerminal()
-                    && inFlight.currentState() != JobState.SUCCEEDED
-                    && inFlight.currentState() != JobState.FAILED
-                    && inFlight.currentState() != JobState.DELETED
-                    && inFlight.currentState() != JobState.QUARANTINED) {
+                    && inFlight.currentState() != JobState.FAILED) {
                 // Still running — leave the next_run_at where it is so we revisit on the next tick.
                 return;
             }

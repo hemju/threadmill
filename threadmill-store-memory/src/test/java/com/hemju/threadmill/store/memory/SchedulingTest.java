@@ -243,6 +243,88 @@ class SchedulingTest {
     }
 
     @Test
+    void materializerSkipsATaskWhoseStateMutexIsHeld() {
+        scheduler.defineIntervalTask("locked", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);
+        var existing = store.findCronTaskState("locked").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+
+        // Another holder (e.g. an upsertCron on a different node) owns the
+        // task's schedule-state mutex: the tick must skip, not clobber.
+        String mutex = RecurringMaterializer.taskMutexName("locked");
+        assertThat(store.tryAcquireMutex(mutex, "other-holder", Duration.ofSeconds(10)))
+                .isTrue();
+        var materializer = new RecurringMaterializer(store);
+        materializer.tick(Instant.now());
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .isEmpty();
+
+        // Once released, the next tick materializes normally.
+        store.releaseMutex(mutex, "other-holder");
+        materializer.tick(Instant.now());
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .isNotEmpty();
+    }
+
+    @Test
+    void upsertCronWaitsForTheTaskMutexAndPreservesInFlightTracking() {
+        scheduler.defineIntervalTask(
+                "guarded", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);
+        var existing = store.findCronTaskState("guarded").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+        new RecurringMaterializer(store).tick(Instant.now());
+        var inFlight = store.findCronTaskState("guarded").orElseThrow().inFlightJobId();
+        assertThat(inFlight).isNotNull();
+
+        // A short-lived foreign hold delays re-registration instead of letting
+        // it proceed concurrently; the tracked in-flight instance survives.
+        String mutex = RecurringMaterializer.taskMutexName("guarded");
+        assertThat(store.tryAcquireMutex(mutex, "other-holder", Duration.ofMillis(250)))
+                .isTrue();
+        long before = System.nanoTime();
+        scheduler.defineIntervalTask(
+                "guarded", Duration.ofMillis(200), new HelloPayload("tick"), RecorderHandler.class);
+        long elapsedMillis = (System.nanoTime() - before) / 1_000_000;
+
+        assertThat(elapsedMillis).isGreaterThanOrEqualTo(150);
+        assertThat(store.findCronTaskState("guarded").orElseThrow().inFlightJobId())
+                .isEqualTo(inFlight);
+    }
+
+    @Test
+    void failedInFlightInstanceDoesNotBlockTheNextMaterialization() {
+        scheduler.defineIntervalTask(
+                "failing-window", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);
+        var existing = store.findCronTaskState("failing-window").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+        var materializer = new RecurringMaterializer(store);
+        materializer.tick(Instant.now());
+        var state = store.findCronTaskState("failing-window").orElseThrow();
+        Job instance = store.findById(JobId.of(state.inFlightJobId())).orElseThrow();
+
+        // Fail the instance terminally (retry-exhausted): the pile-up guard
+        // deliberately treats FAILED as non-blocking so a permanently failed
+        // instance cannot deadlock the task forever.
+        long v = instance.version();
+        instance.transitionTo(JobState.PROCESSING, Instant.now(), "test", null);
+        instance.transitionTo(JobState.FAILED, Instant.now(), "test", "boom");
+        store.saveAtomic(instance, v);
+
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                "failing-window",
+                state.lastRunAt(),
+                state.lastRunJobId(),
+                Instant.now().minusMillis(50),
+                state.inFlightJobId()));
+        materializer.tick(Instant.now());
+
+        var after = store.findCronTaskState("failing-window").orElseThrow();
+        assertThat(after.inFlightJobId()).isNotEqualTo(state.inFlightJobId());
+    }
+
+    @Test
     void catchUpBacklogIsCappedPerTickWithCarryOver() {
         scheduler.defineIntervalTask(
                 "burst",
