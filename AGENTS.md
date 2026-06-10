@@ -409,6 +409,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Persisted type tag initializes an arbitrary classpath class before the payload assignability check | `JsonJobSerializerTest.deserializeArgumentRejectsNonPayloadTypesWithoutRunningTheirInitializers` |
 | Unbounded metadata or state-history entry count blocks the terminal FAILED/SUCCEEDED save | `JsonJobSerializerTest.hugeMetadataAndLongRetryHistoryStillFitTheTerminalSave` |
 | Failed SUCCEEDED-save leaves the job stuck in PROCESSING (and its key held) forever | `ProcessingNodeTest.transientSucceededSaveFailureIsRetriedAndTheJobSucceeds` + `failedSucceededSaveRoutesThroughTheSingleFailurePathAndReleasesTheKey` + `oversizedHandlerResultIsDroppedRatherThanBlockingTheSucceededSave` |
+| Per-job timeout ignored in the watchdog's initial delay; malformed timeout metadata disables enforcement | `ProcessingNodeTest.perJobTimeoutShorterThanTheGlobalDefaultFiresOnTime` + `malformedTimeoutMetadataStillEnforcesTheGlobalTimeout` |
 
 ### Postgres-layer improvements (engagement notes)
 

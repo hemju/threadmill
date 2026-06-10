@@ -117,26 +117,31 @@ public final class JobRunner {
 
         Thread carrier = Thread.currentThread();
         AtomicBoolean timedOut = new AtomicBoolean(false);
+        // Resolve the effective timeout once, before scheduling: the per-job
+        // override must also drive the initial delay, and a malformed value
+        // must degrade to the global timeout instead of throwing inside the
+        // periodic task (which would silently cancel all future checks).
+        Duration effectiveTimeout = resolveJobTimeout(job);
         ScheduledFuture<?> watchdog = timeoutExecutor.scheduleAtFixedRate(
                 () -> {
-                    var now = Instant.now();
-                    var lastCheckIn = ctx.lastCheckInAt();
-                    Duration effectiveTimeout = job.metadata()
-                            .get(META_TIMEOUT_SECONDS)
-                            .map(s -> Duration.ofSeconds(Long.parseLong(s)))
-                            .orElse(jobTimeout);
-                    Instant deadline = lastCheckIn
-                            .map(at -> at.plus(config.noProgressTimeout()))
-                            .orElse(ctx.claimedAt().plus(effectiveTimeout));
-                    if (!deadline.isAfter(now)) {
-                        timedOut.set(true);
-                        carrier.interrupt();
+                    try {
+                        var now = Instant.now();
+                        var lastCheckIn = ctx.lastCheckInAt();
+                        Instant deadline = lastCheckIn
+                                .map(at -> at.plus(config.noProgressTimeout()))
+                                .orElse(ctx.claimedAt().plus(effectiveTimeout));
+                        if (!deadline.isAfter(now)) {
+                            timedOut.set(true);
+                            carrier.interrupt();
+                        }
+                    } catch (Throwable t) {
+                        LOG.warn("Timeout watchdog check failed for job {}", job.id(), t);
                     }
                 },
                 Math.max(
                         1L,
                         Math.min(
-                                jobTimeout.toMillis(),
+                                effectiveTimeout.toMillis(),
                                 config.noProgressTimeout().toMillis())),
                 Math.max(1L, Math.min(1000L, config.checkInMinInterval().toMillis())),
                 TimeUnit.MILLISECONDS);
@@ -301,6 +306,38 @@ public final class JobRunner {
             interceptors.onProcessingFailed(job, ctx, cause, JobInterceptor.FailureCause.QUARANTINE);
         } catch (Throwable t) {
             LOG.error("Quarantine path itself threw for job {}", job.id(), t);
+        }
+    }
+
+    /**
+     * Resolve the per-job timeout override ({@link #META_TIMEOUT_SECONDS}),
+     * falling back to the global job timeout when the metadata is absent,
+     * malformed, or non-positive. Metadata is user-mutable — a bad value must
+     * never disable timeout enforcement.
+     */
+    private Duration resolveJobTimeout(Job job) {
+        var meta = job.metadata().get(META_TIMEOUT_SECONDS);
+        if (meta.isEmpty()) {
+            return jobTimeout;
+        }
+        try {
+            long seconds = Long.parseLong(meta.get().trim());
+            if (seconds < 1) {
+                LOG.warn(
+                        "Ignoring non-positive {}='{}' for job {} — using the global job timeout",
+                        META_TIMEOUT_SECONDS,
+                        meta.get(),
+                        job.id());
+                return jobTimeout;
+            }
+            return Duration.ofSeconds(seconds);
+        } catch (NumberFormatException malformed) {
+            LOG.warn(
+                    "Ignoring malformed {}='{}' for job {} — using the global job timeout",
+                    META_TIMEOUT_SECONDS,
+                    meta.get(),
+                    job.id());
+            return jobTimeout;
         }
     }
 

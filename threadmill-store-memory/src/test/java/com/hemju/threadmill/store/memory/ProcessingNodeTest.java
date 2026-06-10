@@ -964,6 +964,72 @@ class ProcessingNodeTest {
     }
 
     @Test
+    void perJobTimeoutShorterThanTheGlobalDefaultFiresOnTime() {
+        var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
+        JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("test"));
+        Job job = Job.builder()
+                .spec(new JobSpec(EngineTestHandlers.HangingHandler.class.getName(), List.of(arg)))
+                .queue(fastConfig.defaultQueue())
+                .metadata("threadmill.job.timeoutSeconds", "1")
+                .build();
+        store.insert(job);
+        node = ProcessingNode.builder(store)
+                .config(fastConfig.toBuilder()
+                        .jobTimeout(Duration.ofSeconds(60))
+                        .noProgressTimeout(Duration.ofSeconds(60))
+                        .defaultMaxAttempts(1)
+                        .build())
+                .interceptor(new JobInterceptor() {
+                    @Override
+                    public void onProcessingFailed(Job j, JobExecutionContext c, Throwable cause, FailureCause kind) {
+                        failureKinds.add(kind);
+                    }
+                })
+                .build();
+        node.start();
+
+        // The 1-second per-job override must drive the watchdog's initial
+        // delay; with the 60-second global timeout this would otherwise not
+        // be checked within the test window at all.
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            assertThat(failureKinds).contains(JobInterceptor.FailureCause.TIMEOUT);
+            Job loaded = store.findById(job.id()).orElseThrow();
+            assertThat(loaded.currentState()).isEqualTo(JobState.FAILED);
+        });
+    }
+
+    @Test
+    void malformedTimeoutMetadataStillEnforcesTheGlobalTimeout() {
+        var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
+        JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("test"));
+        Job job = Job.builder()
+                .spec(new JobSpec(EngineTestHandlers.HangingHandler.class.getName(), List.of(arg)))
+                .queue(fastConfig.defaultQueue())
+                .metadata("threadmill.job.timeoutSeconds", "abc")
+                .build();
+        store.insert(job);
+        node = ProcessingNode.builder(store)
+                .config(fastConfig.toBuilder()
+                        .jobTimeout(Duration.ofMillis(300))
+                        .defaultMaxAttempts(1)
+                        .build())
+                .interceptor(new JobInterceptor() {
+                    @Override
+                    public void onProcessingFailed(Job j, JobExecutionContext c, Throwable cause, FailureCause kind) {
+                        failureKinds.add(kind);
+                    }
+                })
+                .build();
+        node.start();
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            assertThat(failureKinds).contains(JobInterceptor.FailureCause.TIMEOUT);
+            Job loaded = store.findById(job.id()).orElseThrow();
+            assertThat(loaded.currentState()).isEqualTo(JobState.FAILED);
+        });
+    }
+
+    @Test
     void transientSucceededSaveFailureIsRetriedAndTheJobSucceeds() {
         var remainingFailures = new AtomicInteger(2);
         var failing = new ForwardingJobStore(store) {
