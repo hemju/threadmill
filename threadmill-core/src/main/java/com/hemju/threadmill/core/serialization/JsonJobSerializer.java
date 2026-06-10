@@ -5,6 +5,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -102,15 +104,50 @@ public final class JsonJobSerializer implements JobSerializer {
     }
 
     /**
-     * Produce a snapshot whose {@code JobLog} fits {@code maxJobLogBytes} and
+     * Metadata key recording how many metadata entries were dropped at
+     * serialization time to fit {@code maxMetadataBytes}.
+     */
+    public static final String TRUNCATED_METADATA_KEY = "threadmill.truncated.metadata";
+
+    /**
+     * Metadata key recording how many state-history entries were elided at
+     * serialization time to fit {@code maxStateHistoryEntries}.
+     */
+    public static final String TRUNCATED_STATE_HISTORY_KEY = "threadmill.truncated.stateHistory";
+
+    /**
+     * Produce a snapshot whose {@code JobLog} fits {@code maxJobLogBytes},
      * whose FAILED / QUARANTINED state-history messages fit
-     * {@code maxFailureMetadataBytes}. The snapshot remains immutable —
-     * truncation builds a new copy.
+     * {@code maxFailureMetadataBytes}, whose state history fits
+     * {@code maxStateHistoryEntries} (creation entry plus the most recent
+     * entries are kept), and whose metadata fits {@code maxMetadataBytes}
+     * (largest user entries dropped first; {@code threadmill.}-prefixed
+     * engine entries kept longest). Elisions are recorded under
+     * {@link #TRUNCATED_METADATA_KEY} / {@link #TRUNCATED_STATE_HISTORY_KEY}.
+     * The snapshot remains immutable — truncation builds a new copy.
+     *
+     * <p>Metadata and state-history-count elision apply only to
+     * <em>terminal-state</em> snapshots: a terminal save must never be
+     * blocked by user/engine-growable areas (the stuck-in-PROCESSING failure
+     * mode), while non-terminal saves keep the §6 contract of rejecting
+     * oversize jobs loudly at creation.
      */
     static JobSnapshot truncateForSerialization(JobSnapshot s, JobStoreCapabilities caps) {
         List<JobLog.Entry> trimmedLog = trimLog(s.log(), caps.maxJobLogBytes());
         List<JobStateEntry> trimmedHistory = trimFailureMessages(s.stateHistory(), caps.maxFailureMetadataBytes());
-        if (trimmedLog == s.log() && trimmedHistory == s.stateHistory()) {
+        boolean terminal = isTerminalSaveState(s.currentState());
+        int elidedHistory = 0;
+        int maxEntries = caps.maxStateHistoryEntries();
+        if (terminal && maxEntries > 1 && trimmedHistory.size() > maxEntries) {
+            elidedHistory = trimmedHistory.size() - maxEntries;
+            var kept = new ArrayList<JobStateEntry>(maxEntries);
+            kept.add(trimmedHistory.get(0));
+            kept.addAll(trimmedHistory.subList(trimmedHistory.size() - (maxEntries - 1), trimmedHistory.size()));
+            trimmedHistory = kept;
+        }
+        Map<String, String> trimmedMetadata =
+                terminal ? trimMetadata(s.metadata(), elidedHistory, caps.maxMetadataBytes()) : s.metadata();
+        if (trimmedLog == s.log() && trimmedHistory == s.stateHistory() && trimmedMetadata == s.metadata()) {
             return s;
         }
         return new JobSnapshot(
@@ -125,7 +162,7 @@ public final class JsonJobSerializer implements JobSerializer {
                 s.concurrencyKey(),
                 s.concurrencyMode(),
                 trimmedHistory,
-                s.metadata(),
+                trimmedMetadata,
                 trimmedLog,
                 s.progress(),
                 s.version(),
@@ -135,6 +172,59 @@ public final class JsonJobSerializer implements JobSerializer {
                 s.scheduledFor(),
                 s.result(),
                 s.attempts());
+    }
+
+    /**
+     * States whose save is the end of a processing attempt: the single
+     * failure code path (FAILED is terminal-pending, not {@code isTerminal})
+     * plus the true terminal states.
+     */
+    private static boolean isTerminalSaveState(JobState state) {
+        return state.isTerminal() || state == JobState.FAILED;
+    }
+
+    private static Map<String, String> trimMetadata(Map<String, String> metadata, int elidedHistory, int maxBytes) {
+        Map<String, String> out = metadata;
+        if (elidedHistory > 0) {
+            out = new HashMap<>(metadata);
+            out.put(TRUNCATED_STATE_HISTORY_KEY, elidedHistory + " entries omitted");
+        }
+        if (maxBytes <= 0 || out.isEmpty()) {
+            return out;
+        }
+        long total = 0;
+        for (var e : out.entrySet()) total += metadataByteCost(e);
+        if (total <= maxBytes) {
+            return out;
+        }
+        var mutable = out == metadata ? new HashMap<>(metadata) : (HashMap<String, String>) out;
+        // Drop largest user entries first; engine ("threadmill.") entries and
+        // the elision markers are kept longest.
+        var dropOrder = mutable.entrySet().stream()
+                .sorted(Comparator.comparing(
+                                (Map.Entry<String, String> e) -> e.getKey().startsWith("threadmill."))
+                        .thenComparing(e -> -metadataByteCost(e))
+                        .thenComparing(Map.Entry::getKey))
+                .map(e -> Map.entry(e.getKey(), e.getValue()))
+                .toList();
+        int omitted = 0;
+        for (var e : dropOrder) {
+            if (total <= maxBytes) break;
+            if (TRUNCATED_STATE_HISTORY_KEY.equals(e.getKey())) continue;
+            mutable.remove(e.getKey());
+            total -= metadataByteCost(e);
+            omitted++;
+        }
+        if (omitted > 0) {
+            mutable.put(TRUNCATED_METADATA_KEY, omitted + " entries omitted");
+        }
+        return mutable;
+    }
+
+    private static long metadataByteCost(Map.Entry<String, String> e) {
+        return e.getKey().getBytes(StandardCharsets.UTF_8).length
+                + e.getValue().getBytes(StandardCharsets.UTF_8).length
+                + 8L;
     }
 
     private static List<JobLog.Entry> trimLog(List<JobLog.Entry> log, int maxBytes) {

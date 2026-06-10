@@ -190,6 +190,43 @@ class JsonJobSerializerTest {
     }
 
     @Test
+    void hugeMetadataAndLongRetryHistoryStillFitTheTerminalSave() {
+        Job j = Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"\"")))
+                .metadata("threadmill.retry.maxAttempts", "5")
+                .build();
+        for (int i = 0; i < 200; i++) {
+            j.metadata().put("user.bulk" + i, "x".repeat(2048));
+        }
+        for (int i = 0; i < 150; i++) {
+            j.transitionTo(JobState.PROCESSING, Instant.now(), "engine.claim", null);
+            j.transitionTo(JobState.FAILED, Instant.now(), "engine.exception", "attempt " + i + " failed");
+            j.transitionTo(JobState.SCHEDULED, Instant.now(), "retry.backoff", null);
+            j.transitionTo(JobState.ENQUEUED, Instant.now(), "engine.promote", null);
+        }
+        j.transitionTo(JobState.PROCESSING, Instant.now(), "engine.claim", null);
+        j.transitionTo(JobState.FAILED, Instant.now(), "engine.exception", "final failure");
+
+        var caps = new JobStoreCapabilities(64L * 1024L, 16 * 1024, 8 * 1024, 100, true, true, true, true);
+        String wire = serializer.serializeJob(j.snapshot(), caps);
+        assertThat(wire.getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(64 * 1024);
+
+        Job loaded = serializer.deserializeJob(wire);
+        // The creation entry and the terminal failure detail survive the elision.
+        assertThat(loaded.stateHistory().getFirst().state()).isEqualTo(JobState.ENQUEUED);
+        assertThat(loaded.currentState()).isEqualTo(JobState.FAILED);
+        assertThat(loaded.stateHistory().getLast().message()).isEqualTo("final failure");
+        assertThat(loaded.stateHistory())
+                .hasSizeLessThanOrEqualTo(JobStoreCapabilities.DEFAULT_MAX_STATE_HISTORY_ENTRIES);
+        // Engine metadata survives; bulk user metadata is dropped with markers.
+        assertThat(loaded.metadata().get("threadmill.retry.maxAttempts")).contains("5");
+        assertThat(loaded.metadata().get(JsonJobSerializer.TRUNCATED_METADATA_KEY))
+                .isPresent();
+        assertThat(loaded.metadata().get(JsonJobSerializer.TRUNCATED_STATE_HISTORY_KEY))
+                .isPresent();
+    }
+
+    @Test
     void oversizeThrowsAndDoesNotMutateSnapshotSource() {
         Job j = Job.builder()
                 .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"\"")))
