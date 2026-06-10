@@ -29,6 +29,31 @@ class ProcessingNodeConfigTest {
     }
 
     @Test
+    void terminalStateRetentionAgesAreConfigurableAndValidated() {
+        var config = ProcessingNodeConfig.builder()
+                .succeededRetention(Duration.ofDays(3))
+                .failedRetention(Duration.ofDays(14))
+                .deletedRetention(Duration.ofDays(2))
+                .quarantinedRetention(Duration.ofDays(60))
+                .build();
+        assertThat(config.succeededRetention()).isEqualTo(Duration.ofDays(3));
+        assertThat(config.failedRetention()).isEqualTo(Duration.ofDays(14));
+        assertThat(config.deletedRetention()).isEqualTo(Duration.ofDays(2));
+        assertThat(config.quarantinedRetention()).isEqualTo(Duration.ofDays(60));
+
+        assertThatThrownBy(() -> ProcessingNodeConfig.builder()
+                        .succeededRetention(Duration.ZERO)
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("succeededRetention");
+        assertThatThrownBy(() -> ProcessingNodeConfig.builder()
+                        .failedRetention(Duration.ofDays(-1))
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("failedRetention");
+    }
+
+    @Test
     void zeroOrNegativeMaintenancePollIntervalIsRejected() {
         assertThatThrownBy(() -> ProcessingNodeConfig.builder()
                         .maintenancePollInterval(Duration.ZERO)

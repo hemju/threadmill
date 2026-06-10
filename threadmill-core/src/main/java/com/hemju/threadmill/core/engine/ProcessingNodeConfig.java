@@ -33,7 +33,11 @@ public record ProcessingNodeConfig(
         Duration maxDedupTtl,
         Duration shutdownGracePeriod,
         Duration maintenancePollInterval,
-        Duration retentionInterval) {
+        Duration retentionInterval,
+        Duration succeededRetention,
+        Duration failedRetention,
+        Duration deletedRetention,
+        Duration quarantinedRetention) {
 
     public ProcessingNodeConfig {
         if (workerCount <= 0) throw new IllegalArgumentException("workerCount must be positive");
@@ -61,6 +65,10 @@ public record ProcessingNodeConfig(
         Objects.requireNonNull(shutdownGracePeriod, "shutdownGracePeriod");
         Objects.requireNonNull(maintenancePollInterval, "maintenancePollInterval");
         Objects.requireNonNull(retentionInterval, "retentionInterval");
+        Objects.requireNonNull(succeededRetention, "succeededRetention");
+        Objects.requireNonNull(failedRetention, "failedRetention");
+        Objects.requireNonNull(deletedRetention, "deletedRetention");
+        Objects.requireNonNull(quarantinedRetention, "quarantinedRetention");
         requirePositive("pollInterval", pollInterval);
         requirePositive("claimHeartbeat", claimHeartbeat);
         requirePositive("heartbeatTimeout", heartbeatTimeout);
@@ -77,6 +85,10 @@ public record ProcessingNodeConfig(
         requirePositive("shutdownGracePeriod", shutdownGracePeriod);
         requirePositive("maintenancePollInterval", maintenancePollInterval);
         requirePositive("retentionInterval", retentionInterval);
+        requirePositive("succeededRetention", succeededRetention);
+        requirePositive("failedRetention", failedRetention);
+        requirePositive("deletedRetention", deletedRetention);
+        requirePositive("quarantinedRetention", quarantinedRetention);
         if (!maintenanceLeaseDuration.minus(claimHeartbeat).isPositive()) {
             throw new IllegalArgumentException("maintenanceLeaseDuration must be greater than claimHeartbeat");
         }
@@ -111,7 +123,11 @@ public record ProcessingNodeConfig(
                 Duration.ofDays(30),
                 Duration.ofSeconds(10),
                 Duration.ofSeconds(1),
-                Duration.ofHours(1));
+                Duration.ofHours(1),
+                Duration.ofDays(7),
+                Duration.ofDays(30),
+                Duration.ofDays(7),
+                Duration.ofDays(30));
     }
 
     public Builder toBuilder() {
@@ -147,6 +163,10 @@ public record ProcessingNodeConfig(
         private Duration shutdownGracePeriod;
         private Duration maintenancePollInterval;
         private Duration retentionInterval;
+        private Duration succeededRetention;
+        private Duration failedRetention;
+        private Duration deletedRetention;
+        private Duration quarantinedRetention;
 
         private Builder(ProcessingNodeConfig c) {
             this.workerCount = c.workerCount;
@@ -173,6 +193,10 @@ public record ProcessingNodeConfig(
             this.shutdownGracePeriod = c.shutdownGracePeriod;
             this.maintenancePollInterval = c.maintenancePollInterval;
             this.retentionInterval = c.retentionInterval;
+            this.succeededRetention = c.succeededRetention;
+            this.failedRetention = c.failedRetention;
+            this.deletedRetention = c.deletedRetention;
+            this.quarantinedRetention = c.quarantinedRetention;
         }
 
         public Builder workerCount(int v) {
@@ -295,6 +319,26 @@ public record ProcessingNodeConfig(
             return this;
         }
 
+        public Builder succeededRetention(Duration v) {
+            this.succeededRetention = v;
+            return this;
+        }
+
+        public Builder failedRetention(Duration v) {
+            this.failedRetention = v;
+            return this;
+        }
+
+        public Builder deletedRetention(Duration v) {
+            this.deletedRetention = v;
+            return this;
+        }
+
+        public Builder quarantinedRetention(Duration v) {
+            this.quarantinedRetention = v;
+            return this;
+        }
+
         public ProcessingNodeConfig build() {
             return new ProcessingNodeConfig(
                     workerCount,
@@ -320,7 +364,11 @@ public record ProcessingNodeConfig(
                     maxDedupTtl,
                     shutdownGracePeriod,
                     maintenancePollInterval,
-                    retentionInterval);
+                    retentionInterval,
+                    succeededRetention,
+                    failedRetention,
+                    deletedRetention,
+                    quarantinedRetention);
         }
     }
 

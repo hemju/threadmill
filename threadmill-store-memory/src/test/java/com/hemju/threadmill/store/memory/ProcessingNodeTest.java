@@ -19,6 +19,7 @@ import org.junit.jupiter.api.Test;
 import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.JobInterceptor;
 import com.hemju.threadmill.core.engine.ProcessingNode;
@@ -961,6 +962,49 @@ class ProcessingNodeTest {
             assertThat(loaded.stateHistory())
                     .anySatisfy(e -> assertThat(e.message()).startsWith("big-error:"));
         });
+    }
+
+    @Test
+    void retentionSweepDrainsBeyondOneBatchAndCoversAllTerminalStates() {
+        Instant old = Instant.now().minus(Duration.ofDays(40));
+        insertTerminal(JobState.SUCCEEDED, old, 250);
+        insertTerminal(JobState.FAILED, old, 150);
+        insertTerminal(JobState.DELETED, old, 120);
+        insertTerminal(JobState.QUARANTINED, old, 110);
+        insertTerminal(JobState.SUCCEEDED, Instant.now(), 1);
+
+        node = ProcessingNode.builder(store)
+                .config(fastConfig.toBuilder()
+                        .maintenancePollInterval(Duration.ofMillis(50))
+                        .retentionInterval(Duration.ofMillis(100))
+                        .build())
+                .build();
+        node.start();
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            Map<JobState, Long> counts = store.countsByState();
+            // The drain loop must clear all 250 old SUCCEEDED jobs (beyond one
+            // 100-batch) and sweep the other terminal states too.
+            assertThat(counts.getOrDefault(JobState.SUCCEEDED, 0L)).isEqualTo(1L);
+            assertThat(counts.getOrDefault(JobState.FAILED, 0L)).isZero();
+            assertThat(counts.getOrDefault(JobState.DELETED, 0L)).isZero();
+            assertThat(counts.getOrDefault(JobState.QUARANTINED, 0L)).isZero();
+        });
+    }
+
+    private void insertTerminal(JobState terminal, Instant at, int n) {
+        JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("x"));
+        for (int i = 0; i < n; i++) {
+            Job j = Job.builder()
+                    .spec(new JobSpec("com.example.Done", List.of(arg)))
+                    .createdAt(at)
+                    .withStateHistory(List.of(
+                            JobStateEntry.of(JobState.ENQUEUED, at),
+                            new JobStateEntry(JobState.PROCESSING, at, "test", null),
+                            new JobStateEntry(terminal, at, "test", null)))
+                    .build();
+            store.insert(j);
+        }
     }
 
     @Test

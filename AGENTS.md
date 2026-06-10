@@ -414,6 +414,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Recurring instance loses the back-link to its recurring definition | `SchedulingTest.recurringInstancesCarryTheirCronTaskName` + `JsonJobSerializerTest.jobRoundTripsAllCoreFields` |
 | CATCH_UP instances indistinguishable (nominal fire time discarded) | `SchedulingTest.catchUpInstancesCarryDistinctNominalFireTimes` |
 | Workflow fan-out beyond one batch strands children; deep-chain abandonment recursion | `AdvancedFeatureTest.workflowFanOutBeyondOneBatchPromotesEveryChild` + `workflowFanOutBeyondOneBatchAbandonsEveryChildOnFailure` + `deepWorkflowChainIsAbandonedIterativelyWithoutRecursion` |
+| Retention capped at 100 deletions per interval; FAILED/DELETED/QUARANTINED never swept; retention age hardcoded | `ProcessingNodeTest.retentionSweepDrainsBeyondOneBatchAndCoversAllTerminalStates` + `ProcessingNodeConfigTest.terminalStateRetentionAgesAreConfigurableAndValidated` |
 
 ### Postgres-layer improvements (engagement notes)
 

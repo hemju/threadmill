@@ -164,10 +164,32 @@ public final class MaintenanceCycle {
         }
     }
 
+    /** Batch size for each retention delete call. */
+    private static final int RETENTION_BATCH = 100;
+
+    /**
+     * Per-tick cap on retention batches per state, bounding tick duration so
+     * housekeeping cannot starve the owner-heartbeat refresh that shares
+     * this loop. Anything left over carries to the next retention tick.
+     */
+    private static final int MAX_RETENTION_BATCHES_PER_TICK = 50;
+
     private void retentionSweep() {
-        Duration retention = Duration.ofDays(7);
-        var cutoff = Instant.now().minus(retention);
-        store.deleteFinishedOlderThan(cutoff, JobState.SUCCEEDED, 100);
+        var now = Instant.now();
+        sweepTerminalState(JobState.SUCCEEDED, now.minus(config.succeededRetention()));
+        sweepTerminalState(JobState.FAILED, now.minus(config.failedRetention()));
+        sweepTerminalState(JobState.DELETED, now.minus(config.deletedRetention()));
+        sweepTerminalState(JobState.QUARANTINED, now.minus(config.quarantinedRetention()));
+    }
+
+    private void sweepTerminalState(JobState state, Instant cutoff) {
+        for (int i = 0; i < MAX_RETENTION_BATCHES_PER_TICK; i++) {
+            long deleted = store.deleteFinishedOlderThan(cutoff, state, RETENTION_BATCH);
+            if (deleted < RETENTION_BATCH) {
+                return;
+            }
+        }
+        LOG.debug("Retention sweep for {} hit the per-tick batch cap; continuing on the next tick", state);
     }
 
     private void nodeHeartbeatRetentionSweep() {
@@ -179,7 +201,14 @@ public final class MaintenanceCycle {
     }
 
     private void dedupRetentionSweep() {
-        store.deleteExpiredDedupKeys(Instant.now(), 100);
+        var now = Instant.now();
+        for (int i = 0; i < MAX_RETENTION_BATCHES_PER_TICK; i++) {
+            long deleted = store.deleteExpiredDedupKeys(now, RETENTION_BATCH);
+            if (deleted < RETENTION_BATCH) {
+                return;
+            }
+        }
+        LOG.debug("Dedup retention sweep hit the per-tick batch cap; continuing on the next tick");
     }
 
     private static void sleep(Duration d) {
