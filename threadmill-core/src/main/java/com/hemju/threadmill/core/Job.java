@@ -69,12 +69,17 @@ public final class Job {
         this.id = Objects.requireNonNull(b.id, "id");
         this.spec = Objects.requireNonNull(b.spec, "spec");
         this.createdAt = Objects.requireNonNull(b.createdAt, "createdAt");
-        this.queue = b.queue == null ? "default" : b.queue;
+        this.queue = b.queue == null ? "default" : Names.requireName("queue", b.queue);
         this.priority = b.priority;
         this.cronTaskName = b.cronTaskName;
         this.relationship = b.relationship;
         this.workflowRootId = b.workflowRootId == null ? this.id : b.workflowRootId;
         this.concurrencyKey = validateConcurrencyKey(b.concurrencyKey);
+        if (b.concurrencyKey == null && b.concurrencyMode != null) {
+            // A mode without a key would silently provide no concurrency
+            // control at all — exactly the API misuse worth failing loudly.
+            throw new IllegalArgumentException("concurrencyMode requires a concurrencyKey");
+        }
         this.concurrencyMode =
                 concurrencyKey == null ? null : Objects.requireNonNull(b.concurrencyMode, "concurrencyMode");
         this.metadata = new JobMetadata(b.metadata.snapshot());

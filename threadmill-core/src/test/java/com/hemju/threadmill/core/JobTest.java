@@ -19,6 +19,38 @@ class JobTest {
     }
 
     @Test
+    void concurrencyModeWithoutKeyIsRejectedLoudly() {
+        assertThatThrownBy(() -> Job.builder()
+                        .spec(JobSpec.of("com.example.Handler", new JobArgument("java.lang.String", "\"x\"")))
+                        .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("concurrencyKey");
+    }
+
+    @Test
+    void queueNamesAreValidatedAtTheModelBoundary() {
+        assertThatThrownBy(() -> Job.builder()
+                        .spec(JobSpec.of("com.example.Handler", new JobArgument("java.lang.String", "\"x\"")))
+                        .queue("bad\nqueue")
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("queue");
+        assertThatThrownBy(() -> Job.builder()
+                        .spec(JobSpec.of("com.example.Handler", new JobArgument("java.lang.String", "\"x\"")))
+                        .queue("q".repeat(200))
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("queue");
+        assertThatThrownBy(() -> Job.builder()
+                        .spec(JobSpec.of("com.example.Handler", new JobArgument("java.lang.String", "\"x\"")))
+                        .queue("   ")
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("queue");
+    }
+
+    @Test
     void newJobStartsEnqueuedWithVersionZero() {
         Job j = freshEnqueued();
         assertThat(j.currentState()).isEqualTo(JobState.ENQUEUED);

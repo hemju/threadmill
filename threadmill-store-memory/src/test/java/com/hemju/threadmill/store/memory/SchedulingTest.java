@@ -121,6 +121,14 @@ class SchedulingTest {
     }
 
     @Test
+    void scheduleInFiresAfterTheDelayWithTypedHandlerAgreement() {
+        scheduler.scheduleIn(Duration.ofMillis(150), new HelloPayload("delayed"), RecorderHandler.class);
+        node = ProcessingNode.builder(store).config(fastConfig()).build();
+        node.start();
+        await().atMost(Duration.ofSeconds(5)).until(() -> RecorderHandler.RECORD.contains("delayed"));
+    }
+
+    @Test
     void scheduleAtFiresOnceItsTimeArrives() {
         scheduler.scheduleAt(Instant.now().plusMillis(200), new HelloPayload("later"), RecorderHandler.class);
         node = ProcessingNode.builder(store).config(fastConfig()).build();

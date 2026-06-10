@@ -141,12 +141,11 @@ public final class Scheduler {
         return job.id();
     }
 
-    public JobId scheduleIn(
-            Duration delay, JobPayload payload, Class<? extends JobHandler<? extends JobPayload>> handler) {
+    public <P extends JobPayload> JobId scheduleIn(Duration delay, P payload, Class<? extends JobHandler<P>> handler) {
         Objects.requireNonNull(delay, "delay");
-        @SuppressWarnings({"unchecked", "rawtypes"})
-        Class<? extends JobHandler<JobPayload>> cast = (Class) handler;
-        return scheduleAt(Instant.now().plus(delay), payload, cast);
+        Objects.requireNonNull(payload, "payload");
+        Objects.requireNonNull(handler, "handler");
+        return scheduleAt(Instant.now().plus(delay), payload, handler);
     }
 
     // ---------------------------------------------------------------- recurring
