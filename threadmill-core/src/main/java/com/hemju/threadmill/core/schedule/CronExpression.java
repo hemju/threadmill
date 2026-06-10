@@ -64,7 +64,12 @@ public final class CronExpression {
         BitSet hour = parseField(parts[1], 0, 23);
         BitSet dom = parseField(parts[2], 1, 31);
         BitSet mon = parseField(parts[3], 1, 12);
-        BitSet dow = parseField(normaliseSunday(parts[4]), 0, 6);
+        // Cron historically accepts 7 for Sunday; parse with 7 allowed, then fold it onto 0.
+        BitSet dow = parseField(parts[4], 0, 7);
+        if (dow.get(7)) {
+            dow.clear(7);
+            dow.set(0);
+        }
         return new CronExpression(expression, min, hour, dom, mon, dow, !isStar(parts[2]), !isStar(parts[4]));
     }
 
@@ -121,6 +126,9 @@ public final class CronExpression {
             int slash = part.indexOf('/');
             if (slash >= 0) {
                 step = Integer.parseInt(part.substring(slash + 1));
+                if (step < 1) {
+                    throw new IllegalArgumentException("Cron step must be >= 1 in field '" + field + "'");
+                }
                 body = part.substring(0, slash);
             }
             int start;
@@ -145,12 +153,6 @@ public final class CronExpression {
             }
         }
         return b;
-    }
-
-    private static String normaliseSunday(String dow) {
-        // Cron historically accepts 7 for Sunday; normalise to 0.
-        if ("7".equals(dow)) return "0";
-        return dow.replace("7", "0");
     }
 
     private static boolean isStar(String field) {

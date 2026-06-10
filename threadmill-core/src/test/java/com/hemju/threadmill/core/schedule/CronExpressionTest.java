@@ -9,6 +9,7 @@ import java.time.ZoneId;
 import java.time.ZoneOffset;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 class CronExpressionTest {
 
@@ -55,6 +56,41 @@ class CronExpressionTest {
     @Test
     void rejectsWrongFieldCount() {
         assertThatThrownBy(() -> CronExpression.parse("* * * *")).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    @Timeout(5)
+    void parseRejectsZeroAndNegativeSteps() {
+        assertThatThrownBy(() -> CronExpression.parse("*/0 * * * *"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("step");
+        assertThatThrownBy(() -> CronExpression.parse("*/-1 * * * *")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> CronExpression.parse("* * * * */0"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("step");
+    }
+
+    @Test
+    @Timeout(5)
+    void sundayAsSevenWorksInRangesListsAndSteps() {
+        // Friday June 5th 2026; Sunday June 7th, Saturday June 6th.
+        Instant fri = LocalDateTime.of(2026, 6, 5, 12, 0, 0).toInstant(ZoneOffset.UTC);
+
+        // 5-7 = Fri-Sun: next fire is Saturday 09:00.
+        Instant nextFriToSun = CronExpression.parse("0 9 * * 5-7").nextAfter(fri, UTC);
+        assertThat(nextFriToSun).isEqualTo(LocalDateTime.of(2026, 6, 6, 9, 0).toInstant(ZoneOffset.UTC));
+
+        // 1-7 = every day.
+        Instant nextEveryDay = CronExpression.parse("0 9 * * 1-7").nextAfter(fri, UTC);
+        assertThat(nextEveryDay).isEqualTo(LocalDateTime.of(2026, 6, 6, 9, 0).toInstant(ZoneOffset.UTC));
+
+        // */7 over 0..7 = Sunday only (and must not hang).
+        Instant nextStepSeven = CronExpression.parse("0 9 * * */7").nextAfter(fri, UTC);
+        assertThat(nextStepSeven).isEqualTo(LocalDateTime.of(2026, 6, 7, 9, 0).toInstant(ZoneOffset.UTC));
+
+        // 0,7 = Sunday, both spellings in one list.
+        Instant nextList = CronExpression.parse("0 9 * * 0,7").nextAfter(fri, UTC);
+        assertThat(nextList).isEqualTo(LocalDateTime.of(2026, 6, 7, 9, 0).toInstant(ZoneOffset.UTC));
     }
 
     @Test
