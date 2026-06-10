@@ -29,6 +29,7 @@ import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
+import com.hemju.threadmill.test.ForwardingJobStore;
 
 /**
  * End-to-end engine tests: enqueue a job, the dispatcher claims and runs
@@ -959,6 +960,88 @@ class ProcessingNodeTest {
             // The exception's leading message fragment survives in the state-history entry.
             assertThat(loaded.stateHistory())
                     .anySatisfy(e -> assertThat(e.message()).startsWith("big-error:"));
+        });
+    }
+
+    @Test
+    void transientSucceededSaveFailureIsRetriedAndTheJobSucceeds() {
+        var remainingFailures = new AtomicInteger(2);
+        var failing = new ForwardingJobStore(store) {
+            @Override
+            public void saveAtomic(Job job, long expectedVersion) {
+                if (job.currentState() == JobState.SUCCEEDED && remainingFailures.getAndDecrement() > 0) {
+                    throw new RuntimeException("transient store blip");
+                }
+                super.saveAtomic(job, expectedVersion);
+            }
+        };
+        Job job = enqueueHello(EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue());
+        node = ProcessingNode.builder(failing).config(fastConfig).build();
+        node.start();
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            Job loaded = store.findById(job.id()).orElseThrow();
+            assertThat(loaded.currentState()).isEqualTo(JobState.SUCCEEDED);
+        });
+        // The retry happened at the save level, not by re-running the handler.
+        assertThat(EngineTestHandlers.CountingHandler.COUNT
+                        .get(job.id().toString())
+                        .get())
+                .isEqualTo(1);
+    }
+
+    @Test
+    void failedSucceededSaveRoutesThroughTheSingleFailurePathAndReleasesTheKey() {
+        var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
+        Job poisoned = enqueueHello(
+                EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue(), "k", ConcurrencyMode.EXCLUSIVE);
+        pauseForOrdering();
+        Job follower = enqueueHello(
+                EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue(), "k", ConcurrencyMode.EXCLUSIVE);
+        var failing = new ForwardingJobStore(store) {
+            @Override
+            public void saveAtomic(Job job, long expectedVersion) {
+                if (job.currentState() == JobState.SUCCEEDED && job.id().equals(poisoned.id())) {
+                    throw new RuntimeException("store rejects this SUCCEEDED save");
+                }
+                super.saveAtomic(job, expectedVersion);
+            }
+        };
+        node = ProcessingNode.builder(failing)
+                .config(fastConfig.toBuilder().defaultMaxAttempts(1).build())
+                .interceptor(new JobInterceptor() {
+                    @Override
+                    public void onProcessingFailed(Job j, JobExecutionContext c, Throwable cause, FailureCause kind) {
+                        if (j.id().equals(poisoned.id())) failureKinds.add(kind);
+                    }
+                })
+                .build();
+        node.start();
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            // The job must not stay PROCESSING: the failed SUCCEEDED save is
+            // routed through the single failure path...
+            Job loadedPoisoned = store.findById(poisoned.id()).orElseThrow();
+            assertThat(loadedPoisoned.currentState()).isEqualTo(JobState.FAILED);
+            // ...and the EXCLUSIVE key is released for the next job.
+            Job loadedFollower = store.findById(follower.id()).orElseThrow();
+            assertThat(loadedFollower.currentState()).isEqualTo(JobState.SUCCEEDED);
+        });
+        assertThat(failureKinds).containsExactly(JobInterceptor.FailureCause.EXCEPTION);
+    }
+
+    @Test
+    void oversizedHandlerResultIsDroppedRatherThanBlockingTheSucceededSave() {
+        Job job = enqueueHello(EngineTestHandlers.BigResultHandler.class, fastConfig.defaultQueue());
+        node = ProcessingNode.builder(store).config(fastConfig).build();
+        node.start();
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            Job loaded = store.findById(job.id()).orElseThrow();
+            assertThat(loaded.currentState()).isEqualTo(JobState.SUCCEEDED);
+            assertThat(loaded.result()).isEmpty();
+            assertThat(loaded.metadata().get(JsonJobSerializer.TRUNCATED_RESULT_KEY))
+                    .isPresent();
         });
     }
 

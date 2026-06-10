@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
@@ -192,6 +193,9 @@ public final class JobRunner {
 
     // ---------------------------------------------------------------- the single failure path
 
+    private static final int TERMINAL_SAVE_ATTEMPTS = 3;
+    private static final long TERMINAL_SAVE_BACKOFF_MS = 50L;
+
     private void recordFailure(Job job, ExecutionContext ctx, Throwable cause, JobInterceptor.FailureCause kind) {
         try {
             long version = job.version();
@@ -199,7 +203,7 @@ public final class JobRunner {
             job.transitionTo(
                     JobState.FAILED, Instant.now(), kindReason(kind), cause == null ? null : cause.getMessage());
             job.clearOwner();
-            store.saveAtomic(job, version);
+            saveTerminalWithRetry(job, version);
             interceptors.onStateChange(job, from, JobState.FAILED);
             // After the failure transition lands, run interceptor failure hooks
             // (retry, metrics, etc.) — exactly once, regardless of cause.
@@ -212,20 +216,73 @@ public final class JobRunner {
     }
 
     private void markSucceeded(Job job, ExecutionContext ctx) {
+        long version = job.version();
+        JobState from = job.currentState();
+        // Persist any result the handler recorded via ctx.setResult(...).
+        if (ctx.capturedResult() != null) {
+            job.setResult(ctx.capturedResult());
+        }
+        job.transitionTo(JobState.SUCCEEDED, Instant.now(), "engine.success", null);
+        job.clearOwner();
         try {
-            long version = job.version();
-            JobState from = job.currentState();
-            // Persist any result the handler recorded via ctx.setResult(...).
-            if (ctx.capturedResult() != null) {
-                job.setResult(ctx.capturedResult());
-            }
-            job.transitionTo(JobState.SUCCEEDED, Instant.now(), "engine.success", null);
-            job.clearOwner();
-            store.saveAtomic(job, version);
-            interceptors.onStateChange(job, from, JobState.SUCCEEDED);
-            interceptors.onProcessingSucceeded(job, ctx);
+            saveTerminalWithRetry(job, version);
         } catch (StaleJobException stale) {
             LOG.debug("Job {} version moved under us during success path", job.id());
+            return;
+        } catch (Throwable t) {
+            // The in-memory job already carries the SUCCEEDED entry, so the
+            // failure transition would be illegal on it. Reload the persisted
+            // PROCESSING row and route the reloaded job through the single
+            // failure path — otherwise the job stays PROCESSING forever,
+            // shielded from orphan reclaim by the node-wide heartbeat.
+            LOG.error("SUCCEEDED save failed for job {} — routing through the failure path", job.id(), t);
+            Job fresh = reloadForFailure(job);
+            if (fresh != null) {
+                recordFailure(fresh, ctx, t, JobInterceptor.FailureCause.EXCEPTION);
+            }
+            return;
+        }
+        interceptors.onStateChange(job, from, JobState.SUCCEEDED);
+        interceptors.onProcessingSucceeded(job, ctx);
+    }
+
+    /**
+     * Persist a terminal transition, retrying transient store errors with a
+     * short bounded backoff. {@link StaleJobException} and
+     * {@link OversizedJobException} are not transient and rethrow immediately.
+     */
+    private void saveTerminalWithRetry(Job job, long expectedVersion) {
+        int attempt = 0;
+        while (true) {
+            try {
+                store.saveAtomic(job, expectedVersion);
+                return;
+            } catch (StaleJobException | OversizedJobException notTransient) {
+                throw notTransient;
+            } catch (RuntimeException e) {
+                attempt++;
+                if (attempt >= TERMINAL_SAVE_ATTEMPTS) {
+                    throw e;
+                }
+                try {
+                    Thread.sleep(TERMINAL_SAVE_BACKOFF_MS * attempt);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw e;
+                }
+            }
+        }
+    }
+
+    private Job reloadForFailure(Job job) {
+        try {
+            return store.findById(job.id()).orElse(null);
+        } catch (RuntimeException e) {
+            LOG.error(
+                    "Could not reload job {} after a failed SUCCEEDED save; it stays PROCESSING until reclaim",
+                    job.id(),
+                    e);
+            return null;
         }
     }
 

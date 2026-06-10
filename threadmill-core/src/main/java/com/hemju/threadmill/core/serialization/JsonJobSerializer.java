@@ -116,6 +116,12 @@ public final class JsonJobSerializer implements JobSerializer {
     public static final String TRUNCATED_STATE_HISTORY_KEY = "threadmill.truncated.stateHistory";
 
     /**
+     * Metadata key recording that an oversized {@code JobResult} was dropped
+     * at terminal-save time instead of blocking the save.
+     */
+    public static final String TRUNCATED_RESULT_KEY = "threadmill.truncated.result";
+
+    /**
      * Produce a snapshot whose {@code JobLog} fits {@code maxJobLogBytes},
      * whose FAILED / QUARANTINED state-history messages fit
      * {@code maxFailureMetadataBytes}, whose state history fits
@@ -145,9 +151,25 @@ public final class JsonJobSerializer implements JobSerializer {
             kept.addAll(trimmedHistory.subList(trimmedHistory.size() - (maxEntries - 1), trimmedHistory.size()));
             trimmedHistory = kept;
         }
+        JobResult result = s.result();
+        var markers = new HashMap<String, String>();
+        if (elidedHistory > 0) {
+            markers.put(TRUNCATED_STATE_HISTORY_KEY, elidedHistory + " entries omitted");
+        }
+        if (terminal && result != null) {
+            long resultBytes = result.serialized().getBytes(StandardCharsets.UTF_8).length;
+            if (resultBytes > caps.maxMetadataBytes()) {
+                // An uncapped handler result must never block the terminal save.
+                markers.put(TRUNCATED_RESULT_KEY, resultBytes + " bytes omitted");
+                result = null;
+            }
+        }
         Map<String, String> trimmedMetadata =
-                terminal ? trimMetadata(s.metadata(), elidedHistory, caps.maxMetadataBytes()) : s.metadata();
-        if (trimmedLog == s.log() && trimmedHistory == s.stateHistory() && trimmedMetadata == s.metadata()) {
+                terminal ? trimMetadata(s.metadata(), markers, caps.maxMetadataBytes()) : s.metadata();
+        if (trimmedLog == s.log()
+                && trimmedHistory == s.stateHistory()
+                && trimmedMetadata == s.metadata()
+                && result == s.result()) {
             return s;
         }
         return new JobSnapshot(
@@ -170,7 +192,7 @@ public final class JsonJobSerializer implements JobSerializer {
                 s.ownerHeartbeatAt(),
                 s.lastCheckinAt(),
                 s.scheduledFor(),
-                s.result(),
+                result,
                 s.attempts());
     }
 
@@ -183,11 +205,12 @@ public final class JsonJobSerializer implements JobSerializer {
         return state.isTerminal() || state == JobState.FAILED;
     }
 
-    private static Map<String, String> trimMetadata(Map<String, String> metadata, int elidedHistory, int maxBytes) {
+    private static Map<String, String> trimMetadata(
+            Map<String, String> metadata, Map<String, String> markers, int maxBytes) {
         Map<String, String> out = metadata;
-        if (elidedHistory > 0) {
+        if (!markers.isEmpty()) {
             out = new HashMap<>(metadata);
-            out.put(TRUNCATED_STATE_HISTORY_KEY, elidedHistory + " entries omitted");
+            out.putAll(markers);
         }
         if (maxBytes <= 0 || out.isEmpty()) {
             return out;
@@ -210,7 +233,7 @@ public final class JsonJobSerializer implements JobSerializer {
         int omitted = 0;
         for (var e : dropOrder) {
             if (total <= maxBytes) break;
-            if (TRUNCATED_STATE_HISTORY_KEY.equals(e.getKey())) continue;
+            if (e.getKey().startsWith("threadmill.truncated.")) continue;
             mutable.remove(e.getKey());
             total -= metadataByteCost(e);
             omitted++;

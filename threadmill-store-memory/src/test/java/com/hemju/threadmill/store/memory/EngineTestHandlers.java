@@ -120,6 +120,18 @@ public final class EngineTestHandlers {
         }
     }
 
+    /** Records a result far larger than the per-job metadata budget. */
+    public static final class BigResultHandler implements JobHandler<HelloPayload> {
+        public static final AtomicInteger COMPLETIONS = new AtomicInteger();
+        public static final int RESULT_BYTES = 300 * 1024;
+
+        @Override
+        public void run(HelloPayload payload, JobExecutionContext ctx) {
+            ctx.setResult("big-result: " + "x".repeat(RESULT_BYTES));
+            COMPLETIONS.incrementAndGet();
+        }
+    }
+
     /** Simple payload used by every test handler. */
     public static final class HelloPayload implements JobPayload {
         public String name;
@@ -140,5 +152,6 @@ public final class EngineTestHandlers {
         CheckInHandler.COMPLETIONS.set(0);
         StalledAfterCheckInHandler.INTERRUPTS.set(0);
         BigErrorMessageHandler.ATTEMPTS.set(0);
+        BigResultHandler.COMPLETIONS.set(0);
     }
 }
