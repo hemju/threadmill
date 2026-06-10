@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -200,6 +201,37 @@ class SchedulingTest {
         }
         // Should be a single-digit number, not 600 (one per missed 100ms interval).
         assertThat(RecorderHandler.RECORD.size()).isLessThan(20);
+    }
+
+    @Test
+    void catchUpInstancesCarryDistinctNominalFireTimes() {
+        scheduler.defineIntervalTask(
+                "stamped",
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP);
+        var existing = store.findCronTaskState("stamped").orElseThrow();
+        Instant base = Instant.now().minusMillis(350);
+        store.upsertCronTaskState(new CronTaskScheduleState(existing.taskName(), null, null, base, null));
+
+        new RecurringMaterializer(store).tick(Instant.now());
+
+        List<Job> instances = store.findByHandlerSignature(RecorderHandler.class.getName(), 100);
+        assertThat(instances).hasSizeGreaterThanOrEqualTo(3);
+        var fireTimes = instances.stream()
+                .map(j -> j.metadata()
+                        .get(JobExecutionContext.CRON_FIRE_TIME_META)
+                        .orElseThrow())
+                .map(Instant::parse)
+                .collect(Collectors.toSet());
+        // Every instance represents a distinct interval, starting at the
+        // earliest missed fire — that's what makes CATCH_UP instances usable
+        // for per-interval idempotency keys.
+        assertThat(fireTimes).hasSameSizeAs(instances);
+        assertThat(fireTimes).contains(base);
     }
 
     @Test

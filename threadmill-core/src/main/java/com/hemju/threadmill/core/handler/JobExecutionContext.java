@@ -24,6 +24,12 @@ import com.hemju.threadmill.core.NodeId;
  */
 public interface JobExecutionContext {
 
+    /**
+     * Metadata key carrying the nominal fire time of a recurring instance,
+     * stamped by the recurring materializer as an ISO-8601 instant.
+     */
+    String CRON_FIRE_TIME_META = "threadmill.cron.fireTime";
+
     /** The id of the job being executed. */
     JobId jobId();
 
@@ -76,5 +82,17 @@ public interface JobExecutionContext {
     /** Read the result previously set by this handler, if any. */
     default Optional<Object> readResult() {
         return Optional.empty();
+    }
+
+    /**
+     * The nominal fire time of this recurring instance — the schedule tick
+     * the instance represents, not the wall-clock materialization time.
+     * Present only for jobs materialized from a recurring definition. Under
+     * the {@code CATCH_UP} missed-run policy every missed interval's instance
+     * carries its own distinct fire time, so an idempotent handler can derive
+     * a per-interval idempotency key from it.
+     */
+    default Optional<Instant> cronFireTime() {
+        return metadata().get(CRON_FIRE_TIME_META).map(Instant::parse);
     }
 }

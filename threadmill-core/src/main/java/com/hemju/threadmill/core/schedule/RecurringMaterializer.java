@@ -11,6 +11,7 @@ import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
+import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
 
@@ -100,6 +101,7 @@ public final class RecurringMaterializer {
                 .queue(task.queue())
                 .priority(task.priority())
                 .cronTaskName(task.name())
+                .metadata(JobExecutionContext.CRON_FIRE_TIME_META, when.toString())
                 .initialState(JobState.ENQUEUED)
                 .build();
         store.insert(job);
