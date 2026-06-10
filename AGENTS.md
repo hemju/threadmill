@@ -405,6 +405,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | `CronExpression` `*/0` infinite loop and Sunday-as-7 corruption (`5-7`, `1-7`, `*/7`) | `CronExpressionTest.parseRejectsZeroAndNegativeSteps` + `sundayAsSevenWorksInRangesListsAndSteps` |
 | Job replacement strips concurrencyKey / concurrencyMode / workflowRootId | `AbstractJobStoreContractTest.replaceJobPreservesConcurrencyKeyModeAndWorkflowRoot` |
 | Deserializing an ownerless checked-in job fabricates a phantom owner heartbeat | `JsonJobSerializerTest.ownerlessJobWithCheckinDoesNotFabricateOwnerHeartbeatOnRoundTrip` |
+| Failure-message truncation splits surrogate pairs or exceeds maxBytes; malformed wire escapes as raw runtime exceptions | `JsonJobSerializerTest.capFailureMessageNeverSplitsSurrogatePairsAndRespectsMaxBytes` + `malformedWireYieldsSerializationExceptionNotRawRuntimeExceptions` |
 
 ### Postgres-layer improvements (engagement notes)
 

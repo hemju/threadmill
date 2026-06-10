@@ -3,6 +3,7 @@ package com.hemju.threadmill.core.serialization;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 
 import org.junit.jupiter.api.Test;
@@ -132,6 +133,59 @@ class JsonJobSerializerTest {
         assertThat(loaded.stateHistory())
                 .anySatisfy(
                         e -> assertThat(e.message()).startsWith("big-error:").contains("truncated"));
+    }
+
+    @Test
+    void capFailureMessageNeverSplitsSurrogatePairsAndRespectsMaxBytes() {
+        Job j = Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"\"")))
+                .build();
+        j.transitionTo(JobState.PROCESSING, Instant.now(), "engine.claim", null);
+        j.transitionTo(JobState.FAILED, Instant.now(), "engine.exception", "é".repeat(2) + "💥".repeat(100));
+
+        var caps = new JobStoreCapabilities(64L * 1024L, 16 * 1024, 64, 100, true, true, true, true);
+        var truncated = JsonJobSerializer.truncateForSerialization(j.snapshot(), caps);
+        String message = truncated.stateHistory().stream()
+                .filter(e -> e.state() == JobState.FAILED)
+                .findFirst()
+                .orElseThrow()
+                .message();
+        assertThat(message.getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(64);
+        assertNoLoneSurrogates(message);
+
+        // A budget smaller than the sentinel suffix must still be respected.
+        var tinyCaps = new JobStoreCapabilities(64L * 1024L, 16 * 1024, 10, 100, true, true, true, true);
+        String tinyMessage = JsonJobSerializer.truncateForSerialization(j.snapshot(), tinyCaps).stateHistory().stream()
+                .filter(e -> e.state() == JobState.FAILED)
+                .findFirst()
+                .orElseThrow()
+                .message();
+        assertThat(tinyMessage.getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(10);
+        assertNoLoneSurrogates(tinyMessage);
+    }
+
+    private static void assertNoLoneSurrogates(String s) {
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isHighSurrogate(c)) {
+                assertThat(i + 1 < s.length() && Character.isLowSurrogate(s.charAt(i + 1)))
+                        .as("high surrogate at %d must be followed by a low surrogate", i)
+                        .isTrue();
+                i++;
+            } else {
+                assertThat(Character.isLowSurrogate(c))
+                        .as("unpaired low surrogate at %d", i)
+                        .isFalse();
+            }
+        }
+    }
+
+    @Test
+    void malformedWireYieldsSerializationExceptionNotRawRuntimeExceptions() {
+        assertThatThrownBy(() -> serializer.deserializeJob("[]")).isInstanceOf(SerializationException.class);
+        assertThatThrownBy(() -> serializer.deserializeJob("{}")).isInstanceOf(SerializationException.class);
+        assertThatThrownBy(() -> serializer.deserializeJob("{\"id\":\"not-a-uuid\"}"))
+                .isInstanceOf(SerializationException.class);
     }
 
     @Test

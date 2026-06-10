@@ -174,16 +174,38 @@ public final class JsonJobSerializer implements JobSerializer {
     private static String capFailureMessage(String message, int maxBytes) {
         byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
         if (bytes.length <= maxBytes) return message;
-        String suffix = " <truncated, " + (bytes.length - maxBytes) + " more bytes omitted>";
-        int suffixBytes = suffix.getBytes(StandardCharsets.UTF_8).length;
-        int keep = Math.max(0, maxBytes - suffixBytes);
-        // Trim on a safe character boundary by working in chars: take a leading
-        // window that fits the byte budget.
+        int keep = Math.max(
+                0, maxBytes - truncationSuffix(bytes.length - maxBytes).getBytes(StandardCharsets.UTF_8).length);
         int charBudget = Math.min(message.length(), keep);
-        while (charBudget > 0 && message.substring(0, charBudget).getBytes(StandardCharsets.UTF_8).length > keep) {
+        while (charBudget > 0) {
+            // Never split a surrogate pair: a trailing lone high surrogate is dropped.
+            if (Character.isHighSurrogate(message.charAt(charBudget - 1))) {
+                charBudget--;
+                continue;
+            }
+            String prefix = message.substring(0, charBudget);
+            int prefixBytes = prefix.getBytes(StandardCharsets.UTF_8).length;
+            if (prefixBytes > keep) {
+                charBudget--;
+                continue;
+            }
+            String capped = prefix + truncationSuffix(bytes.length - prefixBytes);
+            if (capped.getBytes(StandardCharsets.UTF_8).length <= maxBytes) {
+                return capped;
+            }
             charBudget--;
         }
-        return message.substring(0, charBudget) + suffix;
+        String suffixOnly = truncationSuffix(bytes.length);
+        if (suffixOnly.getBytes(StandardCharsets.UTF_8).length <= maxBytes) {
+            return suffixOnly;
+        }
+        // Budget smaller than the sentinel itself: clamp a bare ASCII marker.
+        String marker = "<truncated>";
+        return marker.length() <= maxBytes ? marker : marker.substring(0, Math.max(0, maxBytes));
+    }
+
+    private static String truncationSuffix(long omittedBytes) {
+        return " <truncated, " + omittedBytes + " more bytes omitted>";
     }
 
     @Override
@@ -324,8 +346,12 @@ public final class JsonJobSerializer implements JobSerializer {
                         root.get("result").get("serialized").asText()));
             }
             return job;
-        } catch (IOException io) {
-            throw new SerializationException("Failed to deserialize job", io);
+        } catch (SerializationException e) {
+            throw e;
+        } catch (RuntimeException | IOException e) {
+            // Structurally malformed-but-valid JSON surfaces as NPE / CCE /
+            // DateTimeParseException; the documented contract is SerializationException.
+            throw new SerializationException("Failed to deserialize job", e);
         }
     }
 
