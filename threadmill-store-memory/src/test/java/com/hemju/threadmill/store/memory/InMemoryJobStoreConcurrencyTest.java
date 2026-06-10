@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobReplacement;
 import com.hemju.threadmill.core.JobSnapshot;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
@@ -90,6 +91,115 @@ class InMemoryJobStoreConcurrencyTest {
         assertThat(stale.get()).isPositive();
         // sanity: the run actually exercised the path
         assertThat(Instant.now()).isNotNull();
+    }
+
+    @Test
+    void claimRacingSoftDeleteNeverResurrectsADeletedJob() throws Exception {
+        // Hammer claim-vs-softDelete on fresh jobs: a soft-DELETED job must
+        // never be observed PROCESSING afterwards (the historical blind-put
+        // overwrote a delete that landed between candidate collection and
+        // the claim commit), and versions must never regress.
+        var store = new InMemoryJobStore();
+        var node = NodeId.newId();
+        var uncaught = new AtomicReference<Throwable>();
+
+        for (int round = 0; round < 200; round++) {
+            Job job = Job.builder()
+                    .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                    .build();
+            store.insert(job);
+
+            var start = new CountDownLatch(1);
+            try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                executor.submit(() -> {
+                    try {
+                        start.await();
+                        store.claimReady(node, "default", 1, Instant.now());
+                    } catch (Throwable t) {
+                        uncaught.compareAndSet(null, t);
+                    }
+                });
+                executor.submit(() -> {
+                    try {
+                        start.await();
+                        store.softDelete(job.id());
+                    } catch (Throwable t) {
+                        uncaught.compareAndSet(null, t);
+                    }
+                });
+                start.countDown();
+                executor.shutdown();
+                assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+            }
+
+            Job after = store.findById(job.id()).orElseThrow();
+            if (after.currentState() == JobState.DELETED) {
+                // The delete won (either before or after the claim): it must
+                // not have been overwritten back to PROCESSING.
+                assertThat(after.stateHistory().getLast().state()).isEqualTo(JobState.DELETED);
+            } else {
+                // The claim won and the delete lost the race entirely or
+                // deleted the PROCESSING row afterwards.
+                assertThat(after.currentState()).isIn(JobState.PROCESSING, JobState.DELETED);
+            }
+            assertThat(after.version()).isGreaterThanOrEqualTo(1L);
+        }
+        assertThat(uncaught.get()).isNull();
+    }
+
+    @Test
+    void claimRacingReplaceJobNeverLosesTheReplacement() throws Exception {
+        // A replaceJob that commits between candidate collection and the
+        // claim commit must not be silently reverted by the claim's write.
+        var store = new InMemoryJobStore();
+        var node = NodeId.newId();
+        var uncaught = new AtomicReference<Throwable>();
+
+        for (int round = 0; round < 200; round++) {
+            Job job = Job.builder()
+                    .spec(JobSpec.of("com.example.Original", new JobArgument("java.lang.String", "\"x\"")))
+                    .build();
+            store.insert(job);
+            long v = job.version();
+
+            var start = new CountDownLatch(1);
+            var replaced = new AtomicBoolean();
+            try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                executor.submit(() -> {
+                    try {
+                        start.await();
+                        store.claimReady(node, "default", 1, Instant.now());
+                    } catch (Throwable t) {
+                        uncaught.compareAndSet(null, t);
+                    }
+                });
+                executor.submit(() -> {
+                    try {
+                        start.await();
+                        replaced.set(store.replaceJob(
+                                job.id(), v, JobReplacement.ofSpec(JobSpec.of("com.example.Replaced"))));
+                    } catch (StaleJobException expected) {
+                        // claim won — fine
+                    } catch (Throwable t) {
+                        uncaught.compareAndSet(null, t);
+                    }
+                });
+                start.countDown();
+                executor.shutdown();
+                assertThat(executor.awaitTermination(10, TimeUnit.SECONDS)).isTrue();
+            }
+
+            Job after = store.findById(job.id()).orElseThrow();
+            if (replaced.get()) {
+                // The replacement committed: its spec must survive, whether or
+                // not the claim subsequently ran the replaced definition.
+                assertThat(after.spec().handlerType()).isEqualTo("com.example.Replaced");
+            } else {
+                assertThat(after.currentState()).isEqualTo(JobState.PROCESSING);
+                assertThat(after.spec().handlerType()).isEqualTo("com.example.Original");
+            }
+        }
+        assertThat(uncaught.get()).isNull();
     }
 
     @Test

@@ -149,13 +149,19 @@ public final class InMemoryJobStore implements JobStore {
         Objects.requireNonNull(job, "job");
         Names.requireName("queue", job.queue());
         long nextVersion = 1L;
-        JobSnapshot snapshot = snapshotForInsert(job, nextVersion);
-        String wire = serializer.serializeJob(snapshot, capabilities);
-        Entry entry = entryFromSnapshot(snapshot, wire, nextVersion);
+        // Every jobs-mutating method holds claimMutex so claimReady's
+        // multi-entry concurrency decisions (workflow holds, in-flight
+        // counts, earlier-pending order) can never observe a torn write.
+        // This is a dev/test store — simplicity beats throughput.
+        synchronized (claimMutex) {
+            JobSnapshot snapshot = snapshotForInsert(job, nextVersion);
+            String wire = serializer.serializeJob(snapshot, capabilities);
+            Entry entry = entryFromSnapshot(snapshot, wire, nextVersion);
 
-        Entry prior = jobs.putIfAbsent(job.id(), entry);
-        if (prior != null) {
-            throw new IllegalStateException("Job already exists: " + job.id());
+            Entry prior = jobs.putIfAbsent(job.id(), entry);
+            if (prior != null) {
+                throw new IllegalStateException("Job already exists: " + job.id());
+            }
         }
         job.adoptVersion(nextVersion);
     }
@@ -243,17 +249,19 @@ public final class InMemoryJobStore implements JobStore {
         Entry newEntry = entryFromSnapshot(snapshot, wire, nextVersion);
 
         var failure = new AtomicReference<RuntimeException>();
-        jobs.compute(job.id(), (k, existing) -> {
-            if (existing == null) {
-                failure.set(new StaleJobException(job.id(), expectedVersion));
-                return null;
-            }
-            if (existing.version != expectedVersion) {
-                failure.set(new StaleJobException(job.id(), expectedVersion));
-                return existing;
-            }
-            return newEntry;
-        });
+        synchronized (claimMutex) {
+            jobs.compute(job.id(), (k, existing) -> {
+                if (existing == null) {
+                    failure.set(new StaleJobException(job.id(), expectedVersion));
+                    return null;
+                }
+                if (existing.version != expectedVersion) {
+                    failure.set(new StaleJobException(job.id(), expectedVersion));
+                    return existing;
+                }
+                return newEntry;
+            });
+        }
         RuntimeException err = failure.get();
         if (err != null) {
             throw err;
@@ -264,6 +272,13 @@ public final class InMemoryJobStore implements JobStore {
     @Override
     public boolean softDelete(JobId id) {
         var changed = new AtomicReference<Boolean>(false);
+        synchronized (claimMutex) {
+            softDeleteLocked(id, changed);
+        }
+        return Boolean.TRUE.equals(changed.get());
+    }
+
+    private void softDeleteLocked(JobId id, AtomicReference<Boolean> changed) {
         jobs.compute(id, (k, existing) -> {
             if (existing == null) {
                 return null;
@@ -280,7 +295,6 @@ public final class InMemoryJobStore implements JobStore {
             changed.set(true);
             return entryFromSnapshot(snap, wire, nextVersion);
         });
-        return Boolean.TRUE.equals(changed.get());
     }
 
     // ---------------------------------------------------------------- claim & heartbeat
@@ -314,7 +328,18 @@ public final class InMemoryJobStore implements JobStore {
                 JobSnapshot snap = withVersion(j, nextVersion);
                 String wire = serializer.serializeJob(snap, capabilities);
                 Entry updated = entryFromSnapshot(snap, wire, nextVersion);
-                jobs.put(ce.getKey(), updated);
+                // Defensive re-validation — the in-memory analog of Postgres's
+                // SKIP-LOCKED-plus-version-matched UPDATE: never overwrite an
+                // entry that changed since the candidate snapshot was taken.
+                Entry committed = jobs.compute(ce.getKey(), (k, current) -> {
+                    if (current == null || current.version != existing.version || current.state != JobState.ENQUEUED) {
+                        return current;
+                    }
+                    return updated;
+                });
+                if (committed != updated) {
+                    continue;
+                }
                 Job loaded = serializer.deserializeJob(wire);
                 result.add(loaded);
             }
@@ -330,17 +355,19 @@ public final class InMemoryJobStore implements JobStore {
         // the optimistic-lock version, otherwise an in-flight worker's saveAtomic
         // (running on the version recorded at claim time) would fail with a
         // spurious StaleJobException.
-        for (var id : jobs.keySet()) {
-            jobs.computeIfPresent(id, (jobId, existing) -> {
-                if (existing.state != JobState.PROCESSING) return existing;
-                Job j = serializer.deserializeJob(existing.wire);
-                if (j.ownerNodeId().filter(o -> o.equals(nodeId)).isEmpty()) return existing;
-                j.updateHeartbeat(now);
-                long sameVersion = existing.version;
-                JobSnapshot snap = withVersion(j, sameVersion);
-                String wire = serializer.serializeJob(snap, capabilities);
-                return entryFromSnapshot(snap, wire, sameVersion);
-            });
+        synchronized (claimMutex) {
+            for (var id : jobs.keySet()) {
+                jobs.computeIfPresent(id, (jobId, existing) -> {
+                    if (existing.state != JobState.PROCESSING) return existing;
+                    Job j = serializer.deserializeJob(existing.wire);
+                    if (j.ownerNodeId().filter(o -> o.equals(nodeId)).isEmpty()) return existing;
+                    j.updateHeartbeat(now);
+                    long sameVersion = existing.version;
+                    JobSnapshot snap = withVersion(j, sameVersion);
+                    String wire = serializer.serializeJob(snap, capabilities);
+                    return entryFromSnapshot(snap, wire, sameVersion);
+                });
+            }
         }
     }
 
@@ -349,15 +376,17 @@ public final class InMemoryJobStore implements JobStore {
         Objects.requireNonNull(job, "job");
         Objects.requireNonNull(nodeId, "nodeId");
         var changed = new AtomicReference<Boolean>(false);
-        jobs.compute(job.id(), (id, existing) -> {
-            if (existing == null || existing.state != JobState.PROCESSING) return existing;
-            Job persisted = serializer.deserializeJob(existing.wire);
-            if (persisted.ownerNodeId().filter(nodeId::equals).isEmpty()) return existing;
-            JobSnapshot snap = withVersion(job, existing.version);
-            String wire = serializer.serializeJob(snap, capabilities);
-            changed.set(true);
-            return entryFromSnapshot(snap, wire, existing.version);
-        });
+        synchronized (claimMutex) {
+            jobs.compute(job.id(), (id, existing) -> {
+                if (existing == null || existing.state != JobState.PROCESSING) return existing;
+                Job persisted = serializer.deserializeJob(existing.wire);
+                if (persisted.ownerNodeId().filter(nodeId::equals).isEmpty()) return existing;
+                JobSnapshot snap = withVersion(job, existing.version);
+                String wire = serializer.serializeJob(snap, capabilities);
+                changed.set(true);
+                return entryFromSnapshot(snap, wire, existing.version);
+            });
+        }
         return Boolean.TRUE.equals(changed.get());
     }
 
@@ -638,6 +667,19 @@ public final class InMemoryJobStore implements JobStore {
         Objects.requireNonNull(replacement, "replacement");
         var result = new AtomicReference<Boolean>(false);
         var stale = new AtomicReference<StaleJobException>();
+        synchronized (claimMutex) {
+            replaceJobLocked(id, expectedVersion, replacement, result, stale);
+        }
+        if (stale.get() != null) throw stale.get();
+        return Boolean.TRUE.equals(result.get());
+    }
+
+    private void replaceJobLocked(
+            JobId id,
+            long expectedVersion,
+            JobReplacement replacement,
+            AtomicReference<Boolean> result,
+            AtomicReference<StaleJobException> stale) {
         jobs.compute(id, (k, existing) -> {
             if (existing == null) {
                 result.set(false);
@@ -659,8 +701,6 @@ public final class InMemoryJobStore implements JobStore {
             result.set(true);
             return entryFromSnapshot(snap, wire, nextVersion);
         });
-        if (stale.get() != null) throw stale.get();
-        return Boolean.TRUE.equals(result.get());
     }
 
     private static boolean isReplaceable(JobState state) {
