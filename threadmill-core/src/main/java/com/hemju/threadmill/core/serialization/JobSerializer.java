@@ -67,7 +67,15 @@ public interface JobSerializer {
     /** Serialize a typed argument or payload to its on-disk representation. */
     JobArgument serializeArgument(Object value);
 
-    /** Deserialize a typed argument to a concrete instance. */
+    /**
+     * Deserialize a typed argument to a concrete instance.
+     *
+     * <p>The argument's type tag is persisted data and must not be trusted:
+     * implementations reject tags that do not name a
+     * {@link com.hemju.threadmill.core.handler.JobPayload} type with a
+     * {@link SerializationException}, and must not run static initializers of
+     * the named class before that check.
+     */
     Object deserializeArgument(JobArgument argument);
 
     /**

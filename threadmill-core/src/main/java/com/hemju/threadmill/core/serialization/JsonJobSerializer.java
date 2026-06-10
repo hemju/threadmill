@@ -371,12 +371,25 @@ public final class JsonJobSerializer implements JobSerializer {
         }
     }
 
+    /**
+     * {@inheritDoc}
+     *
+     * <p>Trust boundary: the type tag is persisted data. The named class is
+     * loaded <em>without initialization</em> and must implement
+     * {@link JobPayload} before Jackson instantiates it — a tag naming any
+     * other classpath type is rejected with a {@link SerializationException}
+     * and its static initializers never run.
+     */
     @Override
     public Object deserializeArgument(JobArgument argument) {
         Objects.requireNonNull(argument, "argument");
         JobArgument migrated = migrateArgument(argument);
+        String resolvedType = resolveTypeTag(migrated.typeTag());
         try {
-            Class<?> type = Class.forName(resolveTypeTag(migrated.typeTag()));
+            Class<?> type = Class.forName(resolvedType, false, JsonJobSerializer.class.getClassLoader());
+            if (!JobPayload.class.isAssignableFrom(type)) {
+                throw new SerializationException("Argument type is not a JobPayload: " + resolvedType);
+            }
             return mapper.readValue(migrated.serialized(), type);
         } catch (ClassNotFoundException notFound) {
             throw new SerializationException("Unknown argument type: " + migrated.typeTag(), notFound);

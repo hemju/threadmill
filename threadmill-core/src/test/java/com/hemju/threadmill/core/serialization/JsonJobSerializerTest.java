@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.junit.jupiter.api.Test;
 
@@ -200,6 +201,23 @@ class JsonJobSerializerTest {
         assertThatThrownBy(() -> serializer.serializeJob(j.snapshot(), 16 * 1024L))
                 .isInstanceOf(OversizedJobException.class);
         assertThat(j.version()).isEqualTo(versionBefore);
+    }
+
+    static final AtomicBoolean GADGET_INITIALIZED = new AtomicBoolean();
+
+    public static final class NotAPayloadGadget {
+        static {
+            GADGET_INITIALIZED.set(true);
+        }
+    }
+
+    @Test
+    void deserializeArgumentRejectsNonPayloadTypesWithoutRunningTheirInitializers() {
+        assertThatThrownBy(
+                        () -> serializer.deserializeArgument(new JobArgument(NotAPayloadGadget.class.getName(), "{}")))
+                .isInstanceOf(SerializationException.class)
+                .hasMessageContaining("not a JobPayload");
+        assertThat(GADGET_INITIALIZED).isFalse();
     }
 
     public static final class SamplePayload implements JobPayload {

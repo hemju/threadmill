@@ -255,7 +255,10 @@ public final class JobRunner {
         JobArgument first = serializer.migrateArgument(job.spec().arguments().get(0));
         String resolvedType = serializer.resolveTypeTag(first.typeTag());
         try {
-            Class<?> klass = Class.forName(resolvedType);
+            // Load without initialization: the assignability check must run
+            // before any static initializer of a persisted, attacker-influenced
+            // class name can execute.
+            Class<?> klass = Class.forName(resolvedType, false, JobRunner.class.getClassLoader());
             if (!JobPayload.class.isAssignableFrom(klass)) {
                 throw new SerializationException("Argument type is not a JobPayload: " + resolvedType);
             }

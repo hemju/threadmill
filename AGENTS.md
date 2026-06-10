@@ -406,6 +406,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Job replacement strips concurrencyKey / concurrencyMode / workflowRootId | `AbstractJobStoreContractTest.replaceJobPreservesConcurrencyKeyModeAndWorkflowRoot` |
 | Deserializing an ownerless checked-in job fabricates a phantom owner heartbeat | `JsonJobSerializerTest.ownerlessJobWithCheckinDoesNotFabricateOwnerHeartbeatOnRoundTrip` |
 | Failure-message truncation splits surrogate pairs or exceeds maxBytes; malformed wire escapes as raw runtime exceptions | `JsonJobSerializerTest.capFailureMessageNeverSplitsSurrogatePairsAndRespectsMaxBytes` + `malformedWireYieldsSerializationExceptionNotRawRuntimeExceptions` |
+| Persisted type tag initializes an arbitrary classpath class before the payload assignability check | `JsonJobSerializerTest.deserializeArgumentRejectsNonPayloadTypesWithoutRunningTheirInitializers` |
 
 ### Postgres-layer improvements (engagement notes)
 
