@@ -416,6 +416,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Workflow fan-out beyond one batch strands children; deep-chain abandonment recursion | `AdvancedFeatureTest.workflowFanOutBeyondOneBatchPromotesEveryChild` + `workflowFanOutBeyondOneBatchAbandonsEveryChildOnFailure` + `deepWorkflowChainIsAbandonedIterativelyWithoutRecursion` |
 | Retention capped at 100 deletions per interval; FAILED/DELETED/QUARANTINED never swept; retention age hardcoded | `ProcessingNodeTest.retentionSweepDrainsBeyondOneBatchAndCoversAllTerminalStates` + `ProcessingNodeConfigTest.terminalStateRetentionAgesAreConfigurableAndValidated` |
 | Dispatch failure mid-batch abandons remaining claimed jobs and can leak a worker permit | `ProcessingNodeTest.dispatchFailureMidBatchDoesNotAbandonRemainingClaimedJobs` |
+| WakeSignal permit-cap check-then-act race; idle gate misses concurrent finishers | `WakeSignalTest.simultaneousSignalersCollapseIntoOnePermit` + `ProcessingNodeTest.idleWorkerWakesDispatcherEarlyUnderBurstyLoad` |
 
 ### Postgres-layer improvements (engagement notes)
 

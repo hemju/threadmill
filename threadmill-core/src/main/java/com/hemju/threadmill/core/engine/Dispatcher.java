@@ -217,13 +217,16 @@ public final class Dispatcher {
                         try {
                             runner.run(job);
                         } finally {
-                            workerCapacity.release();
                             // Signal only on the transition from "all busy" to
                             // "at least one idle" — otherwise high-churn steady-state
                             // load would burn CPU on permits-already-pending releases.
-                            // The single-permit cap inside WakeSignal coalesces races
-                            // between concurrent finishers.
-                            if (workerCapacity.availablePermits() == 1) {
+                            // Exhaustion is captured BEFORE the release: two workers
+                            // releasing concurrently could otherwise both observe 2
+                            // permits afterwards and neither would signal, leaving a
+                            // zero-budget dispatcher to wait out the full pollInterval.
+                            boolean wasExhausted = workerCapacity.availablePermits() == 0;
+                            workerCapacity.release();
+                            if (wasExhausted) {
                                 wakeSignal.signal();
                             }
                         }

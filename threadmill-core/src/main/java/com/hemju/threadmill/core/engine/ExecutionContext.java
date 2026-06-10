@@ -3,6 +3,7 @@ package com.hemju.threadmill.core.engine;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.slf4j.Logger;
@@ -50,7 +51,7 @@ public final class ExecutionContext implements JobExecutionContext {
     private volatile Instant lastPersistedAt = Instant.EPOCH;
     private volatile long logWindowSecond = -1L;
     private volatile int acceptedLogCount;
-    private volatile long droppedLogCount;
+    private final AtomicLong droppedLogCount = new AtomicLong();
 
     public ExecutionContext(
             Job job,
@@ -162,7 +163,7 @@ public final class ExecutionContext implements JobExecutionContext {
             log.info(message);
             flushIfDue(now);
         } else {
-            droppedLogCount++;
+            droppedLogCount.incrementAndGet();
         }
     }
 
@@ -171,7 +172,7 @@ public final class ExecutionContext implements JobExecutionContext {
     }
 
     public long droppedLogCount() {
-        return droppedLogCount;
+        return droppedLogCount.get();
     }
 
     public void flushBestEffort() {

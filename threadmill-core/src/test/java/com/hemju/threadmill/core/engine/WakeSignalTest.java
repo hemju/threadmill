@@ -3,6 +3,7 @@ package com.hemju.threadmill.core.engine;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -40,6 +41,30 @@ class WakeSignalTest {
             executor.shutdownNow();
             executor.awaitTermination(5, TimeUnit.SECONDS);
         }
+    }
+
+    @Test
+    void simultaneousSignalersCollapseIntoOnePermit() throws Exception {
+        // All signalers released by one latch so they race the check-then-act
+        // window; the CAS gate must still admit exactly one permit.
+        var signal = new WakeSignal();
+        var start = new CountDownLatch(1);
+        var threads = new ArrayList<Thread>();
+        for (int i = 0; i < 64; i++) {
+            threads.add(Thread.ofVirtual().start(() -> {
+                try {
+                    start.await();
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+                signal.signal();
+            }));
+        }
+        start.countDown();
+        for (Thread t : threads) t.join();
+
+        assertThat(signal.awaitFor(Duration.ofMillis(10))).isTrue();
+        assertThat(signal.awaitFor(Duration.ofMillis(50))).isFalse();
     }
 
     @Test
