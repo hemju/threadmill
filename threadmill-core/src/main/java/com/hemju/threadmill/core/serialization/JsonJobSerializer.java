@@ -305,7 +305,7 @@ public final class JsonJobSerializer implements JobSerializer {
                         Instant.parse(root.get("ownerHeartbeatAt").asText()));
             }
             if (root.hasNonNull("lastCheckinAt")) {
-                job.checkIn(Instant.parse(root.get("lastCheckinAt").asText()));
+                job.restoreCheckIn(Instant.parse(root.get("lastCheckinAt").asText()));
             }
             if (root.hasNonNull("log")) {
                 List<JobLog.Entry> entries = readLog(root.get("log"));

@@ -228,6 +228,18 @@ public final class Job {
         }
     }
 
+    /**
+     * Restore the last check-in time from persisted state. Intended for
+     * serializer code only: unlike {@link #checkIn(Instant)} it never touches
+     * the owner heartbeat, so deserializing an ownerless job (for example a
+     * FAILED job that checked in during its last attempt) cannot fabricate
+     * owner activity the wire form never contained.
+     */
+    public synchronized void restoreCheckIn(Instant at) {
+        Objects.requireNonNull(at, "at");
+        this.lastCheckinAt = at;
+    }
+
     public synchronized void scheduleAt(Instant at) {
         Objects.requireNonNull(at, "at");
         this.scheduledFor = at;

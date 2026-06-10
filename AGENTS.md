@@ -404,6 +404,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | OpenTelemetry tracing misses processing/store span attributes or exceptions | `ThreadmillTracingTest.processingSpanIsCurrentAndRecordsSuccessAttributes` + `processingFailureRecordsExceptionAndCause` + `storeDecoratorRecordsClaimCountAndStoreDescription` |
 | `CronExpression` `*/0` infinite loop and Sunday-as-7 corruption (`5-7`, `1-7`, `*/7`) | `CronExpressionTest.parseRejectsZeroAndNegativeSteps` + `sundayAsSevenWorksInRangesListsAndSteps` |
 | Job replacement strips concurrencyKey / concurrencyMode / workflowRootId | `AbstractJobStoreContractTest.replaceJobPreservesConcurrencyKeyModeAndWorkflowRoot` |
+| Deserializing an ownerless checked-in job fabricates a phantom owner heartbeat | `JsonJobSerializerTest.ownerlessJobWithCheckinDoesNotFabricateOwnerHeartbeatOnRoundTrip` |
 
 ### Postgres-layer improvements (engagement notes)
 

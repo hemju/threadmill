@@ -67,6 +67,30 @@ class JsonJobSerializerTest {
     }
 
     @Test
+    void ownerlessJobWithCheckinDoesNotFabricateOwnerHeartbeatOnRoundTrip() {
+        Job j = Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.Long", "42")))
+                .build();
+        long version = j.version();
+        j.transitionTo(JobState.PROCESSING, Instant.now(), "test", null);
+        j.assignOwner(NodeId.newId(), Instant.parse("2026-01-01T00:00:00Z"));
+        j.checkIn(Instant.parse("2026-01-01T00:00:05Z"));
+        j.transitionTo(JobState.FAILED, Instant.now(), "test", "boom");
+        j.clearOwner();
+        j.adoptVersion(version + 1);
+
+        String wire = serializer.serializeJob(j.snapshot(), 1_000_000);
+        Job loaded = serializer.deserializeJob(wire);
+
+        assertThat(loaded.lastCheckinAt()).contains(Instant.parse("2026-01-01T00:00:05Z"));
+        assertThat(loaded.ownerNodeId()).isEmpty();
+        assertThat(loaded.ownerHeartbeatAt()).isEmpty();
+
+        // serialize -> deserialize -> serialize must be idempotent.
+        assertThat(serializer.serializeJob(loaded.snapshot(), 1_000_000)).isEqualTo(wire);
+    }
+
+    @Test
     void fourByteUnicodeRoundTripsExactly() {
         String exotic = "✈🚀𐀀𐀁𐀂😀";
         Job j = Job.builder()
