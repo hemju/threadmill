@@ -410,6 +410,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Unbounded metadata or state-history entry count blocks the terminal FAILED/SUCCEEDED save | `JsonJobSerializerTest.hugeMetadataAndLongRetryHistoryStillFitTheTerminalSave` |
 | Failed SUCCEEDED-save leaves the job stuck in PROCESSING (and its key held) forever | `ProcessingNodeTest.transientSucceededSaveFailureIsRetriedAndTheJobSucceeds` + `failedSucceededSaveRoutesThroughTheSingleFailurePathAndReleasesTheKey` + `oversizedHandlerResultIsDroppedRatherThanBlockingTheSucceededSave` |
 | Per-job timeout ignored in the watchdog's initial delay; malformed timeout metadata disables enforcement | `ProcessingNodeTest.perJobTimeoutShorterThanTheGlobalDefaultFiresOnTime` + `malformedTimeoutMetadataStillEnforcesTheGlobalTimeout` |
+| Retry backoff off-by-one, sub-second truncation to zero, malformed retry metadata cancelling retry, racy policy map | `RetryInterceptorTest.firstRetryDelayEqualsInitialBackoff` + `subSecondBackoffIsNotTruncatedToZero` + `malformedRetryMetadataFallsBackToTheDefaultPolicyAndStillRetries` + `concurrentPolicyRegistrationDoesNotBreakTheFailurePath` |
 
 ### Postgres-layer improvements (engagement notes)
 

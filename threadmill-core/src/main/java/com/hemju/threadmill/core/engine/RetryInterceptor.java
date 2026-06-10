@@ -2,9 +2,12 @@ package com.hemju.threadmill.core.engine;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
@@ -35,9 +38,14 @@ public final class RetryInterceptor implements JobInterceptor {
     public static final String META_MAX_ATTEMPTS = "threadmill.retry.maxAttempts";
     public static final String META_INITIAL_BACKOFF_SECONDS = "threadmill.retry.initialBackoffSeconds";
 
+    private static final Logger LOG = LoggerFactory.getLogger(RetryInterceptor.class);
+
     private final JobStore store;
     private final RetryPolicy defaultPolicy;
-    private final Map<Class<? extends Throwable>, RetryPolicy> byExceptionType = new LinkedHashMap<>();
+    // Iterated from concurrent worker virtual threads while policyFor may
+    // still register entries; most-specific matching scans every entry, so
+    // iteration order is irrelevant.
+    private final Map<Class<? extends Throwable>, RetryPolicy> byExceptionType = new ConcurrentHashMap<>();
 
     public RetryInterceptor(JobStore store, int maxAttempts, Duration initialBackoff) {
         this.store = Objects.requireNonNull(store, "store");
@@ -61,10 +69,16 @@ public final class RetryInterceptor implements JobInterceptor {
         if (attempts >= policy.maxAttempts()) {
             return;
         }
-        long backoffSeconds = Math.min(
-                policy.initialBackoff().toSeconds() * (1L << Math.min(attempts, 10)),
-                Duration.ofHours(1).toSeconds());
-        var next = Instant.now().plusSeconds(Math.max(0, backoffSeconds));
+        // Stores increment attempts at claim, so attempts is already 1 on the
+        // first failure: the first retry waits exactly initialBackoff and the
+        // delay doubles per subsequent attempt. Computed in millis so a
+        // sub-second policy is not truncated to an immediate retry.
+        long capMillis = Duration.ofHours(1).toMillis();
+        long initialMillis = Math.max(0, policy.initialBackoff().toMillis());
+        long backoffMillis = initialMillis >= capMillis
+                ? capMillis
+                : Math.min(capMillis, initialMillis << Math.min(Math.max(0, attempts - 1), 10));
+        var next = Instant.now().plusMillis(backoffMillis);
         long expectedVersion = job.version();
         try {
             job.transitionTo(
@@ -82,14 +96,24 @@ public final class RetryInterceptor implements JobInterceptor {
 
     /** Public for testing — returns the policy that would apply given a job + cause. */
     RetryPolicy effectivePolicy(Job job, Throwable cause) {
-        // 1. Per-job override via metadata.
+        // 1. Per-job override via metadata. Metadata is user-mutable — a
+        // malformed value must fall through to the remaining precedence
+        // levels instead of silently cancelling the retry.
         var attemptsMeta = job.metadata().get(META_MAX_ATTEMPTS);
         var backoffMeta = job.metadata().get(META_INITIAL_BACKOFF_SECONDS);
         if (attemptsMeta.isPresent() || backoffMeta.isPresent()) {
-            int attempts = attemptsMeta.map(Integer::parseInt).orElse(defaultPolicy.maxAttempts());
-            Duration backoff =
-                    backoffMeta.map(s -> Duration.ofSeconds(Long.parseLong(s))).orElse(defaultPolicy.initialBackoff());
-            return new RetryPolicy(attempts, backoff);
+            try {
+                int attempts = attemptsMeta.map(s -> Integer.parseInt(s.trim())).orElse(defaultPolicy.maxAttempts());
+                Duration backoff = backoffMeta
+                        .map(s -> Duration.ofSeconds(Long.parseLong(s.trim())))
+                        .orElse(defaultPolicy.initialBackoff());
+                return new RetryPolicy(attempts, backoff);
+            } catch (RuntimeException malformed) {
+                LOG.warn(
+                        "Ignoring malformed per-job retry metadata for job {} ({}) — applying the remaining precedence levels",
+                        job.id(),
+                        malformed.toString());
+            }
         }
         // 2. Per-exception-type policy (most specific match wins).
         RetryPolicy match = null;
