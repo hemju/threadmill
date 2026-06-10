@@ -185,27 +185,67 @@ public final class Dispatcher {
             wakeSignal.awaitFor(config.pollInterval());
             return;
         }
-        for (Job job : claimed) {
-            if (!eligibleByTags(job)) {
-                releaseBackToEnqueued(job);
-                continue;
-            }
-            workerCapacity.acquire();
-            workerPool.submit(() -> {
+        dispatchClaimed(claimed);
+    }
+
+    /**
+     * Submit each claimed job to the worker pool with per-job error
+     * isolation. A failure dispatching one job must not abandon the
+     * remaining claimed jobs in PROCESSING — the node-wide owner heartbeat
+     * would shield them from orphan reclaim indefinitely. A job that cannot
+     * be dispatched is released back via the SCHEDULED-with-short-backoff
+     * path, and a submit failure after the permit was acquired releases the
+     * permit so lane capacity cannot leak.
+     */
+    private void dispatchClaimed(List<Job> claimed) throws InterruptedException {
+        for (int i = 0; i < claimed.size(); i++) {
+            Job job = claimed.get(i);
+            try {
+                if (!eligibleByTags(job)) {
+                    releaseClaimed(job, "engine.tag-mismatch");
+                    continue;
+                }
                 try {
-                    runner.run(job);
+                    workerCapacity.acquire();
+                } catch (InterruptedException interrupted) {
+                    releaseRemaining(claimed, i);
+                    throw interrupted;
+                }
+                boolean submitted = false;
+                try {
+                    workerPool.submit(() -> {
+                        try {
+                            runner.run(job);
+                        } finally {
+                            workerCapacity.release();
+                            // Signal only on the transition from "all busy" to
+                            // "at least one idle" — otherwise high-churn steady-state
+                            // load would burn CPU on permits-already-pending releases.
+                            // The single-permit cap inside WakeSignal coalesces races
+                            // between concurrent finishers.
+                            if (workerCapacity.availablePermits() == 1) {
+                                wakeSignal.signal();
+                            }
+                        }
+                    });
+                    submitted = true;
                 } finally {
-                    workerCapacity.release();
-                    // Signal only on the transition from "all busy" to
-                    // "at least one idle" — otherwise high-churn steady-state
-                    // load would burn CPU on permits-already-pending releases.
-                    // The single-permit cap inside WakeSignal coalesces races
-                    // between concurrent finishers.
-                    if (workerCapacity.availablePermits() == 1) {
-                        wakeSignal.signal();
+                    if (!submitted) {
+                        workerCapacity.release();
                     }
                 }
-            });
+            } catch (InterruptedException interrupted) {
+                throw interrupted;
+            } catch (Throwable t) {
+                LOG.warn("Failed to dispatch claimed job {} — releasing it for redelivery", job.id(), t);
+                releaseClaimed(job, "engine.dispatch-failure");
+            }
+        }
+    }
+
+    private void releaseRemaining(List<Job> claimed, int fromIndex) {
+        for (int i = fromIndex; i < claimed.size(); i++) {
+            releaseClaimed(claimed.get(i), "engine.dispatch-failure");
         }
     }
 
@@ -309,19 +349,21 @@ public final class Dispatcher {
         return nodeTags.containsAll(wanted);
     }
 
-    private void releaseBackToEnqueued(Job job) {
+    private void releaseClaimed(Job job, String reason) {
         // Re-schedule with a small backoff so this node doesn't immediately re-claim
         // a job it can't run, busy-looping it between ENQUEUED and PROCESSING. A
         // properly-tagged node either picks up the rescheduled job promptly, or
         // the promotion loop puts it back on the queue and another node tries.
         try {
             long v = job.version();
-            job.transitionTo(JobState.SCHEDULED, Instant.now(), "engine.tag-mismatch", null);
+            job.transitionTo(JobState.SCHEDULED, Instant.now(), reason, null);
             job.scheduleAt(Instant.now().plusSeconds(2));
             job.clearOwner();
             store.saveAtomic(job, v);
         } catch (StaleJobException ignored) {
             // Another node already claimed it
+        } catch (Throwable t) {
+            LOG.warn("Could not release claimed job {} — it stays PROCESSING until reclaimed", job.id(), t);
         }
     }
 

@@ -21,6 +21,7 @@ import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.engine.Dispatcher;
 import com.hemju.threadmill.core.engine.JobInterceptor;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
@@ -962,6 +963,49 @@ class ProcessingNodeTest {
             assertThat(loaded.stateHistory())
                     .anySatisfy(e -> assertThat(e.message()).startsWith("big-error:"));
         });
+    }
+
+    @Test
+    void dispatchFailureMidBatchDoesNotAbandonRemainingClaimedJobs() {
+        // Three jobs claimed in one batch. The middle one requires a tag this
+        // node lacks, and its tag-mismatch release is made to fail with a
+        // non-stale store error — historically that aborted the dispatch loop
+        // and abandoned the rest of the batch in PROCESSING (heartbeat-shielded).
+        Job first = enqueueHello(EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue());
+        JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("tagged"));
+        Job tagged = Job.builder()
+                .spec(new JobSpec(EngineTestHandlers.CountingHandler.class.getName(), List.of(arg)))
+                .queue(fastConfig.defaultQueue())
+                .metadata(Dispatcher.REQUIRED_TAGS_META, "gpu")
+                .build();
+        store.insert(tagged);
+        Job third = enqueueHello(EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue());
+
+        var failing = new ForwardingJobStore(store) {
+            @Override
+            public void saveAtomic(Job job, long expectedVersion) {
+                if (job.id().equals(tagged.id()) && job.currentState() == JobState.SCHEDULED) {
+                    throw new RuntimeException("release rejected");
+                }
+                super.saveAtomic(job, expectedVersion);
+            }
+        };
+        node = ProcessingNode.builder(failing)
+                .config(fastConfig.toBuilder().claimBatchSize(3).build())
+                .build();
+        node.start();
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            assertThat(store.findById(first.id()).orElseThrow().currentState()).isEqualTo(JobState.SUCCEEDED);
+            assertThat(store.findById(third.id()).orElseThrow().currentState()).isEqualTo(JobState.SUCCEEDED);
+        });
+
+        // Worker capacity is intact: a later job still gets processed.
+        Job fourth = enqueueHello(EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue());
+        await().atMost(Duration.ofSeconds(10))
+                .untilAsserted(() -> assertThat(
+                                store.findById(fourth.id()).orElseThrow().currentState())
+                        .isEqualTo(JobState.SUCCEEDED));
     }
 
     @Test
