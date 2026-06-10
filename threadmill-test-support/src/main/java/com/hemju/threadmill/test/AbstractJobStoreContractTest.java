@@ -1355,6 +1355,42 @@ public abstract class AbstractJobStoreContractTest {
                 .isFalse();
     }
 
+    @Test
+    @DisplayName("replaceJob preserves concurrencyKey, concurrencyMode, and workflowRootId")
+    void replaceJobPreservesConcurrencyKeyModeAndWorkflowRoot() {
+        Job root = concurrentJob("com.example.Root", "project:42", ConcurrencyMode.EXCLUSIVE, 10, Instant.now());
+        store.insert(root);
+        Job child = Jobs.awaitingWorkflowStep("com.example.Child", root);
+        store.insert(child);
+        Job outsider = concurrentJob("com.example.Other", "project:42", ConcurrencyMode.EXCLUSIVE, -1, Instant.now());
+        store.insert(outsider);
+
+        Job loadedChild = store.findById(child.id()).orElseThrow();
+        boolean replaced = store.replaceJob(
+                child.id(), loadedChild.version(), JobReplacement.ofSpec(JobSpec.of("com.example.ReplacedChild")));
+        assertThat(replaced).isTrue();
+
+        Job after = store.findById(child.id()).orElseThrow();
+        assertThat(after.spec().handlerType()).isEqualTo("com.example.ReplacedChild");
+        assertThat(after.concurrencyKey()).contains("project:42");
+        assertThat(after.concurrencyMode()).contains(ConcurrencyMode.EXCLUSIVE);
+        assertThat(after.workflowRootId()).isEqualTo(root.id());
+
+        // Workflow-hold accounting must still release exactly once, at the true end of the chain.
+        Job claimedRoot =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        assertThat(claimedRoot.id()).isEqualTo(root.id());
+        finish(claimedRoot, JobState.SUCCEEDED);
+        promote(child.id());
+        assertThat(store.claimReady(NodeId.newId(), "default", 2, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(child.id());
+        finish(store.findById(child.id()).orElseThrow(), JobState.SUCCEEDED);
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(outsider.id());
+    }
+
     // ================================================================ recurring ownership
 
     @Test

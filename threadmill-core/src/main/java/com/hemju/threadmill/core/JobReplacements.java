@@ -16,7 +16,8 @@ public final class JobReplacements {
      * Build a new {@link Job} from {@code current} with {@code replacement}
      * applied to spec / queue / priority / scheduled-for. State history,
      * metadata, log, progress, attempts, relationship, cron-task id,
-     * created-at, owner, and result are preserved.
+     * created-at, owner, result, workflow root, concurrency key, and
+     * concurrency mode are preserved.
      *
      * <p>The returned job carries the same persisted-version as {@code current};
      * the caller bumps the version when it persists.
@@ -35,7 +36,11 @@ public final class JobReplacements {
                 .relationship(s.relationship())
                 .version(s.version())
                 .attempts(s.attempts())
+                .workflowRootId(s.workflowRootId())
                 .withStateHistory(s.stateHistory());
+        if (s.concurrencyKey() != null) {
+            b.concurrencyKey(s.concurrencyKey()).concurrencyMode(s.concurrencyMode());
+        }
         if (s.cronTaskId() != null) b.cronTaskId(s.cronTaskId());
         if (replacement.scheduledForValue().isPresent()) {
             b.scheduledFor(replacement.scheduledForValue().get());

@@ -403,6 +403,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Remote wake publish/listen regresses or Spring stops wiring wake publishers/listeners | `PostgresRemoteWakeChannelTest.publishDeliversWakeToListener` + `RedisRemoteWakeChannelTest.publishDeliversWakeToListener` + `ThreadmillAutoConfigurationTest.localWakePublishesToConfiguredRemoteWakeChannel` + `remoteWakeDisabledDoesNotCreateChannel` + `remoteWakeLifecycleStartsListenerOnlyWhenNodeRuns` |
 | OpenTelemetry tracing misses processing/store span attributes or exceptions | `ThreadmillTracingTest.processingSpanIsCurrentAndRecordsSuccessAttributes` + `processingFailureRecordsExceptionAndCause` + `storeDecoratorRecordsClaimCountAndStoreDescription` |
 | `CronExpression` `*/0` infinite loop and Sunday-as-7 corruption (`5-7`, `1-7`, `*/7`) | `CronExpressionTest.parseRejectsZeroAndNegativeSteps` + `sundayAsSevenWorksInRangesListsAndSteps` |
+| Job replacement strips concurrencyKey / concurrencyMode / workflowRootId | `AbstractJobStoreContractTest.replaceJobPreservesConcurrencyKeyModeAndWorkflowRoot` |
 
 ### Postgres-layer improvements (engagement notes)
 
