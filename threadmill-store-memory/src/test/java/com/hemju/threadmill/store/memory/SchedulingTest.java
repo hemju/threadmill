@@ -243,6 +243,32 @@ class SchedulingTest {
     }
 
     @Test
+    void catchUpBacklogIsCappedPerTickWithCarryOver() {
+        scheduler.defineIntervalTask(
+                "burst",
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP);
+        var existing = store.findCronTaskState("burst").orElseThrow();
+        // ~150 missed intervals — more than one tick's materialization cap.
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, Instant.now().minus(Duration.ofSeconds(15)), null));
+
+        Instant now = Instant.now();
+        new RecurringMaterializer(store).tick(now);
+
+        // One tick materializes at most the per-tick cap; the remainder
+        // carries over via nextRunAt, which stays in the past.
+        List<Job> instances = store.findByHandlerSignature(RecorderHandler.class.getName(), 1_000);
+        assertThat(instances).hasSize(100);
+        var state = store.findCronTaskState("burst").orElseThrow();
+        assertThat(state.nextRunAt()).isBefore(now);
+    }
+
+    @Test
     void recurringInstancesCarryTheirCronTaskName() {
         scheduler.defineIntervalTask("linked", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);
         var existing = store.findCronTaskState("linked").orElseThrow();

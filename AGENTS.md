@@ -420,6 +420,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Newly discovered queue-family queue starts at pass 0 and monopolizes claims | `ProcessingNodeTest.queueFamilyLateJoinerDoesNotMonopolizeClaims` |
 | concurrencyMode without key silently dropped; queue-name validation divergent across backends | `JobTest.concurrencyModeWithoutKeyIsRejectedLoudly` + `queueNamesAreValidatedAtTheModelBoundary` + `SchedulingTest.scheduleInFiresAfterTheDelayWithTypedHandlerAgreement` |
 | Typed-ID JSON shape regresses to object form (dashboard React error #31) | `TypedIdJsonTest.typedIdsSerializeAsBareStringsAndRoundTrip` + `typedIdsRoundTripAsMapValuesAndRecordComponents` |
+| Dual master after a hung registry tick; heartbeat starved by master work; CATCH_UP burst unbounded; claimHeartbeat ≥ heartbeatTimeout misconfiguration | `NodeRegistryTest.mastershipSelfExpiresWhenATickHangsPastTheLeaseDuration` + `SchedulingTest.catchUpBacklogIsCappedPerTickWithCarryOver` + `ProcessingNodeConfigTest.heartbeatTimeoutMustBeAtLeastTwiceTheClaimHeartbeat` |
 
 ### Postgres-layer improvements (engagement notes)
 

@@ -59,6 +59,7 @@ public final class MaintenanceCycle {
     private final LocalWakeBus wakeBus;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicReference<Thread> loopThread = new AtomicReference<>();
+    private final AtomicReference<Thread> heartbeatThread = new AtomicReference<>();
 
     public MaintenanceCycle(
             JobStore store,
@@ -94,31 +95,45 @@ public final class MaintenanceCycle {
                 .daemon(true)
                 .start(this::loop);
         loopThread.set(t);
+        // Owner-heartbeat refresh gets its own lightweight thread: master
+        // work (an unbounded CATCH_UP burst, a slow retention sweep) must
+        // never starve the refresh that keeps this node's own PROCESSING
+        // jobs from expiring into orphan reclaim mid-run.
+        Thread hb = Thread.ofPlatform()
+                .name("threadmill-owner-heartbeat-" + nodeId)
+                .daemon(true)
+                .start(this::heartbeatLoop);
+        heartbeatThread.set(hb);
     }
 
     public void stop() {
         running.set(false);
         Thread t = loopThread.getAndSet(null);
         if (t != null) t.interrupt();
+        Thread hb = heartbeatThread.getAndSet(null);
+        if (hb != null) hb.interrupt();
+    }
+
+    private void heartbeatLoop() {
+        while (running.get() && !Thread.currentThread().isInterrupted()) {
+            try {
+                store.touchOwnerHeartbeat(nodeId, Instant.now());
+            } catch (Throwable t) {
+                LOG.warn("Owner-heartbeat refresh failed", t);
+            }
+            sleep(config.claimHeartbeat());
+        }
     }
 
     private void loop() {
-        // Three independent cadences share one thread:
+        // Two cadences share the master thread:
         //   - the loop ticks at maintenancePollInterval (fast; bounds materialize/promote/orphan latency)
-        //   - heartbeat refresh fires at claimHeartbeat (slow; just enough to keep claims alive)
         //   - retention sweeps fire at retentionInterval (slowest; deletion is not time-sensitive)
-        // Deadline tracking keeps the slower cadences from running every tick.
-        Instant nextHeartbeat = Instant.EPOCH;
+        // Owner-heartbeat refresh runs on its own thread (see start()).
         Instant nextRetention = Instant.EPOCH;
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 Instant now = Instant.now();
-                if (!now.isBefore(nextHeartbeat)) {
-                    // Heartbeat is always done, even before knowing if we're master,
-                    // so the registry sees us alive.
-                    store.touchOwnerHeartbeat(nodeId, now);
-                    nextHeartbeat = now.plus(config.claimHeartbeat());
-                }
                 if (registry.isMaster()) {
                     materializer.tick(now);
                     promoteScheduled();

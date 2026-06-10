@@ -130,12 +130,9 @@ public final class ProcessingNode implements AutoCloseable {
 
     public void start() {
         if (!started.compareAndSet(false, true)) return;
+        // NodeRegistry.start() performs the first heartbeat + election
+        // synchronously, so dispatchers can start immediately.
         registry.start();
-        try {
-            Thread.sleep(50);
-        } catch (InterruptedException ignored) {
-            Thread.currentThread().interrupt();
-        }
         for (Dispatcher d : dispatchers) d.start();
         maintenance.start();
     }

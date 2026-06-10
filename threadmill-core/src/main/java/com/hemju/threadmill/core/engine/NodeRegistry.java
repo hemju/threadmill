@@ -32,6 +32,7 @@ public final class NodeRegistry {
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicReference<Thread> loopThread = new AtomicReference<>();
     private volatile boolean master;
+    private volatile Instant masterUntil = Instant.EPOCH;
 
     public NodeRegistry(
             JobStore store,
@@ -50,12 +51,22 @@ public final class NodeRegistry {
         return nodeId;
     }
 
+    /**
+     * Whether this node currently holds the maintenance lease. Mastership
+     * self-expires at the local lease deadline: a registry tick that hangs
+     * (rather than throws) for longer than the lease duration must not leave
+     * this node acting as master while another node legitimately acquires
+     * the expired lease.
+     */
     public boolean isMaster() {
-        return master;
+        return master && Instant.now().isBefore(masterUntil);
     }
 
     public void start() {
         if (!running.compareAndSet(false, true)) return;
+        // The first heartbeat and election run synchronously so a freshly
+        // started node is registered before dispatchers begin claiming.
+        tickOnce();
         Thread t = Thread.ofPlatform()
                 .name("threadmill-registry-" + nodeId)
                 .daemon(true)
@@ -77,19 +88,30 @@ public final class NodeRegistry {
 
     private void loop() {
         while (running.get() && !Thread.currentThread().isInterrupted()) {
-            try {
-                store.recordNodeHeartbeat(nodeId, Instant.now());
-                master = electedMaster();
-            } catch (Throwable t) {
-                LOG.warn("NodeRegistry tick failed", t);
-                master = false; // refuse to act as master under store uncertainty
-            }
+            tickOnce();
             try {
                 Thread.sleep(heartbeatInterval.toMillis());
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 break;
             }
+        }
+    }
+
+    private void tickOnce() {
+        try {
+            // Captured before the store calls: the lease is acquired at or
+            // after this instant, so the local deadline is conservative.
+            Instant renewalStart = Instant.now();
+            store.recordNodeHeartbeat(nodeId, renewalStart);
+            boolean elected = electedMaster();
+            if (elected) {
+                masterUntil = renewalStart.plus(maintenanceLeaseDuration);
+            }
+            master = elected;
+        } catch (Throwable t) {
+            LOG.warn("NodeRegistry tick failed", t);
+            master = false; // refuse to act as master under store uncertainty
         }
     }
 

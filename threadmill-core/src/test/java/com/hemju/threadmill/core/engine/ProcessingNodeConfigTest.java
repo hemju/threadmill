@@ -54,6 +54,22 @@ class ProcessingNodeConfigTest {
     }
 
     @Test
+    void heartbeatTimeoutMustBeAtLeastTwiceTheClaimHeartbeat() {
+        assertThatThrownBy(() -> ProcessingNodeConfig.builder()
+                        .claimHeartbeat(Duration.ofSeconds(30))
+                        .heartbeatTimeout(Duration.ofSeconds(45))
+                        .build())
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("heartbeatTimeout");
+        // Exactly 2x is accepted.
+        var config = ProcessingNodeConfig.builder()
+                .claimHeartbeat(Duration.ofSeconds(30))
+                .heartbeatTimeout(Duration.ofSeconds(60))
+                .build();
+        assertThat(config.heartbeatTimeout()).isEqualTo(Duration.ofSeconds(60));
+    }
+
+    @Test
     void zeroOrNegativeMaintenancePollIntervalIsRejected() {
         assertThatThrownBy(() -> ProcessingNodeConfig.builder()
                         .maintenancePollInterval(Duration.ZERO)

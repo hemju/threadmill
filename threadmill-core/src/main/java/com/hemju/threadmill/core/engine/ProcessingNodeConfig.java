@@ -92,6 +92,11 @@ public record ProcessingNodeConfig(
         if (!maintenanceLeaseDuration.minus(claimHeartbeat).isPositive()) {
             throw new IllegalArgumentException("maintenanceLeaseDuration must be greater than claimHeartbeat");
         }
+        if (heartbeatTimeout.compareTo(claimHeartbeat.multipliedBy(2)) < 0) {
+            // Otherwise every in-flight job looks expired between refreshes
+            // and healthy work is systematically orphan-reclaimed.
+            throw new IllegalArgumentException("heartbeatTimeout must be at least 2x claimHeartbeat");
+        }
         if (!nodeHeartbeatRetention.minus(heartbeatTimeout).isPositive()) {
             throw new IllegalArgumentException("nodeHeartbeatRetention must be greater than heartbeatTimeout");
         }

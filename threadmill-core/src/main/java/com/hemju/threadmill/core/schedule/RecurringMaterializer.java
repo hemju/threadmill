@@ -32,6 +32,9 @@ public final class RecurringMaterializer {
 
     private static final Logger LOG = LoggerFactory.getLogger(RecurringMaterializer.class);
 
+    /** Per-tick cap on CATCH_UP materializations; the rest carries over. */
+    private static final int MAX_CATCH_UP_PER_TICK = 100;
+
     private final JobStore store;
     private final LocalWakeBus wakeBus;
 
@@ -78,12 +81,20 @@ public final class RecurringMaterializer {
         }
 
         if (task.missedRunPolicy() == CronTask.MissedRunPolicy.CATCH_UP) {
-            // Materialize every fire from nextRunAt up to and including now.
+            // Materialize every fire from nextRunAt up to and including now,
+            // capped per tick so an unbounded backlog cannot occupy the
+            // maintenance thread for an unbounded stretch; the remainder
+            // carries over via nextRunAt and continues on later ticks.
             Instant fire = state.nextRunAt();
             JobId last = null;
-            while (!fire.isAfter(now)) {
+            int materialized = 0;
+            while (!fire.isAfter(now) && materialized < MAX_CATCH_UP_PER_TICK) {
                 last = materialize(task, fire);
                 fire = task.trigger().nextAfter(fire, task.zone());
+                materialized++;
+            }
+            if (materialized == MAX_CATCH_UP_PER_TICK && !fire.isAfter(now)) {
+                LOG.debug("CATCH_UP for task {} hit the per-tick cap; continuing on the next tick", task.name());
             }
             store.upsertCronTaskState(new CronTaskScheduleState(
                     task.name(), now, last == null ? null : last.asUuid(), fire, last == null ? null : last.asUuid()));
