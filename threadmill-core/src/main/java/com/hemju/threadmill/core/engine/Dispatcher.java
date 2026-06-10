@@ -293,12 +293,28 @@ public final class Dispatcher {
         }
         nextDiscoveryAt = now.plus(config.queueFamilyDiscoveryInterval());
         var seen = new HashSet<String>();
+        // Stride-scheduling global-virtual-time: a queue discovered (or
+        // rediscovered after the retention window) mid-run joins at the
+        // minimum pass of the active queues, not at zero — otherwise the
+        // newcomer monopolizes claims until it catches up with passes the
+        // established queues accumulated over the whole run.
+        long joinPass = familyQueues.values().stream()
+                .filter(q -> q.weight > 0)
+                .mapToLong(q -> q.pass)
+                .min()
+                .orElse(0L);
         for (String queue : store.listEnqueuedQueues()) {
             if (!queueFamily.matches(queue)) continue;
             seen.add(queue);
             int weight = queueFamily.weights().weightFor(queue);
             familyQueues.compute(queue, (name, existing) -> {
-                FamilyQueue updated = existing == null ? new FamilyQueue(name) : existing;
+                FamilyQueue updated;
+                if (existing == null) {
+                    updated = new FamilyQueue(name);
+                    updated.pass = joinPass;
+                } else {
+                    updated = existing;
+                }
                 updated.weight = weight;
                 if (weight > 0) {
                     updated.emptySince = null;

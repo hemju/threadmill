@@ -621,6 +621,60 @@ class ProcessingNodeTest {
     }
 
     @Test
+    void queueFamilyLateJoinerDoesNotMonopolizeClaims() {
+        // Phase 1: two queues run long enough to accumulate stride passes.
+        var warmup = new ArrayList<Job>();
+        for (int i = 0; i < 20; i++) {
+            warmup.add(enqueueHello(EngineTestHandlers.CountingHandler.class, "project:a"));
+            warmup.add(enqueueHello(EngineTestHandlers.CountingHandler.class, "project:b"));
+        }
+        node = ProcessingNode.builder(store)
+                .config(fastConfig.toBuilder()
+                        .workerCount(3)
+                        .claimBatchSize(1)
+                        .jobTimeout(Duration.ofSeconds(30))
+                        .shutdownGracePeriod(Duration.ofMillis(50))
+                        .queueFamilyDiscoveryInterval(Duration.ofMillis(50))
+                        .queueFamilyRetentionAfterEmpty(Duration.ofSeconds(30))
+                        .build())
+                .lane("project:*", 3, QueueWeights.uniform())
+                .build();
+        node.start();
+        await().atMost(Duration.ofSeconds(10))
+                .untilAsserted(() -> assertThat(warmup.stream()
+                                .allMatch(j ->
+                                        store.findById(j.id()).orElseThrow().currentState() == JobState.SUCCEEDED))
+                        .isTrue());
+
+        // Phase 2: introduce a third queue with backlog alongside fresh work
+        // on the established queues. A newcomer joining at pass 0 would soak
+        // up all three worker slots before project:a / project:b see a claim.
+        var newcomer = new ArrayList<Job>();
+        var established = new ArrayList<Job>();
+        for (int i = 0; i < 4; i++) {
+            newcomer.add(enqueueHello(EngineTestHandlers.BlockingHandler.class, "project:late"));
+        }
+        for (int i = 0; i < 2; i++) {
+            established.add(enqueueHello(EngineTestHandlers.BlockingHandler.class, "project:a"));
+            established.add(enqueueHello(EngineTestHandlers.BlockingHandler.class, "project:b"));
+        }
+
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+            long newcomerProcessing = newcomer.stream()
+                    .filter(j -> store.findById(j.id()).orElseThrow().currentState() == JobState.PROCESSING)
+                    .count();
+            long establishedProcessing = established.stream()
+                    .filter(j -> store.findById(j.id()).orElseThrow().currentState() == JobState.PROCESSING)
+                    .count();
+            assertThat(newcomerProcessing + establishedProcessing).isEqualTo(3);
+            // The newcomer competes fairly from its first pick: it cannot
+            // hold all three worker slots while established queues starve.
+            assertThat(newcomerProcessing).isLessThanOrEqualTo(2);
+            assertThat(establishedProcessing).isGreaterThanOrEqualTo(1);
+        });
+    }
+
+    @Test
     void queueFamilyLaneDiscoversNewQueuesAfterStart() {
         node = ProcessingNode.builder(store)
                 .config(fastConfig.toBuilder()
