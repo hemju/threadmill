@@ -30,6 +30,12 @@ dependencies {
     testImplementation(libs.spring.context)
     testImplementation(libs.spring.jdbc)
     testImplementation(libs.spring.tx)
+    // The real SB4 DataSourceAutoConfiguration, so the ordering regression
+    // can boot a property-configured DataSource instead of a user bean.
+    testImplementation(libs.spring.boot.jdbc)
+    // The pool the JDBC starter would bring; without one the real
+    // DataSourceAutoConfiguration backs off and the ordering test is moot.
+    testImplementation(libs.hikaricp)
     testImplementation(libs.postgresql.jdbc)
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(platform(libs.junit.bom))

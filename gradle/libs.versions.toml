@@ -23,6 +23,8 @@ spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
 
 [libraries]
 spring-boot-autoconfigure = { module = "org.springframework.boot:spring-boot-autoconfigure", version.ref = "springBoot" }
+spring-boot-jdbc = { module = "org.springframework.boot:spring-boot-jdbc", version.ref = "springBoot" }
+hikaricp = { module = "com.zaxxer:HikariCP", version = "7.0.2" }
 spring-boot-starter-test = { module = "org.springframework.boot:spring-boot-starter-test", version.ref = "springBoot" }
 spring-boot-starter-webmvc = { module = "org.springframework.boot:spring-boot-starter-webmvc", version.ref = "springBoot" }
 spring-context = { module = "org.springframework:spring-context", version.ref = "springFramework" }

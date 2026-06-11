@@ -5,6 +5,7 @@ import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
+import org.springframework.boot.autoconfigure.AutoConfigureAfter;
 import org.springframework.boot.autoconfigure.AutoConfigureBefore;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
@@ -38,6 +39,12 @@ import com.hemju.threadmill.store.postgres.PostgresJobStore;
  */
 @AutoConfiguration
 @AutoConfigureBefore(ThreadmillAutoConfiguration.class)
+// The JobStore bean is gated by registration-time @ConditionalOnBean(DataSource),
+// so this config MUST sort after the real DataSourceAutoConfiguration —
+// without the edge, both Threadmill configs sort alphabetically before
+// org.springframework.* and the condition silently backs off, dropping a
+// real application to the in-memory store.
+@AutoConfigureAfter(name = "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration")
 @ConditionalOnClass(PostgresJobStore.class)
 public class ThreadmillPostgresAutoConfiguration {
 

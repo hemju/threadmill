@@ -58,10 +58,14 @@ import com.hemju.threadmill.store.redis.RedisStoreConfig;
  * without starting a {@code ProcessingNode} (submitting-only mode).
  */
 @AutoConfiguration
+// String-form FQCNs keep the constant pool free of optional Spring modules.
+// These are the Spring Boot 4 locations (the SB3-era
+// org.springframework.boot.autoconfigure.* names no longer exist, and
+// AutoConfigurationSorter silently ignores unknown names).
 @AutoConfigureAfter(
         name = {
-            "org.springframework.boot.autoconfigure.jdbc.DataSourceAutoConfiguration",
-            "org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration"
+            "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration",
+            "org.springframework.boot.data.redis.autoconfigure.DataRedisAutoConfiguration"
         })
 @EnableConfigurationProperties(ThreadmillProperties.class)
 public class ThreadmillAutoConfiguration {
