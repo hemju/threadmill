@@ -90,8 +90,12 @@ public final class ThreadmillDashboardApiController {
 
     @GetMapping("/overview")
     public OverviewResponse overview(Authentication authentication) {
-        var permissions = require(authentication, DashboardPermission.READ);
-        return service.overview(sensitiveDetailsAllowed(permissions));
+        var permissions = requireRead(authentication, "overview");
+        boolean includeSensitive = sensitiveDetailsAllowed(permissions);
+        if (includeSensitive) {
+            auditSensitiveView(authentication, "overview");
+        }
+        return service.overview(includeSensitive);
     }
 
     @GetMapping("/jobs")
@@ -102,30 +106,51 @@ public final class ThreadmillDashboardApiController {
             @RequestParam(name = "handlerType", required = false) String handlerType,
             @RequestParam(name = "limit", defaultValue = "50") int limit,
             @RequestParam(name = "offset", defaultValue = "0") int offset) {
-        require(authentication, DashboardPermission.READ);
+        requireRead(authentication, "jobs");
         return service.jobs(new JobSearch(state, queue, handlerType, limit, offset));
     }
 
     @GetMapping("/jobs/{id}")
     public JobDetail job(Authentication authentication, @PathVariable("id") String id) {
-        var permissions = require(authentication, DashboardPermission.READ);
+        var permissions = requireRead(authentication, "jobs/" + id);
         boolean includeSensitive = sensitiveDetailsAllowed(permissions);
         var detail = service.job(JobId.parse(id), includeSensitive);
         if (includeSensitive) {
-            // Reading unredacted payloads is a security-relevant event.
-            recordQuietly(new DashboardAuditEvent(
-                    Instant.now(),
-                    authorizer.displayName(authentication),
-                    DashboardPermission.VIEW_SENSITIVE_DETAILS,
-                    "view_sensitive_details",
-                    id,
-                    "viewed"));
+            auditSensitiveView(authentication, id);
         }
         return detail;
     }
 
     private boolean sensitiveDetailsAllowed(Set<DashboardPermission> permissions) {
         return options.exposeSensitiveDetails() && has(permissions, DashboardPermission.VIEW_SENSITIVE_DETAILS);
+    }
+
+    /** Reading an unredacted payload is a security-relevant event. */
+    private void auditSensitiveView(Authentication authentication, String target) {
+        recordQuietly(new DashboardAuditEvent(
+                Instant.now(),
+                authorizer.displayName(authentication),
+                DashboardPermission.VIEW_SENSITIVE_DETAILS,
+                "view_sensitive_details",
+                target,
+                "viewed"));
+    }
+
+    /**
+     * READ gate for GET endpoints that audits a denied attempt, mirroring the
+     * denial audit on mutations. Mutations keep using {@link #require} via
+     * {@link #action} (which audits their own denials), so there is no double
+     * record.
+     */
+    private Set<DashboardPermission> requireRead(Authentication authentication, String target) {
+        try {
+            return require(authentication, DashboardPermission.READ);
+        } catch (ResponseStatusException denied) {
+            String actor = authentication == null ? "anonymous" : authorizer.displayName(authentication);
+            recordQuietly(
+                    new DashboardAuditEvent(Instant.now(), actor, DashboardPermission.READ, "read", target, "denied"));
+            throw denied;
+        }
     }
 
     /** ADMIN is a superset of every permission — including the redaction decision. */
@@ -135,19 +160,23 @@ public final class ThreadmillDashboardApiController {
 
     @GetMapping("/queues")
     public List<QueueView> queues(Authentication authentication) {
-        require(authentication, DashboardPermission.READ);
+        requireRead(authentication, "queues");
         return service.queues();
     }
 
     @GetMapping("/recurring")
     public List<RecurringTaskView> recurring(Authentication authentication) {
-        var permissions = require(authentication, DashboardPermission.READ);
-        return service.recurringTasks(sensitiveDetailsAllowed(permissions));
+        var permissions = requireRead(authentication, "recurring");
+        boolean includeSensitive = sensitiveDetailsAllowed(permissions);
+        if (includeSensitive) {
+            auditSensitiveView(authentication, "recurring");
+        }
+        return service.recurringTasks(includeSensitive);
     }
 
     @GetMapping("/nodes")
     public List<NodeHeartbeat> nodes(Authentication authentication) {
-        require(authentication, DashboardPermission.READ);
+        requireRead(authentication, "nodes");
         return service.nodeHeartbeats();
     }
 

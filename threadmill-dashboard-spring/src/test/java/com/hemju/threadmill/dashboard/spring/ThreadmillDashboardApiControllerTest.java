@@ -322,6 +322,50 @@ class ThreadmillDashboardApiControllerTest {
     }
 
     @Test
+    void sensitiveRecurringAndOverviewViewsAreAudited() {
+        store.upsertCronTask(new CronTask(
+                "report",
+                new CronTask.Trigger.CronExpr(CronExpression.parse("*/5 * * * *")),
+                "com.example.Report",
+                new JobArgument("com.example.Payload", "{\"apiKey\":\"secret\"}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true));
+        var controller = new ThreadmillDashboardApiController(
+                new DashboardApiService(store, new LocalWakeBus()),
+                new SpringSecurityDashboardAuthorizer(),
+                auditEvents::add,
+                new DashboardOptions(false, true));
+
+        controller.recurring(auth("alice", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"));
+        controller.overview(auth("alice", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"));
+
+        assertThat(auditEvents)
+                .filteredOn(e -> e.action().equals("view_sensitive_details"))
+                .extracting(DashboardAuditEvent::target)
+                .containsExactlyInAnyOrder("recurring", "overview");
+    }
+
+    @Test
+    void deniedReadAttemptsAreAudited() {
+        var controller = new ThreadmillDashboardApiController(
+                new DashboardApiService(store, new LocalWakeBus()),
+                new SpringSecurityDashboardAuthorizer(),
+                auditEvents::add,
+                DashboardOptions.secureDefaults());
+
+        assertThatThrownBy(() -> controller.overview(auth("eve"))).isInstanceOf(ResponseStatusException.class);
+
+        assertThat(auditEvents).anySatisfy(event -> {
+            assertThat(event.action()).isEqualTo("read");
+            assertThat(event.outcome()).isEqualTo("denied");
+            assertThat(event.target()).isEqualTo("overview");
+        });
+    }
+
+    @Test
     void throwingAuditSinkDoesNotFailACommittedMutation() {
         DashboardAuditSink throwingSink = event -> {
             throw new IllegalStateException("audit backend down");
