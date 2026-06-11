@@ -6,7 +6,7 @@ development. **Never for production** — data is lost on restart.
 ## When to use
 
 - **Tests.** Every contract test in `AbstractJobStoreContractTest` runs against
-  this store via `InMemoryJobStoreContractTest`. The same 61 tests run
+  this store via `InMemoryJobStoreContractTest`. The same 76 tests run
   against Postgres and Redis, so passing on memory means the behaviour
   matches the real backends.
 - **Local dev.** The Spring Boot auto-config falls back to this when no

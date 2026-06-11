@@ -2,7 +2,7 @@
 
 The abstract `JobStore` contract test plus shared fixtures. Every storage
 backend extends `AbstractJobStoreContractTest` and is held to the same
-61-test suite — that's the only thing guaranteeing all three backends
+76-test suite — that's the only thing guaranteeing all three backends
 behave identically.
 
 ## How to add a new backend
@@ -22,7 +22,7 @@ behave identically.
    }
    ```
 
-3. Run `./gradlew :threadmill-store-x:test` and pass every test (currently 61)
+3. Run `./gradlew :threadmill-store-x:test` and pass every test (currently 76)
    before adding any backend-specific tests.
 4. Add backend-specific tests in `XJobStoreRegressionTest`. For every
    correctness lesson learned during development, add a named regression

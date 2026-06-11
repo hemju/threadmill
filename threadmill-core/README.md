@@ -17,7 +17,7 @@ implementation, no UI, and no framework code (Spring, CDI, etc.) lives here.
   and reclaims orphans, and the `NodeRegistry` that fights for the master lease.
 - **The SPI.** `JobStore` is the persistence boundary, expressed in operations
   and guarantees, not SQL. Every backend extends `AbstractJobStoreContractTest`
-  in `threadmill-test-support` and is held to the same 61-test suite.
+  in `threadmill-test-support` and is held to the same 76-test suite.
 - **The scheduler.** `Scheduler` is the user-facing API for enqueue / schedule
   / recurring. It needs only a `JobStore` and a `JobSerializer` — no running
   engine — so submission-only nodes work.
@@ -28,8 +28,8 @@ implementation, no UI, and no framework code (Spring, CDI, etc.) lives here.
        enqueue                  claim                run                 save
 ENQUEUED ────► claimReady ────► PROCESSING ───► handler.run ───► SUCCEEDED|FAILED|…
                   │
-                  └─ heartbeat refresh ◄─── MaintenanceCycle on the master lease
-                  └─ orphan reclaim ─────►  if heartbeat expires
+                  └─ heartbeat refresh ◄─── owner-heartbeat thread (every node)
+                  └─ orphan reclaim ─────►  MaintenanceCycle on the master, if heartbeat expires
 ```
 
 Every save funnels through `store.saveAtomic(job, expectedVersion)`. Every
@@ -114,6 +114,6 @@ method.
 ./gradlew :threadmill-core:test
 ```
 
-61 contract tests run as part of every store module's suite; module-local
+76 contract tests run as part of every store module's suite; module-local
 tests cover the state machine, the JSON serializer, JobLog bounds, queue
 families, the wake signal, and cron expressions.

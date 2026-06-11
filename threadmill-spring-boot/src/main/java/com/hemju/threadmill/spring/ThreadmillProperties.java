@@ -49,6 +49,18 @@ public class ThreadmillProperties {
     /** How long old node heartbeat records are kept for observability. */
     private Duration nodeHeartbeatRetention = Duration.ofMinutes(10);
 
+    /** How long SUCCEEDED jobs are kept before retention hard-deletes them. */
+    private Duration succeededRetention = Duration.ofDays(7);
+
+    /** How long FAILED jobs are kept before retention hard-deletes them. */
+    private Duration failedRetention = Duration.ofDays(30);
+
+    /** How long DELETED (soft-deleted) jobs are kept before retention hard-deletes them. */
+    private Duration deletedRetention = Duration.ofDays(7);
+
+    /** How long QUARANTINED jobs are kept before retention hard-deletes them. */
+    private Duration quarantinedRetention = Duration.ofDays(30);
+
     /** Maximum attempts (including the first) before a failing job stays in FAILED. */
     private int defaultMaxAttempts = 5;
 
@@ -154,6 +166,38 @@ public class ThreadmillProperties {
 
     public void setMaintenanceLeaseDuration(Duration maintenanceLeaseDuration) {
         this.maintenanceLeaseDuration = maintenanceLeaseDuration;
+    }
+
+    public Duration getSucceededRetention() {
+        return succeededRetention;
+    }
+
+    public void setSucceededRetention(Duration succeededRetention) {
+        this.succeededRetention = succeededRetention;
+    }
+
+    public Duration getFailedRetention() {
+        return failedRetention;
+    }
+
+    public void setFailedRetention(Duration failedRetention) {
+        this.failedRetention = failedRetention;
+    }
+
+    public Duration getDeletedRetention() {
+        return deletedRetention;
+    }
+
+    public void setDeletedRetention(Duration deletedRetention) {
+        this.deletedRetention = deletedRetention;
+    }
+
+    public Duration getQuarantinedRetention() {
+        return quarantinedRetention;
+    }
+
+    public void setQuarantinedRetention(Duration quarantinedRetention) {
+        this.quarantinedRetention = quarantinedRetention;
     }
 
     public Duration getNodeHeartbeatRetention() {

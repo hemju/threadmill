@@ -5,7 +5,8 @@ at-least-once execution guarantee, and it does not remove the need for
 idempotent handlers.
 
 ```java
-EnqueueResult result = jobEnqueuer.enqueueIfAbsent(
+EnqueueResult result = jobScheduler.enqueueIfAbsent(
+        RebuildAccountHandler.class,
         new RebuildAccount(accountId),
         "account:" + accountId,
         Duration.ofHours(6));

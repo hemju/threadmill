@@ -9,7 +9,11 @@ must be nonblank, at most 128 characters, and contain no control characters.
 | `pollInterval` | `500ms` | Dispatcher fallback idle poll interval. Scheduled promotion and same-JVM producers sharing a `LocalWakeBus` can dispatch sooner. |
 | `claimHeartbeat` | `15s` | Owner heartbeat refresh cadence. |
 | `maintenancePollInterval` | `1s` | Master-only maintenance tick for recurring materialization, scheduled promotion, and orphan reclaim. |
-| `retentionInterval` | `1h` | Master-only cadence for succeeded-job cleanup, expired dedup cleanup, and stale node-heartbeat cleanup. |
+| `retentionInterval` | `1h` | Master-only cadence for retention sweeps: hard-delete of old SUCCEEDED/FAILED/DELETED/QUARANTINED jobs, expired dedup cleanup, and stale node-heartbeat cleanup. |
+| `succeededRetention` | `7d` | Age after which SUCCEEDED jobs are hard-deleted. |
+| `failedRetention` | `30d` | Age after which FAILED jobs are hard-deleted. |
+| `deletedRetention` | `7d` | Age after which DELETED jobs are hard-deleted. |
+| `quarantinedRetention` | `30d` | Age after which QUARANTINED jobs are hard-deleted. |
 | `heartbeatTimeout` | `60s` | Orphan and node heartbeat expiry. |
 | `maintenanceLeaseDuration` | `60s` | Store-backed leadership lease. Must be greater than `claimHeartbeat`. |
 | `nodeHeartbeatRetention` | `10m` | How long old node registry entries remain visible after their last heartbeat. Must be greater than `heartbeatTimeout`. |
@@ -18,7 +22,7 @@ must be nonblank, at most 128 characters, and contain no control characters.
 | `retryInitialBackoff` | `5s` | Default retry backoff. |
 | `defaultMaxAttempts` | `5` | Attempts including the first run. |
 | `claimBatchSize` | `10` | Maximum jobs claimed per poll. |
-| `defaultQueue` | `default` | Queue used by scheduler convenience methods. |
+| `defaultQueue` | `default` | Queue a lane-less node polls (the default lane). NOT the queue `Scheduler` convenience methods write to — those always use the literal `"default"`; set a matching lane or pass an explicit queue. |
 | `storeOutagePollInterval` | `5s` | Probe interval while paused by store outage. |
 | `shutdownGracePeriod` | `10s` | Time to wait for in-flight jobs on close. |
 | `checkInMinInterval` | `5s` | Minimum interval between persisted check-in/progress/log flushes for one job. |

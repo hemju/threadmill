@@ -106,7 +106,7 @@ The processing engine has one job: claim → process → complete.
 - The **dispatcher** loop (per node, per configured queue lane) claims
   ready jobs and submits them to a virtual-thread worker pool.
 - The **maintenance** loop (master-only) promotes due `SCHEDULED` jobs to
-  `ENQUEUED`, refreshes owner heartbeats, reclaims orphans, runs retention
+  `ENQUEUED`, reclaims orphans, runs retention
   deletes, and materializes recurring instances.
 - A **single failure code path** handles every failure mode — thrown
   exception, per-job timeout, orphan-reclaim, payload poisoning. All four
@@ -158,7 +158,7 @@ binder or directly via `ProcessingNodeConfig.builder()`.
 | `threadmill.defaultMaxAttempts` | 5 | Retry budget for the global default policy |
 | `threadmill.retryInitialBackoff` | 5s | First retry's backoff |
 | `threadmill.claimBatchSize` | 10 | Maximum claim per dispatcher tick |
-| `threadmill.defaultQueue` | `"default"` | Queue name when none is specified |
+| `threadmill.defaultQueue` | `"default"` | Queue a lane-less node polls; not the queue `Scheduler` convenience methods write to |
 | `threadmill.remote-wake.enabled` | `true` | Spring auto-configured durable stores publish cross-node wake hints; dispatcher polling remains the fallback |
 | `threadmill.remote-wake.channel` | backend default | Optional channel override to isolate multiple Threadmill deployments sharing one datastore |
 | `threadmill.checkInMinInterval` | 5s | Minimum persisted check-in/progress flush interval |
