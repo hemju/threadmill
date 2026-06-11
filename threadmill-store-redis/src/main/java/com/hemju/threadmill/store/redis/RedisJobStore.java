@@ -1317,7 +1317,8 @@ public final class RedisJobStore implements JobStore {
                         handler == null ? "" : RedisKeys.byHandler(handler)
                     },
                     idStr,
-                    state.name());
+                    state.name(),
+                    Long.toString(Instant.now().toEpochMilli()));
             if (deleted != null && deleted == 1L) {
                 removed++;
             }

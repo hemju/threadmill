@@ -328,6 +328,36 @@ public abstract class AbstractJobStoreContractTest {
     }
 
     @Test
+    @DisplayName("retention keeps a terminal job whose dedup key is still live (TTL > retention age)")
+    void retentionKeepsTerminalJobsWithALiveDedupKey() {
+        var now = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        var past = now.minus(Duration.ofDays(1));
+        Job job = Jobs.enqueued("com.example.SendEmail");
+        assertThat(store.enqueueIfAbsent(job, "invoice-7", Duration.ofMinutes(30), now))
+                .isInstanceOf(EnqueueResult.Created.class);
+
+        // Drive the job terminal, backdated so retention would otherwise sweep it.
+        Job loaded = store.findById(job.id()).orElseThrow();
+        loaded.transitionTo(JobState.PROCESSING, past);
+        loaded.transitionTo(JobState.SUCCEEDED, past);
+        store.saveAtomic(loaded, loaded.version());
+
+        // Retention must NOT delete it while its dedup key is still live, or the
+        // dedup TTL is silently capped at the retention age.
+        store.deleteFinishedOlderThan(now, JobState.SUCCEEDED, 100);
+        assertThat(store.findById(job.id())).isPresent();
+
+        // A re-enqueue inside the TTL coalesces onto the surviving job, and the
+        // returned id resolves (never a dangling reference).
+        Job again = Jobs.enqueued("com.example.SendEmail");
+        EnqueueResult result = store.enqueueIfAbsent(again, "invoice-7", Duration.ofMinutes(30), now.plusSeconds(1));
+        assertThat(result).isInstanceOf(EnqueueResult.Coalesced.class);
+        assertThat(((EnqueueResult.Coalesced) result).existingId()).isEqualTo(job.id());
+        assertThat(store.findById(((EnqueueResult.Coalesced) result).existingId()))
+                .isPresent();
+    }
+
+    @Test
     @DisplayName("execution updates persist check-ins, logs, and progress without bumping version")
     void executionUpdatesPersistWithoutBumpingVersion() {
         Job job = Jobs.enqueued("com.example.SendEmail");

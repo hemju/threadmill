@@ -620,11 +620,19 @@ public final class InMemoryJobStore implements JobStore {
     public long deleteFinishedOlderThan(Instant cutoff, JobState state, int max) {
         long[] removed = {0L};
         List<JobId> toRemove = new ArrayList<>();
+        // Keep terminal jobs whose dedup key is still live: deleting them would
+        // end the producer-dedup window early (mirrors the real backends).
+        var now = Instant.now();
+        Set<JobId> liveDedup = dedupKeys.values().stream()
+                .filter(r -> r.expiresAt().isAfter(now))
+                .map(DedupRecord::jobId)
+                .collect(Collectors.toSet());
         for (var e : jobs.entrySet()) {
             if (toRemove.size() >= max) break;
             if (e.getValue().state == state
                     && e.getValue().currentStateAt != null
-                    && !e.getValue().currentStateAt.isAfter(cutoff)) {
+                    && !e.getValue().currentStateAt.isAfter(cutoff)
+                    && !liveDedup.contains(e.getKey())) {
                 toRemove.add(e.getKey());
             }
         }

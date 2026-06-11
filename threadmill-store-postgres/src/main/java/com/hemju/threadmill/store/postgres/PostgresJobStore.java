@@ -1293,9 +1293,16 @@ public final class PostgresJobStore implements JobStore {
         try {
             return DeadlockRetry.run(() -> {
                 try (Connection conn = dataSource.getConnection();
+                        // Skip a terminal job that still has an unexpired dedup
+                        // row: the FK is ON DELETE CASCADE, so deleting it here
+                        // would drop a live dedup key and silently cap the dedup
+                        // TTL at the retention age. Keep the job until its dedup
+                        // expires; the next sweep then removes both.
                         PreparedStatement ps = conn.prepareStatement(
-                                "DELETE FROM threadmill_jobs WHERE id IN (" + "SELECT id FROM threadmill_jobs "
-                                        + "WHERE state = ? AND current_state_at <= ? "
+                                "DELETE FROM threadmill_jobs WHERE id IN (" + "SELECT j.id FROM threadmill_jobs j "
+                                        + "WHERE j.state = ? AND j.current_state_at <= ? "
+                                        + "AND NOT EXISTS (SELECT 1 FROM threadmill_dedup_keys d "
+                                        + "WHERE d.job_id = j.id AND d.expires_at > clock_timestamp()) "
                                         + "LIMIT ?)")) {
                     ps.setString(1, state.name());
                     ps.setTimestamp(2, Timestamp.from(cutoff));

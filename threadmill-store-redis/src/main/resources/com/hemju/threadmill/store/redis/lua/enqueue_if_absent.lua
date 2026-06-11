@@ -74,7 +74,10 @@ redis.call('HSET', job_key,
     'workflow_root_id', workflow_root_id,
     'concurrency_key', concurrency_key,
     'concurrency_mode', concurrency_mode,
-    'version', '1'
+    'version', '1',
+    -- Back-reference to the dedup record so retention can keep this job until
+    -- its dedup key expires, instead of deleting it early and capping the TTL.
+    'dedup', dedup_key
 )
 
 if active_key ~= '' and active_score ~= nil then
