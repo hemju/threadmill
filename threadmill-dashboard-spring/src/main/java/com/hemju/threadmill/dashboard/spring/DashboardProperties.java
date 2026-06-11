@@ -45,7 +45,7 @@ public class DashboardProperties {
                 security.autoConfigure);
     }
 
-    private static String normalizeBasePath(String value) {
+    static String normalizeBasePath(String value) {
         if (value == null || value.isBlank()) return "/threadmill/api";
         String normalized = value.trim();
         if (!normalized.startsWith("/")) normalized = "/" + normalized;

@@ -87,6 +87,19 @@ class ThreadmillDashboardSecurityIntegrationTest {
     }
 
     @Test
+    void staticUiMountRequiresAuthenticationByDefault() throws Exception {
+        // The UI shell is an admin surface; the auto-configured chain must
+        // cover the fixed /threadmill/** mount, not just the API subpath.
+        mvc.perform(get("/threadmill/")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/threadmill/index.html")).andExpect(status().isUnauthorized());
+        mvc.perform(get("/threadmill/assets/app.js")).andExpect(status().isUnauthorized());
+        // Authenticated requests pass the chain (404 here — no UI assets on
+        // this test classpath — but decisively not 401).
+        mvc.perform(get("/threadmill/index.html").with(user("ada").authorities(authority("THREADMILL_READ"))))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
     void missingScheduleRetryDelayIsABadRequestNotAServerError() throws Exception {
         var store = context.getBean(JobStore.class);
         var failed = Job.builder()

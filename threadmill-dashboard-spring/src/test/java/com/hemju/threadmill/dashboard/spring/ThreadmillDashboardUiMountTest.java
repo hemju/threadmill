@@ -9,6 +9,7 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.WebApplicationContextRunner;
 
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.dashboard.api.DashboardOptions;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 
 class ThreadmillDashboardUiMountTest {
@@ -24,6 +25,25 @@ class ThreadmillDashboardUiMountTest {
             assertThat(context).hasSingleBean(ThreadmillDashboardApiController.class);
             assertThat(context).doesNotHaveBean("threadmillDashboardUiWebMvcConfigurer");
         });
+    }
+
+    @Test
+    void customOptionsBeanWithDivergentBasePathFailsFast() {
+        // The controller mounts at the property; the security chain at the
+        // options bean. A divergent custom bean would scope the chain to a
+        // path with no endpoints — refuse to start instead.
+        runner.withBean(DashboardOptions.class, () -> new DashboardOptions(true, false, "/ops/api", true))
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasMessageContaining("apiBasePath");
+                });
+    }
+
+    @Test
+    void customOptionsBeanMatchingThePropertyStarts() {
+        runner.withPropertyValues("threadmill.dashboard.api.base-path=/ops/api")
+                .withBean(DashboardOptions.class, () -> new DashboardOptions(true, false, "/ops/api", true))
+                .run(context -> assertThat(context).hasSingleBean(ThreadmillDashboardApiController.class));
     }
 
     @Test

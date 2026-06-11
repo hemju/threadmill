@@ -14,6 +14,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
+import org.springframework.core.env.Environment;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.web.SecurityFilterChain;
@@ -78,6 +79,12 @@ public class ThreadmillDashboardApiConfiguration {
         return new ThreadmillDashboardApiController(service, authorizer, auditSink, options);
     }
 
+    /**
+     * Secures both the API and the static UI mount. The UI shell lives at
+     * the fixed {@code /threadmill/**} path; leaving it outside the matcher
+     * would serve the operations-console HTML/JS to unauthenticated clients
+     * — asset disclosure of an admin surface even though data calls 401.
+     */
     @Bean
     @ConditionalOnBean(HttpSecurity.class)
     @ConditionalOnMissingBean(name = "threadmillDashboardSecurityFilterChain")
@@ -89,8 +96,8 @@ public class ThreadmillDashboardApiConfiguration {
     @Order(Ordered.HIGHEST_PRECEDENCE + 100)
     public SecurityFilterChain threadmillDashboardSecurityFilterChain(HttpSecurity http, DashboardOptions options)
             throws Exception {
-        String matcher = options.apiBasePath() + "/**";
-        return http.securityMatcher(matcher)
+        String apiMatcher = options.apiBasePath() + "/**";
+        return http.securityMatcher(apiMatcher, "/threadmill/**", "/threadmill")
                 .authorizeHttpRequests(authorize -> authorize.anyRequest().authenticated())
                 .csrf(csrf -> csrf.csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse()))
                 .httpBasic(Customizer.withDefaults())
@@ -118,8 +125,20 @@ public class ThreadmillDashboardApiConfiguration {
 
     @Bean
     public SmartInitializingSingleton threadmillDashboardSecurityValidator(
-            ListableBeanFactory beanFactory, DashboardOptions options, DashboardAuditSink auditSink) {
+            ListableBeanFactory beanFactory, DashboardOptions options, DashboardAuditSink auditSink, Environment env) {
         return () -> {
+            // The controller mounts at the raw property; the security chain
+            // and validator use DashboardOptions.apiBasePath(). A custom
+            // DashboardOptions bean that diverges from the property would
+            // scope the security chain to a path with no endpoints — fail
+            // fast instead of silently mis-securing.
+            String propertyPath = DashboardProperties.normalizeBasePath(
+                    env.getProperty("threadmill.dashboard.api.base-path", "/threadmill/api"));
+            if (!propertyPath.equals(options.apiBasePath())) {
+                throw new IllegalStateException("DashboardOptions.apiBasePath (" + options.apiBasePath()
+                        + ") must mirror threadmill.dashboard.api.base-path (" + propertyPath
+                        + ") — the controller mounts at the property, the security chain at the options bean");
+            }
             if (!options.allowUnsafeReadOnlyWithoutAuthentication()
                     && beanFactory.getBeanNamesForType(SecurityFilterChain.class).length == 0) {
                 throw new IllegalStateException(

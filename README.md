@@ -73,7 +73,7 @@ See [docs/quickstart.md](docs/quickstart.md) for a complete Spring walkthrough, 
 | `threadmill-tracing` | Optional OpenTelemetry API integration for processing and store-operation spans. |
 | `threadmill-dashboard-api` | Spring-free dashboard contract: `EngineSnapshot`, DTOs, service logic, permissions, and audit contracts. |
 | `threadmill-dashboard-ui` | Static React/Tailwind/shadcn operations console packaged as reusable assets under `/threadmill`. |
-| `threadmill-dashboard-spring` | Spring MVC/Security adapter exposing `/threadmill/api/**` and mounting UI assets when present. |
+| `threadmill-dashboard-spring` | Spring MVC/Security adapter exposing `/threadmill/api/**` and mounting UI assets when present; the auto-configured security chain covers both the API and the `/threadmill/**` UI mount. |
 | `threadmill-test-support` | The abstract `JobStore` contract test every backend passes. |
 
 ## Storage backends
