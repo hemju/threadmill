@@ -86,7 +86,9 @@ export interface RecurringTask {
     enabled: boolean;
     priority: number;
     missedRunPolicy: string;
-    trigger: Record<string, unknown>;
+    triggerKind: string;
+    triggerValue: string;
+    payloadRedacted: boolean;
   };
   state: {
     taskName: string;

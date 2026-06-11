@@ -87,8 +87,8 @@ public final class ThreadmillDashboardApiController {
 
     @GetMapping("/overview")
     public OverviewResponse overview(Authentication authentication) {
-        require(authentication, DashboardPermission.READ);
-        return service.overview();
+        var permissions = require(authentication, DashboardPermission.READ);
+        return service.overview(sensitiveDetailsAllowed(permissions));
     }
 
     @GetMapping("/jobs")
@@ -106,9 +106,11 @@ public final class ThreadmillDashboardApiController {
     @GetMapping("/jobs/{id}")
     public JobDetail job(Authentication authentication, @PathVariable("id") String id) {
         var permissions = require(authentication, DashboardPermission.READ);
-        boolean includeSensitive =
-                options.exposeSensitiveDetails() && permissions.contains(DashboardPermission.VIEW_SENSITIVE_DETAILS);
-        return service.job(JobId.parse(id), includeSensitive);
+        return service.job(JobId.parse(id), sensitiveDetailsAllowed(permissions));
+    }
+
+    private boolean sensitiveDetailsAllowed(Set<DashboardPermission> permissions) {
+        return options.exposeSensitiveDetails() && permissions.contains(DashboardPermission.VIEW_SENSITIVE_DETAILS);
     }
 
     @GetMapping("/queues")
@@ -119,14 +121,14 @@ public final class ThreadmillDashboardApiController {
 
     @GetMapping("/recurring")
     public List<RecurringTaskView> recurring(Authentication authentication) {
-        require(authentication, DashboardPermission.READ);
-        return service.recurringTasks();
+        var permissions = require(authentication, DashboardPermission.READ);
+        return service.recurringTasks(sensitiveDetailsAllowed(permissions));
     }
 
     @GetMapping("/nodes")
     public List<NodeHeartbeat> nodes(Authentication authentication) {
         require(authentication, DashboardPermission.READ);
-        return service.overview().nodeHeartbeats();
+        return service.overview(false).nodeHeartbeats();
     }
 
     @PostMapping("/queues/{queue}/pause")

@@ -68,7 +68,28 @@ public final class DashboardPayloads {
 
     public record QueueView(String queue, long depth, boolean paused, Instant oldestEnqueuedAt) {}
 
-    public record RecurringTaskView(CronTask task, CronTaskScheduleState state) {}
+    public record RecurringTaskView(CronTaskView task, CronTaskScheduleState state) {}
+
+    /**
+     * Wire-stable view of a {@link CronTask}: the trigger is rendered as
+     * explicit {@code triggerKind} / {@code triggerValue} strings (the same
+     * shape {@code UpdateRecurringRequest} accepts), and
+     * {@code payloadArgument} is {@code null} unless the caller is allowed
+     * to see sensitive details — recurring payloads carry the exact data
+     * class redacted on the job-detail endpoint.
+     */
+    public record CronTaskView(
+            String name,
+            String triggerKind,
+            String triggerValue,
+            String handlerType,
+            JobArgument payloadArgument,
+            String queue,
+            int priority,
+            String missedRunPolicy,
+            String zone,
+            boolean enabled,
+            boolean payloadRedacted) {}
 
     public record PauseQueueRequest(String reason) {}
 

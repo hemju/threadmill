@@ -46,11 +46,12 @@ public final class DashboardApiService {
         this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
     }
 
-    public OverviewResponse overview() {
+    public OverviewResponse overview(boolean includeSensitiveDetails) {
         var snapshot = EngineSnapshot.of(store);
         var tasks = snapshot.cronTasks().stream()
                 .map(task -> new RecurringTaskView(
-                        task, store.findCronTaskState(task.name()).orElse(null)))
+                        cronTaskView(task, includeSensitiveDetails),
+                        store.findCronTaskState(task.name()).orElse(null)))
                 .toList();
         return new OverviewResponse(
                 snapshot.takenAt(),
@@ -102,11 +103,38 @@ public final class DashboardApiService {
                 .toList();
     }
 
-    public List<RecurringTaskView> recurringTasks() {
+    public List<RecurringTaskView> recurringTasks(boolean includeSensitiveDetails) {
         return store.listCronTasks().stream()
                 .map(task -> new RecurringTaskView(
-                        task, store.findCronTaskState(task.name()).orElse(null)))
+                        cronTaskView(task, includeSensitiveDetails),
+                        store.findCronTaskState(task.name()).orElse(null)))
                 .toList();
+    }
+
+    private static DashboardPayloads.CronTaskView cronTaskView(CronTask task, boolean includeSensitiveDetails) {
+        String triggerKind =
+                switch (task.trigger()) {
+                    case CronTask.Trigger.CronExpr ignored -> "CRON";
+                    case CronTask.Trigger.Interval ignored -> "INTERVAL";
+                };
+        String triggerValue =
+                switch (task.trigger()) {
+                    case CronTask.Trigger.CronExpr cron -> cron.expression().toString();
+                    case CronTask.Trigger.Interval interval ->
+                        interval.interval().toString();
+                };
+        return new DashboardPayloads.CronTaskView(
+                task.name(),
+                triggerKind,
+                triggerValue,
+                task.handlerType(),
+                includeSensitiveDetails ? task.payloadArgument() : null,
+                task.queue(),
+                task.priority(),
+                task.missedRunPolicy().name(),
+                task.zone().toString(),
+                task.enabled(),
+                !includeSensitiveDetails);
     }
 
     public ActionResponse pauseQueue(String queue, String reason) {

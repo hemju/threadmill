@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -21,6 +22,8 @@ import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
+import com.hemju.threadmill.core.schedule.CronExpression;
+import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
@@ -67,6 +70,46 @@ class ThreadmillDashboardApiControllerTest {
                 .isInstanceOf(ResponseStatusException.class)
                 .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode())
                         .isEqualTo(HttpStatus.FORBIDDEN));
+    }
+
+    @Test
+    void recurringPayloadIsRedactedForReadOnlyCallersAndVisibleWithPermission() {
+        store.upsertCronTask(new CronTask(
+                "report",
+                new CronTask.Trigger.CronExpr(CronExpression.parse("*/5 * * * *")),
+                "com.example.Report",
+                new JobArgument("com.example.Payload", "{\"apiKey\":\"secret\"}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true));
+
+        // Plain READ: payload absent on /recurring AND /overview, trigger
+        // rendered as explicit wire-stable strings.
+        var readOnly = secureController.recurring(auth("alice", "THREADMILL_READ"));
+        assertThat(readOnly).singleElement().satisfies(view -> {
+            assertThat(view.task().payloadArgument()).isNull();
+            assertThat(view.task().payloadRedacted()).isTrue();
+            assertThat(view.task().triggerKind()).isEqualTo("CRON");
+            assertThat(view.task().triggerValue()).isEqualTo("*/5 * * * *");
+        });
+        assertThat(secureController.overview(auth("alice", "THREADMILL_READ")).cronTasks())
+                .singleElement()
+                .satisfies(view -> assertThat(view.task().payloadArgument()).isNull());
+
+        // exposeSensitiveDetails + VIEW_SENSITIVE_DETAILS: payload present.
+        var permissive = new ThreadmillDashboardApiController(
+                new DashboardApiService(store, new LocalWakeBus()),
+                new SpringSecurityDashboardAuthorizer(),
+                auditEvents::add,
+                new DashboardOptions(false, true));
+        var sensitive = permissive.recurring(auth("admin", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"));
+        assertThat(sensitive).singleElement().satisfies(view -> {
+            assertThat(view.task().payloadArgument()).isNotNull();
+            assertThat(view.task().payloadArgument().serialized()).contains("secret");
+            assertThat(view.task().payloadRedacted()).isFalse();
+        });
     }
 
     @Test

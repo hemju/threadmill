@@ -438,6 +438,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Redis oldestEnqueuedAt reads the priority head; insert_all intra-batch duplicate double-counts | `RedisJobStoreRegressionTest.oldestEnqueuedAtReportsTheOldestJobNotTheOldestHighestPriorityJob` + `insertAllRejectsIntraBatchDuplicateIdsBeforeAnyWrite` |
 | Spring Boot 4 auto-config ordering silently drops an auto-configured DataSource to the in-memory store | `SpringAutoConfigurationOrderingTest.autoConfiguredDataSourceResolvesThePostgresStore` + `withoutADataSourceTheInMemoryFallbackStillApplies` |
 | Redis-vs-Postgres store precedence (`OnRedisStoreNotConfigured`) untested after the auto-config split | `StorePrecedenceTest.explicitRedisConfigurationBeatsAPresentDataSource` + `withoutRedisPropertiesTheDataSourceResolvesPostgres` + `onRedisStoreNotConfiguredMirrorsEveryRedisPropertyShape` |
+| Recurring payloadArgument leaks unredacted to READ-level callers; CronExpression JSON shape | `ThreadmillDashboardApiControllerTest.recurringPayloadIsRedactedForReadOnlyCallersAndVisibleWithPermission` + `CronExpressionTest.serializesAsTheBareSourceExpression` |
 
 ### Postgres-layer improvements (engagement notes)
 
