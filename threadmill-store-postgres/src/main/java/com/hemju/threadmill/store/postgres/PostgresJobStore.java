@@ -536,8 +536,13 @@ public final class PostgresJobStore implements JobStore {
                     conn.setAutoCommit(false);
                     try {
                         // 1. Atomically page through ready ids, skipping any locked by another worker.
-                        // A hot blocked key must not hide claimable work deeper in the queue.
-                        int pageSize = Math.max(cap, cap * 64);
+                        // The first page is narrow — FOR UPDATE locks every row it reads and
+                        // holds it until commit, so a wide first page would pin 64x the claim
+                        // budget and starve concurrent claimers' SKIP LOCKED scans. Only when
+                        // a page yields zero claimable candidates (a concurrency-blocked hot
+                        // key hiding claimable work deeper in the queue) does the scan
+                        // escalate to the wide page.
+                        int pageSize = narrowClaimPageSize(cap);
                         Integer cursorPriority = null;
                         UUID cursorId = null;
 
@@ -583,6 +588,9 @@ public final class PostgresJobStore implements JobStore {
                                 cursorId = last.id;
                                 if (pending.size() < pageSize) {
                                     break;
+                                }
+                                if (claimable.isEmpty()) {
+                                    pageSize = wideClaimPageSize(cap);
                                 }
                             }
                             int[] updated = ps.executeBatch();
@@ -1734,6 +1742,16 @@ public final class PostgresJobStore implements JobStore {
                         s.attempts());
             }
         }
+    }
+
+    /** First claim page: locks at most 2x the budget in rows. */
+    static int narrowClaimPageSize(int cap) {
+        return Math.max(cap, cap * 2);
+    }
+
+    /** Escalated page for scanning past concurrency-blocked hot keys. */
+    static int wideClaimPageSize(int cap) {
+        return Math.max(cap, cap * 64);
     }
 
     private static void lockConcurrencyGroup(Connection conn, String key) throws SQLException {

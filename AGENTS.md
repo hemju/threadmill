@@ -429,6 +429,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | `emitPendingSql` executes DDL despite being the inspect-only API | `PostgresJobStoreRegressionTest.emitPendingSqlOnAFreshDatabaseIsReadOnlyAndPrependsHistoryDdl` |
 | insertAll locks concurrency-group rows unsorted (manufactured deadlocks; fatal in join_transaction); duplicate-id state hidden in BatchUpdateException chain | `PostgresJobStoreRegressionTest.insertAllWithReversedKeyOrdersDoesNotManufactureDeadlocks` + `DeadlockRetryTest.hasSqlStateWalksNextExceptionAndCauseChains` |
 | Postgres wake listener killed silently by RuntimeException; close()/start() cycle leaves two live listeners | `PostgresRemoteWakeChannelTest.runtimeExceptionFromTheDataSourceDoesNotKillTheListener` + `closeStartCycleLeavesExactlyOneLiveListener` |
+| Postgres claim locks 64x its budget unconditionally, starving concurrent claimers | `PostgresJobStoreRegressionTest.unkeyedClaimLocksOnlyANarrowPageSoConcurrentClaimersAreNotStarved` (+ `claimReadyScansPastBlockedHotKeyToOtherKeys` pins the escalation) |
 
 ### Postgres-layer improvements (engagement notes)
 

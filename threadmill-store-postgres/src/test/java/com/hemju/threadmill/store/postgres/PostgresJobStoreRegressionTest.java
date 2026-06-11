@@ -13,6 +13,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
@@ -159,6 +160,45 @@ class PostgresJobStoreRegressionTest {
                 .concurrencyKey(key)
                 .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
                 .build();
+    }
+
+    @Test
+    void unkeyedClaimLocksOnlyANarrowPageSoConcurrentClaimersAreNotStarved() throws Exception {
+        // With no keyed jobs, each claim must lock only a narrow page. The
+        // historical unconditional 64x page pinned the entire backlog here
+        // (640 > 300), so overlapping claimers' SKIP LOCKED scans returned
+        // empty while claimable work existed.
+        JobStore store = store();
+        int total = 300;
+        for (int i = 0; i < total; i++) {
+            store.insert(Job.builder()
+                    .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                    .build());
+        }
+
+        int claimers = 8;
+        int perClaim = 10;
+        var start = new CountDownLatch(1);
+        try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            List<Future<List<Job>>> futures = new ArrayList<>();
+            for (int i = 0; i < claimers; i++) {
+                futures.add(executor.submit(() -> {
+                    start.await();
+                    return store.claimReady(NodeId.newId(), "default", perClaim, Instant.now());
+                }));
+            }
+            start.countDown();
+            Set<UUID> seen = new HashSet<>();
+            for (Future<List<Job>> f : futures) {
+                List<Job> claimed = f.get(60, TimeUnit.SECONDS);
+                // 300 jobs comfortably cover 8 claimers x (2x10)-row pages:
+                // every overlapping claimer must find its full batch.
+                assertThat(claimed).hasSize(perClaim);
+                for (Job j : claimed) {
+                    assertThat(seen.add(j.id().asUuid())).isTrue();
+                }
+            }
+        }
     }
 
     @Test
