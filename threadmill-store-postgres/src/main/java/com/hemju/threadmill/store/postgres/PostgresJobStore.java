@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 
 import javax.sql.DataSource;
@@ -202,7 +203,7 @@ public final class PostgresJobStore implements JobStore {
                 return null;
             });
         } catch (SQLException e) {
-            if ("23505".equals(e.getSQLState())) {
+            if (DeadlockRetry.hasSqlState(e, "23505")) {
                 throw new IllegalStateException("Job already exists: " + job.id(), e);
             }
             throw new JdbcException("Insert failed", e);
@@ -277,13 +278,26 @@ public final class PostgresJobStore implements JobStore {
                     }
                     ps.executeBatch();
                 }
+                // Lock the distinct concurrency-group rows once, sorted —
+                // per-snapshot locking in batch order manufactured deadlocks
+                // between concurrent batches with reversed key orders (fatal
+                // in join_transaction mode, where retry is disabled).
+                var workflowKeys = new TreeSet<String>();
                 for (JobSnapshot snap : finalSnapshots) {
-                    noteInsertedWorkflowDescendant(conn, snap);
+                    if (snap.concurrencyKey() != null) {
+                        workflowKeys.add(snap.concurrencyKey());
+                    }
+                }
+                if (!workflowKeys.isEmpty()) {
+                    lockConcurrencyGroups(conn, workflowKeys);
+                    for (JobSnapshot snap : finalSnapshots) {
+                        incrementWorkflowHoldOutstanding(conn, snap);
+                    }
                 }
                 return null;
             });
         } catch (SQLException e) {
-            if ("23505".equals(e.getSQLState())) {
+            if (DeadlockRetry.hasSqlState(e, "23505")) {
                 throw new IllegalStateException("Duplicate job id in batch", e);
             }
             throw new JdbcException("insertAll failed", e);
@@ -332,7 +346,7 @@ public final class PostgresJobStore implements JobStore {
             }
             return result;
         } catch (SQLException e) {
-            if ("23505".equals(e.getSQLState()) && !transactionBoundary.externallyManagedTransactionActive()) {
+            if (DeadlockRetry.hasSqlState(e, "23505") && !transactionBoundary.externallyManagedTransactionActive()) {
                 try {
                     Optional<JobId> existing = findActiveDedup(job.queue(), dedupKey, now);
                     if (existing.isPresent()) return new EnqueueResult.Coalesced(existing.get());
@@ -1755,6 +1769,14 @@ public final class PostgresJobStore implements JobStore {
             return;
         }
         lockConcurrencyGroup(conn, snapshot.concurrencyKey());
+        incrementWorkflowHoldOutstanding(conn, snapshot);
+    }
+
+    /** Caller must already hold the concurrency-group row lock for the snapshot's key. */
+    private void incrementWorkflowHoldOutstanding(Connection conn, JobSnapshot snapshot) throws SQLException {
+        if (snapshot.concurrencyKey() == null) {
+            return;
+        }
         try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_concurrency_workflow_holds "
                 + "SET outstanding = outstanding + 1 "
                 + "WHERE concurrency_key = ? AND workflow_root_id = ?")) {

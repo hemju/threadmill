@@ -55,22 +55,28 @@ public final class DeadlockRetry {
     }
 
     public static boolean isRetryable(SQLException e) {
+        return hasSqlState(e, SQLSTATE_DEADLOCK) || hasSqlState(e, SQLSTATE_SERIALIZATION_FAILURE);
+    }
+
+    /**
+     * Whether {@code e} or anything in its {@code getNextException()} /
+     * {@code getCause()} chains carries {@code sqlState}. Batch failures
+     * surface as {@code BatchUpdateException} where drivers report the state
+     * only on a chained exception, so a top-level check is not enough.
+     */
+    public static boolean hasSqlState(SQLException e, String sqlState) {
         SQLException cur = e;
         while (cur != null) {
-            String state = cur.getSQLState();
-            if (SQLSTATE_DEADLOCK.equals(state) || SQLSTATE_SERIALIZATION_FAILURE.equals(state)) {
+            if (sqlState.equals(cur.getSQLState())) {
                 return true;
             }
             cur = cur.getNextException();
         }
-        // Some drivers surface the deadlock through getCause() instead.
+        // Some drivers surface the state through getCause() instead.
         Throwable cause = e.getCause();
         while (cause != null) {
-            if (cause instanceof SQLException sqlCause) {
-                String state = sqlCause.getSQLState();
-                if (SQLSTATE_DEADLOCK.equals(state) || SQLSTATE_SERIALIZATION_FAILURE.equals(state)) {
-                    return true;
-                }
+            if (cause instanceof SQLException sqlCause && sqlState.equals(sqlCause.getSQLState())) {
+                return true;
             }
             cause = cause.getCause();
         }

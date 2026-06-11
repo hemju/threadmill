@@ -3,12 +3,26 @@ package com.hemju.threadmill.store.postgres;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.sql.BatchUpdateException;
 import java.sql.SQLException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 
 class DeadlockRetryTest {
+
+    @Test
+    void hasSqlStateWalksNextExceptionAndCauseChains() {
+        var batch = new BatchUpdateException("batch failed", null, 0, new int[0], (Throwable) null);
+        batch.setNextException(new SQLException("duplicate key", "23505"));
+        assertThat(DeadlockRetry.hasSqlState(batch, "23505")).isTrue();
+
+        var wrapped = new SQLException("outer", new SQLException("inner", "23505"));
+        assertThat(DeadlockRetry.hasSqlState(wrapped, "23505")).isTrue();
+
+        assertThat(DeadlockRetry.hasSqlState(new SQLException("x", "08000"), "23505"))
+                .isFalse();
+    }
 
     @Test
     void recognisesDeadlockBySqlState() {

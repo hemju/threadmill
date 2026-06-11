@@ -118,6 +118,50 @@ class PostgresJobStoreRegressionTest {
     }
 
     @Test
+    void insertAllWithReversedKeyOrdersDoesNotManufactureDeadlocks() throws Exception {
+        // Concurrent batches whose keyed jobs arrive in opposite key orders:
+        // per-snapshot group-row locking in batch order deadlocked (recovered
+        // by retry in owning mode, fatal in join_transaction mode). With the
+        // sorted single locking pass, no round may fail.
+        JobStore store = store();
+        int rounds = 25;
+        var keys = new ArrayList<String>();
+        for (int i = 0; i < 8; i++) keys.add("lock-order:" + i);
+
+        for (int round = 0; round < rounds; round++) {
+            var ascending = new ArrayList<Job>();
+            var descending = new ArrayList<Job>();
+            for (int i = 0; i < keys.size(); i++) {
+                ascending.add(keyedJob(keys.get(i)));
+                descending.add(keyedJob(keys.get(keys.size() - 1 - i)));
+            }
+            var start = new CountDownLatch(1);
+            try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                Future<?> a = executor.submit(() -> {
+                    start.await();
+                    return store.insertAll(ascending);
+                });
+                Future<?> b = executor.submit(() -> {
+                    start.await();
+                    return store.insertAll(descending);
+                });
+                start.countDown();
+                a.get(30, TimeUnit.SECONDS);
+                b.get(30, TimeUnit.SECONDS);
+            }
+        }
+        assertThat(store.countsByState().get(JobState.ENQUEUED)).isEqualTo(rounds * keys.size() * 2L);
+    }
+
+    private static Job keyedJob(String key) {
+        return Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                .concurrencyKey(key)
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .build();
+    }
+
+    @Test
     void claimReadyIsAtomicAcrossManyConcurrentVirtualThreads() throws Exception {
         JobStore store = store();
         int total = 200;
