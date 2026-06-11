@@ -6,9 +6,14 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 
+import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
@@ -18,9 +23,13 @@ import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.schedule.RecurringMaterializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
+import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobSearch;
+import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
+import com.hemju.threadmill.core.store.NodeHeartbeat;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
+import com.hemju.threadmill.test.ForwardingJobStore;
 
 class DashboardApiServiceTest {
 
@@ -118,6 +127,119 @@ class DashboardApiServiceTest {
         var state = store.findCronTaskState("report").orElseThrow();
         assertThat(state.inFlightJobId()).isEqualTo(state.lastRunJobId());
         assertThat(state.inFlightJobId()).isNotNull();
+    }
+
+    @Test
+    void nodesReadDoesNotBuildAFullEngineSnapshot() {
+        var store = new CountingJobStore(new InMemoryJobStore());
+        var service = new DashboardApiService(store, new LocalWakeBus());
+
+        service.nodeHeartbeats();
+
+        assertThat(store.nodeHeartbeatReads.get()).isEqualTo(1);
+        assertThat(store.queueDepthReads.get()).isZero();
+        assertThat(store.oldestEnqueuedReads.get()).isZero();
+        assertThat(store.cronStateReads.get()).isZero();
+    }
+
+    @Test
+    void snapshotCacheCoalescesDashboardPollsAndMutationsInvalidateIt() {
+        var inner = new InMemoryJobStore();
+        seedQueues(inner);
+        seedCronTask(inner, "report-a");
+        seedCronTask(inner, "report-b");
+        var store = new CountingJobStore(inner);
+        var service = new DashboardApiService(store, new LocalWakeBus(), Duration.ofMinutes(5));
+
+        service.overview(false);
+        service.queues();
+        service.recurringTasks(false);
+        service.overview(false);
+
+        // One snapshot refresh serves all four reads: one queue-depth pass,
+        // one oldest-enqueued probe per queue, one state lookup per task.
+        assertThat(store.queueDepthReads.get()).isEqualTo(1);
+        assertThat(store.oldestEnqueuedReads.get()).isEqualTo(2);
+        assertThat(store.cronStateReads.get()).isEqualTo(2);
+
+        // A dashboard mutation drops the cache so the operator sees it.
+        service.pauseQueue("alpha", null);
+        var queues = service.queues();
+        assertThat(store.queueDepthReads.get()).isEqualTo(2);
+        assertThat(queues.stream().filter(view -> view.queue().equals("alpha")).findFirst())
+                .hasValueSatisfying(view -> assertThat(view.paused()).isTrue());
+    }
+
+    @Test
+    void searchOffsetBeyondTheCapIsABadRequest() {
+        var service = new DashboardApiService(new InMemoryJobStore(), new LocalWakeBus());
+
+        assertThatThrownBy(() -> service.jobs(
+                        new JobSearch(JobState.ENQUEUED, null, null, 50, DashboardApiService.MAX_SEARCH_OFFSET + 1)))
+                .isInstanceOf(DashboardApiException.class)
+                .satisfies(error -> assertThat(((DashboardApiException) error).code())
+                        .isEqualTo(DashboardApiException.Code.BAD_REQUEST));
+    }
+
+    private static void seedQueues(InMemoryJobStore store) {
+        store.insert(Job.builder()
+                .spec(JobSpec.of("com.example.Handler"))
+                .queue("alpha")
+                .build());
+        store.insert(Job.builder()
+                .spec(JobSpec.of("com.example.Handler"))
+                .queue("beta")
+                .build());
+    }
+
+    private static void seedCronTask(InMemoryJobStore store, String name) {
+        store.upsertCronTask(new CronTask(
+                name,
+                new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
+                "com.example.ReportHandler",
+                new JobArgument("com.hemju.threadmill.core.handler.NoPayload", "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true));
+        store.upsertCronTaskState(
+                CronTaskScheduleState.initial(name, Instant.now().plusSeconds(300)));
+    }
+
+    private static final class CountingJobStore extends ForwardingJobStore {
+        final AtomicInteger queueDepthReads = new AtomicInteger();
+        final AtomicInteger oldestEnqueuedReads = new AtomicInteger();
+        final AtomicInteger cronStateReads = new AtomicInteger();
+        final AtomicInteger nodeHeartbeatReads = new AtomicInteger();
+
+        CountingJobStore(JobStore delegate) {
+            super(delegate);
+        }
+
+        @Override
+        public Map<String, Long> queueDepths() {
+            queueDepthReads.incrementAndGet();
+            return super.queueDepths();
+        }
+
+        @Override
+        public Optional<Instant> oldestEnqueuedAt(String queue) {
+            oldestEnqueuedReads.incrementAndGet();
+            return super.oldestEnqueuedAt(queue);
+        }
+
+        @Override
+        public Optional<CronTaskScheduleState> findCronTaskState(String name) {
+            cronStateReads.incrementAndGet();
+            return super.findCronTaskState(name);
+        }
+
+        @Override
+        public List<NodeHeartbeat> listNodeHeartbeats() {
+            nodeHeartbeatReads.incrementAndGet();
+            return super.listNodeHeartbeats();
+        }
     }
 
     @Test

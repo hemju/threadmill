@@ -148,7 +148,7 @@ public final class ThreadmillDashboardApiController {
     @GetMapping("/nodes")
     public List<NodeHeartbeat> nodes(Authentication authentication) {
         require(authentication, DashboardPermission.READ);
-        return service.overview(false).nodeHeartbeats();
+        return service.nodeHeartbeats();
     }
 
     @PostMapping("/queues/{queue}/pause")

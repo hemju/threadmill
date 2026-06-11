@@ -6,6 +6,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeParseException;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -29,6 +31,7 @@ import com.hemju.threadmill.core.schedule.RecurringMaterializer;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.NodeHeartbeat;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads.ActionResponse;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads.JobDetail;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads.JobListResponse;
@@ -47,22 +50,61 @@ public final class DashboardApiService {
     private static final int MAX_PAUSE_REASON_BYTES = 256;
     private static final Duration CRON_MUTEX_LEASE = Duration.ofSeconds(30);
 
+    /**
+     * Deep offset pagination is an O(offset) skip in the relational
+     * backends; cap it so a runaway poller cannot trigger large scans.
+     * Keyset pagination is the follow-up if deeper paging is ever needed.
+     */
+    public static final int MAX_SEARCH_OFFSET = 100_000;
+
+    /** Dashboard polling is the access pattern — one second of staleness is fine. */
+    public static final Duration DEFAULT_SNAPSHOT_CACHE_TTL = Duration.ofSeconds(1);
+
     private final JobStore store;
     private final LocalWakeBus wakeBus;
     private final String cronMutexHolder = UUID.randomUUID().toString();
+    private final long snapshotCacheTtlNanos;
+    private volatile CachedSnapshot cachedSnapshot;
 
     public DashboardApiService(JobStore store, LocalWakeBus wakeBus) {
+        this(store, wakeBus, DEFAULT_SNAPSHOT_CACHE_TTL);
+    }
+
+    public DashboardApiService(JobStore store, LocalWakeBus wakeBus, Duration snapshotCacheTtl) {
         this.store = Objects.requireNonNull(store, "store");
         this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
+        Objects.requireNonNull(snapshotCacheTtl, "snapshotCacheTtl");
+        if (snapshotCacheTtl.isNegative()) throw new IllegalArgumentException("snapshotCacheTtl must be >= 0");
+        this.snapshotCacheTtlNanos = snapshotCacheTtl.toNanos();
+    }
+
+    /** One snapshot plus batched cron states, shared by every snapshot-backed endpoint for one TTL window. */
+    private record CachedSnapshot(
+            EngineSnapshot snapshot, Map<String, CronTaskScheduleState> cronStates, long expiresAtNanos) {}
+
+    private CachedSnapshot snapshotData() {
+        var cached = cachedSnapshot;
+        if (cached != null && System.nanoTime() - cached.expiresAtNanos() < 0) return cached;
+        var snapshot = EngineSnapshot.of(store);
+        Map<String, CronTaskScheduleState> states = new LinkedHashMap<>();
+        for (var task : snapshot.cronTasks()) {
+            store.findCronTaskState(task.name()).ifPresent(state -> states.put(task.name(), state));
+        }
+        var fresh = new CachedSnapshot(
+                snapshot, Collections.unmodifiableMap(states), System.nanoTime() + snapshotCacheTtlNanos);
+        cachedSnapshot = fresh;
+        return fresh;
+    }
+
+    /** Dashboard mutations drop the cache so the operator immediately sees their own action. */
+    private void invalidateSnapshotCache() {
+        cachedSnapshot = null;
     }
 
     public OverviewResponse overview(boolean includeSensitiveDetails) {
-        var snapshot = EngineSnapshot.of(store);
-        var tasks = snapshot.cronTasks().stream()
-                .map(task -> new RecurringTaskView(
-                        cronTaskView(task, includeSensitiveDetails),
-                        store.findCronTaskState(task.name()).orElse(null)))
-                .toList();
+        var data = snapshotData();
+        var snapshot = data.snapshot();
+        var tasks = recurringTaskViews(data, includeSensitiveDetails);
         return new OverviewResponse(
                 snapshot.takenAt(),
                 snapshot.countsByState(),
@@ -76,6 +118,9 @@ public final class DashboardApiService {
     }
 
     public JobListResponse jobs(JobSearch search) {
+        if (search.offset() > MAX_SEARCH_OFFSET) {
+            throw DashboardApiException.badRequest("offset must be at most " + MAX_SEARCH_OFFSET);
+        }
         if (!store.capabilities().supportsRichSearch()
                 && (search.state() == null || search.queue() != null || search.handlerType() != null)) {
             throw DashboardApiException.badRequest("this store supports dashboard job search only by state");
@@ -103,7 +148,7 @@ public final class DashboardApiService {
     }
 
     public List<QueueView> queues() {
-        var snapshot = EngineSnapshot.of(store);
+        var snapshot = snapshotData().snapshot();
         return snapshot.queueDepths().entrySet().stream()
                 .map(e -> new QueueView(
                         e.getKey(),
@@ -113,11 +158,20 @@ public final class DashboardApiService {
                 .toList();
     }
 
+    /** Node heartbeats only — never builds a full snapshot for this one list. */
+    public List<NodeHeartbeat> nodeHeartbeats() {
+        return store.listNodeHeartbeats();
+    }
+
     public List<RecurringTaskView> recurringTasks(boolean includeSensitiveDetails) {
-        return store.listCronTasks().stream()
+        return recurringTaskViews(snapshotData(), includeSensitiveDetails);
+    }
+
+    private static List<RecurringTaskView> recurringTaskViews(CachedSnapshot data, boolean includeSensitiveDetails) {
+        return data.snapshot().cronTasks().stream()
                 .map(task -> new RecurringTaskView(
                         cronTaskView(task, includeSensitiveDetails),
-                        store.findCronTaskState(task.name()).orElse(null)))
+                        data.cronStates().get(task.name())))
                 .toList();
     }
 
@@ -152,12 +206,14 @@ public final class DashboardApiService {
             throw DashboardApiException.badRequest("pause reason must be at most 256 UTF-8 bytes");
         }
         store.pauseQueue(queue, reason);
+        invalidateSnapshotCache();
         return new ActionResponse("paused", queue);
     }
 
     public ActionResponse resumeQueue(String queue) {
         store.resumeQueue(queue);
         wakeBus.wake(queue);
+        invalidateSnapshotCache();
         return new ActionResponse("resumed", queue);
     }
 
@@ -170,6 +226,7 @@ public final class DashboardApiService {
         job.transitionTo(JobState.DELETED, Instant.now(), "dashboard.delete", null);
         job.clearOwner();
         store.saveAtomic(job, expectedVersion);
+        invalidateSnapshotCache();
         return new ActionResponse("deleted", id.toString());
     }
 
@@ -187,6 +244,7 @@ public final class DashboardApiService {
         job.clearScheduledFor();
         store.saveAtomic(job, expectedVersion);
         wakeBus.wake(job.queue());
+        invalidateSnapshotCache();
         return new ActionResponse("requeued", id.toString());
     }
 
@@ -203,6 +261,7 @@ public final class DashboardApiService {
         job.transitionTo(JobState.SCHEDULED, Instant.now(), "dashboard.schedule_retry", null);
         job.scheduleAt(Instant.now().plus(delay));
         store.saveAtomic(job, expectedVersion);
+        invalidateSnapshotCache();
         return new ActionResponse("scheduled", id.toString());
     }
 
@@ -226,6 +285,7 @@ public final class DashboardApiService {
             if (store.findById(id).isEmpty()) throw notFound("job not found");
             throw conflict("job cannot be replaced in its current state");
         }
+        invalidateSnapshotCache();
         return new ActionResponse("replaced", id.toString());
     }
 
@@ -259,6 +319,7 @@ public final class DashboardApiService {
                     priorStillRunning ? inFlight : job.id().asUuid()));
         });
         wakeBus.wake(task.queue());
+        invalidateSnapshotCache();
         return new ActionResponse("triggered", name);
     }
 
@@ -279,11 +340,13 @@ public final class DashboardApiService {
             store.upsertCronTask(task);
             store.upsertCronTaskState(stateAfterRecurringUpdate(task));
         });
+        invalidateSnapshotCache();
         return new ActionResponse("updated", name);
     }
 
     public ActionResponse deleteRecurring(String name) {
         store.deleteCronTask(name);
+        invalidateSnapshotCache();
         return new ActionResponse("deleted", name);
     }
 

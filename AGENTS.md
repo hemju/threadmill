@@ -442,6 +442,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Dashboard manual trigger steals the materializer's pile-up guard (`inFlightJobId` overwrite) | `DashboardApiServiceTest.manualTriggerDoesNotStealThePileUpGuardFromARunningScheduledInstance` + `manualTriggerTakesTheGuardWhenNoPriorInstanceIsRunning` |
 | Dashboard operator-input mistakes surface as 500s (missing retry delay, bad zone/interval, oversized replacement) | `ThreadmillDashboardSecurityIntegrationTest.missingScheduleRetryDelayIsABadRequestNotAServerError` + `invalidZoneAndIntervalOnRecurringUpdateAreBadRequests` + `oversizedJobReplacementIsContentTooLargeNotAServerError` |
 | Dashboard ADMIN not honored for redaction; denied mutations / sensitive views unaudited; throwing audit sink fails a committed mutation | `ThreadmillDashboardApiControllerTest.adminAloneSeesUnredactedDetailsWhenExposureIsConfigured` + `deniedMutationAttemptsAreAudited` + `sensitiveDetailViewsAreAudited` + `throwingAuditSinkDoesNotFailACommittedMutation` |
+| Dashboard snapshot fan-out regrows (full snapshot for /nodes, per-queue/per-task round trips per poll, uncapped search offset) | `DashboardApiServiceTest.nodesReadDoesNotBuildAFullEngineSnapshot` + `snapshotCacheCoalescesDashboardPollsAndMutationsInvalidateIt` + `searchOffsetBeyondTheCapIsABadRequest` |
 
 ### Postgres-layer improvements (engagement notes)
 
