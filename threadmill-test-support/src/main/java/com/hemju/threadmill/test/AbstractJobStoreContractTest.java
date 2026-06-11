@@ -462,9 +462,10 @@ public abstract class AbstractJobStoreContractTest {
     @DisplayName("a retried job re-enters the queue at its original creation-time position")
     void retriedJobReentersTheQueueAtTheSamePositionOnEveryBackend() {
         var base = Instant.now().minusSeconds(5);
-        // Same priority; a is created before b.
-        Job a = concurrentJob("com.example.H", null, null, 0, base);
-        Job b = concurrentJob("com.example.H", null, null, 0, base.plusMillis(1));
+        // Same priority; a is created before b. Use fixed, ordered ids so the
+        // relational backends' id tie-break is deterministic (a < b).
+        Job a = concurrentJobWithId("com.example.H", fixedJobId(1), null, null, 0, base);
+        Job b = concurrentJobWithId("com.example.H", fixedJobId(2), null, null, 0, base.plusMillis(1));
         store.insert(a);
         store.insert(b);
 

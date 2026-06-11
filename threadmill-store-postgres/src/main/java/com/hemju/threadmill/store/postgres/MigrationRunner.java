@@ -78,6 +78,20 @@ public final class MigrationRunner {
             try {
                 ensureHistoryTable(conn);
                 List<Integer> applied = readApplied(conn);
+                // Downgrade guard: an applied version this binary does not ship
+                // means the schema was migrated by a NEWER binary. The default
+                // migrate mode would otherwise skip the missing lower versions and
+                // run silently against a schema it was never tested against (the
+                // classic rollback footgun). Fail fast with an actionable message.
+                Set<Integer> shippedVersions =
+                        all.stream().map(Migration::version).collect(java.util.stream.Collectors.toSet());
+                for (int appliedVersion : applied) {
+                    if (!shippedVersions.contains(appliedVersion)) {
+                        throw new MigrationException("Threadmill schema history contains version " + appliedVersion
+                                + ", which this binary does not ship — the database was migrated by a newer"
+                                + " Threadmill version. Roll the binary forward, or repair the schema history.");
+                    }
+                }
                 for (Migration m : all) {
                     if (applied.contains(m.version())) continue;
                     applyOne(conn, m);
@@ -172,9 +186,36 @@ public final class MigrationRunner {
                             + expected.description()
                             + "'");
                 }
+                // Detect a shipped migration file that was edited in place after
+                // it was applied (the fleet would silently diverge). NULL checksums
+                // are pre-checksum rows — skip them rather than fail.
+                String expectedChecksum = checksum(expected.sql());
+                if (actual.checksum() != null && !expectedChecksum.equals(actual.checksum())) {
+                    throw new MigrationException("Threadmill schema history version "
+                            + actual.version()
+                            + " has checksum "
+                            + actual.checksum()
+                            + " but the shipped migration hashes to "
+                            + expectedChecksum
+                            + " — the migration file was edited after it was applied");
+                }
             }
         } catch (SQLException e) {
             throw new MigrationException("Schema validation failed", e);
+        }
+    }
+
+    private static String checksum(String sql) {
+        try {
+            byte[] digest =
+                    java.security.MessageDigest.getInstance("SHA-256").digest(sql.getBytes(StandardCharsets.UTF_8));
+            var sb = new StringBuilder(digest.length * 2);
+            for (byte b : digest) {
+                sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+            }
+            return sb.toString();
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new MigrationException("SHA-256 unavailable", e);
         }
     }
 
@@ -203,9 +244,10 @@ public final class MigrationRunner {
         try (Statement st = conn.createStatement()) {
             st.execute(m.sql());
             try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO threadmill_schema_history (version, description) VALUES (?, ?)")) {
+                    "INSERT INTO threadmill_schema_history (version, description, checksum) VALUES (?, ?, ?)")) {
                 ps.setInt(1, m.version());
                 ps.setString(2, m.description());
+                ps.setString(3, checksum(m.sql()));
                 ps.executeUpdate();
             }
             conn.commit();
@@ -227,6 +269,9 @@ public final class MigrationRunner {
     private void ensureHistoryTable(Connection conn) throws SQLException {
         try (Statement st = conn.createStatement()) {
             st.execute(historyTableSql());
+            // Backfill the checksum column for history tables created before it
+            // existed; older rows keep a NULL checksum (validate skips those).
+            st.execute("ALTER TABLE threadmill_schema_history ADD COLUMN IF NOT EXISTS checksum TEXT");
         }
     }
 
@@ -293,9 +338,9 @@ public final class MigrationRunner {
         List<AppliedMigration> applied = new ArrayList<>();
         try (Statement st = conn.createStatement();
                 ResultSet rs = st.executeQuery(
-                        "SELECT version, description FROM threadmill_schema_history ORDER BY version")) {
+                        "SELECT version, description, checksum FROM threadmill_schema_history ORDER BY version")) {
             while (rs.next()) {
-                applied.add(new AppliedMigration(rs.getInt(1), rs.getString(2)));
+                applied.add(new AppliedMigration(rs.getInt(1), rs.getString(2), rs.getString(3)));
             }
         }
         return applied;
@@ -318,10 +363,12 @@ public final class MigrationRunner {
         sb.append("-- ").append(m.fileName()).append(System.lineSeparator());
         sb.append("BEGIN;").append(System.lineSeparator());
         sb.append(m.sql()).append(System.lineSeparator());
-        sb.append("INSERT INTO threadmill_schema_history (version, description) VALUES (")
+        sb.append("INSERT INTO threadmill_schema_history (version, description, checksum) VALUES (")
                 .append(m.version())
                 .append(", '")
                 .append(m.description().replace("'", "''"))
+                .append("', '")
+                .append(checksum(m.sql()))
                 .append("');")
                 .append(System.lineSeparator());
         sb.append("COMMIT;").append(System.lineSeparator());
@@ -335,6 +382,7 @@ public final class MigrationRunner {
         return "CREATE TABLE IF NOT EXISTS threadmill_schema_history ("
                 + "version INT PRIMARY KEY, "
                 + "description TEXT NOT NULL, "
+                + "checksum TEXT, "
                 + "applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW())";
     }
 
@@ -370,7 +418,7 @@ public final class MigrationRunner {
         }
     }
 
-    private record AppliedMigration(int version, String description) {}
+    private record AppliedMigration(int version, String description, String checksum) {}
 
     private record Migration(int version, String fileName, String description, String sql) {}
 

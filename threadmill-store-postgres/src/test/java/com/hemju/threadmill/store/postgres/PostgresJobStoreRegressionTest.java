@@ -378,7 +378,7 @@ class PostgresJobStoreRegressionTest {
         assertThat(sql).contains("BEGIN;").contains("COMMIT;");
         // The history INSERT lives inside a transaction block.
         int firstBegin = sql.indexOf("BEGIN;");
-        int firstInsert = sql.indexOf("INSERT INTO threadmill_schema_history (version, description) VALUES");
+        int firstInsert = sql.indexOf("INSERT INTO threadmill_schema_history");
         int firstCommitAfter = sql.indexOf("COMMIT;", firstInsert);
         assertThat(firstBegin).isLessThan(firstInsert);
         assertThat(firstInsert).isLessThan(firstCommitAfter);
@@ -452,6 +452,56 @@ class PostgresJobStoreRegressionTest {
     @Test
     void validationPassesAfterMigrate() {
         new MigrationRunner(dataSource).validate();
+    }
+
+    @Test
+    void migrateFailsFastWhenHistoryContainsAVersionThisBinaryDoesNotShip() throws SQLException {
+        // Simulate a binary downgrade: a newer binary applied a future version.
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute("INSERT INTO threadmill_schema_history (version, description, checksum) "
+                    + "VALUES (999, 'future', 'deadbeef')");
+        }
+        try {
+            assertThatThrownBy(() -> new MigrationRunner(dataSource).migrate())
+                    .isInstanceOf(MigrationRunner.MigrationException.class)
+                    .hasMessageContaining("999")
+                    .hasMessageContaining("newer");
+        } finally {
+            try (Connection conn = dataSource.getConnection();
+                    Statement st = conn.createStatement()) {
+                st.execute("DELETE FROM threadmill_schema_history WHERE version = 999");
+            }
+        }
+    }
+
+    @Test
+    void validateFailsWhenAnAppliedMigrationFileWasEditedInPlace() throws SQLException {
+        // Tamper with the stored checksum to mimic an edited migration file.
+        String original;
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT checksum FROM threadmill_schema_history WHERE version = 1")) {
+            rs.next();
+            original = rs.getString(1);
+            assertThat(original).isNotBlank();
+        }
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute("UPDATE threadmill_schema_history SET checksum = 'tampered' WHERE version = 1");
+        }
+        try {
+            assertThatThrownBy(() -> new MigrationRunner(dataSource).validate())
+                    .isInstanceOf(MigrationRunner.MigrationException.class)
+                    .hasMessageContaining("edited after it was applied");
+        } finally {
+            try (Connection conn = dataSource.getConnection();
+                    PreparedStatement ps = conn.prepareStatement(
+                            "UPDATE threadmill_schema_history SET checksum = ? WHERE version = 1")) {
+                ps.setString(1, original);
+                ps.executeUpdate();
+            }
+        }
     }
 
     @Test
