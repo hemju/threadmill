@@ -816,6 +816,87 @@ public abstract class AbstractJobStoreContractTest {
     }
 
     @Test
+    @DisplayName("a retried EXCLUSIVE workflow root reclaims under its own hold")
+    void workflowRootRetryAfterFailureCanReclaimUnderItsOwnHold() {
+        Job root = concurrentJob("com.example.Root", "project:42", ConcurrencyMode.EXCLUSIVE, 10, Instant.now());
+        store.insert(root);
+        Job child = Jobs.awaitingWorkflowStep("com.example.Child", root);
+        store.insert(child);
+        Job outsider = concurrentJob("com.example.Other", "project:42", ConcurrencyMode.EXCLUSIVE, -1, Instant.now());
+        store.insert(outsider);
+
+        Job claimedRoot =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        assertThat(claimedRoot.id()).isEqualTo(root.id());
+        finish(claimedRoot, JobState.FAILED);
+        retryToEnqueued(root.id());
+
+        // The retried root must be claimable again — its own AWAITING child
+        // is not "earlier pending work" — and the outsider stays blocked.
+        assertThat(store.claimReady(NodeId.newId(), "default", 2, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(root.id());
+        finish(store.findById(root.id()).orElseThrow(), JobState.SUCCEEDED);
+        promote(child.id());
+        assertThat(store.claimReady(NodeId.newId(), "default", 2, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(child.id());
+        finish(store.findById(child.id()).orElseThrow(), JobState.SUCCEEDED);
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(outsider.id());
+    }
+
+    @Test
+    @DisplayName("retry-resurrect of a workflow member does not double-release the hold")
+    void workflowMemberRetryDoesNotDoubleReleaseTheHold() {
+        Job root = concurrentJob("com.example.Root", "project:42", ConcurrencyMode.EXCLUSIVE, 10, Instant.now());
+        store.insert(root);
+        Job child1 = Jobs.awaitingWorkflowStep("com.example.Child1", root);
+        Job child2 = Jobs.awaitingWorkflowStep("com.example.Child2", root);
+        store.insert(child1);
+        store.insert(child2);
+        Job outsider = concurrentJob("com.example.Other", "project:42", ConcurrencyMode.EXCLUSIVE, -1, Instant.now());
+        store.insert(outsider);
+
+        Job claimedRoot =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        assertThat(claimedRoot.id()).isEqualTo(root.id());
+        finish(claimedRoot, JobState.FAILED);
+        retryToEnqueued(root.id());
+        assertThat(store.claimReady(NodeId.newId(), "default", 2, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(root.id());
+        finish(store.findById(root.id()).orElseThrow(), JobState.SUCCEEDED);
+
+        promote(child1.id());
+        promote(child2.id());
+        List<Job> children = store.claimReady(NodeId.newId(), "default", 2, Instant.now());
+        assertThat(children).extracting(Job::id).containsExactlyInAnyOrder(child1.id(), child2.id());
+        finish(children.get(0), JobState.SUCCEEDED);
+
+        // The retry must not have double-decremented the hold: with one
+        // child still PROCESSING the outsider cannot claim.
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .isEmpty();
+        finish(children.get(1), JobState.SUCCEEDED);
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(outsider.id());
+    }
+
+    /** The standard retry path: FAILED -> SCHEDULED -> ENQUEUED. */
+    private void retryToEnqueued(JobId id) {
+        Job failed = store.findById(id).orElseThrow();
+        long v = failed.version();
+        failed.transitionTo(JobState.SCHEDULED, Instant.now(), "engine.retry-after-failure", null);
+        failed.scheduleAt(Instant.now());
+        failed.clearOwner();
+        store.saveAtomic(failed, v);
+        promote(id);
+    }
+
+    @Test
     @DisplayName("workflow concurrency with branching releases only after all siblings terminate")
     void workflowConcurrencyWithBranchingReleasesAfterAllSiblingsTerminate() {
         Job root = concurrentJob("com.example.Root", "project:42", ConcurrencyMode.EXCLUSIVE, 10, Instant.now());

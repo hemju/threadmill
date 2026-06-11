@@ -394,7 +394,7 @@ public final class PostgresJobStore implements JobStore {
                         if (oldSnapshot.concurrencyKey() != null) {
                             lockConcurrencyGroup(conn, oldSnapshot.concurrencyKey());
                         }
-                        releaseWorkflowHoldIfTerminal(conn, oldSnapshot, snapshot.currentState());
+                        adjustWorkflowHoldOnTransition(conn, oldSnapshot, snapshot.currentState());
                         try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
                                 + "state = ?, queue = ?, priority = ?, handler_signature = ?, "
                                 + "scheduled_at = ?, owner_node_id = ?, owner_heartbeat_at = ?, last_checkin_at = ?, "
@@ -478,7 +478,7 @@ public final class PostgresJobStore implements JobStore {
                         JobSnapshot snapshot = withVersion(j, nextVersion);
                         String newBody = serializer.serializeJob(snapshot, capabilities);
                         Instant currentStateAt = lastTransitionTime(snapshot, JobState.DELETED);
-                        releaseWorkflowHoldIfTerminal(conn, oldSnapshot, JobState.DELETED);
+                        adjustWorkflowHoldOnTransition(conn, oldSnapshot, JobState.DELETED);
                         try (PreparedStatement ps = conn.prepareStatement(
                                 "UPDATE threadmill_jobs SET state = ?, version = ?, body = ?, current_state_at = ? "
                                         + "WHERE id = ?")) {
@@ -1824,9 +1824,29 @@ public final class PostgresJobStore implements JobStore {
         }
     }
 
-    private void releaseWorkflowHoldIfTerminal(Connection conn, JobSnapshot oldSnapshot, JobState newState)
+    private void adjustWorkflowHoldOnTransition(Connection conn, JobSnapshot oldSnapshot, JobState newState)
             throws SQLException {
-        if (oldSnapshot.concurrencyKey() == null || isTerminal(oldSnapshot.currentState()) || !isTerminal(newState)) {
+        if (oldSnapshot.concurrencyKey() == null) {
+            return;
+        }
+        if (isTerminal(oldSnapshot.currentState()) && !isTerminal(newState)) {
+            // Mirror branch for the terminal -> non-terminal resurrect — the
+            // standard retry path (FAILED -> SCHEDULED). Without it the job
+            // is decremented twice (once at FAILED, once at its eventual
+            // terminal state) and an EXCLUSIVE key can be released while a
+            // descendant still runs. Zero rows matched is fine: a standalone
+            // job whose hold was already fully released is re-registered at
+            // the next claim by acquireWorkflowHold.
+            try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_concurrency_workflow_holds "
+                    + "SET outstanding = outstanding + 1 "
+                    + "WHERE concurrency_key = ? AND workflow_root_id = ?")) {
+                ps.setString(1, oldSnapshot.concurrencyKey());
+                ps.setObject(2, oldSnapshot.workflowRootId().asUuid());
+                ps.executeUpdate();
+            }
+            return;
+        }
+        if (isTerminal(oldSnapshot.currentState()) || !isTerminal(newState)) {
             return;
         }
         int outstanding;

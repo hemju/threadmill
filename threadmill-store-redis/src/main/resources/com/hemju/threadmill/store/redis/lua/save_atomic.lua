@@ -155,6 +155,18 @@ if old_concurrency_key ~= '' and old_workflows_key ~= '' and old_counters_key ~=
     end
 end
 
+-- Mirror branch for the terminal -> non-terminal resurrect (the standard
+-- retry path FAILED -> SCHEDULED): re-register the member on the still-active
+-- hold, otherwise the job is decremented twice and an EXCLUSIVE key can be
+-- released while a descendant still runs. A missing hold entry is fine — a
+-- standalone job re-acquires it at the next claim.
+if old_concurrency_key ~= '' and old_workflows_key ~= '' and
+   is_terminal(old_state) and (not is_terminal(new_state)) then
+    if redis.call('HEXISTS', old_workflows_key, old_workflow_root_id) == 1 then
+        redis.call('HINCRBY', old_workflows_key, old_workflow_root_id, 1)
+    end
+end
+
 -- Rewrite the hash.
 redis.call('HSET', job_key,
     'body', new_body,
