@@ -49,8 +49,15 @@ public final class JobDefinitionMigrator {
                 migratedSpec = new JobSpec(
                         newHandlerType, migratedSpec.arguments(), migratedSpec.dedupKey(), migratedSpec.dedupTtl());
             }
-            if (store.replaceJob(job.id(), job.version(), JobReplacement.ofSpec(migratedSpec))) {
-                migrated++;
+            try {
+                if (store.replaceJob(job.id(), job.version(), JobReplacement.ofSpec(migratedSpec))) {
+                    migrated++;
+                }
+            } catch (StaleJobException raced) {
+                // A dispatcher claimed (or a retry rescheduled) this job between
+                // our snapshot and the rewrite. Skip it and continue — on a live
+                // system this is expected and must not abort the whole migration.
+                // The job is re-examined on the next migrator run.
             }
         }
         return migrated;

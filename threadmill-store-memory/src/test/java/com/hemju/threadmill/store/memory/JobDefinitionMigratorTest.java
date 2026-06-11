@@ -101,6 +101,38 @@ class JobDefinitionMigratorTest {
     }
 
     @Test
+    void concurrentClaimBetweenSnapshotAndRewriteIsSkippedNotFatal() {
+        // Two replaceable jobs; a concurrent claim bumps the first one's version
+        // between the migrator's snapshot and its rewrite, so replaceJob throws
+        // StaleJobException. The migrator must skip that job and still migrate the
+        // other, rather than aborting the whole batch.
+        insertWithState(JobState.ENQUEUED, OLD_HANDLER);
+        insertWithState(JobState.ENQUEUED, OLD_HANDLER);
+
+        var raced = new java.util.concurrent.atomic.AtomicBoolean(false);
+        var racingStore = new com.hemju.threadmill.test.ForwardingJobStore(store) {
+            @Override
+            public boolean replaceJob(JobId id, long expectedVersion, com.hemju.threadmill.core.JobReplacement r) {
+                if (raced.compareAndSet(false, true)) {
+                    // Simulate another node claiming this job first (bumps version).
+                    Job j = store.findById(id).orElseThrow();
+                    j.transitionTo(JobState.PROCESSING, Instant.now(), "test.concurrent-claim", null);
+                    j.assignOwner(NodeId.newId(), Instant.now());
+                    store.saveAtomic(j, expectedVersion);
+                }
+                return super.replaceJob(id, expectedVersion, r);
+            }
+        };
+
+        long migrated = new JobDefinitionMigrator(racingStore)
+                .migrateHandlerSignature(OLD_HANDLER, NEW_HANDLER, UnaryOperator.identity(), 100);
+
+        // One job was raced (skipped), the other migrated — no abort.
+        assertThat(migrated).isEqualTo(1L);
+        assertThat(store.findByHandlerSignature(NEW_HANDLER, 100)).hasSize(1);
+    }
+
+    @Test
     void newHandlerTypeOverridesAnythingTheSpecMigrationReturned() {
         JobId id = insertWithState(JobState.ENQUEUED, OLD_HANDLER);
 
