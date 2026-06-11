@@ -20,7 +20,13 @@ public interface RemoteWakeChannel extends AutoCloseable {
      */
     void start(Consumer<String> wakeSink);
 
-    /** Stop listening and release any owned resources. */
+    /**
+     * Stop listening and release any owned resources.
+     *
+     * <p>Implementations must be <strong>idempotent</strong>: lifecycle
+     * orchestration (Spring stop/destroy callbacks, user-owned bean
+     * destruction) can invoke {@code close()} more than once.
+     */
     @Override
     void close();
 }

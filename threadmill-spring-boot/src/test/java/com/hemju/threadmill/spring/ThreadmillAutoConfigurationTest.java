@@ -400,6 +400,33 @@ class ThreadmillAutoConfigurationTest {
     }
 
     @Test
+    void userProvidedWakeChannelIsClosedOnlyByItsOwnBeanDestruction() {
+        var channel = new RecordingRemoteWakeChannel();
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(ThreadmillAutoConfiguration.class))
+                .withBean(RemoteWakeChannel.class, () -> channel)
+                .withPropertyValues("threadmill.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(channel.closeCount.get()).isZero();
+                });
+        // The runner's context close destroys the user bean exactly once;
+        // historically Threadmill's wrapper destroy added extra closes on a
+        // bean it does not own.
+        assertThat(channel.closeCount.get()).isEqualTo(1);
+    }
+
+    @Test
+    void managedWakeChannelClosesExactlyOnceAcrossLifecycleAndDestroy() {
+        var channel = new RecordingRemoteWakeChannel();
+        var managed = ThreadmillRemoteWakeChannels.ofManaged(channel);
+        // SmartLifecycle stop and the inferred destroy method both call close().
+        managed.close();
+        managed.close();
+        assertThat(channel.closeCount.get()).isEqualTo(1);
+    }
+
+    @Test
     void remoteWakeLifecycleStartsListenerOnlyWhenNodeRuns() {
         var remote = new RecordingRemoteWakeChannel();
         new ApplicationContextRunner()
@@ -471,6 +498,7 @@ class ThreadmillAutoConfigurationTest {
         private final CopyOnWriteArrayList<String> published = new CopyOnWriteArrayList<>();
         private final CopyOnWriteArrayList<String> receivedBySink = new CopyOnWriteArrayList<>();
         private final AtomicInteger started = new AtomicInteger();
+        private final AtomicInteger closeCount = new AtomicInteger();
         private Consumer<String> wakeSink;
 
         @Override
@@ -488,7 +516,9 @@ class ThreadmillAutoConfigurationTest {
         }
 
         @Override
-        public void close() {}
+        public void close() {
+            closeCount.incrementAndGet();
+        }
     }
 
     private static CronTask testCronTask(String name) {

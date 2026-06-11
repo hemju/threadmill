@@ -163,14 +163,14 @@ public class ThreadmillAutoConfiguration {
         String channel = remoteWakeChannel(properties);
         if (concreteStore instanceof RedisJobStore
                 && properties.getStore().getRedis().isConfigured()) {
-            return ThreadmillRemoteWakeChannels.of(new RedisRemoteWakeChannel(
+            return ThreadmillRemoteWakeChannels.ofManaged(new RedisRemoteWakeChannel(
                     redisStoreConfig(properties.getStore().getRedis()), channel));
         }
         // Postgres-style stores expose their own native pub/sub channel via the
         // JobStore SPI hook — no postgres class reference is required here.
         return concreteStore
                 .createRemoteWakeChannel(channel)
-                .map(ThreadmillRemoteWakeChannels::of)
+                .map(ThreadmillRemoteWakeChannels::ofManaged)
                 .orElseGet(ThreadmillRemoteWakeChannels::none);
     }
 
