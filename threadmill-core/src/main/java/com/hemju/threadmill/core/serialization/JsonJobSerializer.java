@@ -62,6 +62,23 @@ public final class JsonJobSerializer implements JobSerializer {
      * Construct a serializer backed by a caller-supplied {@link ObjectMapper}.
      * Hosts use this to share the mapper they already configure for the
      * application, avoiding two competing Jackson configurations.
+     *
+     * <p><strong>Security — the supplied mapper must not enable polymorphic
+     * default typing</strong> ({@code activateDefaultTyping(...)}). Job
+     * arguments, metadata, and results are persisted data written by producers;
+     * with default typing on, a {@code @class}/{@code @type} discriminator
+     * embedded in that data drives instantiation of arbitrary nested types at
+     * deserialization time — the classic Jackson gadget-deserialization sink.
+     * Threadmill only constrains the outer argument type, not nested ones, so a
+     * mapper with default typing turns producer-controlled data into a code-
+     * execution surface on the worker. Pass a mapper with default typing
+     * disabled (the {@link #defaultMapper()} default), or a dedicated mapper.
+     *
+     * <p><strong>Forward compatibility.</strong> If the mapper has
+     * {@code FAIL_ON_UNKNOWN_PROPERTIES} enabled (Jackson's default), a payload
+     * written by a newer binary with an extra field fails to deserialize on an
+     * older binary (e.g. after a rollback) and quarantines. {@link #defaultMapper()}
+     * disables it; a shared host mapper should too.
      */
     public JsonJobSerializer(ObjectMapper mapper) {
         this(mapper, TypeNameAliases.empty(), PayloadMigrations.empty());
@@ -82,8 +99,23 @@ public final class JsonJobSerializer implements JobSerializer {
     public JsonJobSerializer(
             ObjectMapper mapper, TypeNameAliases typeNameAliases, PayloadMigrations payloadMigrations) {
         this.mapper = Objects.requireNonNull(mapper, "mapper");
+        rejectDefaultTyping(this.mapper);
         this.typeNameAliases = Objects.requireNonNull(typeNameAliases, "typeNameAliases");
         this.payloadMigrations = Objects.requireNonNull(payloadMigrations, "payloadMigrations");
+    }
+
+    /**
+     * Refuse a mapper with polymorphic default typing: job arguments/metadata are
+     * producer-controlled persisted data, and default typing makes nested-type
+     * instantiation attacker-driven (a gadget-deserialization sink).
+     */
+    private static void rejectDefaultTyping(ObjectMapper mapper) {
+        if (mapper.getDeserializationConfig().getDefaultTyper(null) != null) {
+            throw new IllegalArgumentException("The ObjectMapper passed to JsonJobSerializer must not enable "
+                    + "polymorphic default typing (activateDefaultTyping): job arguments are producer-controlled "
+                    + "data and default typing is a gadget-deserialization sink. Use a mapper with default typing "
+                    + "disabled (see JsonJobSerializer.defaultMapper()).");
+        }
     }
 
     public static ObjectMapper defaultMapper() {
