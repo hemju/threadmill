@@ -74,6 +74,7 @@ import com.hemju.threadmill.core.store.NodeHeartbeat;
  */
 public final class PostgresJobStore implements JobStore {
 
+    private static final org.slf4j.Logger LOG = org.slf4j.LoggerFactory.getLogger(PostgresJobStore.class);
     private static final String MAINTENANCE_LEASE = "maintenance";
 
     /** Threadmill requires PostgreSQL 18 or later. See {@link #requirePostgresEighteen}. */
@@ -584,7 +585,18 @@ public final class PostgresJobStore implements JobStore {
                                 Map<UUID, String> bodies = fetchBodies(conn, claimable);
                                 for (var p : claimable) {
                                     if (result.size() >= cap) break;
-                                    Job j = serializer.deserializeJob(bodies.get(p.id));
+                                    Job j;
+                                    try {
+                                        j = serializer.deserializeJob(bodies.get(p.id));
+                                    } catch (RuntimeException corrupt) {
+                                        // An undeserializable body (e.g. a wire form a rollback
+                                        // can't read, or external corruption) must not fail the
+                                        // whole claim and wedge the queue. Quarantine it via a
+                                        // body-independent scalar update so it leaves the
+                                        // ENQUEUED claim path, and continue with the rest.
+                                        quarantineUnreadable(conn, p.id, p.version, heartbeatAt);
+                                        continue;
+                                    }
                                     acquireWorkflowHold(conn, j.snapshot());
                                     j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
                                     j.assignOwner(nodeId, heartbeatAt);
@@ -717,6 +729,24 @@ public final class PostgresJobStore implements JobStore {
         } finally {
             idArray.free();
         }
+    }
+
+    /**
+     * Move an ENQUEUED job with an unreadable body out of the claim path via a
+     * scalar update — no body deserialize needed. Runs in the claim transaction;
+     * the counts trigger reconciles ENQUEUED → QUARANTINED.
+     */
+    private void quarantineUnreadable(Connection conn, UUID id, long version, Instant now) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE threadmill_jobs SET state = 'QUARANTINED', current_state_at = ?, version = ? "
+                        + "WHERE id = ? AND version = ? AND state = 'ENQUEUED'")) {
+            ps.setTimestamp(1, Timestamp.from(now));
+            ps.setLong(2, version + 1);
+            ps.setObject(3, id);
+            ps.setLong(4, version);
+            ps.executeUpdate();
+        }
+        LOG.warn("Quarantined job {} during claim: its persisted body could not be deserialized", id);
     }
 
     private void lockConcurrencyGroups(Connection conn, Set<String> keys) throws SQLException {

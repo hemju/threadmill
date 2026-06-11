@@ -103,6 +103,47 @@ class PostgresJobStoreRegressionTest {
     }
 
     @Test
+    void unreadableBodyAtTheQueueHeadDoesNotStallClaimsForGoodJobs() throws SQLException {
+        JobStore store = store();
+        // Built in order, so the UUIDv7 ids are creation-ordered and `head` sits
+        // at the queue head (ORDER BY priority DESC, id).
+        Job head = sampleOnDefault();
+        Job good1 = sampleOnDefault();
+        Job good2 = sampleOnDefault();
+        store.insert(head);
+        store.insert(good1);
+        store.insert(good2);
+
+        // Corrupt the head job's persisted body so deserialize fails.
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps =
+                        conn.prepareStatement("UPDATE threadmill_jobs SET body = '{not valid json' WHERE id = ?")) {
+            ps.setObject(1, head.id().asUuid());
+            ps.executeUpdate();
+        }
+
+        List<Job> claimed = store.claimReady(NodeId.newId(), "default", 3, Instant.now());
+        assertThat(claimed).extracting(Job::id).containsExactlyInAnyOrder(good1.id(), good2.id());
+
+        // The poison job is quarantined, not left ENQUEUED to wedge the queue.
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement("SELECT state FROM threadmill_jobs WHERE id = ?")) {
+            ps.setObject(1, head.id().asUuid());
+            try (ResultSet rs = ps.executeQuery()) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getString(1)).isEqualTo("QUARANTINED");
+            }
+        }
+    }
+
+    private static Job sampleOnDefault() {
+        return Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                .queue("default")
+                .build();
+    }
+
+    @Test
     void verifyWritableProbesTheDatabaseAndFailsWhileUnreachable() {
         // A trippable DataSource that throws on getConnection when "down".
         var down = new java.util.concurrent.atomic.AtomicBoolean(false);

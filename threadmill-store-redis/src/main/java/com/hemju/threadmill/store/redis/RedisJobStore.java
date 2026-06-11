@@ -863,7 +863,17 @@ public final class RedisJobStore implements JobStore {
                     String oldVersion = hash.get("version");
                     if (oldBody == null || oldVersion == null) continue;
                     long newVersion = Long.parseLong(oldVersion) + 1L;
-                    Job j = serializer.deserializeJob(oldBody);
+                    Job j;
+                    try {
+                        j = serializer.deserializeJob(oldBody);
+                    } catch (RuntimeException corrupt) {
+                        // An undeserializable body must not unwind the whole claim
+                        // (stranding earlier same-pass claims in PROCESSING) or
+                        // wedge the queue. Quarantine it (no body deserialize) and
+                        // continue with the rest of the candidates.
+                        quarantineUnreadable(r, id, queue, oldVersion, heartbeatAt);
+                        continue;
+                    }
                     String lockKey = j.concurrencyKey()
                             .map(RedisKeys::concurrencyClaimLock)
                             .orElse(null);
@@ -1800,6 +1810,40 @@ public final class RedisJobStore implements JobStore {
 
     private static List<String> claimLockKeys(List<ClaimLock> locks) {
         return locks.stream().map(ClaimLock::key).toList();
+    }
+
+    /**
+     * Move an ENQUEUED job with an unreadable body out of the claim path without
+     * deserializing it: flip the hash state to QUARANTINED, drop it from the queue
+     * and ENQUEUED indexes, add it to the QUARANTINED index, and fix the counts —
+     * all atomically. Version-guarded so a concurrent change is a no-op.
+     */
+    private void quarantineUnreadable(
+            RedisClusterCommands<String, String> r, JobId id, String queue, String expectedVersion, Instant now) {
+        evalScript(
+                """
+                if redis.call('HGET', KEYS[1], 'state') ~= 'ENQUEUED' then return 0 end
+                if redis.call('HGET', KEYS[1], 'version') ~= ARGV[3] then return 0 end
+                redis.call('HSET', KEYS[1], 'state', 'QUARANTINED', 'current_state_at', ARGV[2],
+                  'version', tostring(tonumber(ARGV[3]) + 1))
+                redis.call('ZREM', KEYS[2], ARGV[1])
+                redis.call('ZREM', KEYS[3], ARGV[1])
+                redis.call('ZADD', KEYS[4], tonumber(ARGV[2]), ARGV[1])
+                redis.call('HINCRBY', KEYS[5], 'ENQUEUED', -1)
+                redis.call('HINCRBY', KEYS[5], 'QUARANTINED', 1)
+                return 1
+                """,
+                ScriptOutputType.INTEGER,
+                new String[] {
+                    RedisKeys.job(id),
+                    RedisKeys.queue(queue),
+                    RedisKeys.byStateTime(JobState.ENQUEUED),
+                    RedisKeys.byStateTime(JobState.QUARANTINED),
+                    RedisKeys.COUNTS
+                },
+                id.toString(),
+                Long.toString(now.toEpochMilli()),
+                expectedVersion);
     }
 
     private List<ClaimLock> acquireClaimLocks(RedisClusterCommands<String, String> r, List<String> keys) {

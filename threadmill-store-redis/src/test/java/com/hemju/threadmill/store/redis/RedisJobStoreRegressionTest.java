@@ -657,6 +657,31 @@ class RedisJobStoreRegressionTest {
     }
 
     @Test
+    void unreadableBodyAtTheQueueHeadDoesNotStallClaimsOrStrandEarlierCandidates() {
+        JobStore store = store();
+        Job head = sample();
+        Job good1 = sample();
+        Job good2 = sample();
+        store.insert(head);
+        store.insert(good1);
+        store.insert(good2);
+
+        // Corrupt the head job's body so deserialize fails during the claim pass.
+        RedisCommands<String, String> r = adminConnection.sync();
+        r.hset(RedisKeys.job(head.id()), "body", "{not valid json");
+
+        List<Job> claimed = store.claimReady(NodeId.newId(), "default", 3, Instant.now());
+
+        // The good jobs are claimed; the poison job did not wedge the pass.
+        assertThat(claimed)
+                .extracting(j -> j.id().toString())
+                .containsExactlyInAnyOrder(good1.id().toString(), good2.id().toString());
+        // The poison job is quarantined and out of the queue index.
+        assertThat(r.hget(RedisKeys.job(head.id()), "state")).isEqualTo("QUARANTINED");
+        assertThat(r.zscore(RedisKeys.queue("default"), head.id().toString())).isNull();
+    }
+
+    @Test
     void findDueForPromotionSelfHealsDanglingIdsAndStillReturnsDueJobs() {
         JobStore store = store();
         Job scheduled = Job.builder()
