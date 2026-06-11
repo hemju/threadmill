@@ -1278,19 +1278,22 @@ public final class PostgresJobStore implements JobStore {
         Names.requireName("mutex", name);
         Objects.requireNonNull(holder, "holder");
         Mutexes.requirePositive(leaseDuration);
-        var now = Instant.now();
-        Instant expires = now.plus(leaseDuration);
         try {
             return DeadlockRetry.run(() -> {
+                // Lease expiry uses server-side time (clock_timestamp()) for
+                // both write and compare, like the maintenance lease: a node
+                // whose clock runs ahead must not be able to steal a mutex
+                // whose lease is unexpired by server time.
                 try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps = conn.prepareStatement(
-                                "INSERT INTO threadmill_mutexes (name, holder, expires_at) VALUES (?, ?, ?) "
-                                        + "ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at "
-                                        + "WHERE threadmill_mutexes.expires_at <= ? OR threadmill_mutexes.holder = EXCLUDED.holder")) {
+                        PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_mutexes "
+                                + "(name, holder, expires_at) "
+                                + "VALUES (?, ?, clock_timestamp() + (? * interval '1 millisecond')) "
+                                + "ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at "
+                                + "WHERE threadmill_mutexes.expires_at <= clock_timestamp() "
+                                + "OR threadmill_mutexes.holder = EXCLUDED.holder")) {
                     ps.setString(1, name);
                     ps.setString(2, holder);
-                    ps.setTimestamp(3, Timestamp.from(expires));
-                    ps.setTimestamp(4, Timestamp.from(now));
+                    ps.setLong(3, leaseDuration.toMillis());
                     return ps.executeUpdate() > 0;
                 }
             });
