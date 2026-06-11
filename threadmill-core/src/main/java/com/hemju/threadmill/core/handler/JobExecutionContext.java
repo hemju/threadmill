@@ -19,8 +19,12 @@ import com.hemju.threadmill.core.NodeId;
  * and otherwise gives the handler read-only access to identity and timing.
  *
  * <p>Per-execution propagation (job id, attempt number, MDC) is implemented
- * with {@code ScopedValue} (final in Java 25), not {@code ThreadLocal}, so
- * it survives across virtual threads spawned by handler code.
+ * with {@code ScopedValue} (final in Java 25), not {@code ThreadLocal}. A
+ * {@code ScopedValue} binding is inherited only by structured-concurrency forks
+ * (a {@code StructuredTaskScope} opened inside the handler); it is <strong>not</strong>
+ * inherited by virtual threads the handler spawns directly (e.g. via an executor
+ * or {@code Thread.ofVirtual().start(...)}). To carry the context across such a
+ * boundary, wrap the work with {@code EngineScopedValues.capturing(...)}.
  */
 public interface JobExecutionContext {
 

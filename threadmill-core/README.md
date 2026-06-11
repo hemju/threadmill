@@ -52,7 +52,10 @@ are load-bearing — see `AGENTS.md` §6.
    "a job failed" is expressed. Exceptions, per-job timeouts, orphan reclaim,
    and quarantine all flow through it.
 5. **Scoped values, not `ThreadLocal`.** `EngineScopedValues.CURRENT` is bound
-   around `handler.run(...)`; virtual threads the handler spawns inherit it.
+   around `handler.run(...)`. The binding is inherited by structured-concurrency
+   forks (a `StructuredTaskScope` opened in the handler), but **not** by virtual
+   threads the handler spawns directly via an executor — use
+   `EngineScopedValues.capturing(...)` to carry it across that boundary.
 
 ## Virtual threads
 
