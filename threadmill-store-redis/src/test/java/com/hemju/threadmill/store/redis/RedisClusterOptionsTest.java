@@ -16,6 +16,17 @@ import org.junit.jupiter.api.Test;
 class RedisClusterOptionsTest {
 
     @Test
+    @DisplayName("standalone and cluster options apply a bounded command timeout")
+    void optionsApplyABoundedCommandTimeout() {
+        assertThat(RedisClusterOptions.standaloneOptions().getTimeoutOptions().isTimeoutCommands())
+                .isTrue();
+        assertThat(RedisClusterOptions.topologyRefreshing().getTimeoutOptions().isTimeoutCommands())
+                .isTrue();
+        // Commands must not be able to outlive the 30s per-key claim lock.
+        assertThat(RedisClusterOptions.COMMAND_TIMEOUT).isLessThanOrEqualTo(Duration.ofSeconds(30));
+    }
+
+    @Test
     @DisplayName("cluster options enable periodic refresh and all adaptive triggers")
     void clusterOptionsEnablePeriodicAndAdaptiveRefresh() {
         var options = RedisClusterOptions.topologyRefreshing();

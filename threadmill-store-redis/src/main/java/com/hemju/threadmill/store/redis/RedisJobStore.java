@@ -118,7 +118,7 @@ public final class RedisJobStore implements JobStore {
 
     public RedisJobStore(RedisURI uri) {
         this(
-                connectStandalone(RedisClient.create(uri)),
+                connectStandalone(internalStandaloneClient(uri)),
                 new JsonJobSerializer(),
                 defaultCapabilities(),
                 true,
@@ -168,7 +168,8 @@ public final class RedisJobStore implements JobStore {
     private static ConnectionHandle connect(RedisStoreConfig config) {
         Objects.requireNonNull(config, "config");
         return switch (config) {
-            case RedisStoreConfig.Standalone standalone -> connectStandalone(RedisClient.create(standalone.uri()));
+            case RedisStoreConfig.Standalone standalone ->
+                connectStandalone(internalStandaloneClient(standalone.uri()));
             case RedisStoreConfig.Sentinel sentinel -> connectSentinel(sentinel);
             case RedisStoreConfig.Cluster cluster -> connectCluster(cluster);
         };
@@ -189,7 +190,17 @@ public final class RedisJobStore implements JobStore {
         if (config.password() != null && !config.password().isBlank()) {
             builder.withPassword(config.password().toCharArray());
         }
-        return connectStandalone(RedisClient.create(builder.build()));
+        return connectStandalone(internalStandaloneClient(builder.build()));
+    }
+
+    /**
+     * A standalone/sentinel client we own, configured with the bounded command
+     * timeout. Client-injected constructors keep the caller's own options.
+     */
+    private static RedisClient internalStandaloneClient(RedisURI uri) {
+        RedisClient client = RedisClient.create(uri);
+        client.setOptions(RedisClusterOptions.standaloneOptions());
+        return client;
     }
 
     private static ConnectionHandle connectCluster(RedisStoreConfig.Cluster config) {
