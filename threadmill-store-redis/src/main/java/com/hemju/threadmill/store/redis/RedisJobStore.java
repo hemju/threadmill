@@ -1044,11 +1044,25 @@ public final class RedisJobStore implements JobStore {
     public List<Job> findDueForPromotion(Instant now, int max) {
         Objects.requireNonNull(now, "now");
         if (max <= 0) return List.of();
-        List<String> ids = sync().zrangebyscore(
-                        RedisKeys.SCHEDULED,
-                        Range.create(Double.NEGATIVE_INFINITY, (double) now.toEpochMilli()),
-                        Limit.create(0, max));
-        return loadJobs(ids);
+        RedisClusterCommands<String, String> r = sync();
+        List<String> ids = r.zrangebyscore(
+                RedisKeys.SCHEDULED,
+                Range.create(Double.NEGATIVE_INFINITY, (double) now.toEpochMilli()),
+                Limit.create(0, max));
+        if (ids == null || ids.isEmpty()) return List.of();
+        List<Job> out = new ArrayList<>(ids.size());
+        for (String idStr : ids) {
+            String body = r.hget(RedisKeys.PREFIX + "job:" + idStr, "body");
+            if (body != null) {
+                out.add(serializer.deserializeJob(body));
+            } else {
+                // Self-heal a dangling id (no job hash) so it does not occupy a
+                // unit of the bounded promotion budget every maintenance tick —
+                // the same self-heal findOrphaned applies to the PROCESSING index.
+                r.zrem(RedisKeys.SCHEDULED, idStr);
+            }
+        }
+        return out;
     }
 
     @Override

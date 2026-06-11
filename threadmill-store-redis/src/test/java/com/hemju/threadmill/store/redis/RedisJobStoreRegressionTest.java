@@ -657,6 +657,33 @@ class RedisJobStoreRegressionTest {
     }
 
     @Test
+    void findDueForPromotionSelfHealsDanglingIdsAndStillReturnsDueJobs() {
+        JobStore store = store();
+        Job scheduled = Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                .initialState(JobState.SCHEDULED)
+                .scheduledFor(Instant.now().minusSeconds(1))
+                .createdAt(Instant.now().minusSeconds(1))
+                .build();
+        store.insert(scheduled);
+
+        // Seed a dangling id (no job hash) at the bottom of the due window, as a
+        // partial deletion would leave behind.
+        RedisCommands<String, String> r = adminConnection.sync();
+        String dangling = JobId.newId().toString();
+        r.zadd(RedisKeys.SCHEDULED, 1.0, dangling);
+
+        List<Job> due = store.findDueForPromotion(Instant.now(), 100);
+
+        assertThat(due)
+                .extracting(j -> j.id().toString())
+                .containsExactly(scheduled.id().toString());
+        // The dangling id is healed out of the SCHEDULED index, not left to
+        // consume a unit of the promotion budget every tick.
+        assertThat(r.zscore(RedisKeys.SCHEDULED, dangling)).isNull();
+    }
+
+    @Test
     void findOrphanedSelfHealsDanglingIdsAndStillReturnsRealOrphans() {
         JobStore store = store();
         var node = NodeId.newId();
