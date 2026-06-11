@@ -60,6 +60,25 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
         this(connectStandalone(Objects.requireNonNull(client, "client"), channel), false);
     }
 
+    /**
+     * Create a channel that shares an existing client (standalone, sentinel,
+     * or cluster) without owning it: closing the channel closes only the two
+     * connections it opened. Used by {@code RedisJobStore}'s
+     * {@code createRemoteWakeChannel} SPI hook so the store's own client
+     * carries the wake traffic.
+     */
+    static RedisRemoteWakeChannel forClient(AbstractRedisClient client, String channel) {
+        Objects.requireNonNull(client, "client");
+        return switch (client) {
+            case RedisClient standalone -> new RedisRemoteWakeChannel(connectStandalone(standalone, channel), false);
+            case RedisClusterClient cluster ->
+                new RedisRemoteWakeChannel(connectClusterClient(cluster, channel), false);
+            default ->
+                throw new IllegalArgumentException(
+                        "Unsupported Redis client type: " + client.getClass().getName());
+        };
+    }
+
     private RedisRemoteWakeChannel(ConnectionHandle handle, boolean ownsClient) {
         this.client = handle.client();
         this.commandConnection = handle.commandConnection();
@@ -209,11 +228,21 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     }
 
     private static ConnectionHandle connectCluster(RedisStoreConfig.Cluster config, String channel) {
-        String wakeChannel = normalizeChannel(channel);
         var uris = config.nodes().stream()
                 .map(node -> RedisURI.Builder.redis(node.host(), node.port()).build())
                 .toList();
         RedisClusterClient client = RedisClusterClient.create(uris);
+        try {
+            return connectClusterClient(client, channel);
+        } catch (RuntimeException connectFailure) {
+            // The cluster client is always created (owned) here.
+            client.shutdown();
+            throw connectFailure;
+        }
+    }
+
+    private static ConnectionHandle connectClusterClient(RedisClusterClient client, String channel) {
+        String wakeChannel = normalizeChannel(channel);
         StatefulRedisClusterConnection<String, String> commandConnection = client.connect();
         StatefulRedisClusterPubSubConnection<String, String> pubSubConnection;
         try {
@@ -224,8 +253,6 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
             } catch (RuntimeException closeFailure) {
                 pubSubFailure.addSuppressed(closeFailure);
             }
-            // The cluster client is always created (owned) here.
-            client.shutdown();
             throw pubSubFailure;
         }
         pubSubConnection.setNodeMessagePropagation(true);

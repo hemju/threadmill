@@ -81,4 +81,36 @@ class RedisRemoteWakeChannelTest {
             listener.close();
         }
     }
+
+    @Test
+    void storeCreatedChannelDeliversWakesAndLeavesTheStoreUsable() throws Exception {
+        // Pins the JobStore SPI hook: RedisJobStore.createRemoteWakeChannel
+        // must return a real Pub/Sub channel (the Javadoc names it), and
+        // closing that channel must not shut down the store's shared client.
+        var store = new RedisJobStore(uri);
+        try {
+            var listener = store.createRemoteWakeChannel(null).orElseThrow();
+            var publisher = store.createRemoteWakeChannel(null).orElseThrow();
+            var received = new CountDownLatch(1);
+            try {
+                listener.start(queue -> {
+                    if ("critical".equals(queue)) {
+                        received.countDown();
+                    }
+                });
+                Thread.sleep(200);
+
+                publisher.publish("critical");
+
+                assertThat(received.await(5, TimeUnit.SECONDS)).isTrue();
+            } finally {
+                publisher.close();
+                listener.close();
+            }
+            // The store's own client must survive the channel close.
+            assertThat(store.countsByState()).isNotNull();
+        } finally {
+            store.close();
+        }
+    }
 }

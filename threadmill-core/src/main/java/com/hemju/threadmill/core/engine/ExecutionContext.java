@@ -26,9 +26,11 @@ import com.hemju.threadmill.core.store.JobStore;
  * job's identity, the owning node, the attempt number, the start time, and
  * the user-touchable surfaces (log, progress, metadata, result).
  *
- * <p>This is published to handler code via {@link EngineScopedValues} so
- * code running on a virtual thread the handler spawns can still resolve
- * the current job's id and attempt.
+ * <p>This is published to handler code via {@link EngineScopedValues}.
+ * Threads forked through a {@code StructuredTaskScope} inherit the binding;
+ * plain virtual threads and executor tasks do not — wrap those with
+ * {@link EngineScopedValues#capturing(Runnable)} so spawned code can still
+ * resolve the current job's id and attempt.
  */
 public final class ExecutionContext implements JobExecutionContext {
 

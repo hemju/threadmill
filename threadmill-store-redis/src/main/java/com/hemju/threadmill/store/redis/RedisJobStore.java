@@ -49,6 +49,7 @@ import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.StoreCapacityExceededException;
+import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
@@ -267,6 +268,17 @@ public final class RedisJobStore implements JobStore {
     @Override
     public String describe() {
         return "Redis " + topologyDescription;
+    }
+
+    /**
+     * Redis has a native notification path: Pub/Sub on the engine's wake
+     * channel. The returned channel shares this store's client (separate
+     * command and pub/sub connections); closing the channel closes only
+     * those connections, never the client.
+     */
+    @Override
+    public Optional<RemoteWakeChannel> createRemoteWakeChannel(String channelName) {
+        return Optional.of(RedisRemoteWakeChannel.forClient(client, channelName));
     }
 
     /** Delete every Redis key in Threadmill's namespace. Intended for disposable environments. */

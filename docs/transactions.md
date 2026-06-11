@@ -110,6 +110,16 @@ monitor for the `after-commit enqueue failed` log line, or use
 `join_transaction` (Postgres) when the enqueue must be exactly as durable as
 the business rows.
 
+**`enqueueIfAbsent(...)` is the exception: it is always immediate in this
+mode.** Its synchronous `EnqueueResult` (Created vs Coalesced) cannot be
+deferred to `afterCommit` without changing the API, so the dedup record and
+the job row are written when the method is called — and they **survive a
+rollback** of the surrounding business transaction. A DEBUG log line is
+emitted when `enqueueIfAbsent` runs inside an active transaction. If the
+deduplicated enqueue must roll back with the caller, use
+`join_transaction` (Postgres) — there the dedup write shares the caller's
+JDBC transaction — or restructure to a plain `enqueue()` after commit.
+
 ### `join_transaction`
 
 Postgres + Spring can make scheduling part of the caller's SQL transaction:

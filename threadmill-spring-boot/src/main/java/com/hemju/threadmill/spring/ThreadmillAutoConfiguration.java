@@ -32,7 +32,6 @@ import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 import com.hemju.threadmill.store.redis.RedisJobStore;
-import com.hemju.threadmill.store.redis.RedisRemoteWakeChannel;
 import com.hemju.threadmill.store.redis.RedisStoreConfig;
 
 /**
@@ -161,13 +160,10 @@ public class ThreadmillAutoConfiguration {
         }
         JobStore concreteStore = unwrapStore(store);
         String channel = remoteWakeChannel(properties);
-        if (concreteStore instanceof RedisJobStore
-                && properties.getStore().getRedis().isConfigured()) {
-            return ThreadmillRemoteWakeChannels.ofManaged(new RedisRemoteWakeChannel(
-                    redisStoreConfig(properties.getStore().getRedis()), channel));
-        }
-        // Postgres-style stores expose their own native pub/sub channel via the
-        // JobStore SPI hook — no postgres class reference is required here.
+        // Every store with a native notification path (Postgres LISTEN/NOTIFY,
+        // Redis Pub/Sub) exposes it through the JobStore SPI hook — no
+        // concrete store class references are required here, and user-defined
+        // store beans get the same wiring as property-configured ones.
         return concreteStore
                 .createRemoteWakeChannel(channel)
                 .map(ThreadmillRemoteWakeChannels::ofManaged)

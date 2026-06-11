@@ -41,6 +41,15 @@ import com.hemju.threadmill.core.store.JobStore;
  *       row exists. Callers depending on {@code findById(id)} succeeding
  *       immediately after {@code enqueue()} returns should use
  *       {@code threadmill.spring.enqueue-mode=immediate}.</li>
+ *   <li>{@link #enqueueIfAbsent(Class, JobPayload, String, Duration)} is the
+ *       exception: it is <strong>always immediate</strong>, even inside an
+ *       active transaction. Its synchronous {@code EnqueueResult} (Created
+ *       vs Coalesced) cannot be deferred, so the dedup record and the job
+ *       row are written when the method is called and <em>survive a
+ *       rollback</em> of the surrounding business transaction. If the
+ *       enqueue must roll back with the caller, use
+ *       {@code threadmill.spring.enqueue-mode=join_transaction} (Postgres)
+ *       or a plain {@code enqueue()} without dedup.</li>
  * </ul>
  *
  * <p>Recurring tasks defined through {@link #enqueueRecurring(Class, JobPayload, String)}
@@ -144,6 +153,12 @@ public final class TransactionAwareJobScheduler extends JobScheduler {
         // synchronously — we cannot defer it without changing the API. So
         // dedup writes are always immediate. Use a plain enqueue path if
         // after-commit semantics matter more than dedup.
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            LOG.debug(
+                    "enqueueIfAbsent(dedupKey={}) called inside an active transaction: the dedup write is "
+                            + "immediate and will survive a rollback of the surrounding transaction",
+                    dedupKey);
+        }
         return super.enqueueIfAbsent(handler, payload, dedupKey, ttl);
     }
 
