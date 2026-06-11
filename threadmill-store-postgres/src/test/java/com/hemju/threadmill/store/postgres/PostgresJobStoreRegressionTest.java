@@ -215,6 +215,34 @@ class PostgresJobStoreRegressionTest {
     }
 
     @Test
+    void emitPendingSqlOnAFreshDatabaseIsReadOnlyAndPrependsHistoryDdl() throws SQLException {
+        dropSchemaObjects();
+
+        String sql = new MigrationRunner(dataSource).emitPendingSql();
+
+        // The inspect-only API must not execute DDL: no history table (or any
+        // other Threadmill table) may exist afterwards...
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT to_regclass('threadmill_schema_history')")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getString(1)).isNull();
+        }
+        // ...and the emitted SQL must carry the history-table DDL itself plus
+        // every shipped migration, so an external apply works on a clean DB.
+        assertThat(sql).contains("threadmill_schema_history").contains("V1__baseline.sql");
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute(sql);
+            try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getInt(1)).isEqualTo(1);
+            }
+        }
+        new MigrationRunner(dataSource).validate();
+    }
+
+    @Test
     void emittedMigrationSqlAppliesToACleanSchema() throws SQLException {
         try (Connection conn = dataSource.getConnection();
                 Statement st = conn.createStatement()) {

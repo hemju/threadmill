@@ -83,22 +83,28 @@ public final class MigrationRunner {
         }
     }
 
-    /** Return the SQL for migrations that have not yet been applied. */
+    /**
+     * Return the SQL for migrations that have not yet been applied.
+     *
+     * <p>Strictly read-only: this is the inspect-and-apply-externally API, so
+     * it must work for roles without DDL rights and leave the database
+     * untouched. If the history table does not exist yet, its DDL is
+     * <em>prepended to the emitted SQL</em> (never executed) and every
+     * shipped migration is treated as pending.
+     */
     public String emitPendingSql() {
         try (Connection conn = dataSource.getConnection()) {
-            ensureHistoryTable(conn);
-            List<Integer> applied = readApplied(conn);
             var sb = new StringBuilder();
+            List<Integer> applied;
+            if (historyTableExists(conn)) {
+                applied = readApplied(conn);
+            } else {
+                appendHistoryTableSql(sb);
+                applied = List.of();
+            }
             for (Migration m : loadAll()) {
                 if (applied.contains(m.version())) continue;
-                sb.append("-- ").append(m.fileName()).append(System.lineSeparator());
-                sb.append(m.sql()).append(System.lineSeparator());
-                sb.append("INSERT INTO threadmill_schema_history (version, description) VALUES (")
-                        .append(m.version())
-                        .append(", '")
-                        .append(m.description().replace("'", "''"))
-                        .append("');")
-                        .append(System.lineSeparator());
+                appendMigrationSql(sb, m);
             }
             return sb.toString();
         } catch (SQLException e) {

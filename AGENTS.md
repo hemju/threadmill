@@ -426,6 +426,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Retried EXCLUSIVE workflow root deadlocks against its own AWAITING children (in-memory hold inference) | `InMemoryJobStoreConcurrencyTest.retriedExclusiveWorkflowRootCanReclaimUnderItsOwnHold` |
 | In-memory priority comparator overflow, zombie execution updates, insertAll phantom visibility, mutex map growth | `InMemoryJobStoreHardeningTest.integerMinValuePrioritySortsLastLikeTheRelationalBackends` + `zombieExecutionUpdateFromAPreviousAttemptIsRejected` + `insertAllWithDuplicateIdsRejectsTheBatchWithoutPhantomVisibility` + `insertAllDuplicateOfAnExistingJobLeavesTheStoreUntouched` |
 | Workflow hold double-decrements on retry resurrect (EXCLUSIVE key released while a descendant runs) | `AbstractJobStoreContractTest.workflowRootRetryAfterFailureCanReclaimUnderItsOwnHold` + `workflowMemberRetryDoesNotDoubleReleaseTheHold` |
+| `emitPendingSql` executes DDL despite being the inspect-only API | `PostgresJobStoreRegressionTest.emitPendingSqlOnAFreshDatabaseIsReadOnlyAndPrependsHistoryDdl` |
 
 ### Postgres-layer improvements (engagement notes)
 
