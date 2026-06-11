@@ -3,9 +3,9 @@ package com.hemju.threadmill.core.engine;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -65,13 +65,20 @@ public final class JobRunner {
         this.interceptors = Objects.requireNonNull(interceptors, "interceptors");
         this.config = Objects.requireNonNull(config, "config");
         this.jobTimeout = config.jobTimeout();
-        this.timeoutExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = Thread.ofPlatform()
-                    .name("threadmill-timeout-watchdog")
-                    .daemon(true)
-                    .unstarted(r);
-            return t;
-        });
+        // ScheduledThreadPoolExecutor directly (not Executors.newSingleThreadScheduledExecutor)
+        // so removeOnCancelPolicy can be enabled: every completed job cancels a
+        // watchdog whose initial delay is up to jobTimeout/noProgressTimeout. With
+        // the default policy=false a cancelled-but-not-yet-due task lingers in the
+        // delay queue for that whole window, retaining the captured ctx -> Job
+        // graph; at high throughput that is a large, mysterious heap plateau.
+        var executor = new ScheduledThreadPoolExecutor(
+                1,
+                r -> Thread.ofPlatform()
+                        .name("threadmill-timeout-watchdog")
+                        .daemon(true)
+                        .unstarted(r));
+        executor.setRemoveOnCancelPolicy(true);
+        this.timeoutExecutor = executor;
     }
 
     /** Stops the timeout watchdog. Intended for engine shutdown. */
