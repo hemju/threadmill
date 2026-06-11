@@ -1874,8 +1874,16 @@ public final class RedisJobStore implements JobStore {
 
     private static double activeScoreFor(JobSnapshot s, Instant stateAt) {
         return switch (s.currentState()) {
-            case ENQUEUED ->
-                RedisKeys.queueScore(s.priority(), stateAt.getEpochSecond() * 1_000_000L + stateAt.getNano() / 1_000L);
+            // Order the per-queue ENQUEUED ZSET by CREATION time, not the
+            // (re-)enqueue transition time, so a retried or scheduled-then-
+            // promoted job keeps its original queue position — matching the
+            // relational backends' `ORDER BY priority DESC, id` (UUIDv7 ids are
+            // creation-ordered). This also makes ordersByCreationTime honest.
+            case ENQUEUED -> {
+                Instant order = s.createdAt() != null ? s.createdAt() : stateAt;
+                yield RedisKeys.queueScore(
+                        s.priority(), order.getEpochSecond() * 1_000_000L + order.getNano() / 1_000L);
+            }
             case SCHEDULED ->
                 s.scheduledFor() == null
                         ? stateAt.toEpochMilli()

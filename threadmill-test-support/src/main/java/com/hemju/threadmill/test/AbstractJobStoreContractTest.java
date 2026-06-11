@@ -459,6 +459,30 @@ public abstract class AbstractJobStoreContractTest {
     }
 
     @Test
+    @DisplayName("a retried job re-enters the queue at its original creation-time position")
+    void retriedJobReentersTheQueueAtTheSamePositionOnEveryBackend() {
+        var base = Instant.now().minusSeconds(5);
+        // Same priority; a is created before b.
+        Job a = concurrentJob("com.example.H", null, null, 0, base);
+        Job b = concurrentJob("com.example.H", null, null, 0, base.plusMillis(1));
+        store.insert(a);
+        store.insert(b);
+
+        // a is claimed first (earliest creation), fails, and is re-enqueued.
+        Job claimedA =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        assertThat(claimedA.id()).isEqualTo(a.id());
+        finish(claimedA, JobState.FAILED);
+        retryToEnqueued(a.id());
+
+        // a re-entered ENQUEUED later in wall-clock time but must keep its place
+        // ahead of b by creation order on every backend.
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(a.id());
+    }
+
+    @Test
     @DisplayName("EXCLUSIVE jobs with the same concurrency key serialize")
     void exclusiveJobsWithSameConcurrencyKeySerialize() {
         store.insert(Jobs.withConcurrency("com.example.Import", "project:42", ConcurrencyMode.EXCLUSIVE));
