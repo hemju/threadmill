@@ -104,6 +104,16 @@ public final class ProcessingNode implements AutoCloseable {
         return nodeId;
     }
 
+    /**
+     * Whether {@link #close()} has been called. A closed node is not
+     * restartable — {@link #start()} on it is a silent no-op — so callers that
+     * manage a lifecycle must check this rather than assume start() resumes a
+     * stopped node.
+     */
+    public boolean isStopped() {
+        return stopped.get();
+    }
+
     public ProcessingNodeConfig config() {
         return config;
     }

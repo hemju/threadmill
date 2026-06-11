@@ -1,6 +1,7 @@
 package com.hemju.threadmill.spring;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -39,6 +40,25 @@ class ThreadmillLifecycleBannerTest {
         assertThat(banner).contains("Polling      : poll=");
         assertThat(banner).contains("Maintenance  : poll=");
         assertThat(banner).contains("Master lease : ");
+    }
+
+    @Test
+    void restartAfterStopFailsLoudlyInsteadOfClaimingStarted() {
+        var store = new InMemoryJobStore();
+        node = ProcessingNode.builder(store).build();
+        var lifecycle = new ThreadmillLifecycle(node);
+
+        lifecycle.start();
+        assertThat(lifecycle.isRunning()).isTrue();
+        lifecycle.stop();
+        assertThat(lifecycle.isRunning()).isFalse();
+
+        // A ProcessingNode cannot restart in place; the lifecycle must fail
+        // loudly rather than log a "started" banner over a dead engine.
+        assertThatThrownBy(lifecycle::start)
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("cannot be restarted");
+        assertThat(lifecycle.isRunning()).isFalse();
     }
 
     @Test

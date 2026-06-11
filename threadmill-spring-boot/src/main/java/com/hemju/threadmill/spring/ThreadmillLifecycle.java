@@ -48,6 +48,19 @@ public final class ThreadmillLifecycle implements SmartLifecycle {
     @Override
     public void start() {
         if (running) return;
+        // A ProcessingNode is not restartable: once close()d, start() is a silent
+        // no-op. Re-running this lifecycle after a stop (e.g. actuator /pause then
+        // /resume, which does context stop()/start()) would log a "started"
+        // banner over a permanently dead engine — a silent total processing
+        // outage. Fail loudly instead. Because this lifecycle's phase is below
+        // the remote-wake lifecycle's, throwing here also prevents that bean from
+        // re-subscribing (and leaking) its listener on the same broken restart.
+        if (node.isStopped()) {
+            throw new IllegalStateException("Threadmill ProcessingNode " + node.nodeId()
+                    + " has been stopped and cannot be restarted in place. A SmartLifecycle stop()/start()"
+                    + " cycle (e.g. actuator /pause then /resume) is not supported; restart the application"
+                    + " context instead.");
+        }
         node.start();
         running = true;
         LOG.info("\n{}", renderBanner(node));
