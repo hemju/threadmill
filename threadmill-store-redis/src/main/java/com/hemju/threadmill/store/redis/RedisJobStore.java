@@ -723,54 +723,70 @@ public final class RedisJobStore implements JobStore {
     @Override
     public boolean softDelete(JobId id) {
         RedisClusterCommands<String, String> r = sync();
-        Map<String, String> hash = r.hgetall(RedisKeys.job(id));
-        if (hash == null || hash.isEmpty()) return false;
+        // The read -> transition -> serialize -> eval sequence is the only
+        // read-modify-write in the store, so the script compares the version
+        // it observes against the one this read saw and returns -2 on a
+        // mismatch; we re-read and retry until the delete commits or the job
+        // reports a non-deletable state.
+        long lastExpectedVersion = 0L;
+        for (int attempt = 0; attempt < 20; attempt++) {
+            Map<String, String> hash = r.hgetall(RedisKeys.job(id));
+            if (hash == null || hash.isEmpty()) return false;
 
-        String body = hash.get("body");
-        Job j = serializer.deserializeJob(body);
-        if (j.currentState() == JobState.DELETED) return false;
-        var now = Instant.now();
-        j.transitionTo(JobState.DELETED, now, "user.delete", null);
-        long nextVersion = j.version() + 1;
-        JobSnapshot snapshot = withVersion(j, nextVersion);
-        String newBody = serializer.serializeJob(snapshot, capabilities);
+            String body = hash.get("body");
+            long expectedVersion = Long.parseLong(hash.get("version"));
+            lastExpectedVersion = expectedVersion;
+            Job j = serializer.deserializeJob(body);
+            if (j.currentState() == JobState.DELETED) return false;
+            var now = Instant.now();
+            j.transitionTo(JobState.DELETED, now, "user.delete", null);
+            long nextVersion = expectedVersion + 1;
+            JobSnapshot snapshot = withVersion(j, nextVersion);
+            String newBody = serializer.serializeJob(snapshot, capabilities);
 
-        var oldState = JobState.valueOf(hash.get("state"));
-        String oldQueue = hash.get("queue");
-        String oldOwnerNode = hash.get("owner_node_id");
-        NodeId oldOwnerNodeId = (oldOwnerNode == null || oldOwnerNode.isEmpty()) ? null : NodeId.parse(oldOwnerNode);
-        String oldConcurrencyKey = blankToNull(hash.get("concurrency_key"));
-        String oldConcurrencyMode = blankToNull(hash.get("concurrency_mode"));
-        String oldWorkflowRoot = hash.get("workflow_root_id");
-        String oldActive = activeKeyFor(oldState, oldQueue, oldOwnerNodeId);
-        String oldPerNode = (oldState == JobState.PROCESSING && oldOwnerNodeId != null)
-                ? RedisKeys.processingFor(oldOwnerNodeId)
-                : "";
+            var oldState = JobState.valueOf(hash.get("state"));
+            String oldQueue = hash.get("queue");
+            String oldOwnerNode = hash.get("owner_node_id");
+            NodeId oldOwnerNodeId =
+                    (oldOwnerNode == null || oldOwnerNode.isEmpty()) ? null : NodeId.parse(oldOwnerNode);
+            String oldConcurrencyKey = blankToNull(hash.get("concurrency_key"));
+            String oldConcurrencyMode = blankToNull(hash.get("concurrency_mode"));
+            String oldWorkflowRoot = hash.get("workflow_root_id");
+            String oldActive = activeKeyFor(oldState, oldQueue, oldOwnerNodeId);
+            String oldPerNode = (oldState == JobState.PROCESSING && oldOwnerNodeId != null)
+                    ? RedisKeys.processingFor(oldOwnerNodeId)
+                    : "";
 
-        var keys = new String[] {
-            RedisKeys.job(id),
-            oldActive == null ? "" : oldActive,
-            oldPerNode,
-            RedisKeys.byStateTime(oldState),
-            RedisKeys.byStateTime(JobState.DELETED),
-            RedisKeys.COUNTS,
-            concurrencyPendingKey(oldConcurrencyKey),
-            concurrencyCountersKey(oldConcurrencyKey),
-            concurrencyWorkflowsKey(oldConcurrencyKey),
-            concurrencyWorkflowCountsKey(oldConcurrencyKey)
-        };
-        var args = new String[] {
-            id.toString(),
-            newBody,
-            Long.toString(now.toEpochMilli()),
-            oldState.name(),
-            oldConcurrencyKey == null ? "" : oldConcurrencyKey,
-            oldConcurrencyMode == null ? "" : oldConcurrencyMode,
-            oldWorkflowRoot == null ? "" : oldWorkflowRoot,
-            concurrencyPendingMember(oldConcurrencyMode, id)
-        };
-        Long result = r.eval(LuaScripts.softDelete(), ScriptOutputType.INTEGER, keys, args);
-        return result != null && result == 1L;
+            var keys = new String[] {
+                RedisKeys.job(id),
+                oldActive == null ? "" : oldActive,
+                oldPerNode,
+                RedisKeys.byStateTime(oldState),
+                RedisKeys.byStateTime(JobState.DELETED),
+                RedisKeys.COUNTS,
+                concurrencyPendingKey(oldConcurrencyKey),
+                concurrencyCountersKey(oldConcurrencyKey),
+                concurrencyWorkflowsKey(oldConcurrencyKey),
+                concurrencyWorkflowCountsKey(oldConcurrencyKey)
+            };
+            var args = new String[] {
+                id.toString(),
+                newBody,
+                Long.toString(now.toEpochMilli()),
+                oldState.name(),
+                oldConcurrencyKey == null ? "" : oldConcurrencyKey,
+                oldConcurrencyMode == null ? "" : oldConcurrencyMode,
+                oldWorkflowRoot == null ? "" : oldWorkflowRoot,
+                concurrencyPendingMember(oldConcurrencyMode, id),
+                Long.toString(expectedVersion)
+            };
+            Long result = r.eval(LuaScripts.softDelete(), ScriptOutputType.INTEGER, keys, args);
+            if (result == null) return false;
+            if (result == 1L) return true;
+            if (result == 0L || result == -1L) return false;
+            // -2: the version moved under us — re-read and retry.
+        }
+        throw new StaleJobException(id, lastExpectedVersion);
     }
 
     // ---------------------------------------------------------------- claim

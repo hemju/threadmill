@@ -18,6 +18,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 import io.lettuce.core.RedisClient;
@@ -536,6 +537,69 @@ class RedisJobStoreRegressionTest {
         assertThat(r.hget(RedisKeys.COUNTS, "DELETED")).isEqualTo("1");
         assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.DELETED);
         assertRedisIndexesConsistent();
+    }
+
+    @Test
+    void softDeleteRacingAClaimNeverCommitsAgainstAStaleRead() throws Exception {
+        // soft_delete.lua was the only unversioned read-modify-write: a claim
+        // landing between the HGETALL and the EVAL committed against stale
+        // ARGVs — decrementing the wrong state count, leaving the job dangling
+        // in PROCESSING indexes, and releasing live concurrency holds. The
+        // script now compares the expected version and the Java side retries.
+        JobStore store = store();
+        var node = NodeId.newId();
+        for (int round = 0; round < 40; round++) {
+            Job job = Job.builder()
+                    .spec(JobSpec.of("com.example.Raced", new JobArgument("java.lang.String", "\"x\"")))
+                    .concurrencyKey("race:" + round)
+                    .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                    .build();
+            store.insert(job);
+
+            var start = new CountDownLatch(1);
+            try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                Future<?> claimer = executor.submit(() -> {
+                    start.await();
+                    return store.claimReady(node, "default", 1, Instant.now());
+                });
+                Future<?> deleter = executor.submit(() -> {
+                    start.await();
+                    return store.softDelete(job.id());
+                });
+                start.countDown();
+                claimer.get(30, TimeUnit.SECONDS);
+                deleter.get(30, TimeUnit.SECONDS);
+            }
+
+            RedisCommands<String, String> r = adminConnection.sync();
+            Job after = store.findById(job.id()).orElseThrow();
+            if (after.currentState() == JobState.DELETED) {
+                // The delete won (before or after the claim): nothing may
+                // linger in the PROCESSING indexes.
+                assertThat(r.zscore(RedisKeys.PROCESSING_ALL, job.id().toString()))
+                        .isNull();
+                assertThat(r.hget(RedisKeys.COUNTS, "PROCESSING")).isIn(null, "0");
+            } else {
+                // The claim won and the delete observed the post-claim state:
+                // the job is genuinely PROCESSING with its exclusive hold held.
+                assertThat(after.currentState()).isEqualTo(JobState.PROCESSING);
+                assertThat(r.zscore(RedisKeys.PROCESSING_ALL, job.id().toString()))
+                        .isNotNull();
+                // EXCLUSIVE serialization must remain intact: a second job for
+                // the same key cannot claim while the first still runs.
+                Job rival = Job.builder()
+                        .spec(JobSpec.of("com.example.Rival", new JobArgument("java.lang.String", "\"x\"")))
+                        .concurrencyKey("race:" + round)
+                        .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                        .build();
+                store.insert(rival);
+                assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                        .isEmpty();
+                assertThat(store.softDelete(rival.id())).isTrue();
+                assertThat(store.softDelete(job.id())).isTrue();
+            }
+            assertRedisIndexesConsistent();
+        }
     }
 
     @Test

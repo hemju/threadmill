@@ -22,8 +22,10 @@
 --   [6] old_concurrency_mode
 --   [7] old_workflow_root_id
 --   [8] old_pending_member
+--   [9] expected_version (from the caller's read)
 --
--- Returns 1 on success, 0 if already DELETED, -1 if vanished.
+-- Returns 1 on success, 0 if already DELETED, -1 if vanished, -2 if the
+-- live version no longer matches expected_version (caller must re-read).
 
 local job_key            = KEYS[1]
 local old_active_key     = KEYS[2]
@@ -44,6 +46,7 @@ local old_concurrency_key = ARGV[5]
 local old_concurrency_mode = ARGV[6]
 local old_workflow_root_id = ARGV[7]
 local old_pending_member = ARGV[8]
+local expected_version = tonumber(ARGV[9])
 
 local function is_terminal(state)
     return state == 'SUCCEEDED' or state == 'FAILED' or state == 'DELETED' or state == 'QUARANTINED'
@@ -59,6 +62,13 @@ if current_state == 'DELETED' then
 end
 
 local old_version = tonumber(redis.call('HGET', job_key, 'version'))
+if old_version ~= expected_version then
+    -- A state transition (e.g. a claim) landed between the caller's HGETALL
+    -- and this script: committing against the stale read would decrement the
+    -- wrong state count, strand index entries, and release live concurrency
+    -- holds. The caller re-reads and retries.
+    return -2
+end
 local new_version = old_version + 1
 
 if old_active_key ~= '' then
