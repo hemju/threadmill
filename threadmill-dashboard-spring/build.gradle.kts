@@ -15,6 +15,7 @@ dependencies {
     testImplementation(project(":threadmill-store-memory"))
     testImplementation(libs.jakarta.servlet.api)
     testImplementation(libs.spring.boot.starter.webmvc)
+    testImplementation(libs.spring.boot.starter.security)
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(libs.spring.security.test)
     testImplementation(platform(libs.junit.bom))

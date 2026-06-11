@@ -29,8 +29,23 @@ import com.hemju.threadmill.dashboard.api.DashboardApiService;
 import com.hemju.threadmill.dashboard.api.DashboardAuditSink;
 import com.hemju.threadmill.dashboard.api.DashboardOptions;
 
-/** Minimal Spring configuration for the Threadmill dashboard API. */
-@AutoConfiguration(afterName = "com.hemju.threadmill.spring.ThreadmillAutoConfiguration")
+/**
+ * Minimal Spring configuration for the Threadmill dashboard API.
+ *
+ * <p>The after-edges to the Spring Security auto-configurations are
+ * load-bearing: auto-configs sort alphabetically absent explicit edges
+ * ({@code com.hemju...} before {@code org.springframework.boot...}), so in a
+ * host that relies on the security starter's auto-configured
+ * {@code @EnableWebSecurity} the {@code HttpSecurity} bean definition would
+ * not exist yet when {@code @ConditionalOnBean(HttpSecurity.class)} is
+ * evaluated — the documented dashboard chain would silently never be created.
+ */
+@AutoConfiguration(
+        afterName = {
+            "com.hemju.threadmill.spring.ThreadmillAutoConfiguration",
+            "org.springframework.boot.security.autoconfigure.SecurityAutoConfiguration",
+            "org.springframework.boot.security.autoconfigure.web.servlet.ServletWebSecurityAutoConfiguration"
+        })
 @ConditionalOnBean(JobStore.class)
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
 @EnableConfigurationProperties(DashboardProperties.class)
@@ -139,10 +154,25 @@ public class ThreadmillDashboardApiConfiguration {
                         + ") must mirror threadmill.dashboard.api.base-path (" + propertyPath
                         + ") — the controller mounts at the property, the security chain at the options bean");
             }
-            if (!options.allowUnsafeReadOnlyWithoutAuthentication()
-                    && beanFactory.getBeanNamesForType(SecurityFilterChain.class).length == 0) {
+            boolean anyChain = beanFactory.getBeanNamesForType(SecurityFilterChain.class).length > 0;
+            if (!options.allowUnsafeReadOnlyWithoutAuthentication() && !anyChain) {
                 throw new IllegalStateException(
                         "Threadmill dashboard API requires Spring Security or unsafe read-only local mode");
+            }
+            // A host chain existing somewhere does not mean the documented
+            // dashboard posture (scoped httpBasic + cookie CSRF) applied. If
+            // auto-configure is on but the dashboard chain bean was skipped,
+            // the configuration silently degraded — fail loudly instead.
+            if (options.autoConfigureSecurity()
+                    && anyChain
+                    && !options.allowUnsafeReadOnlyWithoutAuthentication()
+                    && !beanFactory.containsBean("threadmillDashboardSecurityFilterChain")) {
+                throw new IllegalStateException(
+                        "threadmill.dashboard.security.auto-configure is on but the threadmillDashboardSecurityFilterChain "
+                                + "bean was not created (no HttpSecurity available). Enable Spring Security's web "
+                                + "support, provide your own SecurityFilterChain bean named "
+                                + "threadmillDashboardSecurityFilterChain, or set "
+                                + "threadmill.dashboard.security.auto-configure=false");
             }
             if (auditSink.isNoop()) {
                 LOG.warn(

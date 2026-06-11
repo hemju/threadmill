@@ -444,6 +444,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Dashboard ADMIN not honored for redaction; denied mutations / sensitive views unaudited; throwing audit sink fails a committed mutation | `ThreadmillDashboardApiControllerTest.adminAloneSeesUnredactedDetailsWhenExposureIsConfigured` + `deniedMutationAttemptsAreAudited` + `sensitiveDetailViewsAreAudited` + `throwingAuditSinkDoesNotFailACommittedMutation` |
 | Dashboard snapshot fan-out regrows (full snapshot for /nodes, per-queue/per-task round trips per poll, uncapped search offset) | `DashboardApiServiceTest.nodesReadDoesNotBuildAFullEngineSnapshot` + `snapshotCacheCoalescesDashboardPollsAndMutationsInvalidateIt` + `searchOffsetBeyondTheCapIsABadRequest` |
 | Dashboard base path diverges between controller property and DashboardOptions; static UI mount served unauthenticated | `ThreadmillDashboardUiMountTest.customOptionsBeanWithDivergentBasePathFailsFast` + `customOptionsBeanMatchingThePropertyStarts` + `ThreadmillDashboardSecurityIntegrationTest.staticUiMountRequiresAuthenticationByDefault` |
+| Dashboard security chain silently skipped when the host relies on the security starter auto-configuration (missing after-edge) | `ThreadmillDashboardSecurityStarterAutoConfigTest.dashboardChainIsCreatedWhenTheHostReliesOnSecurityStarterAutoConfiguration` + `documentedSessionAndCsrfBehaviorApplies` |
 
 ### Postgres-layer improvements (engagement notes)
 
