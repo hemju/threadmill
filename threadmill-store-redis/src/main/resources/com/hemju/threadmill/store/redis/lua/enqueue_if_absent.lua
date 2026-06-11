@@ -37,6 +37,11 @@ local pending_score    = tonumber(ARGV[21])
 
 local existing = redis.call('HGET', dedup_key, 'job_id')
 if existing then
+    -- Deliberate non-KEYS access: the referenced job key is discovered from
+    -- the dedup record INSIDE the script, so it cannot be passed in KEYS.
+    -- Safe because every engine key carries the {threadmill} hash tag and
+    -- therefore lives in one cluster slot (pinned by
+    -- RedisKeysTest.allEngineKeysUseOneClusterSlot).
     local existing_expires = tonumber(redis.call('HGET', dedup_key, 'expires_at'))
     local existing_state = redis.call('HGET', job_prefix .. existing, 'state')
     if existing_expires ~= nil and existing_expires <= now_ms and

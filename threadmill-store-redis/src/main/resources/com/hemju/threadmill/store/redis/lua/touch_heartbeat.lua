@@ -17,6 +17,10 @@ local all_key  = KEYS[2]
 local hb_ms    = tonumber(ARGV[1])
 local prefix   = ARGV[2]
 
+-- Deliberate non-KEYS access: the per-job keys are discovered from the
+-- per-node ZSET inside the script, so they cannot be passed in KEYS. Safe
+-- because every engine key carries the {threadmill} hash tag and therefore
+-- lives in one cluster slot (pinned by RedisKeysTest.allEngineKeysUseOneClusterSlot).
 local ids = redis.call('ZRANGE', node_key, 0, -1)
 local count = 0
 for _, id in ipairs(ids) do

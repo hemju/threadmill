@@ -16,14 +16,17 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.LockSupport;
 
 import io.lettuce.core.AbstractRedisClient;
+import io.lettuce.core.KeyScanCursor;
 import io.lettuce.core.Limit;
 import io.lettuce.core.Range;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisCommandExecutionException;
 import io.lettuce.core.RedisURI;
+import io.lettuce.core.ScanArgs;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.SetArgs;
 import io.lettuce.core.ZAddArgs;
@@ -103,15 +106,6 @@ public final class RedisJobStore implements JobStore {
             end
             return 0
             """;
-    private static final String DROP_THREADMILL_KEYS = """
-            local keys = redis.call('KEYS', ARGV[1])
-            local removed = 0
-            for i = 1, #keys do
-              removed = removed + redis.call('DEL', keys[i])
-            end
-            return removed
-            """;
-
     private final AbstractRedisClient client;
     private final AutoCloseable connection;
     private final RedisClusterCommands<String, String> commands;
@@ -277,12 +271,25 @@ public final class RedisJobStore implements JobStore {
 
     /** Delete every Redis key in Threadmill's namespace. Intended for disposable environments. */
     public long dropThreadmillKeys() {
-        Long removed = sync().eval(
-                        DROP_THREADMILL_KEYS,
-                        ScriptOutputType.INTEGER,
-                        new String[] {RedisKeys.resetAnchor()},
-                        RedisKeys.PREFIX + "*");
-        return removed == null ? 0L : removed;
+        // Non-blocking SCAN + batched UNLINK instead of KEYS inside Lua: a
+        // dev reset over a large disposable dataset must not stall the
+        // server for its full duration.
+        RedisClusterCommands<String, String> r = sync();
+        var scanArgs = ScanArgs.Builder.matches(RedisKeys.PREFIX + "*").limit(500);
+        long removed = 0L;
+        KeyScanCursor<String> cursor = r.scan(scanArgs);
+        while (true) {
+            List<String> keys = cursor.getKeys();
+            if (!keys.isEmpty()) {
+                Long unlinked = r.unlink(keys.toArray(new String[0]));
+                removed += unlinked == null ? 0L : unlinked;
+            }
+            if (cursor.isFinished()) {
+                break;
+            }
+            cursor = r.scan(cursor, scanArgs);
+        }
+        return removed;
     }
 
     @Override
@@ -372,7 +379,7 @@ public final class RedisJobStore implements JobStore {
         };
 
         try {
-            String result = r.eval(LuaScripts.insert(), ScriptOutputType.VALUE, keys, args);
+            String result = evalScript(LuaScripts.insert(), ScriptOutputType.VALUE, keys, args);
             if ("EXISTS".equals(result)) {
                 throw new IllegalStateException("Job already exists: " + snapshot.id());
             }
@@ -491,7 +498,7 @@ public final class RedisJobStore implements JobStore {
                 argList.add(Long.toString(toEpochMicros(stateAt)));
             }
             try {
-                String result = r.eval(
+                String result = evalScript(
                         LuaScripts.insertAll(),
                         ScriptOutputType.VALUE,
                         keyList.toArray(new String[0]),
@@ -560,7 +567,7 @@ public final class RedisJobStore implements JobStore {
         double activeScore = activeScoreFor(snapshot, stateAt);
         String reply;
         try {
-            reply = r.eval(
+            reply = evalScript(
                     LuaScripts.enqueueIfAbsent(),
                     ScriptOutputType.VALUE,
                     new String[] {
@@ -716,7 +723,7 @@ public final class RedisJobStore implements JobStore {
 
         String result;
         try {
-            result = r.eval(LuaScripts.saveAtomic(), ScriptOutputType.VALUE, keys, args);
+            result = evalScript(LuaScripts.saveAtomic(), ScriptOutputType.VALUE, keys, args);
         } catch (RuntimeException e) {
             throw translateCapacity(e);
         }
@@ -789,7 +796,7 @@ public final class RedisJobStore implements JobStore {
                 concurrencyPendingMember(oldConcurrencyMode, id),
                 Long.toString(expectedVersion)
             };
-            Long result = r.eval(LuaScripts.softDelete(), ScriptOutputType.INTEGER, keys, args);
+            Long result = evalScript(LuaScripts.softDelete(), ScriptOutputType.INTEGER, keys, args);
             if (result == null) return false;
             if (result == 1L) return true;
             if (result == 0L || result == -1L) return false;
@@ -849,7 +856,7 @@ public final class RedisJobStore implements JobStore {
                         JobSnapshot snap = withVersion(j, newVersion);
                         String newBody = serializer.serializeJob(snap, capabilities);
                         String concurrencyKey = snap.concurrencyKey();
-                        String reply = r.eval(
+                        String reply = evalScript(
                                 LuaScripts.claimCommit(),
                                 ScriptOutputType.VALUE,
                                 new String[] {
@@ -927,7 +934,7 @@ public final class RedisJobStore implements JobStore {
         Objects.requireNonNull(nodeId, "nodeId");
         Objects.requireNonNull(now, "now");
         RedisClusterCommands<String, String> r = sync();
-        r.eval(
+        evalScript(
                 LuaScripts.touchHeartbeat(),
                 ScriptOutputType.INTEGER,
                 new String[] {RedisKeys.processingFor(nodeId), RedisKeys.PROCESSING_ALL},
@@ -942,8 +949,8 @@ public final class RedisJobStore implements JobStore {
         JobSnapshot snapshot = withVersion(job, job.version());
         String body = serializer.serializeJob(snapshot, capabilities);
         Instant heartbeat = snapshot.lastCheckinAt() == null ? snapshot.ownerHeartbeatAt() : snapshot.lastCheckinAt();
-        Long result = sync().eval(
-                        """
+        Long result = evalScript(
+                """
                 if redis.call('HGET', KEYS[1], 'state') ~= 'PROCESSING' then return 0 end
                 if redis.call('HGET', KEYS[1], 'owner_node_id') ~= ARGV[1] then return 0 end
                 redis.call('HSET', KEYS[1],
@@ -954,17 +961,15 @@ public final class RedisJobStore implements JobStore {
                 redis.call('ZADD', KEYS[3], ARGV[3], ARGV[5])
                 return 1
                 """,
-                        ScriptOutputType.INTEGER,
-                        new String[] {
-                            RedisKeys.job(snapshot.id()), RedisKeys.PROCESSING_ALL, RedisKeys.processingFor(nodeId)
-                        },
-                        nodeId.toString(),
-                        body,
-                        heartbeat == null ? "" : Long.toString(heartbeat.toEpochMilli()),
-                        snapshot.lastCheckinAt() == null
-                                ? ""
-                                : Long.toString(snapshot.lastCheckinAt().toEpochMilli()),
-                        snapshot.id().toString());
+                ScriptOutputType.INTEGER,
+                new String[] {RedisKeys.job(snapshot.id()), RedisKeys.PROCESSING_ALL, RedisKeys.processingFor(nodeId)},
+                nodeId.toString(),
+                body,
+                heartbeat == null ? "" : Long.toString(heartbeat.toEpochMilli()),
+                snapshot.lastCheckinAt() == null
+                        ? ""
+                        : Long.toString(snapshot.lastCheckinAt().toEpochMilli()),
+                snapshot.id().toString());
         return result != null && result == 1L;
     }
 
@@ -989,23 +994,23 @@ public final class RedisJobStore implements JobStore {
     public boolean acquireOrRenewMaintenanceLease(NodeId nodeId, Duration leaseDuration) {
         Objects.requireNonNull(nodeId, "nodeId");
         Mutexes.requirePositive(leaseDuration);
-        String reply = sync().eval(
-                        LuaScripts.leaseAcquire(),
-                        ScriptOutputType.VALUE,
-                        new String[] {RedisKeys.MAINTENANCE_LEASE},
-                        nodeId.toString(),
-                        Long.toString(leaseDuration.toMillis()));
+        String reply = evalScript(
+                LuaScripts.leaseAcquire(),
+                ScriptOutputType.VALUE,
+                new String[] {RedisKeys.MAINTENANCE_LEASE},
+                nodeId.toString(),
+                Long.toString(leaseDuration.toMillis()));
         return "OK".equals(reply);
     }
 
     @Override
     public void releaseMaintenanceLease(NodeId nodeId) {
         Objects.requireNonNull(nodeId, "nodeId");
-        sync().eval(
-                        LuaScripts.leaseRelease(),
-                        ScriptOutputType.VALUE,
-                        new String[] {RedisKeys.MAINTENANCE_LEASE},
-                        nodeId.toString());
+        evalScript(
+                LuaScripts.leaseRelease(),
+                ScriptOutputType.VALUE,
+                new String[] {RedisKeys.MAINTENANCE_LEASE},
+                nodeId.toString());
     }
 
     @Override
@@ -1082,7 +1087,7 @@ public final class RedisJobStore implements JobStore {
                 // high-cardinality dynamic queue names. The prune is a Lua
                 // compare-and-remove so it cannot race an insert that just
                 // re-populated the queue; a later insert re-SADDs anyway.
-                r.eval(
+                evalScript(
                         LuaScripts.queuePrune(),
                         ScriptOutputType.INTEGER,
                         new String[] {RedisKeys.queue(queue), RedisKeys.QUEUES},
@@ -1140,11 +1145,11 @@ public final class RedisJobStore implements JobStore {
         // highest-priority job — not the oldest enqueued. Scan for the true
         // minimum current_state_at in one Lua call (fine for the moderate
         // depths a dashboard gauge covers; Postgres uses MIN(current_state_at)).
-        String value = sync().eval(
-                        LuaScripts.oldestEnqueued(),
-                        ScriptOutputType.VALUE,
-                        new String[] {RedisKeys.queue(queue)},
-                        RedisKeys.PREFIX + "job:");
+        String value = evalScript(
+                LuaScripts.oldestEnqueued(),
+                ScriptOutputType.VALUE,
+                new String[] {RedisKeys.queue(queue)},
+                RedisKeys.PREFIX + "job:");
         if (value == null || value.isEmpty()) return Optional.empty();
         return Optional.of(Instant.ofEpochMilli(Long.parseLong(value)));
     }
@@ -1181,7 +1186,7 @@ public final class RedisJobStore implements JobStore {
             String key = RedisKeys.nodeHeartbeat(nodeId);
             String value = r.get(key);
             if (value == null || !Instant.ofEpochMilli(Long.parseLong(value)).isAfter(cutoff)) {
-                Long deleted = r.eval(
+                Long deleted = evalScript(
                         DELETE_NODE_HEARTBEAT_IF_STALE,
                         ScriptOutputType.INTEGER,
                         new String[] {key, RedisKeys.NODES},
@@ -1215,7 +1220,7 @@ public final class RedisJobStore implements JobStore {
                 // the record between this scan and the delete; an unconditional
                 // DEL would remove the brand-new record and let a duplicate
                 // enqueue through inside its TTL window.
-                Long deleted = r.eval(
+                Long deleted = evalScript(
                         LuaScripts.dedupDelete(),
                         ScriptOutputType.INTEGER,
                         new String[] {key, RedisKeys.dedupExpiry()},
@@ -1258,7 +1263,7 @@ public final class RedisJobStore implements JobStore {
             // decrement land together (no permanent count drift on a crash).
             String jobKey = RedisKeys.PREFIX + "job:" + idStr;
             String handler = r.hget(jobKey, "handler_signature");
-            Long deleted = r.eval(
+            Long deleted = evalScript(
                     LuaScripts.retentionDelete(),
                     ScriptOutputType.INTEGER,
                     new String[] {
@@ -1321,12 +1326,8 @@ public final class RedisJobStore implements JobStore {
         // expire between the SET-NX failing and the PEXPIRE running, leaving
         // the caller believing it holds a mutex that no longer exists. The
         // Lua script removes that window.
-        String reply = sync().eval(
-                        LuaScripts.mutexAcquire(),
-                        ScriptOutputType.VALUE,
-                        new String[] {key},
-                        holder,
-                        Long.toString(millis));
+        String reply = evalScript(
+                LuaScripts.mutexAcquire(), ScriptOutputType.VALUE, new String[] {key}, holder, Long.toString(millis));
         return "ACQUIRED".equals(reply) || "REFRESHED".equals(reply);
     }
 
@@ -1399,7 +1400,7 @@ public final class RedisJobStore implements JobStore {
         };
         String reply;
         try {
-            reply = r.eval(LuaScripts.replaceJob(), ScriptOutputType.VALUE, keys, args);
+            reply = evalScript(LuaScripts.replaceJob(), ScriptOutputType.VALUE, keys, args);
         } catch (RuntimeException e) {
             throw translateCapacity(e);
         }
@@ -1413,11 +1414,11 @@ public final class RedisJobStore implements JobStore {
         Objects.requireNonNull(holder, "holder");
         String key = RedisKeys.userKey("mutex", name);
         // Compare-and-delete via Lua so we don't race a new acquirer.
-        sync().eval(
-                        "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
-                        ScriptOutputType.INTEGER,
-                        new String[] {key},
-                        holder);
+        evalScript(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+                ScriptOutputType.INTEGER,
+                new String[] {key},
+                holder);
     }
 
     // ---------------------------------------------------------------- cron tasks
@@ -1580,6 +1581,29 @@ public final class RedisJobStore implements JobStore {
         return commands;
     }
 
+    private final ConcurrentHashMap<String, String> scriptShas = new ConcurrentHashMap<>();
+
+    /**
+     * Evaluate a Lua script via {@code SCRIPT LOAD} + {@code EVALSHA},
+     * shipping the multi-KB script body once instead of on every call. A
+     * {@code NOSCRIPT} reply (replica promotion, {@code SCRIPT FLUSH})
+     * repopulates the server-side cache with one full {@code EVAL}.
+     */
+    @SuppressWarnings("unchecked")
+    private <T> T evalScript(String script, ScriptOutputType type, String[] keys, String... args) {
+        RedisClusterCommands<String, String> r = sync();
+        String sha = scriptShas.computeIfAbsent(script, r::scriptLoad);
+        try {
+            return (T) r.evalsha(sha, type, keys, args);
+        } catch (RedisCommandExecutionException e) {
+            if (e.getMessage() != null && e.getMessage().contains("NOSCRIPT")) {
+                scriptShas.put(script, r.scriptLoad(script));
+                return (T) r.eval(script, type, keys, args);
+            }
+            throw e;
+        }
+    }
+
     private void validateRedisSafety() {
         if (!safetyValidation.requireNoEviction() || safetyValidation.externallyValidated()) {
             return;
@@ -1733,7 +1757,7 @@ public final class RedisJobStore implements JobStore {
         return locks.stream().map(ClaimLock::key).toList();
     }
 
-    private static List<ClaimLock> acquireClaimLocks(RedisClusterCommands<String, String> r, List<String> keys) {
+    private List<ClaimLock> acquireClaimLocks(RedisClusterCommands<String, String> r, List<String> keys) {
         if (keys.isEmpty()) {
             return List.of();
         }
@@ -1761,15 +1785,15 @@ public final class RedisJobStore implements JobStore {
         }
     }
 
-    private static void releaseClaimLocks(RedisClusterCommands<String, String> r, List<ClaimLock> locks) {
+    private void releaseClaimLocks(RedisClusterCommands<String, String> r, List<ClaimLock> locks) {
         for (int i = locks.size() - 1; i >= 0; i--) {
             ClaimLock lock = locks.get(i);
             releaseClaimLock(r, lock.key(), lock.token());
         }
     }
 
-    private static void releaseClaimLock(RedisClusterCommands<String, String> r, String key, String token) {
-        r.eval(
+    private void releaseClaimLock(RedisClusterCommands<String, String> r, String key, String token) {
+        evalScript(
                 "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
                 ScriptOutputType.INTEGER,
                 new String[] {key},
