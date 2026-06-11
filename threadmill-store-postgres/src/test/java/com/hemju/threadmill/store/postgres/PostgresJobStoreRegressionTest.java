@@ -325,6 +325,25 @@ class PostgresJobStoreRegressionTest {
     }
 
     @Test
+    void emittedSqlWrapsEachMigrationAndItsHistoryInsertInOneTransaction() throws SQLException {
+        dropSchemaObjects();
+        String sql = new MigrationRunner(dataSource).emitPendingSql();
+
+        // Every shipped migration's DDL and its history INSERT are bracketed by
+        // BEGIN/COMMIT so an external psql apply cannot half-apply a migration.
+        long begins = sql.lines().filter(l -> l.strip().equals("BEGIN;")).count();
+        long commits = sql.lines().filter(l -> l.strip().equals("COMMIT;")).count();
+        assertThat(begins).isEqualTo(commits).isGreaterThanOrEqualTo(1L);
+        assertThat(sql).contains("BEGIN;").contains("COMMIT;");
+        // The history INSERT lives inside a transaction block.
+        int firstBegin = sql.indexOf("BEGIN;");
+        int firstInsert = sql.indexOf("INSERT INTO threadmill_schema_history (version, description) VALUES");
+        int firstCommitAfter = sql.indexOf("COMMIT;", firstInsert);
+        assertThat(firstBegin).isLessThan(firstInsert);
+        assertThat(firstInsert).isLessThan(firstCommitAfter);
+    }
+
+    @Test
     void emitPendingSqlOnAFreshDatabaseIsReadOnlyAndPrependsHistoryDdl() throws SQLException {
         dropSchemaObjects();
 

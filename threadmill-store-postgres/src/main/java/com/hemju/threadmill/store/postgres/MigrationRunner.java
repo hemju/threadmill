@@ -10,6 +10,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -20,6 +21,9 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.sql.DataSource;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * Minimal in-process schema migrator.
@@ -40,6 +44,9 @@ public final class MigrationRunner {
     private static final String RESOURCE_ROOT = "com/hemju/threadmill/store/postgres/migrations/";
     private static final List<String> SHIPPED_MIGRATIONS = List.of("V1__baseline.sql");
     private static final long MIGRATION_LOCK_KEY = 0x5468726561646D6CL;
+    private static final Logger LOG = LoggerFactory.getLogger(MigrationRunner.class);
+    private static final Duration LOCK_ACQUIRE_TIMEOUT = Duration.ofMinutes(5);
+    private static final Duration LOCK_POLL_INTERVAL = Duration.ofMillis(250);
     private static final List<String> THREADMILL_TABLES = List.of(
             "threadmill_mutexes",
             "threadmill_concurrency_workflow_holds",
@@ -76,7 +83,15 @@ public final class MigrationRunner {
                     applyOne(conn, m);
                 }
             } finally {
-                releaseMigrationLock(conn);
+                // Swallow+log an unlock failure so it cannot supersede an
+                // in-flight MigrationException from applyOne (which names the
+                // failing migration). The session-level advisory lock is released
+                // automatically when the connection closes anyway.
+                try {
+                    releaseMigrationLock(conn);
+                } catch (SQLException unlockError) {
+                    LOG.warn("Failed to release the Threadmill migration advisory lock", unlockError);
+                }
             }
         } catch (SQLException e) {
             throw new MigrationException("Migration failed", e);
@@ -195,7 +210,14 @@ public final class MigrationRunner {
             }
             conn.commit();
         } catch (SQLException e) {
-            conn.rollback();
+            // Preserve the original failure even if the rollback itself fails
+            // (e.g. the connection died), so the operator still sees which
+            // migration and statement failed.
+            try {
+                conn.rollback();
+            } catch (SQLException rollbackError) {
+                e.addSuppressed(rollbackError);
+            }
             throw new MigrationException("Migration " + m.fileName() + " failed", e);
         } finally {
             conn.setAutoCommit(priorAutoCommit);
@@ -209,9 +231,39 @@ public final class MigrationRunner {
     }
 
     private void acquireMigrationLock(Connection conn) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement("SELECT pg_advisory_lock(?)")) {
-            ps.setLong(1, MIGRATION_LOCK_KEY);
-            ps.execute();
+        // Poll with pg_try_advisory_lock + a bounded timeout instead of a blocking
+        // pg_advisory_lock, so a rolling deploy where another node holds the lock
+        // (e.g. running a slow ALTER) logs a diagnostic and eventually fails with
+        // an actionable message — rather than hanging startup silently until a
+        // probe kills the pod.
+        long deadlineNanos = System.nanoTime() + LOCK_ACQUIRE_TIMEOUT.toNanos();
+        boolean warned = false;
+        while (true) {
+            try (PreparedStatement ps = conn.prepareStatement("SELECT pg_try_advisory_lock(?)")) {
+                ps.setLong(1, MIGRATION_LOCK_KEY);
+                try (ResultSet rs = ps.executeQuery()) {
+                    if (rs.next() && rs.getBoolean(1)) {
+                        return;
+                    }
+                }
+            }
+            if (System.nanoTime() >= deadlineNanos) {
+                throw new MigrationException("Timed out after " + LOCK_ACQUIRE_TIMEOUT
+                        + " waiting for the Threadmill migration advisory lock (pg_advisory_lock key "
+                        + MIGRATION_LOCK_KEY + "). Another node is likely migrating — inspect pg_locks.");
+            }
+            if (!warned) {
+                LOG.warn(
+                        "Waiting for the Threadmill migration advisory lock (key {}); another node is migrating.",
+                        MIGRATION_LOCK_KEY);
+                warned = true;
+            }
+            try {
+                Thread.sleep(LOCK_POLL_INTERVAL.toMillis());
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new MigrationException("Interrupted while waiting for the migration advisory lock", ie);
+            }
         }
     }
 
@@ -259,7 +311,12 @@ public final class MigrationRunner {
     }
 
     private static void appendMigrationSql(StringBuilder sb, Migration m) {
+        // Wrap each migration's DDL and its history INSERT in one transaction so a
+        // DBA piping the emitted SQL through psql (the no-DDL-rights path) cannot
+        // half-apply it: either the schema change and its history row both land,
+        // or neither does. In-process migrate() already commits them atomically.
         sb.append("-- ").append(m.fileName()).append(System.lineSeparator());
+        sb.append("BEGIN;").append(System.lineSeparator());
         sb.append(m.sql()).append(System.lineSeparator());
         sb.append("INSERT INTO threadmill_schema_history (version, description) VALUES (")
                 .append(m.version())
@@ -267,6 +324,7 @@ public final class MigrationRunner {
                 .append(m.description().replace("'", "''"))
                 .append("');")
                 .append(System.lineSeparator());
+        sb.append("COMMIT;").append(System.lineSeparator());
     }
 
     private static void appendHistoryTableSql(StringBuilder sb) {
