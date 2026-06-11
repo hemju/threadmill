@@ -7,6 +7,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
@@ -30,7 +31,10 @@ public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
     private final DataSource publisherDataSource;
     private final DataSource listenerDataSource;
     private final String channel;
+    private static final int FAILURES_BEFORE_WARN = 10;
+
     private final AtomicBoolean running = new AtomicBoolean(false);
+    private final AtomicLong generation = new AtomicLong();
     private final AtomicReference<Connection> listenerConnection = new AtomicReference<>();
     private final AtomicReference<Thread> listenerThread = new AtomicReference<>();
 
@@ -69,16 +73,22 @@ public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
     public void start(Consumer<String> wakeSink) {
         Objects.requireNonNull(wakeSink, "wakeSink");
         if (!running.compareAndSet(false, true)) return;
+        // Per-start generation token: getNotifications(1000) is not
+        // interruptible, so a close()/start() cycle could otherwise revive a
+        // stale loop whose running.get() re-reads true — leaving two live
+        // listeners bound to different wake sinks.
+        long startedGeneration = generation.incrementAndGet();
         Thread thread = Thread.ofPlatform()
                 .name("threadmill-postgres-remote-wake")
                 .daemon(true)
-                .start(() -> listen(wakeSink));
+                .start(() -> listen(wakeSink, startedGeneration));
         listenerThread.set(thread);
     }
 
     @Override
     public void close() {
         running.set(false);
+        generation.incrementAndGet();
         Connection conn = listenerConnection.getAndSet(null);
         if (conn != null) {
             try {
@@ -91,8 +101,9 @@ public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
         if (thread != null) thread.interrupt();
     }
 
-    private void listen(Consumer<String> wakeSink) {
-        while (running.get() && !Thread.currentThread().isInterrupted()) {
+    private void listen(Consumer<String> wakeSink, long myGeneration) {
+        int consecutiveFailures = 0;
+        while (live(myGeneration)) {
             Connection current = null;
             try (Connection conn = listenerDataSource.getConnection();
                     Statement st = conn.createStatement()) {
@@ -100,22 +111,42 @@ public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
                 listenerConnection.set(conn);
                 st.execute("LISTEN " + quoteIdentifier(channel));
                 PGConnection pg = conn.unwrap(PGConnection.class);
-                while (running.get() && !Thread.currentThread().isInterrupted()) {
+                consecutiveFailures = 0;
+                while (live(myGeneration)) {
                     PGNotification[] notifications = pg.getNotifications(1000);
                     if (notifications == null) continue;
                     for (PGNotification notification : notifications) {
                         wake(notification.getParameter(), wakeSink);
                     }
                 }
-            } catch (SQLException e) {
-                if (running.get()) {
-                    LOG.debug("PostgreSQL remote wake listener failed; retrying while polling remains fallback", e);
+            } catch (SQLException | RuntimeException e) {
+                // RuntimeException too: a pooled/proxy DataSource throwing
+                // IllegalStateException during pool transitions must not kill
+                // the daemon silently — wake is latency-only, but the listener
+                // is required to keep retrying.
+                if (live(myGeneration)) {
+                    consecutiveFailures++;
+                    if (consecutiveFailures >= FAILURES_BEFORE_WARN) {
+                        LOG.warn(
+                                "PostgreSQL remote wake listener failing repeatedly ({} consecutive); "
+                                        + "retrying while polling remains the fallback",
+                                consecutiveFailures,
+                                e);
+                    } else {
+                        LOG.debug("PostgreSQL remote wake listener failed; retrying while polling remains fallback", e);
+                    }
                     sleepBeforeRetry();
                 }
             } finally {
                 listenerConnection.compareAndSet(current, null);
             }
         }
+    }
+
+    private boolean live(long myGeneration) {
+        return running.get()
+                && generation.get() == myGeneration
+                && !Thread.currentThread().isInterrupted();
     }
 
     private static void wake(String queue, Consumer<String> wakeSink) {

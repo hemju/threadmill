@@ -428,6 +428,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Workflow hold double-decrements on retry resurrect (EXCLUSIVE key released while a descendant runs) | `AbstractJobStoreContractTest.workflowRootRetryAfterFailureCanReclaimUnderItsOwnHold` + `workflowMemberRetryDoesNotDoubleReleaseTheHold` |
 | `emitPendingSql` executes DDL despite being the inspect-only API | `PostgresJobStoreRegressionTest.emitPendingSqlOnAFreshDatabaseIsReadOnlyAndPrependsHistoryDdl` |
 | insertAll locks concurrency-group rows unsorted (manufactured deadlocks; fatal in join_transaction); duplicate-id state hidden in BatchUpdateException chain | `PostgresJobStoreRegressionTest.insertAllWithReversedKeyOrdersDoesNotManufactureDeadlocks` + `DeadlockRetryTest.hasSqlStateWalksNextExceptionAndCauseChains` |
+| Postgres wake listener killed silently by RuntimeException; close()/start() cycle leaves two live listeners | `PostgresRemoteWakeChannelTest.runtimeExceptionFromTheDataSourceDoesNotKillTheListener` + `closeStartCycleLeavesExactlyOneLiveListener` |
 
 ### Postgres-layer improvements (engagement notes)
 
