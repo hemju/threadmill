@@ -349,6 +349,39 @@ public abstract class AbstractJobStoreContractTest {
         assertThat(loaded.log().snapshot()).extracting(JobLog.Entry::message).contains("still alive");
     }
 
+    @Test
+    @DisplayName("a zombie execution update from a previous attempt is rejected")
+    void executionUpdateFromAPreviousAttemptIsRejected() {
+        NodeId node = NodeId.newId();
+        Job inserted = Jobs.enqueued("com.example.SendEmail");
+        store.insert(inserted);
+
+        // Attempt 1, claimed by this node — the stale writer holds this object.
+        Job attemptOne = store.claimReady(node, "default", 1, Instant.now()).get(0);
+        assertThat(attemptOne.attempts()).isEqualTo(1);
+
+        // Orphan-reclaim shape: attempt 1 fails, is re-enqueued, and re-claimed by
+        // the SAME node as attempt 2 (a separate reload, leaving attemptOne stale).
+        long v = attemptOne.version();
+        Job failed = store.findById(inserted.id()).orElseThrow();
+        failed.transitionTo(JobState.FAILED, Instant.now(), "test", "orphaned");
+        failed.clearOwner();
+        store.saveAtomic(failed, v);
+        Job reenqueued = store.findById(inserted.id()).orElseThrow();
+        reenqueued.transitionTo(JobState.ENQUEUED, Instant.now(), "test", null);
+        store.saveAtomic(reenqueued, reenqueued.version());
+        Job attemptTwo = store.claimReady(node, "default", 1, Instant.now()).get(0);
+        assertThat(attemptTwo.attempts()).isEqualTo(2);
+        attemptTwo.checkIn(Instant.now());
+        assertThat(store.saveExecutionUpdate(attemptTwo, node)).isTrue();
+
+        // The attempt-1 writer passes the state and owner checks but must NOT
+        // overwrite the live attempt's persisted state.
+        attemptOne.log().info("zombie write");
+        assertThat(store.saveExecutionUpdate(attemptOne, node)).isFalse();
+        assertThat(store.findById(inserted.id()).orElseThrow().attempts()).isEqualTo(2);
+    }
+
     // ================================================================ concurrency
 
     @Test

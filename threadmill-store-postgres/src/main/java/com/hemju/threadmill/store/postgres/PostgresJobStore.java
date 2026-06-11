@@ -968,9 +968,14 @@ public final class PostgresJobStore implements JobStore {
         try {
             return DeadlockRetry.run(() -> {
                 try (Connection conn = dataSource.getConnection();
+                        // The version guard rejects a zombie flush from a previous
+                        // attempt: a claim bumps version while a check-in does not,
+                        // so an attempt-N flush whose job was orphan-reclaimed,
+                        // retried, and re-claimed (as attempt N+1) by the same node
+                        // no longer matches the live row's version and is dropped.
                         PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
                                 + "owner_heartbeat_at = ?, last_checkin_at = ?, body = ? "
-                                + "WHERE id = ? AND state = 'PROCESSING' AND owner_node_id = ?")) {
+                                + "WHERE id = ? AND state = 'PROCESSING' AND owner_node_id = ? AND version = ?")) {
                     Instant heartbeat =
                             snapshot.lastCheckinAt() == null ? snapshot.ownerHeartbeatAt() : snapshot.lastCheckinAt();
                     setNullableTimestamp(ps, 1, heartbeat);
@@ -978,6 +983,7 @@ public final class PostgresJobStore implements JobStore {
                     ps.setString(3, body);
                     ps.setObject(4, snapshot.id().asUuid());
                     ps.setObject(5, nodeId.asUuid());
+                    ps.setLong(6, snapshot.version());
                     return ps.executeUpdate() > 0;
                 }
             });

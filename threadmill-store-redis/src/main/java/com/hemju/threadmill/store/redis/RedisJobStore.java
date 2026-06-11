@@ -966,6 +966,11 @@ public final class RedisJobStore implements JobStore {
                 """
                 if redis.call('HGET', KEYS[1], 'state') ~= 'PROCESSING' then return 0 end
                 if redis.call('HGET', KEYS[1], 'owner_node_id') ~= ARGV[1] then return 0 end
+                -- Reject a zombie flush from a previous attempt: the hash's
+                -- attempts is set at claim time, so an attempt-N flush whose job
+                -- was reclaimed, retried, and re-claimed (attempt N+1) by the same
+                -- node no longer matches and is dropped.
+                if redis.call('HGET', KEYS[1], 'attempts') ~= ARGV[6] then return 0 end
                 redis.call('HSET', KEYS[1],
                   'body', ARGV[2],
                   'owner_heartbeat_at', ARGV[3],
@@ -982,7 +987,8 @@ public final class RedisJobStore implements JobStore {
                 snapshot.lastCheckinAt() == null
                         ? ""
                         : Long.toString(snapshot.lastCheckinAt().toEpochMilli()),
-                snapshot.id().toString());
+                snapshot.id().toString(),
+                Integer.toString(snapshot.attempts()));
         return result != null && result == 1L;
     }
 
