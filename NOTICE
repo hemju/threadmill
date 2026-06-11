@@ -1,0 +1,13 @@
+Threadmill
+Copyright 2026 Helmut Michael Juskewycz
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes third-party software. The `threadmill-dashboard-ui`
+module bundles a compiled React/Tailwind operations console that embeds the
+JavaScript libraries listed, with their licenses and copyright notices, in:
+
+    threadmill-dashboard-ui/THIRD-PARTY.md
+
+That file is also packaged into the `threadmill-dashboard-ui` jar at
+`META-INF/threadmill-dashboard-ui/THIRD-PARTY.md`.

@@ -38,4 +38,8 @@ tasks.named("check") { dependsOn(npmTest, npmBuild) }
 tasks.named<ProcessResources>("processResources") {
     dependsOn(npmBuild)
     from(layout.projectDirectory.dir("dist")) { into("META-INF/resources/threadmill") }
+    // Ship third-party attribution for the bundled JS libraries alongside the assets.
+    from(layout.projectDirectory.file("THIRD-PARTY.md")) {
+        into("META-INF/threadmill-dashboard-ui")
+    }
 }
