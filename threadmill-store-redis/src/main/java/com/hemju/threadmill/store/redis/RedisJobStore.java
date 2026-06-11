@@ -1581,11 +1581,24 @@ public final class RedisJobStore implements JobStore {
             fields.put("next_run_at", Long.toString(state.nextRunAt().toEpochMilli()));
         if (state.inFlightJobId() != null)
             fields.put("in_flight_job_id", state.inFlightJobId().toString());
-        RedisClusterCommands<String, String> r = sync();
         String key = RedisKeys.userKey("cron_task_state", state.taskName());
+        // DEL (overwrite semantics so cleared fields clear) + HSET must be ONE
+        // atomic script: a crash or failover between two separate commands would
+        // leave the state hash wiped, and the materializer reads a null nextRunAt
+        // and silently dormants the recurring task until the next re-registration.
+        var argv = new ArrayList<String>(fields.size() * 2);
+        fields.forEach((k, v) -> {
+            argv.add(k);
+            argv.add(v);
+        });
         try {
-            r.del(key); // overwrite semantics so cleared fields actually clear
-            if (!fields.isEmpty()) r.hset(key, fields);
+            evalScript("""
+                    redis.call('DEL', KEYS[1])
+                    if #ARGV > 0 then
+                        redis.call('HSET', KEYS[1], unpack(ARGV))
+                    end
+                    return 1
+                    """, ScriptOutputType.INTEGER, new String[] {key}, argv.toArray(String[]::new));
         } catch (RuntimeException e) {
             throw translateCapacity(e);
         }
@@ -1595,12 +1608,11 @@ public final class RedisJobStore implements JobStore {
     public Optional<CronTaskScheduleState> findCronTaskState(String name) {
         Names.requireName("cronTask", name);
         Map<String, String> hash = sync().hgetall(RedisKeys.userKey("cron_task_state", name));
-        if (hash == null) return Optional.empty();
-        if (hash.isEmpty()) {
-            // No state at all — but the task might exist with no recorded run yet.
-            if (sync().exists(RedisKeys.userKey("cron_task", name)) == 0) return Optional.empty();
-            return Optional.of(new CronTaskScheduleState(name, null, null, null, null));
-        }
+        // No recorded schedule state -> empty, matching the relational backends
+        // (which return empty when no state row exists). Previously Redis
+        // fabricated a present-but-all-null state when the task existed, diverging
+        // from Postgres/in-memory.
+        if (hash == null || hash.isEmpty()) return Optional.empty();
         return Optional.of(new CronTaskScheduleState(
                 name,
                 hash.containsKey("last_run_at") ? Instant.ofEpochMilli(Long.parseLong(hash.get("last_run_at"))) : null,

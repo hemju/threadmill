@@ -1612,6 +1612,16 @@ public abstract class AbstractJobStoreContractTest {
     // ================================================================ recurring ownership
 
     @Test
+    @DisplayName("findCronTaskState is empty when no schedule state has been recorded")
+    void cronStateForATaskWithoutRecordedStateIsEmptyOnEveryBackend() {
+        // The SPI makes schedule state the caller's responsibility; a task with
+        // no recorded state must read as empty on every backend (Redis used to
+        // fabricate a present-but-all-null state).
+        store.upsertCronTask(cronTask("nightly"));
+        assertThat(store.findCronTaskState("nightly")).isEmpty();
+    }
+
+    @Test
     @DisplayName("cron-task ownership tracks namespace-owned tasks")
     void cronTaskOwnershipTracksNamespace() {
         store.upsertCronTask(cronTask("owned-a"));
