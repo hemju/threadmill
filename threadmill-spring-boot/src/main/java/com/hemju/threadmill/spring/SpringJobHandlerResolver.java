@@ -4,6 +4,7 @@ import java.util.Objects;
 
 import org.springframework.beans.BeansException;
 import org.springframework.context.ApplicationContext;
+import org.springframework.util.ClassUtils;
 
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
@@ -42,7 +43,12 @@ public final class SpringJobHandlerResolver implements JobHandlerResolver {
         Objects.requireNonNull(handlerTypeName, "handlerTypeName");
         String resolvedName = aliases.resolve(handlerTypeName);
         try {
-            Class<?> type = Class.forName(resolvedName);
+            // Resolve through the application context's classloader, not the
+            // library's defining classloader: under layered classloaders
+            // (Spring Boot devtools restart loader, war deployments) handler
+            // classes are invisible to the base loader and a plain
+            // Class.forName quarantines every job.
+            Class<?> type = ClassUtils.forName(resolvedName, context.getClassLoader());
             if (!JobHandler.class.isAssignableFrom(type)) {
                 throw new HandlerResolutionException("Type " + resolvedName + " does not implement JobHandler");
             }
