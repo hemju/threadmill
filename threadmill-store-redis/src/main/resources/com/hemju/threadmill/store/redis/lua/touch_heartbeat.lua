@@ -20,12 +20,19 @@ local prefix   = ARGV[2]
 local ids = redis.call('ZRANGE', node_key, 0, -1)
 local count = 0
 for _, id in ipairs(ids) do
-    redis.call('ZADD', node_key, hb_ms, id)
-    redis.call('ZADD', all_key, hb_ms, id)
     local job_key = prefix .. id
     if redis.call('EXISTS', job_key) == 1 then
+        redis.call('ZADD', node_key, hb_ms, id)
+        redis.call('ZADD', all_key, hb_ms, id)
         redis.call('HSET', job_key, 'owner_heartbeat_at', tostring(hb_ms))
+        count = count + 1
+    else
+        -- A dangling id (partial deletion, manual intervention) must not be
+        -- resurrected with a fresh heartbeat forever: once its node stops,
+        -- it would permanently occupy the lowest-score window of the orphan
+        -- scan. Drop it from both indexes so the structure self-heals.
+        redis.call('ZREM', node_key, id)
+        redis.call('ZREM', all_key, id)
     end
-    count = count + 1
 end
 return count

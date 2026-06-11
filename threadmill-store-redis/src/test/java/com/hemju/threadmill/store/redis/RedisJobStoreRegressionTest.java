@@ -603,6 +603,53 @@ class RedisJobStoreRegressionTest {
     }
 
     @Test
+    void heartbeatTouchDropsDanglingIdsInsteadOfResurrectingThem() {
+        JobStore store = store();
+        var node = NodeId.newId();
+        Job real = sample();
+        store.insert(real);
+        store.claimReady(node, "default", 1, Instant.now());
+
+        // Seed a dangling id (no job hash) in the per-node and global
+        // PROCESSING ZSETs, as a partial deletion would leave behind.
+        RedisCommands<String, String> r = adminConnection.sync();
+        String dangling = JobId.newId().toString();
+        r.zadd(RedisKeys.processingFor(node), 1.0, dangling);
+        r.zadd(RedisKeys.PROCESSING_ALL, 1.0, dangling);
+
+        store.touchOwnerHeartbeat(node, Instant.now());
+
+        // The dangling id is removed from both indexes instead of rescored;
+        // the real job keeps its fresh heartbeat.
+        assertThat(r.zscore(RedisKeys.processingFor(node), dangling)).isNull();
+        assertThat(r.zscore(RedisKeys.PROCESSING_ALL, dangling)).isNull();
+        assertThat(r.zscore(RedisKeys.PROCESSING_ALL, real.id().toString())).isNotNull();
+    }
+
+    @Test
+    void findOrphanedSelfHealsDanglingIdsAndStillReturnsRealOrphans() {
+        JobStore store = store();
+        var node = NodeId.newId();
+        Job orphan = sample();
+        store.insert(orphan);
+        store.claimReady(node, "default", 1, Instant.now());
+
+        // Backdate the real orphan's heartbeat and seed dangling ids at the
+        // very bottom of the scan window — historically they consumed the
+        // orphan-scan budget on every cycle because loadJobs silently
+        // skipped missing bodies.
+        RedisCommands<String, String> r = adminConnection.sync();
+        r.zadd(RedisKeys.PROCESSING_ALL, 1.0, JobId.newId().toString());
+        r.zadd(RedisKeys.PROCESSING_ALL, 2.0, JobId.newId().toString());
+        r.zadd(RedisKeys.PROCESSING_ALL, 3.0, orphan.id().toString());
+
+        List<Job> orphans = store.findOrphaned(Instant.now().minusSeconds(1), 3);
+        assertThat(orphans).extracting(Job::id).containsExactly(orphan.id());
+        // The dangling ids are gone; the next scan window is clean.
+        assertThat(r.zcard(RedisKeys.PROCESSING_ALL)).isEqualTo(1L);
+    }
+
+    @Test
     void cronTaskDefinitionAndScheduleStateRoundTrip() {
         JobStore store = store();
         CronTask task = sampleCronTask("nightly-cleanup");

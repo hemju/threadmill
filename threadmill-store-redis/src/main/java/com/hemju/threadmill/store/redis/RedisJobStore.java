@@ -1022,11 +1022,24 @@ public final class RedisJobStore implements JobStore {
     public List<Job> findOrphaned(Instant heartbeatExpiry, int max) {
         Objects.requireNonNull(heartbeatExpiry, "heartbeatExpiry");
         if (max <= 0) return List.of();
-        List<String> ids = sync().zrangebyscore(
-                        RedisKeys.PROCESSING_ALL,
-                        Range.create(Double.NEGATIVE_INFINITY, (double) heartbeatExpiry.toEpochMilli()),
-                        Limit.create(0, max));
-        return loadJobs(ids);
+        RedisClusterCommands<String, String> r = sync();
+        List<String> ids = r.zrangebyscore(
+                RedisKeys.PROCESSING_ALL,
+                Range.create(Double.NEGATIVE_INFINITY, (double) heartbeatExpiry.toEpochMilli()),
+                Limit.create(0, max));
+        if (ids == null || ids.isEmpty()) return List.of();
+        List<Job> out = new ArrayList<>(ids.size());
+        for (String idStr : ids) {
+            String body = r.hget(RedisKeys.PREFIX + "job:" + idStr, "body");
+            if (body != null) {
+                out.add(serializer.deserializeJob(body));
+            } else {
+                // Self-heal historical corruption: a dangling id with no job
+                // hash must not consume the orphan-scan budget every cycle.
+                r.zrem(RedisKeys.PROCESSING_ALL, idStr);
+            }
+        }
+        return out;
     }
 
     // ---------------------------------------------------------------- counts & search

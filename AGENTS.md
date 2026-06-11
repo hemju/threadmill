@@ -431,6 +431,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Postgres wake listener killed silently by RuntimeException; close()/start() cycle leaves two live listeners | `PostgresRemoteWakeChannelTest.runtimeExceptionFromTheDataSourceDoesNotKillTheListener` + `closeStartCycleLeavesExactlyOneLiveListener` |
 | Postgres claim locks 64x its budget unconditionally, starving concurrent claimers | `PostgresJobStoreRegressionTest.unkeyedClaimLocksOnlyANarrowPageSoConcurrentClaimersAreNotStarved` (+ `claimReadyScansPastBlockedHotKeyToOtherKeys` pins the escalation) |
 | Redis softDelete commits against a stale read (wrong counts, dangling PROCESSING indexes, released live holds) | `RedisJobStoreRegressionTest.softDeleteRacingAClaimNeverCommitsAgainstAStaleRead` |
+| Redis heartbeat touch resurrects dangling ids forever, occupying the orphan-scan window | `RedisJobStoreRegressionTest.heartbeatTouchDropsDanglingIdsInsteadOfResurrectingThem` + `findOrphanedSelfHealsDanglingIdsAndStillReturnsRealOrphans` |
 
 ### Postgres-layer improvements (engagement notes)
 
