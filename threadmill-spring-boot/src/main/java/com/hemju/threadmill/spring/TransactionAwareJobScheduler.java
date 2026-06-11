@@ -6,6 +6,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -47,6 +49,8 @@ import com.hemju.threadmill.core.store.JobStore;
  * surprising. Deferral applies only to actual job enqueue paths.
  */
 public final class TransactionAwareJobScheduler extends JobScheduler {
+
+    private static final Logger LOG = LoggerFactory.getLogger(TransactionAwareJobScheduler.class);
 
     public TransactionAwareJobScheduler(
             JobStore store, JobSerializer serializer, ThreadmillJobRegistry registry, ProcessingNodeConfig config) {
@@ -106,8 +110,22 @@ public final class TransactionAwareJobScheduler extends JobScheduler {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    store.insertAll(jobs);
-                    wakeBus.wake(queueToWake);
+                    // Spring invokes after-commit callbacks in a bare loop
+                    // with no per-item isolation: a throw here would silently
+                    // skip every later-registered synchronization in this
+                    // transaction — including other deferred enqueues.
+                    // Contain the failure and log the lost jobs loudly; the
+                    // business transaction is already durably committed.
+                    try {
+                        store.insertAll(jobs);
+                        wakeBus.wake(queueToWake);
+                    } catch (RuntimeException e) {
+                        LOG.error(
+                                "Threadmill after-commit bulk enqueue failed; {} job(s) were NOT inserted: {}",
+                                jobs.size(),
+                                jobs.stream().map(j -> j.id().toString()).toList(),
+                                e);
+                    }
                 }
             });
         } else {
@@ -138,8 +156,19 @@ public final class TransactionAwareJobScheduler extends JobScheduler {
             TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
                 @Override
                 public void afterCommit() {
-                    store.insert(job);
-                    if (queueToWake != null) wakeBus.wake(queueToWake);
+                    // See enqueueAll: per-synchronization isolation so one
+                    // failing insert cannot silently cancel every later
+                    // deferred enqueue in the same transaction.
+                    try {
+                        store.insert(job);
+                        if (queueToWake != null) wakeBus.wake(queueToWake);
+                    } catch (RuntimeException e) {
+                        LOG.error(
+                                "Threadmill after-commit enqueue failed; job {} ({}) was NOT inserted",
+                                job.id(),
+                                job.spec().handlerType(),
+                                e);
+                    }
                 }
             });
             return job.id();

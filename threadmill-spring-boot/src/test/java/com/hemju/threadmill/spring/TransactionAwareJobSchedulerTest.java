@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
@@ -21,6 +23,7 @@ import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
+import com.hemju.threadmill.test.ForwardingJobStore;
 
 /**
  * Drives the {@link TransactionAwareJobScheduler} contract directly by
@@ -177,6 +180,45 @@ class TransactionAwareJobSchedulerTest {
             triggerAfterCommit();
 
             assertThat(wakeCalls).isEmpty();
+        } finally {
+            TransactionSynchronizationManager.clear();
+        }
+    }
+
+    @Test
+    void firstFailingAfterCommitInsertDoesNotCancelLaterDeferredEnqueues() {
+        // Spring invokes after-commit callbacks in a bare loop with no
+        // per-item isolation (triggerAfterCommit mirrors that): without the
+        // wrapper's own containment, the first failing insert would skip
+        // every later-registered deferred enqueue in the same transaction.
+        var failFor = new AtomicReference<JobId>();
+        var failing = new ForwardingJobStore(store) {
+            @Override
+            public void insert(Job job) {
+                if (job.id().equals(failFor.get())) {
+                    throw new RuntimeException("store outage at exactly after-commit time");
+                }
+                super.insert(job);
+            }
+        };
+        var failingEnqueuer = new TransactionAwareJobScheduler(
+                failing,
+                new JsonJobSerializer(),
+                new TestRegistry(),
+                ProcessingNodeConfig.builder().build(),
+                new LocalWakeBus());
+
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            JobId first = failingEnqueuer.enqueue(GreetHandler.class, new GreetPayload("first"));
+            failFor.set(first);
+            JobId second = failingEnqueuer.enqueue(GreetHandler.class, new GreetPayload("second"));
+
+            triggerAfterCommit();
+
+            // The first job is lost (logged at ERROR); the second still lands.
+            assertThat(store.findById(first)).isEmpty();
+            assertThat(store.findById(second)).isPresent();
         } finally {
             TransactionSynchronizationManager.clear();
         }

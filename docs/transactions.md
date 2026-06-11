@@ -101,6 +101,15 @@ reserved, but the row doesn't exist yet. This mode avoids jobs that point to
 rolled-back application rows, but it has one remaining failure window: the
 business transaction can commit and the after-commit job insert can still fail.
 
+Each deferred enqueue is isolated from the others: if one after-commit insert
+fails (store outage, oversized job), the failure is contained and logged at
+ERROR with the lost `JobId` and handler type, and every other deferred enqueue
+registered in the same transaction still runs. The lost job is **not**
+retried — after-commit mode is at-most-once for the job insert itself, so
+monitor for the `after-commit enqueue failed` log line, or use
+`join_transaction` (Postgres) when the enqueue must be exactly as durable as
+the business rows.
+
 ### `join_transaction`
 
 Postgres + Spring can make scheduling part of the caller's SQL transaction:

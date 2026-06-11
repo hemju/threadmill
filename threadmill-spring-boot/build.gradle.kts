@@ -26,6 +26,7 @@ dependencies {
     )
 
     testImplementation(project(":threadmill-store-postgres"))
+    testImplementation(project(":threadmill-test-support"))
     testImplementation(libs.spring.boot.autoconfigure)
     testImplementation(libs.spring.context)
     testImplementation(libs.spring.jdbc)
