@@ -13,7 +13,9 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
 
+import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobRelationship;
 import com.hemju.threadmill.core.JobReplacement;
 import com.hemju.threadmill.core.JobSnapshot;
 import com.hemju.threadmill.core.JobState;
@@ -91,6 +93,55 @@ class InMemoryJobStoreConcurrencyTest {
         assertThat(stale.get()).isPositive();
         // sanity: the run actually exercised the path
         assertThat(Instant.now()).isNotNull();
+    }
+
+    @Test
+    void retriedExclusiveWorkflowRootCanReclaimUnderItsOwnHold() {
+        var store = new InMemoryJobStore();
+        var node = NodeId.newId();
+        Job root = Job.builder()
+                .spec(JobSpec.of("com.example.Root", new JobArgument("java.lang.String", "\"x\"")))
+                .concurrencyKey("project:42")
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .priority(10)
+                .build();
+        store.insert(root);
+        Job child = Job.builder()
+                .spec(JobSpec.of("com.example.Child", new JobArgument("java.lang.String", "\"x\"")))
+                .relationship(new JobRelationship(root.id(), JobRelationship.Kind.WORKFLOW_STEP))
+                .initialState(JobState.AWAITING)
+                .build();
+        store.insert(child);
+        Job outsider = Job.builder()
+                .spec(JobSpec.of("com.example.Other", new JobArgument("java.lang.String", "\"x\"")))
+                .concurrencyKey("project:42")
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .priority(-1)
+                .build();
+        store.insert(outsider);
+
+        // First attempt: claim the root and fail it.
+        Job claimedRoot = store.claimReady(node, "default", 1, Instant.now()).get(0);
+        assertThat(claimedRoot.id()).isEqualTo(root.id());
+        long v = claimedRoot.version();
+        claimedRoot.transitionTo(JobState.FAILED, Instant.now(), "test", "boom");
+        claimedRoot.clearOwner();
+        store.saveAtomic(claimedRoot, v);
+
+        // Standard retry path: FAILED -> SCHEDULED -> ENQUEUED.
+        Job failed = store.findById(root.id()).orElseThrow();
+        v = failed.version();
+        failed.transitionTo(JobState.SCHEDULED, Instant.now(), "engine.retry-after-failure", null);
+        store.saveAtomic(failed, v);
+        Job scheduled = store.findById(root.id()).orElseThrow();
+        v = scheduled.version();
+        scheduled.transitionTo(JobState.ENQUEUED, Instant.now(), "engine.promote", null);
+        store.saveAtomic(scheduled, v);
+
+        // The retried root must be claimable again — its own AWAITING child
+        // is not "earlier pending work" — and the outsider must stay blocked.
+        var reclaimed = store.claimReady(node, "default", 2, Instant.now());
+        assertThat(reclaimed).extracting(Job::id).containsExactly(root.id());
     }
 
     @Test

@@ -64,6 +64,7 @@ public final class InMemoryJobStore implements JobStore {
         final JobId workflowRootId;
         final String concurrencyKey;
         final ConcurrencyMode concurrencyMode;
+        final int attempts;
 
         Entry(
                 String wire,
@@ -78,7 +79,8 @@ public final class InMemoryJobStore implements JobStore {
                 String handlerType,
                 JobId workflowRootId,
                 String concurrencyKey,
-                ConcurrencyMode concurrencyMode) {
+                ConcurrencyMode concurrencyMode,
+                int attempts) {
             this.wire = wire;
             this.version = version;
             this.state = state;
@@ -92,6 +94,7 @@ public final class InMemoryJobStore implements JobStore {
             this.workflowRootId = workflowRootId;
             this.concurrencyKey = concurrencyKey;
             this.concurrencyMode = concurrencyMode;
+            this.attempts = attempts;
         }
     }
 
@@ -779,7 +782,8 @@ public final class InMemoryJobStore implements JobStore {
                 snapshot.spec().handlerType(),
                 snapshot.workflowRootId(),
                 snapshot.concurrencyKey(),
-                snapshot.concurrencyMode());
+                snapshot.concurrencyMode(),
+                snapshot.attempts());
     }
 
     private JobSnapshot snapshotForInsert(Job job, long version) {
@@ -850,14 +854,20 @@ public final class InMemoryJobStore implements JobStore {
     private boolean hasEarlierPendingExclusive(Map.Entry<JobId, Entry> candidate) {
         return jobs.entrySet().stream()
                 .anyMatch(e -> sameConcurrencyKey(candidate.getValue(), e.getValue())
+                        && !candidate.getValue().workflowRootId.equals(e.getValue().workflowRootId)
                         && e.getValue().concurrencyMode == ConcurrencyMode.EXCLUSIVE
                         && isPending(e.getValue().state)
                         && pendingBefore(e, candidate));
     }
 
     private boolean hasEarlierPendingJob(Map.Entry<JobId, Entry> candidate) {
+        // Same-root members never block each other: ordering inside a
+        // workflow is owned by the hold, not the strict in-key pending
+        // order. Without this exclusion a retried EXCLUSIVE root would see
+        // its own AWAITING child as earlier pending work and deadlock.
         return jobs.entrySet().stream()
                 .anyMatch(e -> sameConcurrencyKey(candidate.getValue(), e.getValue())
+                        && !candidate.getValue().workflowRootId.equals(e.getValue().workflowRootId)
                         && isPending(e.getValue().state)
                         && pendingBefore(e, candidate));
     }
@@ -876,10 +886,15 @@ public final class InMemoryJobStore implements JobStore {
     }
 
     private boolean hasActiveWorkflowHoldForRoot(Entry candidate) {
+        // The hold is acquired once any same-root member has ever been
+        // claimed (PROCESSING, terminal, or attempts > 0 — the retried-root
+        // case, where the root sits ENQUEUED again after a failure) and
+        // stays active while any member is non-terminal. This mirrors the
+        // persisted-hold semantics of the real backends.
         boolean acquired = jobs.values().stream()
                 .anyMatch(e -> candidate.workflowRootId.equals(e.workflowRootId)
                         && sameConcurrencyKey(candidate, e)
-                        && (e.state == JobState.PROCESSING || isTerminal(e.state)));
+                        && (e.state == JobState.PROCESSING || isTerminal(e.state) || e.attempts > 0));
         if (!acquired) {
             return false;
         }

@@ -423,6 +423,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Dual master after a hung registry tick; heartbeat starved by master work; CATCH_UP burst unbounded; claimHeartbeat ≥ heartbeatTimeout misconfiguration | `NodeRegistryTest.mastershipSelfExpiresWhenATickHangsPastTheLeaseDuration` + `SchedulingTest.catchUpBacklogIsCappedPerTickWithCarryOver` + `ProcessingNodeConfigTest.heartbeatTimeoutMustBeAtLeastTwiceTheClaimHeartbeat` |
 | upsertCron read-modify-write clobbers a concurrently-set inFlightJobId; FAILED pile-up-guard window semantics | `SchedulingTest.materializerSkipsATaskWhoseStateMutexIsHeld` + `upsertCronWaitsForTheTaskMutexAndPreservesInFlightTracking` + `failedInFlightInstanceDoesNotBlockTheNextMaterialization` |
 | In-memory claim blind-put loses concurrent softDelete/replaceJob writes; lock-free writers tear claim-time concurrency decisions | `InMemoryJobStoreConcurrencyTest.claimRacingSoftDeleteNeverResurrectsADeletedJob` + `claimRacingReplaceJobNeverLosesTheReplacement` |
+| Retried EXCLUSIVE workflow root deadlocks against its own AWAITING children (in-memory hold inference) | `InMemoryJobStoreConcurrencyTest.retriedExclusiveWorkflowRootCanReclaimUnderItsOwnHold` |
 
 ### Postgres-layer improvements (engagement notes)
 
