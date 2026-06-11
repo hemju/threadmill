@@ -221,7 +221,19 @@ public final class RedisJobStore implements JobStore {
         this.ownsClient = ownsClient;
         this.safetyValidation = Objects.requireNonNull(safetyValidation, "safetyValidation");
         this.topologyDescription = Objects.requireNonNull(topologyDescription, "topologyDescription");
-        validateRedisSafety();
+        try {
+            validateRedisSafety();
+        } catch (RuntimeException validationFailure) {
+            // A wrong eviction policy is the EXPECTED failure mode on
+            // misconfigured Redis (and apps retry startup): the connection
+            // and owned client (with its Netty event loops) must not leak.
+            try {
+                close();
+            } catch (RuntimeException closeFailure) {
+                validationFailure.addSuppressed(closeFailure);
+            }
+            throw validationFailure;
+        }
     }
 
     private static String describeUri(RedisURI uri) {
@@ -246,8 +258,11 @@ public final class RedisJobStore implements JobStore {
             connection.close();
         } catch (Exception e) {
             throw new IllegalStateException("Failed to close Redis connection", e);
+        } finally {
+            // The owned client's Netty event loops must not survive a failed
+            // connection close.
+            if (ownsClient) client.shutdown();
         }
-        if (ownsClient) client.shutdown();
     }
 
     @Override

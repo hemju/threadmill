@@ -138,6 +138,34 @@ class RedisJobStoreRegressionTest {
     }
 
     @Test
+    void failedSafetyValidationDoesNotLeakLettuceResources() throws Exception {
+        // A wrong eviction policy is the EXPECTED failure mode on
+        // misconfigured Redis (and apps retry startup): the owned client and
+        // its Netty event loops must be torn down, not abandoned.
+        adminConnection.sync().configSet("maxmemory-policy", "allkeys-lru");
+        try {
+            long before = lettuceThreadCount();
+            for (int i = 0; i < 3; i++) {
+                assertThatThrownBy(() -> new RedisJobStore(uri)).isInstanceOf(JobEngineFatalException.class);
+            }
+            long deadline = System.nanoTime() + Duration.ofSeconds(20).toNanos();
+            while (lettuceThreadCount() > before && System.nanoTime() < deadline) {
+                Thread.sleep(100);
+            }
+            assertThat(lettuceThreadCount()).isLessThanOrEqualTo(before);
+        } finally {
+            adminConnection.sync().configSet("maxmemory-policy", "noeviction");
+        }
+    }
+
+    private static long lettuceThreadCount() {
+        return Thread.getAllStackTraces().keySet().stream()
+                .map(Thread::getName)
+                .filter(name -> name.startsWith("lettuce-"))
+                .count();
+    }
+
+    @Test
     void externallyValidatedModeAllowsStartupAgainstEvictionPolicy() {
         adminConnection.sync().configSet("maxmemory-policy", "allkeys-lru");
         var config = new Standalone(uri, RedisSafetyValidation.externallyValidatedMode());

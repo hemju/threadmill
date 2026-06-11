@@ -41,7 +41,7 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     }
 
     public RedisRemoteWakeChannel(RedisURI uri, String channel) {
-        this(connectStandalone(RedisClient.create(uri), channel), true);
+        this(connectOwned(RedisClient.create(uri), channel), true);
     }
 
     public RedisRemoteWakeChannel(RedisStoreConfig config) {
@@ -139,17 +139,38 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
 
     private static ConnectionHandle connect(RedisStoreConfig config, String channel) {
         return switch (config) {
-            case RedisStoreConfig.Standalone standalone ->
-                connectStandalone(RedisClient.create(standalone.uri()), channel);
+            case RedisStoreConfig.Standalone standalone -> connectOwned(RedisClient.create(standalone.uri()), channel);
             case RedisStoreConfig.Sentinel sentinel -> connectSentinel(sentinel, channel);
             case RedisStoreConfig.Cluster cluster -> connectCluster(cluster, channel);
         };
     }
 
+    /** Connect with a client this channel owns: a partial connect shuts it down. */
+    private static ConnectionHandle connectOwned(RedisClient client, String channel) {
+        try {
+            return connectStandalone(client, channel);
+        } catch (RuntimeException connectFailure) {
+            client.shutdown();
+            throw connectFailure;
+        }
+    }
+
     private static ConnectionHandle connectStandalone(RedisClient client, String channel) {
         String wakeChannel = normalizeChannel(channel);
         StatefulRedisConnection<String, String> commandConnection = client.connect();
-        StatefulRedisPubSubConnection<String, String> pubSubConnection = client.connectPubSub();
+        StatefulRedisPubSubConnection<String, String> pubSubConnection;
+        try {
+            pubSubConnection = client.connectPubSub();
+        } catch (RuntimeException pubSubFailure) {
+            // Partial connect must not leak the already-open command
+            // connection (and the owned client's event loops).
+            try {
+                commandConnection.close();
+            } catch (RuntimeException closeFailure) {
+                pubSubFailure.addSuppressed(closeFailure);
+            }
+            throw pubSubFailure;
+        }
         return new ConnectionHandle(
                 client,
                 commandConnection,
@@ -184,7 +205,7 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
         if (config.password() != null && !config.password().isBlank()) {
             builder.withPassword(config.password().toCharArray());
         }
-        return connectStandalone(RedisClient.create(builder.build()), channel);
+        return connectOwned(RedisClient.create(builder.build()), channel);
     }
 
     private static ConnectionHandle connectCluster(RedisStoreConfig.Cluster config, String channel) {
@@ -194,7 +215,19 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
                 .toList();
         RedisClusterClient client = RedisClusterClient.create(uris);
         StatefulRedisClusterConnection<String, String> commandConnection = client.connect();
-        StatefulRedisClusterPubSubConnection<String, String> pubSubConnection = client.connectPubSub();
+        StatefulRedisClusterPubSubConnection<String, String> pubSubConnection;
+        try {
+            pubSubConnection = client.connectPubSub();
+        } catch (RuntimeException pubSubFailure) {
+            try {
+                commandConnection.close();
+            } catch (RuntimeException closeFailure) {
+                pubSubFailure.addSuppressed(closeFailure);
+            }
+            // The cluster client is always created (owned) here.
+            client.shutdown();
+            throw pubSubFailure;
+        }
         pubSubConnection.setNodeMessagePropagation(true);
         return new ConnectionHandle(
                 client,
