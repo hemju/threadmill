@@ -2,9 +2,7 @@ package com.hemju.threadmill.spring;
 
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 
-import io.lettuce.core.RedisURI;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
@@ -31,8 +29,6 @@ import com.hemju.threadmill.core.serialization.PayloadMigrations;
 import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
-import com.hemju.threadmill.store.redis.RedisJobStore;
-import com.hemju.threadmill.store.redis.RedisStoreConfig;
 
 /**
  * Spring Boot auto-configuration for Threadmill.
@@ -76,40 +72,30 @@ public class ThreadmillAutoConfiguration {
     }
 
     /**
-     * Default {@link JobStore} when nothing else has provided one. Resolves by
-     * configuration precedence:
-     * <ol>
-     *   <li>If {@code threadmill.store.redis.*} is explicitly configured, use Redis.</li>
-     *   <li>Otherwise fall back to {@link InMemoryJobStore} with a loud warning.</li>
-     * </ol>
+     * In-memory {@link JobStore} fallback when nothing else has provided one.
      *
-     * <p>The Postgres branch lives in {@link ThreadmillPostgresAutoConfiguration},
-     * which is gated by {@code @ConditionalOnClass(PostgresJobStore.class)} and ordered
-     * {@code @AutoConfigureBefore} this class so it wins the
-     * {@link ConditionalOnMissingBean} race when its conditions match. Keeping this
-     * class free of any {@code threadmill-store-postgres} class references means
-     * Java 25 reflection on this configuration (Spring's {@code OnBeanCondition}
-     * deduction path) never has to resolve those types, so applications that
-     * exclude the optional Postgres module can still load this configuration.
+     * <p>The durable stores live in their own gated configurations, each ordered
+     * {@code @AutoConfigureBefore} this class so they win the
+     * {@link ConditionalOnMissingBean} race when their conditions match:
+     * {@link ThreadmillRedisAutoConfiguration} ({@code @ConditionalOnClass(RedisJobStore.class)}
+     * + {@code threadmill.store.redis.*} configured) and
+     * {@link ThreadmillPostgresAutoConfiguration}
+     * ({@code @ConditionalOnClass(PostgresJobStore.class)} + a {@code DataSource},
+     * deferring to Redis). Keeping this class free of any
+     * {@code threadmill-store-redis}/{@code -postgres} class references means the
+     * optional store modules can be {@code compileOnly} dependencies and excluded
+     * at runtime without breaking this configuration.
      *
      * <p>Applications wanting full control define their own {@code JobStore} bean
      * and this default is skipped.
      */
     @Bean
     @ConditionalOnMissingBean
-    public JobStore threadmillJobStore(ThreadmillProperties properties) {
-        if (properties.getStore().getRedis().isConfigured()) {
-            var redis = properties.getStore().getRedis();
-            if (redis.isResetOnStart() && !redis.isAllowDestructiveReset()) {
-                throw new IllegalStateException("threadmill.store.redis.reset-on-start=true requires"
-                        + " threadmill.store.redis.allow-destructive-reset=true");
-            }
-            var store = new RedisJobStore(redisStoreConfig(redis));
-            if (redis.isResetOnStart()) {
-                store.dropThreadmillKeys();
-            }
-            return store;
-        }
+    public JobStore threadmillJobStore() {
+        // Durable stores are contributed by ThreadmillRedisAutoConfiguration and
+        // ThreadmillPostgresAutoConfiguration, both @AutoConfigureBefore this one
+        // and gated on their store class + configuration; this is the in-memory
+        // fallback when neither matched.
         LOG.warn("Threadmill: using in-memory store — jobs will not survive restart. Configure"
                 + " threadmill.store.redis.* or define a DataSource bean for durable storage.");
         return new InMemoryJobStore();
@@ -348,58 +334,12 @@ public class ThreadmillAutoConfiguration {
         return new ThreadmillRemoteWakeLifecycle(remoteWakeChannels, node);
     }
 
-    private static RedisStoreConfig redisStoreConfig(ThreadmillProperties.RedisProperties redis) {
-        var safety = redis.isNoEvictionExternallyValidated()
-                ? RedisStoreConfig.RedisSafetyValidation.externallyValidatedMode()
-                : RedisStoreConfig.RedisSafetyValidation.strict();
-        return switch (redis.getMode().toLowerCase(Locale.ROOT)) {
-            case "standalone" -> {
-                if (redis.getUri() == null || redis.getUri().isBlank()) {
-                    throw new IllegalArgumentException("threadmill.store.redis.uri must be set for standalone Redis");
-                }
-                yield new RedisStoreConfig.Standalone(RedisURI.create(redis.getUri()), safety);
-            }
-            case "sentinel" -> {
-                var sentinel = redis.getSentinel();
-                yield new RedisStoreConfig.Sentinel(
-                        sentinel.getMasterName(), parseRedisNodes(sentinel.getNodes()), sentinel.getPassword(), safety);
-            }
-            case "cluster" -> {
-                var cluster = redis.getCluster();
-                yield new RedisStoreConfig.Cluster(
-                        parseRedisNodes(cluster.getNodes()), cluster.getReadPolicy(), safety);
-            }
-            default ->
-                throw new IllegalArgumentException(
-                        "threadmill.store.redis.mode must be standalone, sentinel, or cluster");
-        };
-    }
-
     private static String recurringNamespace(ThreadmillProperties properties, ApplicationContext context) {
         String configured = properties.getSpring().getRecurringNamespace();
         if (configured != null && !configured.isBlank()) {
             return configured;
         }
         return context.getEnvironment().getProperty("spring.application.name");
-    }
-
-    private static List<RedisStoreConfig.HostAndPort> parseRedisNodes(List<String> nodes) {
-        if (nodes == null || nodes.isEmpty()) {
-            throw new IllegalArgumentException("threadmill.store.redis nodes must not be empty");
-        }
-        return nodes.stream().map(ThreadmillAutoConfiguration::parseRedisNode).toList();
-    }
-
-    private static RedisStoreConfig.HostAndPort parseRedisNode(String value) {
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException("Redis node must not be blank");
-        }
-        int colon = value.lastIndexOf(':');
-        if (colon < 1 || colon == value.length() - 1) {
-            throw new IllegalArgumentException("Redis node must use host:port format: " + value);
-        }
-        return new RedisStoreConfig.HostAndPort(
-                value.substring(0, colon), Integer.parseInt(value.substring(colon + 1)));
     }
 
     private static JobStore unwrapStore(JobStore store) {

@@ -1,2 +1,3 @@
 com.hemju.threadmill.spring.ThreadmillAutoConfiguration
 com.hemju.threadmill.spring.ThreadmillPostgresAutoConfiguration
+com.hemju.threadmill.spring.ThreadmillRedisAutoConfiguration

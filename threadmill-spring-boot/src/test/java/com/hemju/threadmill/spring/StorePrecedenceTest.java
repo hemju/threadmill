@@ -73,7 +73,9 @@ class StorePrecedenceTest {
     private ApplicationContextRunner runner() {
         return new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(DataSource.class, () -> dataSource)
                 .withPropertyValues("threadmill.enabled=false");
     }

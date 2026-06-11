@@ -29,8 +29,10 @@ import com.hemju.threadmill.store.memory.InMemoryJobStore;
 class ThreadmillAutoConfigurationTest {
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-            .withConfiguration(
-                    AutoConfigurations.of(ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+            .withConfiguration(AutoConfigurations.of(
+                    ThreadmillRedisAutoConfiguration.class,
+                    ThreadmillPostgresAutoConfiguration.class,
+                    ThreadmillAutoConfiguration.class))
             .withPropertyValues("threadmill.enabled=false");
 
     @Test
@@ -79,7 +81,9 @@ class ThreadmillAutoConfigurationTest {
     void processingNodeLanesAreDerivedFromAnnotatedQueues() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(QueueAHandler.class)
                 .withBean(QueueBHandler.class)
                 .run(context -> {
@@ -95,7 +99,9 @@ class ThreadmillAutoConfigurationTest {
     void processingNodeAlwaysIncludesDefaultLaneEvenWithNoHandlers() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     ProcessingNode node = context.getBean(ProcessingNode.class);
@@ -107,7 +113,9 @@ class ThreadmillAutoConfigurationTest {
     void processingNodeDoesNotDuplicateDefaultLaneWhenHandlerUsesDefaultQueue() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(DefaultQueueHandler.class)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -120,7 +128,9 @@ class ThreadmillAutoConfigurationTest {
     void intervalAnnotationRegistersRecurringHandlerAsNoPayloadTask() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(RecurringIntervalHandler.class)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -137,7 +147,9 @@ class ThreadmillAutoConfigurationTest {
     void cronAnnotationRegistersRecurringHandler() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(RecurringCronHandler.class)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -153,7 +165,9 @@ class ThreadmillAutoConfigurationTest {
     void explicitRecurringNameOverridesHandlerClassName() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(NamedRecurringHandler.class)
                 .run(context -> {
                     var registrar = context.getBean(ThreadmillRecurringRegistrar.class);
@@ -167,7 +181,9 @@ class ThreadmillAutoConfigurationTest {
     void recurringNamespaceDeletesStaleOwnedTasks() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(JobStore.class, () -> {
                     var store = new InMemoryJobStore();
                     store.upsertCronTask(testCronTask("stale-task"));
@@ -189,7 +205,9 @@ class ThreadmillAutoConfigurationTest {
     void explicitRecurringNameReconcilesWithoutCreatingSecondTask() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(JobStore.class, () -> {
                     var store = new InMemoryJobStore();
                     store.upsertCronTask(testCronTask("locked-name"));
@@ -210,7 +228,9 @@ class ThreadmillAutoConfigurationTest {
     void missingRecurringNamespaceLeavesStaleTasksUntouched() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(JobStore.class, () -> {
                     var store = new InMemoryJobStore();
                     store.upsertCronTask(testCronTask("stale-task"));
@@ -234,7 +254,9 @@ class ThreadmillAutoConfigurationTest {
         // is now an orphan that would fire forever. The auto-prune path must delete it.
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(JobStore.class, () -> {
                     var store = new InMemoryJobStore();
                     store.upsertCronTask(testCronTask("com.example.OldReportHandler"));
@@ -258,7 +280,9 @@ class ThreadmillAutoConfigurationTest {
     void intervalAndCronTogetherFailsStartup() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(BothScheduleFieldsHandler.class)
                 .run(context -> {
                     assertThat(context).hasFailed();
@@ -270,7 +294,9 @@ class ThreadmillAutoConfigurationTest {
     void jobActionIsRegisteredAsNoPayloadJobHandler() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(SomeAction.class)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -289,7 +315,9 @@ class ThreadmillAutoConfigurationTest {
         // register and the registrar must materialize one CronTask per handler.
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(SomeAction.class)
                 .withBean(OtherAction.class)
                 .withPropertyValues("threadmill.enabled=false")
@@ -317,7 +345,9 @@ class ThreadmillAutoConfigurationTest {
         // ran. Mirrors the payload-collision startup failure.
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(FirstClashingAction.class)
                 .withBean(SecondClashingAction.class)
                 .withPropertyValues("threadmill.enabled=false")
@@ -335,7 +365,9 @@ class ThreadmillAutoConfigurationTest {
     void enqueueWakesLocalDispatcherViaWakeBus() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(QueueAHandler.class)
                 .withPropertyValues("threadmill.spring.enqueue-mode=immediate")
                 .run(context -> {
@@ -431,7 +463,9 @@ class ThreadmillAutoConfigurationTest {
         var remote = new RecordingRemoteWakeChannel();
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(RemoteWakeChannel.class, () -> remote)
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -447,7 +481,9 @@ class ThreadmillAutoConfigurationTest {
     void rawJobHandlerIsRejectedWithGuidance() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(RawHandler.class)
                 .run(context -> {
                     assertThat(context).hasFailed();
@@ -461,7 +497,9 @@ class ThreadmillAutoConfigurationTest {
     void annotationOnNonNoPayloadHandlerFailsStartup() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(RecurringWithCustomPayloadHandler.class)
                 .run(context -> {
                     assertThat(context).hasFailed();
@@ -474,7 +512,9 @@ class ThreadmillAutoConfigurationTest {
     void invalidIntervalFailsStartupAtRegistryBuild() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withBean(InvalidIntervalHandler.class)
                 .run(context -> {
                     assertThat(context).hasFailed();

@@ -62,7 +62,9 @@ class SpringRedisResetAutoConfigurationTest {
 
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
-                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
                 .withPropertyValues(
                         "threadmill.enabled=false",
                         "threadmill.remote-wake.enabled=false",

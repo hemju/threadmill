@@ -14,7 +14,10 @@ val springBootVersion =
 dependencies {
     api(project(":threadmill-core"))
     api(project(":threadmill-store-memory"))
-    api(project(":threadmill-store-redis"))
+    // Redis store is compileOnly so apps that do not use Redis do not pull in
+    // Lettuce/Netty; ThreadmillRedisAutoConfiguration is gated by
+    // @ConditionalOnClass(RedisJobStore.class) so this is safe.
+    compileOnly(project(":threadmill-store-redis"))
 
     // Postgres store is compileOnly so applications that don't need it (or
     // use Redis exclusively) don't pull in the JDBC driver. The auto-config
@@ -29,6 +32,7 @@ dependencies {
     )
 
     testImplementation(project(":threadmill-store-postgres"))
+    testImplementation(project(":threadmill-store-redis"))
     testImplementation(project(":threadmill-test-support"))
     testImplementation(libs.spring.boot.autoconfigure)
     testImplementation(libs.spring.context)
