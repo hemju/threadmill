@@ -54,6 +54,7 @@ public final class ProcessingNode implements AutoCloseable {
     private final Set<String> tags;
     private final AtomicBoolean started = new AtomicBoolean(false);
     private final AtomicBoolean stopped = new AtomicBoolean(false);
+    private final AtomicBoolean claimingSuspended = new AtomicBoolean(false);
 
     public static Builder builder(JobStore store) {
         return new Builder(store);
@@ -96,8 +97,16 @@ public final class ProcessingNode implements AutoCloseable {
         }
         this.wakeRegistration = wakeBus.register(this::wake);
 
+        // When this node's owner-heartbeat writes keep failing, suspend claiming
+        // so the maintenance leader does not orphan-reclaim (and duplicate) this
+        // node's in-flight jobs while it keeps grabbing more.
+        for (Dispatcher d : dispatchers) {
+            d.suspendClaimingWhen(claimingSuspended::get);
+        }
+
         var materializer = new RecurringMaterializer(store, wakeBus);
         this.maintenance = new MaintenanceCycle(store, nodeId, registry, runner, materializer, config, wakeBus);
+        this.maintenance.setClaimSuspensionGate(claimingSuspended);
     }
 
     public NodeId nodeId() {
@@ -112,6 +121,17 @@ public final class ProcessingNode implements AutoCloseable {
      */
     public boolean isStopped() {
         return stopped.get();
+    }
+
+    /**
+     * Whether this node has suspended claiming new work because its owner-heartbeat
+     * writes are failing. While suspended, in-flight jobs still drain but no new
+     * jobs are claimed, so the maintenance leader's orphan reclaim of this node's
+     * (now stale-heartbeat) jobs is not compounded by it grabbing more. Clears
+     * automatically once heartbeats succeed again. Useful for a health signal.
+     */
+    public boolean isClaimingSuspended() {
+        return claimingSuspended.get();
     }
 
     public ProcessingNodeConfig config() {

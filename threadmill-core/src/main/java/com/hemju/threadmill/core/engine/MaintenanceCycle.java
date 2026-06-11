@@ -114,12 +114,50 @@ public final class MaintenanceCycle {
         if (hb != null) hb.interrupt();
     }
 
+    /**
+     * Gate flipped to {@code true} when this node's owner-heartbeat writes keep
+     * failing. ProcessingNode wires it into the dispatchers so they stop claiming
+     * new work — otherwise the maintenance leader orphan-reclaims this node's
+     * in-flight jobs (their heartbeats have gone stale) while this node keeps
+     * claiming more, compounding duplicate execution. Null = no escalation.
+     */
+    private volatile AtomicBoolean claimSuspended;
+
+    void setClaimSuspensionGate(AtomicBoolean gate) {
+        this.claimSuspended = gate;
+    }
+
     private void heartbeatLoop() {
+        // Suspend claiming after heartbeats have failed for close to
+        // heartbeatTimeout (when the leader would start reclaiming), leaving a
+        // tick of margin. heartbeatTimeout >= 2 * claimHeartbeat is enforced.
+        int threshold = Math.max(
+                1,
+                (int) (config.heartbeatTimeout().toMillis()
+                                / Math.max(1, config.claimHeartbeat().toMillis()))
+                        - 1);
+        int consecutiveFailures = 0;
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
                 store.touchOwnerHeartbeat(nodeId, Instant.now());
+                if (consecutiveFailures > 0) {
+                    consecutiveFailures = 0;
+                    if (claimSuspended != null && claimSuspended.compareAndSet(true, false)) {
+                        LOG.warn("Owner-heartbeat refresh recovered on node {} — resuming claiming", nodeId);
+                    }
+                }
             } catch (Throwable t) {
-                LOG.warn("Owner-heartbeat refresh failed", t);
+                consecutiveFailures++;
+                LOG.warn("Owner-heartbeat refresh failed on node {} ({} consecutive)", nodeId, consecutiveFailures, t);
+                if (consecutiveFailures >= threshold
+                        && claimSuspended != null
+                        && claimSuspended.compareAndSet(false, true)) {
+                    LOG.error(
+                            "Owner-heartbeat refresh failing on node {} ({} consecutive) — suspending claiming so the"
+                                    + " maintenance leader's orphan reclaim does not duplicate this node's in-flight jobs",
+                            nodeId,
+                            consecutiveFailures);
+                }
             }
             sleep(config.claimHeartbeat());
         }

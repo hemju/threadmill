@@ -1270,6 +1270,39 @@ class ProcessingNodeTest {
     }
 
     @Test
+    void persistentHeartbeatFailureSuspendsClaimingAndRecovers() throws Exception {
+        var heartbeatDown = new AtomicInteger(1); // 1 = failing
+        var failingStore = new ForwardingJobStore(store) {
+            @Override
+            public void touchOwnerHeartbeat(NodeId n, Instant now) {
+                if (heartbeatDown.get() == 1) throw new RuntimeException("heartbeat write failing");
+                super.touchOwnerHeartbeat(n, now);
+            }
+        };
+        node = ProcessingNode.builder(failingStore)
+                .config(fastConfig.toBuilder()
+                        .claimHeartbeat(Duration.ofMillis(50))
+                        .heartbeatTimeout(Duration.ofMillis(200))
+                        .build())
+                .build();
+        node.start();
+
+        // Heartbeats fail for ~heartbeatTimeout, so the node suspends claiming.
+        await().atMost(Duration.ofSeconds(5)).until(node::isClaimingSuspended);
+
+        // While suspended, newly-enqueued work must NOT be claimed.
+        Job blocked = enqueueHello(EngineTestHandlers.CountingHandler.class, "default");
+        Thread.sleep(300);
+        assertThat(store.findById(blocked.id()).orElseThrow().currentState()).isEqualTo(JobState.ENQUEUED);
+
+        // Recovery: once heartbeats succeed, claiming resumes and the job runs.
+        heartbeatDown.set(0);
+        await().atMost(Duration.ofSeconds(5)).until(() -> !node.isClaimingSuspended());
+        await().atMost(Duration.ofSeconds(5))
+                .until(() -> store.findById(blocked.id()).orElseThrow().currentState() == JobState.SUCCEEDED);
+    }
+
+    @Test
     void ownerHeartbeatsKeepFlowingWhileWorkersDrainOnShutdown() throws Exception {
         Job job = enqueueHello(EngineTestHandlers.BlockingHandler.class, "default");
         node = ProcessingNode.builder(store)

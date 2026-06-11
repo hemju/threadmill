@@ -13,6 +13,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -53,6 +54,12 @@ public final class Dispatcher {
     private Set<String> pausedQueues = Set.of();
     private final CircuitBreaker breaker;
     private final AtomicBoolean paused = new AtomicBoolean(false);
+    // Set by ProcessingNode and flipped by the owner-heartbeat loop: when this
+    // node cannot persist heartbeats, it must stop claiming NEW work (the
+    // maintenance leader is about to orphan-reclaim its in-flight jobs, and
+    // claiming more would just compound the duplicate execution). In-flight jobs
+    // still drain. Defaults to "never suspended" so existing wiring is unaffected.
+    private volatile BooleanSupplier claimSuspended = () -> false;
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final AtomicReference<Thread> loopThread = new AtomicReference<>();
     private final WakeSignal wakeSignal = new WakeSignal();
@@ -138,9 +145,20 @@ public final class Dispatcher {
         wakeSignal.signal();
     }
 
+    /** Wire a gate that, when true, suspends claiming new work (heartbeat impairment). */
+    void suspendClaimingWhen(BooleanSupplier gate) {
+        this.claimSuspended = Objects.requireNonNull(gate, "gate");
+    }
+
     private void loop() {
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
+                if (claimSuspended.getAsBoolean()) {
+                    // Owner heartbeats are failing on this node — don't claim more
+                    // work; let in-flight jobs drain and wait for recovery.
+                    sleep(config.pollInterval());
+                    continue;
+                }
                 if (paused.get()) {
                     if (probeStore()) {
                         LOG.info("Store reachable again — resuming dispatcher");
