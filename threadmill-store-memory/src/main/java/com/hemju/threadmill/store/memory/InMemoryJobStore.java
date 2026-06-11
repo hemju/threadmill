@@ -840,7 +840,7 @@ public final class InMemoryJobStore implements JobStore {
         if (candidate.concurrencyKey == null) {
             return true;
         }
-        if (hasActiveWorkflowHoldForRoot(candidate)) {
+        if (hasActiveWorkflowHoldForRoot(candidateEntry.getKey(), candidate)) {
             return true;
         }
         if (candidate.concurrencyMode == ConcurrencyMode.EXCLUSIVE) {
@@ -901,16 +901,27 @@ public final class InMemoryJobStore implements JobStore {
                         && !isTerminal(other.state));
     }
 
-    private boolean hasActiveWorkflowHoldForRoot(Entry candidate) {
-        // The hold is acquired once any same-root member has ever been
-        // claimed (PROCESSING, terminal, or attempts > 0 — the retried-root
-        // case, where the root sits ENQUEUED again after a failure) and
-        // stays active while any member is non-terminal. This mirrors the
-        // persisted-hold semantics of the real backends.
+    private boolean hasActiveWorkflowHoldForRoot(JobId candidateId, Entry candidate) {
+        // The hold is acquired once any same-root member has been claimed
+        // (PROCESSING, terminal, or — for the retried-root case, where the root
+        // sits ENQUEUED again after a failure — attempts > 0) and stays active
+        // while any member is non-terminal. A member's own attempts > 0 only
+        // counts as a hold when the workflow has at least one OTHER same-root
+        // member: a standalone keyed job's workflowRootId defaults to its own id,
+        // so without that guard a retried standalone job would satisfy its own
+        // "hold" and bypass concurrency exclusion entirely. The real backends
+        // release a standalone job's hold at its FAILED transition, so it carries
+        // no active hold on re-claim. This mirrors that persisted-hold semantics.
+        boolean hasOtherSameRootMember = jobs.entrySet().stream()
+                .anyMatch(e -> !e.getKey().equals(candidateId)
+                        && candidate.workflowRootId.equals(e.getValue().workflowRootId)
+                        && sameConcurrencyKey(candidate, e.getValue()));
         boolean acquired = jobs.values().stream()
                 .anyMatch(e -> candidate.workflowRootId.equals(e.workflowRootId)
                         && sameConcurrencyKey(candidate, e)
-                        && (e.state == JobState.PROCESSING || isTerminal(e.state) || e.attempts > 0));
+                        && (e.state == JobState.PROCESSING
+                                || isTerminal(e.state)
+                                || (e.attempts > 0 && hasOtherSameRootMember)));
         if (!acquired) {
             return false;
         }

@@ -412,6 +412,56 @@ public abstract class AbstractJobStoreContractTest {
     }
 
     @Test
+    @DisplayName("retried standalone EXCLUSIVE jobs for the same key still serialize")
+    void retriedStandaloneExclusiveJobsStillSerialize() {
+        var base = Instant.now().minusSeconds(5);
+        Job a = concurrentJob("com.example.Import", "project:42", ConcurrencyMode.EXCLUSIVE, 0, base);
+        Job b = concurrentJob("com.example.Import", "project:42", ConcurrencyMode.EXCLUSIVE, 0, base.plusMillis(1));
+        store.insert(a);
+        store.insert(b);
+
+        // a runs first, fails (terminal). That frees b to run; b fails and retries.
+        Job ca = store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        assertThat(ca.id()).isEqualTo(a.id());
+        finish(ca, JobState.FAILED);
+
+        Job cb = store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        assertThat(cb.id()).isEqualTo(b.id());
+        finish(cb, JobState.FAILED);
+        retryToEnqueued(b.id());
+
+        // Now retry a too. Both a and b are ENQUEUED with attempts > 0; both are
+        // EXCLUSIVE on the same key, so a claim may return at most one.
+        retryToEnqueued(a.id());
+        assertThat(store.claimReady(NodeId.newId(), "default", 2, Instant.now()))
+                .hasSize(1);
+    }
+
+    @Test
+    @DisplayName("a retried SHARED job never runs alongside a retried EXCLUSIVE job for the same key")
+    void retriedSharedDoesNotRunWithRetriedExclusiveForSameKey() {
+        var base = Instant.now().minusSeconds(5);
+        Job excl = concurrentJob("com.example.Import", "project:42", ConcurrencyMode.EXCLUSIVE, 0, base);
+        Job shared = concurrentJob("com.example.Export", "project:42", ConcurrencyMode.SHARED, 0, base.plusMillis(1));
+        store.insert(excl);
+        store.insert(shared);
+
+        Job c1 = store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        assertThat(c1.id()).isEqualTo(excl.id());
+        finish(c1, JobState.FAILED);
+
+        Job c2 = store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        assertThat(c2.id()).isEqualTo(shared.id());
+        finish(c2, JobState.FAILED);
+        retryToEnqueued(shared.id());
+        retryToEnqueued(excl.id());
+
+        // EXCLUSIVE and SHARED on the same key must never both be PROCESSING.
+        assertThat(store.claimReady(NodeId.newId(), "default", 2, Instant.now()))
+                .hasSize(1);
+    }
+
+    @Test
     @DisplayName("concurrent claimers cannot both claim EXCLUSIVE jobs for the same concurrency key")
     void concurrentClaimersCannotBothClaimExclusiveJobsForSameConcurrencyKey() throws Exception {
         var base = Instant.now().minusSeconds(1);
