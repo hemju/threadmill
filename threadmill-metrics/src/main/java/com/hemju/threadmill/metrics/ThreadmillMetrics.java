@@ -51,6 +51,15 @@ public final class ThreadmillMetrics {
     private final Timer claimLatency;
     private final ConcurrentHashMap<String, Instant> inFlightStart = new ConcurrentHashMap<>();
 
+    /**
+     * Coalesce the per-completion {@link #refresh()} so a high-throughput node
+     * does not run three store reads (counts, queue depths, oldest heartbeat)
+     * on every single job. The dashboard uses the same 1s-TTL approach.
+     */
+    private static final long REFRESH_TTL_NANOS = Duration.ofSeconds(1).toNanos();
+
+    private final AtomicLong lastRefreshNanos = new AtomicLong(Long.MIN_VALUE);
+
     public ThreadmillMetrics(MeterRegistry registry, JobStore store) {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.store = Objects.requireNonNull(store, "store");
@@ -90,15 +99,49 @@ public final class ThreadmillMetrics {
             for (JobState s : JobState.values()) {
                 stateGauges.get(s).set(counts.getOrDefault(s, 0L));
             }
-            for (var e : store.queueDepths().entrySet()) {
+            Map<String, Long> depths = store.queueDepths();
+            for (var e : depths.entrySet()) {
                 queueGauge(e.getKey()).set(e.getValue());
             }
+            // Evict meters for queues that no longer have ENQUEUED work, so a
+            // drained or churned-away (e.g. queue-family) queue does not report
+            // a stale phantom depth forever, accumulate unbounded meter
+            // cardinality, or keep costing an oldestEnqueuedAt store call per
+            // scrape.
+            queueDepthGauges.keySet().removeIf(q -> {
+                if (!depths.containsKey(q)) {
+                    removeQueueMeters(q);
+                    return true;
+                }
+                return false;
+            });
             long age = store.oldestProcessingHeartbeat()
                     .map(at -> Math.max(0L, Duration.between(at, Instant.now()).toMillis()))
                     .orElse(0L);
             oldestProcessingHeartbeatAgeMillis.set(age);
         } catch (RuntimeException e) {
             refreshErrors.increment();
+        }
+    }
+
+    /** Coalesced refresh for the hot per-completion path. */
+    private void refreshThrottled() {
+        long now = System.nanoTime();
+        long last = lastRefreshNanos.get();
+        if (now - last < REFRESH_TTL_NANOS) {
+            return;
+        }
+        if (lastRefreshNanos.compareAndSet(last, now)) {
+            refresh();
+        }
+    }
+
+    private void removeQueueMeters(String queue) {
+        for (String name : new String[] {"threadmill.queue.depth", "threadmill.queue.oldest.enqueued.age"}) {
+            var meter = registry.find(name).tag("queue", queue).meter();
+            if (meter != null) {
+                registry.remove(meter);
+            }
         }
     }
 
@@ -119,7 +162,7 @@ public final class ThreadmillMetrics {
             public void onProcessingSucceeded(Job job, JobExecutionContext ctx) {
                 processedCounter.increment();
                 recordElapsed(job);
-                refresh();
+                refreshThrottled();
             }
 
             @Override
@@ -132,7 +175,7 @@ public final class ThreadmillMetrics {
                                         .register(registry))
                         .increment();
                 recordElapsed(job);
-                refresh();
+                refreshThrottled();
             }
         };
     }
