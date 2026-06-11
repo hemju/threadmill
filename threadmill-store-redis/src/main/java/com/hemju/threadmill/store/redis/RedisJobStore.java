@@ -1186,9 +1186,18 @@ public final class RedisJobStore implements JobStore {
                 terminal = state == null || isTerminal(JobState.valueOf(state));
             }
             if (terminal) {
-                r.del(key);
-                r.zrem(RedisKeys.dedupExpiry(), key);
-                removed++;
+                // Compare-and-delete: enqueue_if_absent can atomically replace
+                // the record between this scan and the delete; an unconditional
+                // DEL would remove the brand-new record and let a duplicate
+                // enqueue through inside its TTL window.
+                Long deleted = r.eval(
+                        LuaScripts.dedupDelete(),
+                        ScriptOutputType.INTEGER,
+                        new String[] {key, RedisKeys.dedupExpiry()},
+                        jobId == null ? "" : jobId);
+                if (deleted != null && deleted == 1L) {
+                    removed++;
+                }
             }
         }
         return removed;

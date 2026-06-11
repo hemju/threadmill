@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
+import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.SetArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
@@ -37,6 +38,7 @@ import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
+import com.hemju.threadmill.core.EnqueueResult;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobEngineFatalException;
 import com.hemju.threadmill.core.JobId;
@@ -647,6 +649,48 @@ class RedisJobStoreRegressionTest {
         assertThat(orphans).extracting(Job::id).containsExactly(orphan.id());
         // The dangling ids are gone; the next scan window is clean.
         assertThat(r.zcard(RedisKeys.PROCESSING_ALL)).isEqualTo(1L);
+    }
+
+    @Test
+    void dedupSweepDoesNotDeleteARecordReplacedByAConcurrentProducer() {
+        // Deterministic replay of the maintenance-vs-producer interleave:
+        // the sweeper reads an expired record referencing terminal job A;
+        // before its delete lands, a producer's enqueue_if_absent atomically
+        // replaces the record with fresh job B. The sweeper's delete carries
+        // A as the expected id and must leave B's record alone.
+        JobStore store = store();
+        Job a = Job.builder()
+                .spec(JobSpec.of("com.example.Dedup", new JobArgument("java.lang.String", "\"x\"")))
+                .build();
+        assertThat(store.enqueueIfAbsent(a, "report-42", Duration.ofMillis(1), Instant.now()))
+                .isInstanceOf(EnqueueResult.Created.class);
+        assertThat(store.softDelete(a.id())).isTrue();
+
+        // Producer replaces the expired record (job A terminal) with job B.
+        Job b = Job.builder()
+                .spec(JobSpec.of("com.example.Dedup", new JobArgument("java.lang.String", "\"x\"")))
+                .build();
+        assertThat(store.enqueueIfAbsent(b, "report-42", Duration.ofMinutes(5), Instant.now()))
+                .isInstanceOf(EnqueueResult.Created.class);
+
+        // The racing sweeper's compare-and-delete with the stale expected id.
+        RedisCommands<String, String> r = adminConnection.sync();
+        String recordKey = RedisKeys.dedup("default", "report-42");
+        Long deleted = r.eval(
+                LuaScripts.dedupDelete(),
+                ScriptOutputType.INTEGER,
+                new String[] {recordKey, RedisKeys.dedupExpiry()},
+                a.id().toString());
+        assertThat(deleted).isEqualTo(0L);
+        assertThat(r.hget(recordKey, "job_id")).isEqualTo(b.id().toString());
+
+        // A third producer must still coalesce onto B inside its TTL window.
+        Job c = Job.builder()
+                .spec(JobSpec.of("com.example.Dedup", new JobArgument("java.lang.String", "\"x\"")))
+                .build();
+        EnqueueResult third = store.enqueueIfAbsent(c, "report-42", Duration.ofMinutes(5), Instant.now());
+        assertThat(third).isInstanceOf(EnqueueResult.Coalesced.class);
+        assertThat(((EnqueueResult.Coalesced) third).existingId()).isEqualTo(b.id());
     }
 
     @Test
