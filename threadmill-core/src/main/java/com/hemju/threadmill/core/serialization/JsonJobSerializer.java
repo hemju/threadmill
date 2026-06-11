@@ -141,7 +141,13 @@ public final class JsonJobSerializer implements JobSerializer {
     static JobSnapshot truncateForSerialization(JobSnapshot s, JobStoreCapabilities caps) {
         List<JobLog.Entry> trimmedLog = trimLog(s.log(), caps.maxJobLogBytes());
         List<JobStateEntry> trimmedHistory = trimFailureMessages(s.stateHistory(), caps.maxFailureMetadataBytes());
-        boolean terminal = isTerminalSaveState(s.currentState());
+        // Elide user/engine-growable areas for terminal saves AND for a retry
+        // reschedule (a SCHEDULED save of an already-attempted job): otherwise a
+        // handler that grew its metadata past the cap fails the terminal save's
+        // elision but blocks the non-terminal SCHEDULED reschedule with an
+        // OversizedJobException, silently cancelling every remaining retry. An
+        // initial schedule (attempts == 0) still keeps the loud §6 rejection.
+        boolean terminal = isElisionEligible(s.currentState(), s.attempts());
         int elidedHistory = 0;
         int maxEntries = caps.maxStateHistoryEntries();
         if (terminal && maxEntries > 1 && trimmedHistory.size() > maxEntries) {
@@ -203,6 +209,11 @@ public final class JsonJobSerializer implements JobSerializer {
      */
     private static boolean isTerminalSaveState(JobState state) {
         return state.isTerminal() || state == JobState.FAILED;
+    }
+
+    private static boolean isElisionEligible(JobState state, int attempts) {
+        // Terminal saves, plus a retry/park reschedule of an already-run job.
+        return isTerminalSaveState(state) || (state == JobState.SCHEDULED && attempts > 0);
     }
 
     private static Map<String, String> trimMetadata(

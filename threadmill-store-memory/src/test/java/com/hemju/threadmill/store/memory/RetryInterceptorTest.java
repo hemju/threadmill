@@ -2,6 +2,8 @@ package com.hemju.threadmill.store.memory;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -20,6 +22,7 @@ import com.hemju.threadmill.core.engine.RetryPolicy;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
+import com.hemju.threadmill.core.store.JobStore;
 
 /**
  * Unit-level retry-interceptor regressions: backoff arithmetic, sub-second
@@ -81,6 +84,44 @@ class RetryInterceptorTest {
         Job scheduled = store.findById(failed.id()).orElseThrow();
         Duration delay = Duration.between(before, scheduled.scheduledFor().orElseThrow());
         assertThat(delay).isGreaterThan(Duration.ofMillis(250)).isLessThan(Duration.ofSeconds(1));
+    }
+
+    @Test
+    void transientStoreErrorOnRescheduleIsRetriedNotSwallowed() {
+        // The FAILED save has already landed; a transient store blip on the
+        // reschedule must not silently strand the job in FAILED with budget left.
+        // A proxy injects a single saveAtomic failure on the SCHEDULED transition.
+        var blips = new java.util.concurrent.atomic.AtomicInteger(0);
+        JobStore flakyStore = (JobStore) Proxy.newProxyInstance(
+                JobStore.class.getClassLoader(), new Class<?>[] {JobStore.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("saveAtomic")
+                            && ((Job) args[0]).currentState() == JobState.SCHEDULED
+                            && blips.getAndIncrement() == 0) {
+                        throw new RuntimeException("transient store blip");
+                    }
+                    try {
+                        return method.invoke(store, args);
+                    } catch (InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+
+        JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("x"));
+        Job job = Job.builder().spec(new JobSpec("com.example.H", List.of(arg))).build();
+        store.insert(job);
+        Job claimed =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        long version = claimed.version();
+        claimed.transitionTo(JobState.FAILED, Instant.now(), "engine.exception", "boom");
+        claimed.clearOwner();
+        store.saveAtomic(claimed, version);
+
+        var interceptor = new RetryInterceptor(flakyStore, 3, Duration.ofMillis(50));
+        interceptor.onProcessingFailed(
+                claimed, null, new RuntimeException("boom"), JobInterceptor.FailureCause.EXCEPTION);
+
+        assertThat(blips.get()).isGreaterThanOrEqualTo(2); // first throw, then a successful retry
+        assertThat(store.findById(claimed.id()).orElseThrow().currentState()).isEqualTo(JobState.SCHEDULED);
     }
 
     @Test

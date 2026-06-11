@@ -40,6 +40,9 @@ public final class RetryInterceptor implements JobInterceptor {
 
     private static final Logger LOG = LoggerFactory.getLogger(RetryInterceptor.class);
 
+    private static final int RESCHEDULE_SAVE_ATTEMPTS = 3;
+    private static final long RESCHEDULE_SAVE_BACKOFF_MS = 50L;
+
     private final JobStore store;
     private final RetryPolicy defaultPolicy;
     // Iterated from concurrent worker virtual threads while policyFor may
@@ -88,9 +91,39 @@ public final class RetryInterceptor implements JobInterceptor {
                     "retry " + (attempts + 1) + " of " + policy.maxAttempts());
             job.scheduleAt(next);
             job.clearOwner();
-            store.saveAtomic(job, expectedVersion);
+            saveRescheduleWithRetry(job, expectedVersion);
         } catch (StaleJobException ignored) {
             // Another node beat us to the next state for this job — fine.
+        }
+    }
+
+    /**
+     * Persist the FAILED&nbsp;→&nbsp;SCHEDULED retry transition, retrying transient
+     * store errors with a short bounded backoff. The terminal FAILED save has
+     * already landed, so a swallowed reschedule here permanently strands the job
+     * in FAILED with unspent retry budget — the reschedule must be as resilient
+     * as the terminal save itself. {@link StaleJobException} is not transient
+     * (another node moved the job) and propagates to the caller's catch.
+     */
+    private void saveRescheduleWithRetry(Job job, long expectedVersion) {
+        int attempt = 0;
+        while (true) {
+            try {
+                store.saveAtomic(job, expectedVersion);
+                return;
+            } catch (StaleJobException stale) {
+                throw stale;
+            } catch (RuntimeException transientError) {
+                if (++attempt >= RESCHEDULE_SAVE_ATTEMPTS) {
+                    throw transientError;
+                }
+                try {
+                    Thread.sleep(RESCHEDULE_SAVE_BACKOFF_MS);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw transientError;
+                }
+            }
         }
     }
 

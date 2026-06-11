@@ -229,6 +229,49 @@ class JsonJobSerializerTest {
     }
 
     @Test
+    void retryRescheduleWithOversizedMetadataIsElidedNotRejected() {
+        // A handler grew its metadata past the cap, then failed. The FAILED save
+        // elides to fit; the subsequent SCHEDULED reschedule (attempts > 0) must
+        // also elide so the retry is not silently cancelled with an oversize throw.
+        Job j = Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"\"")))
+                .metadata("threadmill.retry.maxAttempts", "5")
+                .build();
+        for (int i = 0; i < 500; i++) {
+            j.metadata().put("user.bulk" + i, "x".repeat(2048));
+        }
+        j.transitionTo(JobState.PROCESSING, Instant.now(), "engine.claim", null);
+        j.incrementAttempts();
+        j.transitionTo(JobState.FAILED, Instant.now(), "engine.exception", "boom");
+        j.transitionTo(JobState.SCHEDULED, Instant.now(), "engine.retry-after-failure", "retry 2 of 5");
+
+        var caps = new JobStoreCapabilities(64L * 1024L, 16 * 1024, 8 * 1024, 100, true, true, true, true);
+        String wire = serializer.serializeJob(j.snapshot(), caps);
+        assertThat(wire.getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(64 * 1024);
+
+        Job loaded = serializer.deserializeJob(wire);
+        assertThat(loaded.currentState()).isEqualTo(JobState.SCHEDULED);
+        assertThat(loaded.metadata().get("threadmill.retry.maxAttempts")).contains("5");
+        assertThat(loaded.metadata().get(JsonJobSerializer.TRUNCATED_METADATA_KEY))
+                .isPresent();
+    }
+
+    @Test
+    void initialScheduleWithOversizedMetadataStillRejectsLoudly() {
+        // attempts == 0: an initial schedule keeps the §6 loud oversize rejection.
+        Job j = Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"\"")))
+                .initialState(JobState.SCHEDULED)
+                .scheduledFor(Instant.now())
+                .build();
+        String chunk = "x".repeat(2048);
+        for (int i = 0; i < 500; i++) j.metadata().put("k" + i, chunk);
+
+        var caps = new JobStoreCapabilities(64L * 1024L, 16 * 1024, 8 * 1024, 100, true, true, true, true);
+        assertThatThrownBy(() -> serializer.serializeJob(j.snapshot(), caps)).isInstanceOf(OversizedJobException.class);
+    }
+
+    @Test
     void oversizeThrowsAndDoesNotMutateSnapshotSource() {
         Job j = Job.builder()
                 .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"\"")))
