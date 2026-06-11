@@ -325,7 +325,8 @@ public final class RedisJobStore implements JobStore {
             concurrencyPendingKey(snapshot),
             concurrencyWorkflowsKey(snapshot.concurrencyKey()),
             concurrencyWorkflowCountsKey(snapshot.concurrencyKey()),
-            awaitingParentKey(snapshot)
+            awaitingParentKey(snapshot),
+            RedisKeys.QUEUES
         };
         var args = new String[] {
             snapshot.id().toString(),
@@ -358,9 +359,6 @@ public final class RedisJobStore implements JobStore {
             String result = r.eval(LuaScripts.insert(), ScriptOutputType.VALUE, keys, args);
             if ("EXISTS".equals(result)) {
                 throw new IllegalStateException("Job already exists: " + snapshot.id());
-            }
-            if (snapshot.currentState() == JobState.ENQUEUED) {
-                r.sadd(RedisKeys.QUEUES, snapshot.queue());
             }
         } catch (RuntimeException e) {
             throw translateCapacity(e);
@@ -416,9 +414,9 @@ public final class RedisJobStore implements JobStore {
         }
 
         try {
-            // Pack 9 keys + 18 args per job for the batched Lua script.
+            // Pack 10 keys + 18 args per job for the batched Lua script.
             int n = snapshots.size();
-            var keyList = new ArrayList<String>(n * 9);
+            var keyList = new ArrayList<String>(n * 10);
             var argList = new ArrayList<String>(1 + n * 18);
             argList.add(Integer.toString(n));
             for (int i = 0; i < n; i++) {
@@ -435,6 +433,7 @@ public final class RedisJobStore implements JobStore {
                 keyList.add(concurrencyWorkflowsKey(snap.concurrencyKey()));
                 keyList.add(concurrencyWorkflowCountsKey(snap.concurrencyKey()));
                 keyList.add(awaitingParentKey(snap));
+                keyList.add(RedisKeys.QUEUES);
 
                 argList.add(snap.id().toString());
                 argList.add(bodies.get(i));
@@ -477,13 +476,6 @@ public final class RedisJobStore implements JobStore {
                     int idx = Integer.parseInt(result.substring("EXISTS:".length()));
                     throw new IllegalStateException("Duplicate job id in batch at index " + idx + ": "
                             + snapshots.get(idx).id());
-                }
-
-                // Add queue names to the QUEUES set for any ENQUEUED jobs.
-                for (JobSnapshot snap : snapshots) {
-                    if (snap.currentState() == JobState.ENQUEUED) {
-                        r.sadd(RedisKeys.QUEUES, snap.queue());
-                    }
                 }
             } catch (RuntimeException e) {
                 throw translateCapacity(e);
@@ -558,7 +550,8 @@ public final class RedisJobStore implements JobStore {
                         concurrencyPendingKey(snapshot),
                         concurrencyWorkflowsKey(snapshot.concurrencyKey()),
                         concurrencyWorkflowCountsKey(snapshot.concurrencyKey()),
-                        awaitingParentKey(snapshot)
+                        awaitingParentKey(snapshot),
+                        RedisKeys.QUEUES
                     },
                     snapshot.id().toString(),
                     body,
@@ -597,13 +590,6 @@ public final class RedisJobStore implements JobStore {
         }
         if ("EXISTS".equals(reply)) {
             throw new IllegalStateException("Job already exists: " + job.id());
-        }
-        if (snapshot.currentState() == JobState.ENQUEUED) {
-            try {
-                r.sadd(RedisKeys.QUEUES, snapshot.queue());
-            } catch (RuntimeException e) {
-                throw translateCapacity(e);
-            }
         }
         job.adoptVersion(version);
         return new EnqueueResult.Created(job.id());
@@ -669,7 +655,8 @@ public final class RedisJobStore implements JobStore {
             concurrencyWorkflowsKey(oldConcurrencyKey),
             concurrencyWorkflowCountsKey(oldConcurrencyKey),
             concurrencyWorkflowCountsKey(snapshot.concurrencyKey()),
-            awaitingParentKey(snapshot)
+            awaitingParentKey(snapshot),
+            RedisKeys.QUEUES
         };
         var args = new String[] {
             snapshot.id().toString(),
@@ -711,13 +698,6 @@ public final class RedisJobStore implements JobStore {
         }
         if ("VANISHED".equals(result) || "STALE".equals(result)) {
             throw new StaleJobException(job.id(), expectedVersion);
-        }
-        if (snapshot.currentState() == JobState.ENQUEUED) {
-            try {
-                r.sadd(RedisKeys.QUEUES, snapshot.queue());
-            } catch (RuntimeException e) {
-                throw translateCapacity(e);
-            }
         }
         job.adoptVersion(nextVersion);
     }
@@ -1073,6 +1053,16 @@ public final class RedisJobStore implements JobStore {
             long depth = r.zcard(RedisKeys.queue(queue));
             if (depth > 0) {
                 depths.put(queue, depth);
+            } else {
+                // The registry would otherwise grow forever with
+                // high-cardinality dynamic queue names. The prune is a Lua
+                // compare-and-remove so it cannot race an insert that just
+                // re-populated the queue; a later insert re-SADDs anyway.
+                r.eval(
+                        LuaScripts.queuePrune(),
+                        ScriptOutputType.INTEGER,
+                        new String[] {RedisKeys.queue(queue), RedisKeys.QUEUES},
+                        queue);
             }
         }
         return depths;
@@ -1232,14 +1222,26 @@ public final class RedisJobStore implements JobStore {
         if (ids.isEmpty()) return 0L;
         long removed = 0;
         for (String idStr : ids) {
-            // Best-effort hard delete: remove job hash + index entries.
+            // Atomic per-job hard delete: the script re-checks the state so a
+            // job that legally left the terminal state between the scan and
+            // the delete is skipped, and DEL + index removals + the count
+            // decrement land together (no permanent count drift on a crash).
             String jobKey = RedisKeys.PREFIX + "job:" + idStr;
             String handler = r.hget(jobKey, "handler_signature");
-            r.del(jobKey);
-            r.zrem(RedisKeys.byStateTime(state), idStr);
-            if (handler != null) r.srem(RedisKeys.byHandler(handler), idStr);
-            r.hincrby(RedisKeys.COUNTS, state.name(), -1);
-            removed++;
+            Long deleted = r.eval(
+                    LuaScripts.retentionDelete(),
+                    ScriptOutputType.INTEGER,
+                    new String[] {
+                        jobKey,
+                        RedisKeys.byStateTime(state),
+                        RedisKeys.COUNTS,
+                        handler == null ? "" : RedisKeys.byHandler(handler)
+                    },
+                    idStr,
+                    state.name());
+            if (deleted != null && deleted == 1L) {
+                removed++;
+            }
         }
         return removed;
     }
@@ -1344,7 +1346,8 @@ public final class RedisJobStore implements JobStore {
             concurrencyPendingKey(oldConcurrencyKey),
             concurrencyPendingKey(snap),
             RedisKeys.byHandler(oldHandler),
-            RedisKeys.byHandler(snap.spec().handlerType())
+            RedisKeys.byHandler(snap.spec().handlerType()),
+            RedisKeys.QUEUES
         };
         var args = new String[] {
             id.toString(),
@@ -1371,17 +1374,7 @@ public final class RedisJobStore implements JobStore {
             throw translateCapacity(e);
         }
         if ("STALE".equals(reply)) throw new StaleJobException(id, expectedVersion);
-        if ("OK".equals(reply)) {
-            if (state == JobState.ENQUEUED) {
-                try {
-                    r.sadd(RedisKeys.QUEUES, snap.queue());
-                } catch (RuntimeException e) {
-                    throw translateCapacity(e);
-                }
-            }
-            return true;
-        }
-        return false;
+        return "OK".equals(reply);
     }
 
     @Override

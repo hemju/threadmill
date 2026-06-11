@@ -10,6 +10,7 @@
 --   [6] new concurrency pending ZSET, or empty
 --   [7] old by_handler SET
 --   [8] new by_handler SET
+--   [9] queue registry SET
 --
 -- ARGV:
 --   [1] job id (string member of zsets)
@@ -39,6 +40,7 @@ local old_pending_k = KEYS[5]
 local new_pending_k = KEYS[6]
 local old_handler_k = KEYS[7]
 local new_handler_k = KEYS[8]
+local queues_key    = KEYS[9]
 
 local job_id        = ARGV[1]
 local expected_ver  = tonumber(ARGV[2])
@@ -85,6 +87,9 @@ end
 if old_handler_k ~= new_handler_k then
     redis.call('SREM', old_handler_k, job_id)
     redis.call('SADD', new_handler_k, job_id)
+end
+if state == 'ENQUEUED' then
+    redis.call('SADD', queues_key, new_queue)
 end
 -- Rescore in the by_state_time index too (state is unchanged).
 redis.call('ZADD', state_time_k, new_state_at, job_id)

@@ -60,6 +60,14 @@ public final class LuaScripts {
         return load("dedup_delete.lua");
     }
 
+    public static String retentionDelete() {
+        return load("retention_delete.lua");
+    }
+
+    public static String queuePrune() {
+        return load("queue_prune.lua");
+    }
+
     public static String replaceJob() {
         return load("replace_job.lua");
     }

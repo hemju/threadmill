@@ -1,9 +1,9 @@
 -- Atomic batch insert. All-or-nothing: every job is inserted or none are.
 --
--- Layout: 9 keys + 18 args per job, matching insert.lua exactly. The leading
+-- Layout: 10 keys + 18 args per job, matching insert.lua exactly. The leading
 -- ARGV[1] is the job count N (so the total ARGV length is 1 + 18*N).
 --
--- KEYS[i*9+1 .. i*9+9] are the 9 keys for job i (0-based).
+-- KEYS[i*10+1 .. i*10+10] are the 10 keys for job i (0-based).
 -- ARGV[i*18+2 .. i*18+19] are the 18 args for job i.
 --
 -- Returns 'OK' on success. On a duplicate id, returns 'EXISTS:N' where N is
@@ -21,7 +21,7 @@ for i = 1, n do
     if redis.call('EXISTS', KEYS[key_offset + 1]) == 1 then
         return 'EXISTS:' .. tostring(i - 1)
     end
-    key_offset = key_offset + 9
+    key_offset = key_offset + 10
 end
 
 -- All clear — apply every insert.
@@ -37,6 +37,7 @@ for i = 1, n do
     local workflows_key  = KEYS[key_offset + 7]
     local workflow_counts_key = KEYS[key_offset + 8]
     local awaiting_parent_key = KEYS[key_offset + 9]
+    local queues_key          = KEYS[key_offset + 10]
 
     local job_id           = ARGV[arg_offset + 1]
     local body             = ARGV[arg_offset + 2]
@@ -94,11 +95,14 @@ for i = 1, n do
     if awaiting_parent_key ~= '' and state == 'AWAITING' then
         redis.call('SADD', awaiting_parent_key, job_id)
     end
+    if state == 'ENQUEUED' then
+        redis.call('SADD', queues_key, queue)
+    end
     redis.call('ZADD', state_time_key, state_time, job_id)
     redis.call('SADD', handler_key, job_id)
     redis.call('HINCRBY', counts_key, state, 1)
 
-    key_offset = key_offset + 9
+    key_offset = key_offset + 10
     arg_offset = arg_offset + 18
 end
 

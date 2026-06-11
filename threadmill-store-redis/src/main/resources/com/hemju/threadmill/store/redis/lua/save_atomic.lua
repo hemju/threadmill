@@ -19,6 +19,7 @@
 --   [13] old concurrency workflow counts HASH, or empty
 --   [14] new concurrency workflow counts HASH, or empty
 --   [15] awaiting_by_parent SET, or empty (relationship is immutable)
+--   [16] queue registry SET
 --
 -- ARGV:
 --   [1] job id
@@ -63,6 +64,7 @@ local old_workflows_key      = KEYS[12]
 local old_workflow_counts_key = KEYS[13]
 local new_workflow_counts_key = KEYS[14]
 local awaiting_parent_key     = KEYS[15]
+local queues_key              = KEYS[16]
 
 local job_id              = ARGV[1]
 local expected_version    = tonumber(ARGV[2])
@@ -197,6 +199,9 @@ redis.call('HSET', job_key,
 -- Add to the new active structure(s).
 if new_active_key ~= '' and new_active_score ~= nil then
     redis.call('ZADD', new_active_key, new_active_score, job_id)
+end
+if new_state == 'ENQUEUED' then
+    redis.call('SADD', queues_key, new_queue)
 end
 if new_active_node_key ~= '' and new_active_score ~= nil then
     redis.call('ZADD', new_active_node_key, new_active_score, job_id)

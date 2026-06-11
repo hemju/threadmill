@@ -11,6 +11,7 @@ local pending_key    = KEYS[8]
 local workflows_key  = KEYS[9]
 local workflow_counts_key = KEYS[10]
 local awaiting_parent_key = KEYS[11]
+local queues_key          = KEYS[12]
 
 local job_id           = ARGV[1]
 local body             = ARGV[2]
@@ -89,6 +90,9 @@ if concurrency_key ~= '' and workflow_counts_key ~= '' and
 end
 if awaiting_parent_key ~= '' and state == 'AWAITING' then
     redis.call('SADD', awaiting_parent_key, job_id)
+end
+if state == 'ENQUEUED' then
+    redis.call('SADD', queues_key, queue)
 end
 redis.call('ZADD', state_time_key, state_time, job_id)
 redis.call('SADD', handler_key, job_id)

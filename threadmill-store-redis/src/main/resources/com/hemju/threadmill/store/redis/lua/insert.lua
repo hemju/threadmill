@@ -10,6 +10,7 @@
 --   [7] concurrency workflows HASH, or empty
 --   [8] concurrency workflow counts HASH, or empty
 --   [9] awaiting_by_parent SET, or empty
+--   [10] queue registry SET
 --
 -- ARGV:
 --   [1] job id (string)
@@ -42,6 +43,7 @@ local pending_key    = KEYS[6]
 local workflows_key  = KEYS[7]
 local workflow_counts_key = KEYS[8]
 local awaiting_parent_key = KEYS[9]
+local queues_key          = KEYS[10]
 
 local job_id           = ARGV[1]
 local body             = ARGV[2]
@@ -102,6 +104,12 @@ if concurrency_key ~= '' and workflow_counts_key ~= '' and
 end
 if awaiting_parent_key ~= '' and state == 'AWAITING' then
     redis.call('SADD', awaiting_parent_key, job_id)
+end
+if state == 'ENQUEUED' then
+    -- Registry membership lands in the same atomic call as the enqueue: a
+    -- crash between the two would otherwise leave a durably ENQUEUED job in
+    -- a queue the discovery paths cannot see.
+    redis.call('SADD', queues_key, queue)
 end
 redis.call('ZADD', state_time_key, state_time, job_id)
 redis.call('SADD', handler_key, job_id)

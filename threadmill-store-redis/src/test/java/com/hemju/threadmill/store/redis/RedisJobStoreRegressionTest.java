@@ -735,6 +735,76 @@ class RedisJobStoreRegressionTest {
     }
 
     @Test
+    void queueRegistryIsMaintainedInsideTheScriptsAndPrunedWhenEmpty() {
+        JobStore store = store();
+        RedisCommands<String, String> r = adminConnection.sync();
+
+        // Membership lands atomically with the insert script itself.
+        Job job = Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                .queue("burst:q")
+                .build();
+        store.insert(job);
+        assertThat(r.smembers(RedisKeys.QUEUES)).contains("burst:q");
+
+        // Drain the queue; the discovery path prunes the registry entry
+        // (atomically against concurrent inserts) instead of growing forever.
+        store.claimReady(NodeId.newId(), "burst:q", 1, Instant.now());
+        assertThat(store.queueDepths()).doesNotContainKey("burst:q");
+        assertThat(r.smembers(RedisKeys.QUEUES)).doesNotContain("burst:q");
+
+        // A later insert to the same queue re-registers it from the script.
+        Job again = Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                .queue("burst:q")
+                .build();
+        store.insert(again);
+        assertThat(r.smembers(RedisKeys.QUEUES)).contains("burst:q");
+        assertThat(store.listEnqueuedQueues()).contains("burst:q");
+    }
+
+    @Test
+    void retentionDeleteSkipsJobsThatLeftTheTerminalStateAndKeepsCountsExact() {
+        JobStore store = store();
+        RedisCommands<String, String> r = adminConnection.sync();
+        Job job = sample();
+        store.insert(job);
+        Job claimed =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+        long v = claimed.version();
+        claimed.transitionTo(JobState.SUCCEEDED, Instant.now(), "test", null);
+        claimed.clearOwner();
+        store.saveAtomic(claimed, v);
+
+        // A racing operator delete moves the job out of SUCCEEDED after the
+        // sweeper's scan observed it.
+        assertThat(store.softDelete(job.id())).isTrue();
+
+        // The sweeper's stale per-job delete must skip: state re-check fails.
+        Long deleted = r.eval(
+                LuaScripts.retentionDelete(),
+                ScriptOutputType.INTEGER,
+                new String[] {
+                    RedisKeys.job(job.id()),
+                    RedisKeys.byStateTime(JobState.SUCCEEDED),
+                    RedisKeys.COUNTS,
+                    RedisKeys.byHandler(claimed.spec().handlerType())
+                },
+                job.id().toString(),
+                JobState.SUCCEEDED.name());
+        assertThat(deleted).isEqualTo(0L);
+        assertThat(store.findById(job.id())).isPresent();
+        assertThat(r.hget(RedisKeys.COUNTS, "DELETED")).isEqualTo("1");
+        assertThat(r.hget(RedisKeys.COUNTS, "SUCCEEDED")).isEqualTo("0");
+        assertRedisIndexesConsistent();
+
+        // The normal retention path for the job's actual state still works.
+        assertThat(store.deleteFinishedOlderThan(Instant.now().plusSeconds(3600), JobState.DELETED, 10))
+                .isEqualTo(1L);
+        assertThat(store.findById(job.id())).isEmpty();
+    }
+
+    @Test
     void cronTaskDefinitionAndScheduleStateRoundTrip() {
         JobStore store = store();
         CronTask task = sampleCronTask("nightly-cleanup");
