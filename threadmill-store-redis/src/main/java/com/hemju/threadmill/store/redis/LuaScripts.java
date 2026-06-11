@@ -68,6 +68,10 @@ public final class LuaScripts {
         return load("queue_prune.lua");
     }
 
+    public static String oldestEnqueued() {
+        return load("oldest_enqueued.lua");
+    }
+
     public static String replaceJob() {
         return load("replace_job.lua");
     }

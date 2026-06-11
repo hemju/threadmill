@@ -8,6 +8,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -378,9 +379,17 @@ public final class RedisJobStore implements JobStore {
         var snapshots = new ArrayList<JobSnapshot>(jobsToInsert.size());
         var bodies = new ArrayList<String>(jobsToInsert.size());
         var stateAts = new ArrayList<Instant>(jobsToInsert.size());
+        // The script's pre-flight only detects ids that already exist in
+        // Redis; an id appearing twice within one batch would be written
+        // twice and double-count HINCRBY. Reject it here, like Postgres's
+        // primary key does.
+        var batchIds = new HashSet<JobId>(jobsToInsert.size());
         for (var j : jobsToInsert) {
             Objects.requireNonNull(j, "job");
             Names.requireName("queue", j.queue());
+            if (!batchIds.add(j.id())) {
+                throw new IllegalStateException("Duplicate job id in batch: " + j.id());
+            }
             JobSnapshot snap = snapshotForInsert(r, j, version);
             String body = serializer.serializeJob(snap, capabilities);
             snapshots.add(snap);
@@ -1112,9 +1121,15 @@ public final class RedisJobStore implements JobStore {
     @Override
     public Optional<Instant> oldestEnqueuedAt(String queue) {
         Names.requireName("queue", queue);
-        List<String> ids = sync().zrange(RedisKeys.queue(queue), 0, 0);
-        if (ids == null || ids.isEmpty()) return Optional.empty();
-        String value = sync().hget(RedisKeys.job(JobId.parse(ids.get(0))), "current_state_at");
+        // The queue ZSET is priority-ordered, so index 0 is the oldest
+        // highest-priority job — not the oldest enqueued. Scan for the true
+        // minimum current_state_at in one Lua call (fine for the moderate
+        // depths a dashboard gauge covers; Postgres uses MIN(current_state_at)).
+        String value = sync().eval(
+                        LuaScripts.oldestEnqueued(),
+                        ScriptOutputType.VALUE,
+                        new String[] {RedisKeys.queue(queue)},
+                        RedisKeys.PREFIX + "job:");
         if (value == null || value.isEmpty()) return Optional.empty();
         return Optional.of(Instant.ofEpochMilli(Long.parseLong(value)));
     }

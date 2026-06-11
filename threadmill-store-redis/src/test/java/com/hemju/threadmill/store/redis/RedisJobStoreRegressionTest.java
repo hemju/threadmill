@@ -805,6 +805,49 @@ class RedisJobStoreRegressionTest {
     }
 
     @Test
+    void oldestEnqueuedAtReportsTheOldestJobNotTheOldestHighestPriorityJob() throws Exception {
+        JobStore store = store();
+        // Older low-priority job first...
+        Job oldLow = Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                .priority(-5)
+                .build();
+        store.insert(oldLow);
+        Thread.sleep(20);
+        // ...then a fresh high-priority job that sorts FIRST in the queue ZSET.
+        Job freshHigh = Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                .priority(50)
+                .build();
+        store.insert(freshHigh);
+
+        Instant oldLowAt = Instant.ofEpochMilli(
+                Long.parseLong(adminConnection.sync().hget(RedisKeys.job(oldLow.id()), "current_state_at")));
+        // The age gauge must see the starving low-priority job, not the
+        // queue head.
+        assertThat(store.oldestEnqueuedAt("default")).contains(oldLowAt);
+    }
+
+    @Test
+    void insertAllRejectsIntraBatchDuplicateIdsBeforeAnyWrite() {
+        JobStore store = store();
+        Job a = sample();
+        Job duplicate = Job.builder()
+                .id(a.id())
+                .spec(JobSpec.of("com.example.Other", new JobArgument("java.lang.String", "\"x\"")))
+                .build();
+
+        assertThatThrownBy(() -> store.insertAll(List.of(a, duplicate)))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("Duplicate job id");
+
+        // Nothing was written and counts did not double-increment.
+        assertThat(store.findById(a.id())).isEmpty();
+        assertThat(adminConnection.sync().hget(RedisKeys.COUNTS, "ENQUEUED")).isIn(null, "0");
+        assertThat(a.version()).isZero();
+    }
+
+    @Test
     void cronTaskDefinitionAndScheduleStateRoundTrip() {
         JobStore store = store();
         CronTask task = sampleCronTask("nightly-cleanup");

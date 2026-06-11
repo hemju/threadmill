@@ -164,7 +164,19 @@ public final class RedisKeys {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8));
     }
 
-    /** Computes the ZSET score used by per-queue ready sets. */
+    /**
+     * Computes the ZSET score used by per-queue ready sets.
+     *
+     * <p>Precision envelope: the score is collision-safe across distinct
+     * int priorities, but FIFO-within-priority precision degrades once
+     * {@code |score|} exceeds 2^53 (IEEE double mantissa). With 2026-epoch
+     * micros that happens for priorities beyond roughly ±1,000, reaching
+     * ~4-second granularity at {@code Integer.MAX_VALUE}. Score ties fall
+     * back to lexicographic UUIDv7 member order (still time-ordered at
+     * millisecond resolution), so ordering damage is bounded — but exact
+     * micros-FIFO within a priority is only guaranteed for priorities in
+     * roughly the ±1,000 range. Keep operational priorities small.
+     */
     public static double queueScore(int priority, long enqueueMicros) {
         return (-(double) priority) * 1e13 + (double) enqueueMicros;
     }

@@ -435,6 +435,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Redis dedup sweep deletes a record replaced by a concurrent producer (duplicate enqueue inside TTL) | `RedisJobStoreRegressionTest.dedupSweepDoesNotDeleteARecordReplacedByAConcurrentProducer` |
 | Redis findAwaitingByParent strands successors beyond ~400 AWAITING jobs (global-ZSET window scan) | `RedisJobStoreRegressionTest.findAwaitingByParentScalesBeyondTheGlobalAwaitingWindow` |
 | Redis queue registry written outside the atomic scripts and never pruned; retention hard-delete unverified and non-atomic | `RedisJobStoreRegressionTest.queueRegistryIsMaintainedInsideTheScriptsAndPrunedWhenEmpty` + `retentionDeleteSkipsJobsThatLeftTheTerminalStateAndKeepsCountsExact` |
+| Redis oldestEnqueuedAt reads the priority head; insert_all intra-batch duplicate double-counts | `RedisJobStoreRegressionTest.oldestEnqueuedAtReportsTheOldestJobNotTheOldestHighestPriorityJob` + `insertAllRejectsIntraBatchDuplicateIdsBeforeAnyWrite` |
 
 ### Postgres-layer improvements (engagement notes)
 
