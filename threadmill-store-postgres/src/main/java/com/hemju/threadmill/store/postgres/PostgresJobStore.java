@@ -528,10 +528,14 @@ public final class PostgresJobStore implements JobStore {
                         UUID cursorId = null;
 
                         // 2. For each, deserialize, transition to PROCESSING, re-serialize, and UPDATE the row.
+                        // Version-matched as defense-in-depth: correctness rests on the
+                        // FOR UPDATE SKIP LOCKED row lock from readClaimPage, but if a
+                        // future refactor ever fetches candidates without it, this turns a
+                        // silent double-claim into a loud failure.
                         try (PreparedStatement ps = conn.prepareStatement(
                                 "UPDATE threadmill_jobs SET state = 'PROCESSING', owner_node_id = ?, "
                                         + "owner_heartbeat_at = ?, last_checkin_at = NULL, current_state_at = ?, version = ?, body = ? "
-                                        + "WHERE id = ?")) {
+                                        + "WHERE id = ? AND version = ?")) {
                             while (result.size() < cap) {
                                 List<PendingClaim> pending =
                                         readClaimPage(conn, queue, pageSize, cursorPriority, cursorId);
@@ -556,6 +560,7 @@ public final class PostgresJobStore implements JobStore {
                                     ps.setLong(4, nextVersion);
                                     ps.setString(5, newBody);
                                     ps.setObject(6, p.id);
+                                    ps.setLong(7, p.version);
                                     ps.addBatch();
                                     result.add(serializer.deserializeJob(newBody));
                                 }
@@ -566,7 +571,14 @@ public final class PostgresJobStore implements JobStore {
                                     break;
                                 }
                             }
-                            ps.executeBatch();
+                            int[] updated = ps.executeBatch();
+                            for (int count : updated) {
+                                if (count != 1) {
+                                    throw new IllegalStateException(
+                                            "Claim UPDATE matched " + count + " rows — the row lock taken by "
+                                                    + "readClaimPage no longer guarantees claim exclusivity");
+                                }
+                            }
                         }
                         conn.commit();
                         return result;
@@ -1710,19 +1722,6 @@ public final class PostgresJobStore implements JobStore {
         }
     }
 
-    private boolean canClaim(Connection conn, JobSnapshot candidate) throws SQLException {
-        if (candidate.concurrencyKey() == null) {
-            return true;
-        }
-        if (hasActiveWorkflowHoldForRoot(conn, candidate)) {
-            return true;
-        }
-        if (candidate.concurrencyMode() == ConcurrencyMode.EXCLUSIVE) {
-            return groupIsIdle(conn, candidate.concurrencyKey()) && !hasEarlierPending(conn, candidate, false);
-        }
-        return noExclusiveInFlight(conn, candidate.concurrencyKey()) && !hasEarlierPending(conn, candidate, true);
-    }
-
     private static void lockConcurrencyGroup(Connection conn, String key) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_concurrency_groups "
                 + "(concurrency_key, exclusive_in_flight, shared_in_flight, last_modified) "
@@ -1747,29 +1746,6 @@ public final class PostgresJobStore implements JobStore {
             try (ResultSet rs = ps.executeQuery()) {
                 rs.next();
                 return rs.getBoolean(1);
-            }
-        }
-    }
-
-    private boolean groupIsIdle(Connection conn, String key) throws SQLException {
-        try (PreparedStatement ps =
-                conn.prepareStatement("SELECT exclusive_in_flight, shared_in_flight FROM threadmill_concurrency_groups "
-                        + "WHERE concurrency_key = ?")) {
-            ps.setString(1, key);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) return true;
-                return rs.getInt(1) == 0 && rs.getInt(2) == 0;
-            }
-        }
-    }
-
-    private boolean noExclusiveInFlight(Connection conn, String key) throws SQLException {
-        try (PreparedStatement ps = conn.prepareStatement(
-                "SELECT exclusive_in_flight FROM threadmill_concurrency_groups WHERE concurrency_key = ?")) {
-            ps.setString(1, key);
-            try (ResultSet rs = ps.executeQuery()) {
-                if (!rs.next()) return true;
-                return rs.getInt(1) == 0;
             }
         }
     }
@@ -1882,26 +1858,6 @@ public final class PostgresJobStore implements JobStore {
                 + "WHERE concurrency_key = ?")) {
             ps.setString(1, oldSnapshot.concurrencyKey());
             ps.executeUpdate();
-        }
-    }
-
-    private boolean hasEarlierPending(Connection conn, JobSnapshot candidate, boolean exclusiveOnly)
-            throws SQLException {
-        String modePredicate = exclusiveOnly ? "AND concurrency_mode = 'EXCLUSIVE' " : "";
-        try (PreparedStatement ps = conn.prepareStatement("SELECT EXISTS (SELECT 1 FROM threadmill_jobs "
-                + "WHERE concurrency_key = ? "
-                + modePredicate
-                + "AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
-                + "AND (current_state_at < ? OR (current_state_at = ? AND id < ?)))")) {
-            ps.setString(1, candidate.concurrencyKey());
-            Instant candidateStateAt = lastTransitionTime(candidate, candidate.currentState());
-            ps.setTimestamp(2, Timestamp.from(candidateStateAt));
-            ps.setTimestamp(3, Timestamp.from(candidateStateAt));
-            ps.setObject(4, candidate.id().asUuid());
-            try (ResultSet rs = ps.executeQuery()) {
-                rs.next();
-                return rs.getBoolean(1);
-            }
         }
     }
 
