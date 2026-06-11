@@ -163,6 +163,25 @@ public final class PostgresJobStore implements JobStore {
         return capabilities;
     }
 
+    /**
+     * Liveness probe for the dispatcher's store-outage circuit breaker. The SPI
+     * default returns a cached capabilities object and can never fail, so on
+     * Postgres the documented "pause and probe the store until it returns"
+     * behaviour would otherwise be dead code — the breaker would resume on every
+     * probe and thrash. A real {@code SELECT 1} round trip fails while the
+     * database is unreachable and succeeds once it returns.
+     */
+    @Override
+    public void verifyWritable() {
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT 1")) {
+            rs.next();
+        } catch (SQLException e) {
+            throw new JdbcException("verifyWritable probe failed", e);
+        }
+    }
+
     @Override
     public String describe() {
         return "PostgreSQL " + serverVersion + " @ " + databaseName;

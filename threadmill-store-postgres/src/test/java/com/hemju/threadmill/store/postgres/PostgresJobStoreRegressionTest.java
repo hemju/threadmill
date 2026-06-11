@@ -103,6 +103,32 @@ class PostgresJobStoreRegressionTest {
     }
 
     @Test
+    void verifyWritableProbesTheDatabaseAndFailsWhileUnreachable() {
+        // A trippable DataSource that throws on getConnection when "down".
+        var down = new java.util.concurrent.atomic.AtomicBoolean(false);
+        DataSource flaky = (DataSource) java.lang.reflect.Proxy.newProxyInstance(
+                DataSource.class.getClassLoader(), new Class<?>[] {DataSource.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("getConnection") && down.get()) {
+                        throw new SQLException("simulated outage");
+                    }
+                    try {
+                        return method.invoke(dataSource, args);
+                    } catch (java.lang.reflect.InvocationTargetException e) {
+                        throw e.getCause();
+                    }
+                });
+        var store = new PostgresJobStore(flaky);
+
+        store.verifyWritable(); // healthy: a real SELECT 1 round trip succeeds
+
+        down.set(true);
+        assertThatThrownBy(store::verifyWritable).isInstanceOf(PostgresJobStore.JdbcException.class);
+
+        down.set(false);
+        store.verifyWritable(); // recovered: the probe passes again
+    }
+
+    @Test
     void fourByteUnicodeRoundTripsThroughJsonBodyAndMetadata() {
         String exotic = "shipping ✈ 🚀 𐀀 𐀁 𐀂";
         JobStore store = store();
