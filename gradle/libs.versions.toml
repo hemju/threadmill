@@ -6,7 +6,7 @@ springBoot = "4.0.4"
 springFramework = "7.0.4"
 springSecurity = "7.0.5"
 servlet = "6.1.0"
-jackson = "2.18.2"
+jackson = "2.18.6"
 slf4j = "2.0.16"
 micrometer = "1.14.1"
 opentelemetry = "1.62.0"
@@ -14,8 +14,9 @@ junit = "5.11.4"
 assertj = "3.27.0"
 awaitility = "4.2.2"
 testcontainers = "2.0.5"
-postgresql = "42.7.4"
-lettuce = "6.5.1.RELEASE"
+postgresql = "42.7.7"
+lettuce = "6.6.0.RELEASE"
+netty = "4.1.118.Final"
 networkntJsonschema = "1.5.4"
 
 [plugins]
@@ -55,4 +56,5 @@ testcontainers-junit-jupiter = { module = "org.testcontainers:testcontainers-jun
 testcontainers-postgresql = { module = "org.testcontainers:testcontainers-postgresql" }
 postgresql-jdbc = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
 lettuce-core = { module = "io.lettuce:lettuce-core", version.ref = "lettuce" }
+netty-bom = { module = "io.netty:netty-bom", version.ref = "netty" }
 networknt-jsonschema = { module = "com.networknt:json-schema-validator", version.ref = "networkntJsonschema" }

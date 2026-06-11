@@ -64,8 +64,20 @@ tasks.register("dependencySecurityScan") {
                 .get()
                 .trim()
         if (osv.isBlank()) {
-            logger.warn("Skipping dependencySecurityScan: osv-scanner is not installed")
-            return@doLast
+            // Fail-closed: a release gate that silently passes when the scanner
+            // is absent gives false assurance. Local runs without osv-scanner can
+            // opt out explicitly with -PallowMissingDependencyScanner=true.
+            if (project.findProperty("allowMissingDependencyScanner") == "true") {
+                logger.warn(
+                    "Skipping dependencySecurityScan: osv-scanner is not installed " +
+                        "(allowMissingDependencyScanner=true)"
+                )
+                return@doLast
+            }
+            throw GradleException(
+                "dependencySecurityScan requires osv-scanner (https://osv.dev). Install it, or pass " +
+                    "-PallowMissingDependencyScanner=true to skip (not recommended for releases)."
+            )
         }
         val result =
             providers
