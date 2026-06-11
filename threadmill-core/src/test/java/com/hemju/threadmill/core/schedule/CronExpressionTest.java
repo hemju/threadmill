@@ -8,6 +8,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -51,6 +52,16 @@ class CronExpressionTest {
         Instant nextWith7 = CronExpression.parse("0 9 * * 7").nextAfter(fri, UTC);
         assertThat(nextWith0).isEqualTo(LocalDateTime.of(2026, 6, 7, 9, 0).toInstant(ZoneOffset.UTC));
         assertThat(nextWith7).isEqualTo(LocalDateTime.of(2026, 6, 7, 9, 0).toInstant(ZoneOffset.UTC));
+    }
+
+    @Test
+    void serializesAsTheBareSourceExpression() throws Exception {
+        // Dashboard JSON renders CronExpression through the host's
+        // ObjectMapper; a bean with no visible properties breaks /overview
+        // and /recurring (500 under FAIL_ON_EMPTY_BEANS, {} under Jackson 3).
+        var mapper = new ObjectMapper();
+        assertThat(mapper.writeValueAsString(CronExpression.parse("*/5 * * * *")))
+                .isEqualTo("\"*/5 * * * *\"");
     }
 
     @Test

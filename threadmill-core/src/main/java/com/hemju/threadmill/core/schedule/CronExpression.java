@@ -7,6 +7,8 @@ import java.time.temporal.ChronoField;
 import java.util.BitSet;
 import java.util.Objects;
 
+import com.fasterxml.jackson.annotation.JsonValue;
+
 /**
  * A standard 5-field cron expression: {@code minute hour dayOfMonth month dayOfWeek}.
  *
@@ -159,7 +161,14 @@ public final class CronExpression {
         return "*".equals(field) || "*/1".equals(field);
     }
 
+    /**
+     * The source expression. {@code @JsonValue} so Jackson serializes this
+     * type as a bare string scalar — without it, the class has no
+     * get-prefixed accessors and dashboard JSON either throws
+     * (FAIL_ON_EMPTY_BEANS) or renders {@code {}}.
+     */
     @Override
+    @JsonValue
     public String toString() {
         return expression;
     }
