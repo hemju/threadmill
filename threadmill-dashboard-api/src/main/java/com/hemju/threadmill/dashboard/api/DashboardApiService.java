@@ -7,6 +7,10 @@ import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.UUID;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
@@ -19,6 +23,7 @@ import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
+import com.hemju.threadmill.core.schedule.RecurringMaterializer;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
@@ -36,10 +41,13 @@ import com.hemju.threadmill.dashboard.api.DashboardPayloads.UpdateRecurringReque
 /** Dashboard read and mutation service. */
 public final class DashboardApiService {
 
+    private static final Logger LOG = LoggerFactory.getLogger(DashboardApiService.class);
     private static final int MAX_PAUSE_REASON_BYTES = 256;
+    private static final Duration CRON_MUTEX_LEASE = Duration.ofSeconds(30);
 
     private final JobStore store;
     private final LocalWakeBus wakeBus;
+    private final String cronMutexHolder = UUID.randomUUID().toString();
 
     public DashboardApiService(JobStore store, LocalWakeBus wakeBus) {
         this.store = Objects.requireNonNull(store, "store");
@@ -223,15 +231,29 @@ public final class DashboardApiService {
                 .spec(new JobSpec(task.handlerType(), List.of(task.payloadArgument())))
                 .queue(task.queue())
                 .priority(task.priority())
+                .cronTaskName(task.name())
                 .build();
-        store.insert(job);
-        var prior = store.findCronTaskState(name).orElse(CronTaskScheduleState.initial(name, null));
-        store.upsertCronTaskState(new CronTaskScheduleState(
-                name,
-                Instant.now(),
-                job.id().asUuid(),
-                prior.nextRunAt(),
-                job.id().asUuid()));
+        withTaskMutex(name, () -> {
+            store.insert(job);
+            var prior = store.findCronTaskState(name).orElse(CronTaskScheduleState.initial(name, null));
+            // The materializer's pile-up guard tracks inFlightJobId. While a
+            // scheduled instance is still running, the manual job runs but
+            // must NOT take over the guard — otherwise the guard is released
+            // as soon as the manual job terminates and the next scheduled
+            // instance overlaps the still-running one.
+            UUID inFlight = prior.inFlightJobId();
+            boolean priorStillRunning = inFlight != null
+                    && store.findById(JobId.of(inFlight))
+                            .map(running ->
+                                    !running.currentState().isTerminal() && running.currentState() != JobState.FAILED)
+                            .orElse(false);
+            store.upsertCronTaskState(new CronTaskScheduleState(
+                    name,
+                    Instant.now(),
+                    job.id().asUuid(),
+                    prior.nextRunAt(),
+                    priorStillRunning ? inFlight : job.id().asUuid()));
+        });
         wakeBus.wake(task.queue());
         return new ActionResponse("triggered", name);
     }
@@ -249,8 +271,10 @@ public final class DashboardApiService {
                 request.missedRunPolicy() == null ? existing.missedRunPolicy() : request.missedRunPolicy(),
                 request.zone() == null ? existing.zone() : ZoneId.of(request.zone()),
                 request.enabled() == null ? existing.enabled() : request.enabled());
-        store.upsertCronTask(task);
-        store.upsertCronTaskState(stateAfterRecurringUpdate(task));
+        withTaskMutex(name, () -> {
+            store.upsertCronTask(task);
+            store.upsertCronTaskState(stateAfterRecurringUpdate(task));
+        });
         return new ActionResponse("updated", name);
     }
 
@@ -266,6 +290,44 @@ public final class DashboardApiService {
         var state = existing.get();
         return new CronTaskScheduleState(
                 task.name(), state.lastRunAt(), state.lastRunJobId(), next, state.inFlightJobId());
+    }
+
+    /**
+     * Guard a {@code CronTaskScheduleState} read-modify-write with the same
+     * per-task store mutex the {@code RecurringMaterializer} and
+     * {@code Scheduler.upsertCron} take, so dashboard mutations cannot
+     * clobber a concurrently-set {@code inFlightJobId} on the maintenance
+     * master. If the mutex never frees, proceed with a warning — the
+     * operator action must not hang indefinitely, and the lease expires.
+     */
+    private void withTaskMutex(String name, Runnable action) {
+        String mutex = RecurringMaterializer.taskMutexName(name);
+        boolean locked = false;
+        for (int attempt = 0; attempt < 100 && !locked; attempt++) {
+            locked = store.tryAcquireMutex(mutex, cronMutexHolder, CRON_MUTEX_LEASE);
+            if (!locked) {
+                try {
+                    Thread.sleep(50);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        if (!locked) {
+            LOG.warn("Could not acquire recurring-state mutex {} — proceeding unguarded", mutex);
+        }
+        try {
+            action.run();
+        } finally {
+            if (locked) {
+                try {
+                    store.releaseMutex(mutex, cronMutexHolder);
+                } catch (RuntimeException ignored) {
+                    // the lease expires on its own
+                }
+            }
+        }
     }
 
     private static CronTask.Trigger trigger(String kind, String value, CronTask.Trigger fallback) {
