@@ -7,6 +7,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -99,7 +100,11 @@ public final class InMemoryJobStore implements JobStore {
     }
 
     private static Comparator<Map.Entry<JobId, Entry>> byPriorityDescThenId() {
-        return Comparator.<Map.Entry<JobId, Entry>>comparingInt(e -> -e.getValue().priority)
+        // reversed() instead of negation: -Integer.MIN_VALUE overflows back to
+        // MIN_VALUE and would sort the lowest priority first, diverging from
+        // the relational backends' ORDER BY priority DESC.
+        return Comparator.<Map.Entry<JobId, Entry>>comparingInt(e -> e.getValue().priority)
+                .reversed()
                 .thenComparing(e -> e.getKey().asUuid());
     }
 
@@ -189,15 +194,17 @@ public final class InMemoryJobStore implements JobStore {
         // or (on duplicate-id detection) all earlier insertions are rolled back.
         var insertedIds = new ArrayList<JobId>(prepared.size());
         synchronized (claimMutex) {
+            // Validate every id before any put: lock-free readers must never
+            // observe a phantom job from a batch that is later rolled back.
+            var batchIds = new HashSet<JobId>(prepared.size());
             for (var p : prepared) {
-                Entry entry = entryFromSnapshot(p.snapshot, p.wire, 1L);
-                Entry prior = jobs.putIfAbsent(p.job.id(), entry);
-                if (prior != null) {
-                    for (JobId id : insertedIds) {
-                        jobs.remove(id);
-                    }
+                if (!batchIds.add(p.job.id()) || jobs.containsKey(p.job.id())) {
                     throw new IllegalStateException("Job already exists: " + p.job.id());
                 }
+            }
+            for (var p : prepared) {
+                Entry entry = entryFromSnapshot(p.snapshot, p.wire, 1L);
+                jobs.put(p.job.id(), entry);
                 insertedIds.add(p.job.id());
             }
         }
@@ -382,6 +389,12 @@ public final class InMemoryJobStore implements JobStore {
         synchronized (claimMutex) {
             jobs.compute(job.id(), (id, existing) -> {
                 if (existing == null || existing.state != JobState.PROCESSING) return existing;
+                // Reject zombie writers from a previous attempt: a stale
+                // flush from attempt N (job orphan-reclaimed, retried, and
+                // re-claimed by this same node as attempt N+1) must not
+                // overwrite the live attempt's wire form or refresh its
+                // check-in time.
+                if (existing.attempts != job.attempts()) return existing;
                 Job persisted = serializer.deserializeJob(existing.wire);
                 if (persisted.ownerNodeId().filter(nodeId::equals).isEmpty()) return existing;
                 JobSnapshot snap = withVersion(job, existing.version);
@@ -585,6 +598,9 @@ public final class InMemoryJobStore implements JobStore {
             if (removable) removed[0]++;
             return removable;
         });
+        // Piggyback expired-mutex cleanup on the retention cadence so the
+        // mutex map does not grow monotonically with name cardinality.
+        mutexes.entrySet().removeIf(e -> !e.getValue().expiresAt().isAfter(now));
         return removed[0];
     }
 

@@ -424,6 +424,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | upsertCron read-modify-write clobbers a concurrently-set inFlightJobId; FAILED pile-up-guard window semantics | `SchedulingTest.materializerSkipsATaskWhoseStateMutexIsHeld` + `upsertCronWaitsForTheTaskMutexAndPreservesInFlightTracking` + `failedInFlightInstanceDoesNotBlockTheNextMaterialization` |
 | In-memory claim blind-put loses concurrent softDelete/replaceJob writes; lock-free writers tear claim-time concurrency decisions | `InMemoryJobStoreConcurrencyTest.claimRacingSoftDeleteNeverResurrectsADeletedJob` + `claimRacingReplaceJobNeverLosesTheReplacement` |
 | Retried EXCLUSIVE workflow root deadlocks against its own AWAITING children (in-memory hold inference) | `InMemoryJobStoreConcurrencyTest.retriedExclusiveWorkflowRootCanReclaimUnderItsOwnHold` |
+| In-memory priority comparator overflow, zombie execution updates, insertAll phantom visibility, mutex map growth | `InMemoryJobStoreHardeningTest.integerMinValuePrioritySortsLastLikeTheRelationalBackends` + `zombieExecutionUpdateFromAPreviousAttemptIsRejected` + `insertAllWithDuplicateIdsRejectsTheBatchWithoutPhantomVisibility` + `insertAllDuplicateOfAnExistingJobLeavesTheStoreUntouched` |
 
 ### Postgres-layer improvements (engagement notes)
 
