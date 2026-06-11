@@ -9,6 +9,7 @@
 --   [6] concurrency pending ZSET, or empty
 --   [7] concurrency workflows HASH, or empty
 --   [8] concurrency workflow counts HASH, or empty
+--   [9] awaiting_by_parent SET, or empty
 --
 -- ARGV:
 --   [1] job id (string)
@@ -40,6 +41,7 @@ local counts_key     = KEYS[5]
 local pending_key    = KEYS[6]
 local workflows_key  = KEYS[7]
 local workflow_counts_key = KEYS[8]
+local awaiting_parent_key = KEYS[9]
 
 local job_id           = ARGV[1]
 local body             = ARGV[2]
@@ -97,6 +99,9 @@ end
 if concurrency_key ~= '' and workflow_counts_key ~= '' and
    (state == 'ENQUEUED' or state == 'SCHEDULED' or state == 'AWAITING' or state == 'PROCESSING') then
     redis.call('HINCRBY', workflow_counts_key, workflow_root_id, 1)
+end
+if awaiting_parent_key ~= '' and state == 'AWAITING' then
+    redis.call('SADD', awaiting_parent_key, job_id)
 end
 redis.call('ZADD', state_time_key, state_time, job_id)
 redis.call('SADD', handler_key, job_id)

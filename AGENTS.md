@@ -433,6 +433,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Redis softDelete commits against a stale read (wrong counts, dangling PROCESSING indexes, released live holds) | `RedisJobStoreRegressionTest.softDeleteRacingAClaimNeverCommitsAgainstAStaleRead` |
 | Redis heartbeat touch resurrects dangling ids forever, occupying the orphan-scan window | `RedisJobStoreRegressionTest.heartbeatTouchDropsDanglingIdsInsteadOfResurrectingThem` + `findOrphanedSelfHealsDanglingIdsAndStillReturnsRealOrphans` |
 | Redis dedup sweep deletes a record replaced by a concurrent producer (duplicate enqueue inside TTL) | `RedisJobStoreRegressionTest.dedupSweepDoesNotDeleteARecordReplacedByAConcurrentProducer` |
+| Redis findAwaitingByParent strands successors beyond ~400 AWAITING jobs (global-ZSET window scan) | `RedisJobStoreRegressionTest.findAwaitingByParentScalesBeyondTheGlobalAwaitingWindow` |
 
 ### Postgres-layer improvements (engagement notes)
 

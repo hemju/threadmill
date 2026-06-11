@@ -18,6 +18,7 @@
 --   [12] old concurrency workflows HASH, or empty
 --   [13] old concurrency workflow counts HASH, or empty
 --   [14] new concurrency workflow counts HASH, or empty
+--   [15] awaiting_by_parent SET, or empty (relationship is immutable)
 --
 -- ARGV:
 --   [1] job id
@@ -61,6 +62,7 @@ local old_counters_key       = KEYS[11]
 local old_workflows_key      = KEYS[12]
 local old_workflow_counts_key = KEYS[13]
 local new_workflow_counts_key = KEYS[14]
+local awaiting_parent_key     = KEYS[15]
 
 local job_id              = ARGV[1]
 local expected_version    = tonumber(ARGV[2])
@@ -164,6 +166,14 @@ if old_concurrency_key ~= '' and old_workflows_key ~= '' and
    is_terminal(old_state) and (not is_terminal(new_state)) then
     if redis.call('HEXISTS', old_workflows_key, old_workflow_root_id) == 1 then
         redis.call('HINCRBY', old_workflows_key, old_workflow_root_id, 1)
+    end
+end
+
+if awaiting_parent_key ~= '' then
+    if old_state == 'AWAITING' and new_state ~= 'AWAITING' then
+        redis.call('SREM', awaiting_parent_key, job_id)
+    elseif new_state == 'AWAITING' and old_state ~= 'AWAITING' then
+        redis.call('SADD', awaiting_parent_key, job_id)
     end
 end
 

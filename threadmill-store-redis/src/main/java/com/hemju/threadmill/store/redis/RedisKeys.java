@@ -31,6 +31,9 @@ import com.hemju.threadmill.core.NodeId;
  *   <li>{@code {threadmill}:processing:{nodeId}} — per-node ZSET (same score)
  *       used for cheap {@code touchOwnerHeartbeat}.</li>
  *   <li>{@code {threadmill}:by_handler:{handlerType}} — SET of ids.</li>
+ *   <li>{@code {threadmill}:awaiting_by_parent:{parentId}} — SET of AWAITING
+ *       child ids, maintained inside the insert / save / delete scripts so
+ *       successor lookups never scan the global AWAITING ZSET.</li>
  *   <li>{@code {threadmill}:by_state_time:{STATE}} — ZSET of ids scored by
  *       {@code current_state_at}; used for retention.</li>
  *   <li>{@code {threadmill}:counts} — HASH state → cardinality (engine-maintained
@@ -110,6 +113,12 @@ public final class RedisKeys {
         Objects.requireNonNull(queue, "queue");
         Objects.requireNonNull(dedupKey, "dedupKey");
         return PREFIX + "dedup:" + userSegment(queue) + ":" + userSegment(dedupKey);
+    }
+
+    /** Per-parent index of AWAITING children, so successor lookups need no scan. */
+    public static String awaitingByParent(JobId parentId) {
+        Objects.requireNonNull(parentId, "parentId");
+        return PREFIX + "awaiting_by_parent:" + parentId;
     }
 
     public static String dedupExpiry() {

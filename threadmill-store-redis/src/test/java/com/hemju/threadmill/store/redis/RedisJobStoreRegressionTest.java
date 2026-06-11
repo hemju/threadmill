@@ -694,6 +694,47 @@ class RedisJobStoreRegressionTest {
     }
 
     @Test
+    void findAwaitingByParentScalesBeyondTheGlobalAwaitingWindow() {
+        // The historical implementation scanned only the first max*4 entries
+        // of the single global AWAITING ZSET; with > ~400 AWAITING jobs the
+        // children of newer workflows sorted last and were never found —
+        // stranded forever. The per-parent SET makes the lookup exact.
+        JobStore store = store();
+        for (int i = 0; i < 450; i++) {
+            store.insert(Job.builder()
+                    .spec(JobSpec.of("com.example.Filler", new JobArgument("java.lang.String", "\"x\"")))
+                    .initialState(JobState.AWAITING)
+                    .build());
+        }
+        Job parent = sample();
+        store.insert(parent);
+        var children = new ArrayList<JobId>();
+        for (int i = 0; i < 5; i++) {
+            Job child = Job.builder()
+                    .spec(JobSpec.of("com.example.LateChild", new JobArgument("java.lang.String", "\"x\"")))
+                    .relationship(new JobRelationship(parent.id(), JobRelationship.Kind.WORKFLOW_STEP))
+                    .initialState(JobState.AWAITING)
+                    .build();
+            store.insert(child);
+            children.add(child.id());
+        }
+
+        List<Job> found = store.findAwaitingByParent(parent.id(), 100);
+        assertThat(found).extracting(Job::id).containsExactlyInAnyOrderElementsOf(children);
+
+        // Index hygiene: promotion and deletion both remove the entry.
+        Job promoted = store.findById(children.get(0)).orElseThrow();
+        long v = promoted.version();
+        promoted.transitionTo(JobState.ENQUEUED, Instant.now(), "test.promote", null);
+        store.saveAtomic(promoted, v);
+        assertThat(store.softDelete(children.get(1))).isTrue();
+
+        found = store.findAwaitingByParent(parent.id(), 100);
+        assertThat(found).extracting(Job::id).containsExactlyInAnyOrderElementsOf(children.subList(2, children.size()));
+        assertRedisIndexesConsistent();
+    }
+
+    @Test
     void cronTaskDefinitionAndScheduleStateRoundTrip() {
         JobStore store = store();
         CronTask task = sampleCronTask("nightly-cleanup");

@@ -324,7 +324,8 @@ public final class RedisJobStore implements JobStore {
             RedisKeys.COUNTS,
             concurrencyPendingKey(snapshot),
             concurrencyWorkflowsKey(snapshot.concurrencyKey()),
-            concurrencyWorkflowCountsKey(snapshot.concurrencyKey())
+            concurrencyWorkflowCountsKey(snapshot.concurrencyKey()),
+            awaitingParentKey(snapshot)
         };
         var args = new String[] {
             snapshot.id().toString(),
@@ -415,9 +416,9 @@ public final class RedisJobStore implements JobStore {
         }
 
         try {
-            // Pack 8 keys + 18 args per job for the batched Lua script.
+            // Pack 9 keys + 18 args per job for the batched Lua script.
             int n = snapshots.size();
-            var keyList = new ArrayList<String>(n * 8);
+            var keyList = new ArrayList<String>(n * 9);
             var argList = new ArrayList<String>(1 + n * 18);
             argList.add(Integer.toString(n));
             for (int i = 0; i < n; i++) {
@@ -433,6 +434,7 @@ public final class RedisJobStore implements JobStore {
                 keyList.add(concurrencyPendingKey(snap));
                 keyList.add(concurrencyWorkflowsKey(snap.concurrencyKey()));
                 keyList.add(concurrencyWorkflowCountsKey(snap.concurrencyKey()));
+                keyList.add(awaitingParentKey(snap));
 
                 argList.add(snap.id().toString());
                 argList.add(bodies.get(i));
@@ -555,7 +557,8 @@ public final class RedisJobStore implements JobStore {
                         RedisKeys.dedupExpiry(),
                         concurrencyPendingKey(snapshot),
                         concurrencyWorkflowsKey(snapshot.concurrencyKey()),
-                        concurrencyWorkflowCountsKey(snapshot.concurrencyKey())
+                        concurrencyWorkflowCountsKey(snapshot.concurrencyKey()),
+                        awaitingParentKey(snapshot)
                     },
                     snapshot.id().toString(),
                     body,
@@ -665,7 +668,8 @@ public final class RedisJobStore implements JobStore {
             concurrencyCountersKey(oldConcurrencyKey),
             concurrencyWorkflowsKey(oldConcurrencyKey),
             concurrencyWorkflowCountsKey(oldConcurrencyKey),
-            concurrencyWorkflowCountsKey(snapshot.concurrencyKey())
+            concurrencyWorkflowCountsKey(snapshot.concurrencyKey()),
+            awaitingParentKey(snapshot)
         };
         var args = new String[] {
             snapshot.id().toString(),
@@ -767,7 +771,8 @@ public final class RedisJobStore implements JobStore {
                 concurrencyPendingKey(oldConcurrencyKey),
                 concurrencyCountersKey(oldConcurrencyKey),
                 concurrencyWorkflowsKey(oldConcurrencyKey),
-                concurrencyWorkflowCountsKey(oldConcurrencyKey)
+                concurrencyWorkflowCountsKey(oldConcurrencyKey),
+                awaitingParentKey(snapshot)
             };
             var args = new String[] {
                 id.toString(),
@@ -1245,15 +1250,27 @@ public final class RedisJobStore implements JobStore {
     public List<Job> findAwaitingByParent(JobId parentId, int max) {
         Objects.requireNonNull(parentId, "parentId");
         if (max <= 0) return List.of();
-        List<String> ids = sync().zrange(RedisKeys.AWAITING, 0, Math.max(0, max * 4L));
-        List<Job> out = new ArrayList<>();
+        // Per-parent SET maintained inside the insert / save / delete scripts:
+        // the historical scan over the first max*4 entries of the global
+        // AWAITING ZSET silently stranded successors once more than ~400 jobs
+        // were AWAITING cluster-wide.
+        RedisClusterCommands<String, String> r = sync();
+        String indexKey = RedisKeys.awaitingByParent(parentId);
+        var ids = new ArrayList<>(r.smembers(indexKey));
+        // UUIDv7 string ordering is creation-time ordering — match the
+        // relational backends' deterministic result order.
+        Collections.sort(ids);
+        List<Job> out = new ArrayList<>(Math.min(max, ids.size()));
         for (String id : ids) {
             if (out.size() >= max) break;
-            String body = sync().hget(RedisKeys.PREFIX + "job:" + id, "body");
-            if (body == null) continue;
+            String body = r.hget(RedisKeys.PREFIX + "job:" + id, "body");
+            if (body == null) {
+                // Self-heal a dangling index entry.
+                r.srem(indexKey, id);
+                continue;
+            }
             Job j = serializer.deserializeJob(body);
-            if (j.relationship().isPresent()
-                    && j.relationship().get().parentId().equals(parentId)) {
+            if (j.currentState() == JobState.AWAITING) {
                 out.add(j);
             }
         }
@@ -1589,6 +1606,12 @@ public final class RedisJobStore implements JobStore {
             current = current.getCause();
         }
         return false;
+    }
+
+    private static String awaitingParentKey(JobSnapshot snapshot) {
+        return snapshot.relationship() == null
+                ? ""
+                : RedisKeys.awaitingByParent(snapshot.relationship().parentId());
     }
 
     private List<Job> loadJobs(List<String> ids) {

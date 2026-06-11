@@ -12,6 +12,7 @@
 --   [8] old concurrency counters HASH, or empty
 --   [9] old concurrency workflows HASH, or empty
 --   [10] old concurrency workflow counts HASH, or empty
+--   [11] awaiting_by_parent SET, or empty
 --
 -- ARGV:
 --   [1] job id
@@ -37,6 +38,7 @@ local old_pending_key    = KEYS[7]
 local old_counters_key   = KEYS[8]
 local old_workflows_key  = KEYS[9]
 local old_workflow_counts_key = KEYS[10]
+local awaiting_parent_key = KEYS[11]
 
 local job_id   = ARGV[1]
 local new_body = ARGV[2]
@@ -80,6 +82,9 @@ end
 redis.call('ZREM', old_state_time_key, job_id)
 if old_pending_key ~= '' and old_pending_member ~= '' then
     redis.call('ZREM', old_pending_key, old_pending_member)
+end
+if awaiting_parent_key ~= '' and old_state == 'AWAITING' then
+    redis.call('SREM', awaiting_parent_key, job_id)
 end
 redis.call('HINCRBY', counts_key, old_state, -1)
 redis.call('HINCRBY', counts_key, 'DELETED', 1)
