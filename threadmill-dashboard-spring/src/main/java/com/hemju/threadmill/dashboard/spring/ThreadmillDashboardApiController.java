@@ -27,6 +27,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
@@ -295,5 +296,13 @@ public final class ThreadmillDashboardApiController {
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     ProblemDetail invalidRequest(IllegalArgumentException e) {
         return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, e.getMessage());
+    }
+
+    @ExceptionHandler(OversizedJobException.class)
+    @ResponseStatus(HttpStatus.CONTENT_TOO_LARGE)
+    ProblemDetail oversizedJob(OversizedJobException e) {
+        return ProblemDetail.forStatusAndDetail(
+                HttpStatus.CONTENT_TOO_LARGE,
+                "job serialized form is " + e.actualBytes() + " bytes, exceeds limit of " + e.limitBytes());
     }
 }

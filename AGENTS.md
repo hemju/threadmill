@@ -440,6 +440,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Redis-vs-Postgres store precedence (`OnRedisStoreNotConfigured`) untested after the auto-config split | `StorePrecedenceTest.explicitRedisConfigurationBeatsAPresentDataSource` + `withoutRedisPropertiesTheDataSourceResolvesPostgres` + `onRedisStoreNotConfiguredMirrorsEveryRedisPropertyShape` |
 | Recurring payloadArgument leaks unredacted to READ-level callers; CronExpression JSON shape | `ThreadmillDashboardApiControllerTest.recurringPayloadIsRedactedForReadOnlyCallersAndVisibleWithPermission` + `CronExpressionTest.serializesAsTheBareSourceExpression` |
 | Dashboard manual trigger steals the materializer's pile-up guard (`inFlightJobId` overwrite) | `DashboardApiServiceTest.manualTriggerDoesNotStealThePileUpGuardFromARunningScheduledInstance` + `manualTriggerTakesTheGuardWhenNoPriorInstanceIsRunning` |
+| Dashboard operator-input mistakes surface as 500s (missing retry delay, bad zone/interval, oversized replacement) | `ThreadmillDashboardSecurityIntegrationTest.missingScheduleRetryDelayIsABadRequestNotAServerError` + `invalidZoneAndIntervalOnRecurringUpdateAreBadRequests` + `oversizedJobReplacementIsContentTooLargeNotAServerError` |
 
 ### Postgres-layer improvements (engagement notes)
 

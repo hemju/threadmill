@@ -1,9 +1,11 @@
 package com.hemju.threadmill.dashboard.api;
 
 import java.nio.charset.StandardCharsets;
+import java.time.DateTimeException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -189,7 +191,9 @@ public final class DashboardApiService {
     }
 
     public ActionResponse scheduleRetry(JobId id, long expectedVersion, Duration delay) {
-        Objects.requireNonNull(delay, "delay");
+        // A request body omitting delay reaches here as null (Jackson leaves
+        // the record component unset) — operator input, not a server fault.
+        if (delay == null) throw DashboardApiException.badRequest("delay is required");
         if (delay.isNegative()) throw DashboardApiException.badRequest("delay must not be negative");
         Job job = load(id);
         requireVersion(job, expectedVersion);
@@ -269,7 +273,7 @@ public final class DashboardApiService {
                 request.queue() == null ? existing.queue() : request.queue(),
                 request.priority() == null ? existing.priority() : request.priority(),
                 request.missedRunPolicy() == null ? existing.missedRunPolicy() : request.missedRunPolicy(),
-                request.zone() == null ? existing.zone() : ZoneId.of(request.zone()),
+                request.zone() == null ? existing.zone() : parseZone(request.zone()),
                 request.enabled() == null ? existing.enabled() : request.enabled());
         withTaskMutex(name, () -> {
             store.upsertCronTask(task);
@@ -335,9 +339,28 @@ public final class DashboardApiService {
         if (kind == null || value == null) throw DashboardApiException.badRequest("trigger incomplete");
         return switch (kind.toUpperCase()) {
             case "CRON" -> new CronTask.Trigger.CronExpr(CronExpression.parse(value));
-            case "INTERVAL" -> new CronTask.Trigger.Interval(Duration.parse(value));
+            case "INTERVAL" -> new CronTask.Trigger.Interval(parseInterval(value));
             default -> throw DashboardApiException.badRequest("unknown trigger kind");
         };
+    }
+
+    private static ZoneId parseZone(String zone) {
+        // ZoneRulesException is a DateTimeException, not an
+        // IllegalArgumentException — unwrapped it surfaces as a 500.
+        try {
+            return ZoneId.of(zone);
+        } catch (DateTimeException e) {
+            throw DashboardApiException.badRequest("invalid zone: " + zone);
+        }
+    }
+
+    private static Duration parseInterval(String value) {
+        try {
+            return Duration.parse(value);
+        } catch (DateTimeParseException e) {
+            throw DashboardApiException.badRequest(
+                    "invalid INTERVAL value: " + value + " (expected ISO-8601 duration)");
+        }
     }
 
     private Job load(JobId id) {
