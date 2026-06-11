@@ -6,6 +6,8 @@ import java.util.Set;
 
 import jakarta.servlet.http.HttpServletRequest;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -55,6 +57,8 @@ import com.hemju.threadmill.dashboard.api.DashboardPermission;
 @RequestMapping("${threadmill.dashboard.api.base-path:/threadmill/api}")
 public final class ThreadmillDashboardApiController {
 
+    private static final Logger LOG = LoggerFactory.getLogger(ThreadmillDashboardApiController.class);
+
     private final DashboardApiService service;
     private final DashboardAuthorizer authorizer;
     private final DashboardAuditSink auditSink;
@@ -81,9 +85,7 @@ public final class ThreadmillDashboardApiController {
                 csrf == null
                         ? null
                         : new SessionResponse.Csrf(csrf.getHeaderName(), csrf.getParameterName(), csrf.getToken()),
-                options.exposeSensitiveDetails() && permissions.contains(DashboardPermission.VIEW_SENSITIVE_DETAILS)
-                        ? "full"
-                        : "redacted");
+                sensitiveDetailsAllowed(permissions) ? "full" : "redacted");
     }
 
     @GetMapping("/overview")
@@ -107,11 +109,28 @@ public final class ThreadmillDashboardApiController {
     @GetMapping("/jobs/{id}")
     public JobDetail job(Authentication authentication, @PathVariable("id") String id) {
         var permissions = require(authentication, DashboardPermission.READ);
-        return service.job(JobId.parse(id), sensitiveDetailsAllowed(permissions));
+        boolean includeSensitive = sensitiveDetailsAllowed(permissions);
+        var detail = service.job(JobId.parse(id), includeSensitive);
+        if (includeSensitive) {
+            // Reading unredacted payloads is a security-relevant event.
+            recordQuietly(new DashboardAuditEvent(
+                    Instant.now(),
+                    authorizer.displayName(authentication),
+                    DashboardPermission.VIEW_SENSITIVE_DETAILS,
+                    "view_sensitive_details",
+                    id,
+                    "viewed"));
+        }
+        return detail;
     }
 
     private boolean sensitiveDetailsAllowed(Set<DashboardPermission> permissions) {
-        return options.exposeSensitiveDetails() && permissions.contains(DashboardPermission.VIEW_SENSITIVE_DETAILS);
+        return options.exposeSensitiveDetails() && has(permissions, DashboardPermission.VIEW_SENSITIVE_DETAILS);
+    }
+
+    /** ADMIN is a superset of every permission — including the redaction decision. */
+    private static boolean has(Set<DashboardPermission> permissions, DashboardPermission permission) {
+        return permissions.contains(permission) || permissions.contains(DashboardPermission.ADMIN);
     }
 
     @GetMapping("/queues")
@@ -236,7 +255,7 @@ public final class ThreadmillDashboardApiController {
 
     private Set<DashboardPermission> require(Authentication authentication, DashboardPermission permission) {
         var permissions = permissions(authentication);
-        if (!permissions.contains(permission) && !permissions.contains(DashboardPermission.ADMIN)) {
+        if (!has(permissions, permission)) {
             throw new ResponseStatusException(HttpStatus.FORBIDDEN, "missing " + permission);
         }
         return permissions;
@@ -257,16 +276,32 @@ public final class ThreadmillDashboardApiController {
             String action,
             String target,
             DashboardAction work) {
-        require(authentication, permission);
         String actor = authorizer.displayName(authentication);
         try {
-            ActionResponse response = work.run();
-            auditSink.record(
-                    new DashboardAuditEvent(Instant.now(), actor, permission, action, target, response.status()));
-            return response;
-        } catch (RuntimeException e) {
-            auditSink.record(new DashboardAuditEvent(Instant.now(), actor, permission, action, target, "failed"));
+            require(authentication, permission);
+        } catch (ResponseStatusException e) {
+            // Denied mutation attempts are security-relevant events.
+            recordQuietly(new DashboardAuditEvent(Instant.now(), actor, permission, action, target, "denied"));
             throw e;
+        }
+        ActionResponse response;
+        try {
+            response = work.run();
+        } catch (RuntimeException e) {
+            recordQuietly(new DashboardAuditEvent(Instant.now(), actor, permission, action, target, "failed"));
+            throw e;
+        }
+        // The mutation is durably applied at this point: a throwing audit
+        // sink must not convert it into a false "failed" + 500.
+        recordQuietly(new DashboardAuditEvent(Instant.now(), actor, permission, action, target, response.status()));
+        return response;
+    }
+
+    private void recordQuietly(DashboardAuditEvent event) {
+        try {
+            auditSink.record(event);
+        } catch (RuntimeException e) {
+            LOG.warn("Dashboard audit sink failed for {} {} ({})", event.action(), event.target(), event.outcome(), e);
         }
     }
 

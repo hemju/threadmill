@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -37,6 +38,7 @@ import com.hemju.threadmill.dashboard.api.DashboardOptions;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads.ScheduleRetryRequest;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads.VersionedActionRequest;
+import com.hemju.threadmill.dashboard.api.DashboardPermission;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 
 class ThreadmillDashboardApiControllerTest {
@@ -266,6 +268,75 @@ class ThreadmillDashboardApiControllerTest {
                 new DashboardOptions(true, false));
 
         assertThat(controller.overview(null).countsByState()).containsKey(JobState.ENQUEUED);
+    }
+
+    @Test
+    void adminAloneSeesUnredactedDetailsWhenExposureIsConfigured() {
+        var job = insertSensitiveJob();
+        // A custom authorizer may return the bare ADMIN permission without
+        // expanding it — ADMIN must be a superset for redaction too.
+        DashboardAuthorizer adminOnly = authentication -> Set.of(DashboardPermission.ADMIN);
+        var controller = new ThreadmillDashboardApiController(
+                new DashboardApiService(store, new LocalWakeBus()),
+                adminOnly,
+                auditEvents::add,
+                new DashboardOptions(false, true));
+
+        var detail = controller.job(auth("root"), job.id().toString());
+
+        assertThat(detail.sensitiveDetailsRedacted()).isFalse();
+        assertThat(detail.arguments()).extracting(JobArgument::serialized).containsExactly("{\"secret\":\"value\"}");
+    }
+
+    @Test
+    void deniedMutationAttemptsAreAudited() {
+        assertThatThrownBy(() -> secureController.pauseQueue(
+                        auth("intruder", "THREADMILL_READ"), "default", new DashboardPayloads.PauseQueueRequest(null)))
+                .isInstanceOf(ResponseStatusException.class);
+
+        assertThat(auditEvents).singleElement().satisfies(event -> {
+            assertThat(event.outcome()).isEqualTo("denied");
+            assertThat(event.action()).isEqualTo("pause_queue");
+            assertThat(event.actor()).isEqualTo("intruder");
+        });
+    }
+
+    @Test
+    void sensitiveDetailViewsAreAudited() {
+        var job = insertSensitiveJob();
+        var controller = new ThreadmillDashboardApiController(
+                new DashboardApiService(store, new LocalWakeBus()),
+                new SpringSecurityDashboardAuthorizer(),
+                auditEvents::add,
+                new DashboardOptions(false, true));
+
+        controller.job(
+                auth("alice", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"),
+                job.id().toString());
+
+        assertThat(auditEvents).singleElement().satisfies(event -> {
+            assertThat(event.action()).isEqualTo("view_sensitive_details");
+            assertThat(event.outcome()).isEqualTo("viewed");
+            assertThat(event.target()).isEqualTo(job.id().toString());
+        });
+    }
+
+    @Test
+    void throwingAuditSinkDoesNotFailACommittedMutation() {
+        DashboardAuditSink throwingSink = event -> {
+            throw new IllegalStateException("audit backend down");
+        };
+        var controller = new ThreadmillDashboardApiController(
+                new DashboardApiService(store, new LocalWakeBus()),
+                new SpringSecurityDashboardAuthorizer(),
+                throwingSink,
+                DashboardOptions.secureDefaults());
+
+        var response = controller.pauseQueue(
+                auth("operator", "THREADMILL_PAUSE_QUEUE"), "default", new DashboardPayloads.PauseQueueRequest(null));
+
+        assertThat(response.status()).isEqualTo("paused");
+        assertThat(store.listPausedQueues()).contains("default");
     }
 
     private Job insertSensitiveJob() {

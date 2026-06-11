@@ -441,6 +441,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Recurring payloadArgument leaks unredacted to READ-level callers; CronExpression JSON shape | `ThreadmillDashboardApiControllerTest.recurringPayloadIsRedactedForReadOnlyCallersAndVisibleWithPermission` + `CronExpressionTest.serializesAsTheBareSourceExpression` |
 | Dashboard manual trigger steals the materializer's pile-up guard (`inFlightJobId` overwrite) | `DashboardApiServiceTest.manualTriggerDoesNotStealThePileUpGuardFromARunningScheduledInstance` + `manualTriggerTakesTheGuardWhenNoPriorInstanceIsRunning` |
 | Dashboard operator-input mistakes surface as 500s (missing retry delay, bad zone/interval, oversized replacement) | `ThreadmillDashboardSecurityIntegrationTest.missingScheduleRetryDelayIsABadRequestNotAServerError` + `invalidZoneAndIntervalOnRecurringUpdateAreBadRequests` + `oversizedJobReplacementIsContentTooLargeNotAServerError` |
+| Dashboard ADMIN not honored for redaction; denied mutations / sensitive views unaudited; throwing audit sink fails a committed mutation | `ThreadmillDashboardApiControllerTest.adminAloneSeesUnredactedDetailsWhenExposureIsConfigured` + `deniedMutationAttemptsAreAudited` + `sensitiveDetailViewsAreAudited` + `throwingAuditSinkDoesNotFailACommittedMutation` |
 
 ### Postgres-layer improvements (engagement notes)
 
