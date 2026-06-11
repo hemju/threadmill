@@ -1268,4 +1268,36 @@ class ProcessingNodeTest {
             Thread.currentThread().interrupt();
         }
     }
+
+    @Test
+    void ownerHeartbeatsKeepFlowingWhileWorkersDrainOnShutdown() throws Exception {
+        Job job = enqueueHello(EngineTestHandlers.BlockingHandler.class, "default");
+        node = ProcessingNode.builder(store)
+                .config(fastConfig.toBuilder()
+                        .claimHeartbeat(Duration.ofMillis(100))
+                        .jobTimeout(Duration.ofSeconds(30))
+                        .shutdownGracePeriod(Duration.ofMillis(700))
+                        .build())
+                .build();
+        node.start();
+
+        await().atMost(Duration.ofSeconds(5)).until(() -> {
+            Job j = store.findById(job.id()).orElseThrow();
+            return j.currentState() == JobState.PROCESSING
+                    && j.ownerHeartbeatAt().isPresent();
+        });
+        Instant before =
+                store.findById(job.id()).orElseThrow().ownerHeartbeatAt().orElseThrow();
+
+        // close() drains the blocking handler for shutdownGracePeriod before
+        // interrupting it; the owner-heartbeat thread must stay alive through the
+        // drain so another node does not orphan-reclaim the still-running job.
+        Thread closeThread = Thread.ofPlatform().start(() -> node.close());
+        Thread.sleep(350);
+        Instant during =
+                store.findById(job.id()).orElseThrow().ownerHeartbeatAt().orElseThrow();
+        assertThat(during).isAfter(before);
+
+        closeThread.join(Duration.ofSeconds(5));
+    }
 }

@@ -150,10 +150,13 @@ public final class ProcessingNode implements AutoCloseable {
     @Override
     public void close() {
         if (!stopped.compareAndSet(false, true)) return;
+        // Stop claiming new work, then drain the in-flight handlers BEFORE
+        // stopping maintenance. maintenance owns the owner-heartbeat thread; if
+        // it stopped first, a long shutdownGracePeriod would drain with stale
+        // heartbeats and another node would mass-orphan-reclaim the still-running
+        // jobs (duplicate execution on every deploy). Keeping it alive through
+        // the drain keeps the draining jobs' heartbeats fresh.
         for (Dispatcher d : dispatchers) d.stop();
-        maintenance.stop();
-        wakeRegistration.run();
-        registry.stop();
         workerPool.shutdown();
         try {
             if (!workerPool.awaitTermination(config.shutdownGracePeriod().toMillis(), TimeUnit.MILLISECONDS)) {
@@ -163,6 +166,9 @@ public final class ProcessingNode implements AutoCloseable {
             workerPool.shutdownNow();
             Thread.currentThread().interrupt();
         } finally {
+            maintenance.stop();
+            wakeRegistration.run();
+            registry.stop();
             runner.shutdown();
         }
     }
