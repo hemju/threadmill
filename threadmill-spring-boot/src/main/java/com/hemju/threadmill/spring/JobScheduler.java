@@ -209,6 +209,24 @@ public class JobScheduler {
                     + " is not a " + registration.payloadType().getName()
                     + " (handler " + handler.getName() + " declared that payload type)");
         }
+        if (payload.getClass() != registration.payloadType()) {
+            // isInstance admits subtypes — but a subtype with its own
+            // registered handler is genuinely ambiguous dispatch, and
+            // routing it to the supertype's handler is almost always a bug.
+            // The deliberate NoPayload multi-handler path is unaffected:
+            // every JobAction payload IS exactly NoPayload.
+            for (var own : registry.registrationsForExactPayloadType(payload.getClass())) {
+                if (!own.handlerType().equals(registration.handlerType())) {
+                    throw new IllegalStateException(
+                            "Payload " + payload.getClass().getName()
+                                    + " has its own registered handler "
+                                    + own.handlerType().getName()
+                                    + "; refusing to route it to " + handler.getName()
+                                    + " (declared for supertype "
+                                    + registration.payloadType().getName() + ")");
+                }
+            }
+        }
         return registration;
     }
 

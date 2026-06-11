@@ -132,6 +132,17 @@ public class ThreadmillJobRegistry {
         return matches.get(0);
     }
 
+    /**
+     * Registrations whose declared payload type is exactly
+     * {@code payloadType} (possibly empty). Used by the enqueue-time
+     * dispatch-ambiguity check: a payload subtype with its own handler must
+     * not silently route to a supertype's handler.
+     */
+    public List<Registration> registrationsForExactPayloadType(Class<? extends JobPayload> payloadType) {
+        Objects.requireNonNull(payloadType, "payloadType");
+        return byPayload.getOrDefault(payloadType, List.of());
+    }
+
     public List<Registration> registrations() {
         var out = new ArrayList<>(byHandler.values());
         out.sort(Comparator.comparing(r -> r.handlerType().getName()));
