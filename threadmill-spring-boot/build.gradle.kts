@@ -1,4 +1,7 @@
-plugins { id("threadmill.java-module") }
+plugins {
+    id("threadmill.java-module")
+    id("threadmill.publish")
+}
 
 val springBootVersion =
     rootProject.extensions

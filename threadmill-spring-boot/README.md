@@ -24,10 +24,10 @@ single place to confirm "which engine, which store, which lanes" at boot time.
 
 ```kotlin
 dependencies {
-    implementation("com.hemju:threadmill-spring-boot:VERSION")
+    implementation("com.hemju.threadmill:threadmill-spring-boot:VERSION")
     // Optional, pick one or none — auto-detected:
-    implementation("com.hemju:threadmill-store-postgres:VERSION")
-    // implementation("com.hemju:threadmill-store-redis:VERSION") // pulled in transitively
+    implementation("com.hemju.threadmill:threadmill-store-postgres:VERSION")
+    // implementation("com.hemju.threadmill:threadmill-store-redis:VERSION") // pulled in transitively
 }
 ```
 

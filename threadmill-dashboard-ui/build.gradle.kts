@@ -1,4 +1,7 @@
-plugins { id("threadmill.java-base") }
+plugins {
+    id("threadmill.java-base")
+    id("threadmill.publish")
+}
 
 val npmInstall by
     tasks.registering(Exec::class) {
