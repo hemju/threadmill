@@ -2,6 +2,7 @@ package com.hemju.threadmill.core.engine;
 
 import java.time.Instant;
 import java.util.ArrayDeque;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
@@ -15,6 +16,7 @@ import com.hemju.threadmill.core.JobRelationship;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 
 /**
@@ -56,6 +58,49 @@ public final class WorkflowInterceptor implements JobInterceptor {
             return;
         }
         abandonAwaitingSuccessorsOf(job.id());
+    }
+
+    /**
+     * Recovery sweep for AWAITING workflow children whose predecessor already
+     * reached a terminal state but whose promote/abandon never ran — e.g. the
+     * node crashed in the window between the predecessor's terminal save and
+     * this interceptor's hook. Without this, such children stay AWAITING
+     * forever and their workflow-root concurrency key is held forever. Promotes
+     * children of a SUCCEEDED predecessor, abandons children of a failed /
+     * quarantined / deleted / vanished predecessor, and leaves children of a
+     * still-active predecessor alone. Idempotent; safe to run on every node's
+     * maintenance leader periodically.
+     */
+    public void reconcileOrphanedAwaitingChildren(int max) {
+        if (store.capabilities().supportsExactCounts()
+                && store.countsByState().getOrDefault(JobState.AWAITING, 0L) == 0L) {
+            return;
+        }
+        List<Job> awaiting = store.searchJobs(new JobSearch(JobState.AWAITING, null, null, max, 0));
+        var handledParents = new HashSet<JobId>();
+        for (Job child : awaiting) {
+            if (child.relationship().isEmpty()) continue;
+            JobRelationship rel = child.relationship().get();
+            if (rel.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
+            JobId parentId = rel.parentId();
+            if (!handledParents.add(parentId)) continue;
+            JobState parentState =
+                    store.findById(parentId).map(Job::currentState).orElse(null);
+            if (parentState == JobState.SUCCEEDED) {
+                promoteAwaitingSuccessorsOf(parentId);
+            } else if (parentState == null
+                    || parentState == JobState.FAILED
+                    || parentState == JobState.QUARANTINED
+                    || parentState == JobState.DELETED) {
+                // Failed (no pending retry), quarantined, deleted, or hard-deleted
+                // by retention: the predecessor can never promote this child, so
+                // abandon the subtree. ENQUEUED/SCHEDULED/PROCESSING/AWAITING all
+                // mean the predecessor is still in flight — leave the child be.
+                // (FAILED is not state.isTerminal() because a retry can resurrect
+                // it, but a predecessor sitting in FAILED at this cadence is done.)
+                abandonAwaitingSuccessorsOf(parentId);
+            }
+        }
     }
 
     /** Children are drained in batches of this size until exhausted. */

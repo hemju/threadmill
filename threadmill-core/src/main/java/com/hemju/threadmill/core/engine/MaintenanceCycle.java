@@ -142,6 +142,7 @@ public final class MaintenanceCycle {
                         retentionSweep();
                         nodeHeartbeatRetentionSweep();
                         dedupRetentionSweep();
+                        reconcileOrphanedWorkflowChildren();
                         nextRetention = now.plus(config.retentionInterval());
                     }
                 }
@@ -188,6 +189,20 @@ public final class MaintenanceCycle {
      * this loop. Anything left over carries to the next retention tick.
      */
     private static final int MAX_RETENTION_BATCHES_PER_TICK = 50;
+
+    /** Cap on AWAITING jobs inspected per reconciliation pass. */
+    private static final int WORKFLOW_RECONCILE_SCAN = 500;
+
+    /**
+     * Recover workflow children stranded in AWAITING because their predecessor
+     * reached a terminal state but the promote/abandon hook never ran (a crash
+     * between the terminal save and the interceptor). Reuses the workflow
+     * interceptor's idempotent promote/abandon logic. Runs on the retention
+     * cadence — recovery latency for this rare crash window is not urgent.
+     */
+    private void reconcileOrphanedWorkflowChildren() {
+        new WorkflowInterceptor(store).reconcileOrphanedAwaitingChildren(WORKFLOW_RECONCILE_SCAN);
+    }
 
     private void retentionSweep() {
         var now = Instant.now();
