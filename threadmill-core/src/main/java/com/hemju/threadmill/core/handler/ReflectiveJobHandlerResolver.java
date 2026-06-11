@@ -36,7 +36,12 @@ public final class ReflectiveJobHandlerResolver implements JobHandlerResolver {
         JobHandler<?> cached = cache.get(resolvedName);
         if (cached != null) return cached;
         try {
-            Class<?> klass = Class.forName(resolvedName);
+            // initialize=false: never run the named class's static initializer
+            // before the JobHandler assignability check. handlerTypeName is
+            // producer-controlled persisted data; loading it with the
+            // initializing Class.forName(String) would let a job producer trigger
+            // an arbitrary classpath class's <clinit> side effects on a worker.
+            Class<?> klass = Class.forName(resolvedName, false, getClass().getClassLoader());
             if (!JobHandler.class.isAssignableFrom(klass)) {
                 throw new HandlerResolutionException("Type " + resolvedName + " does not implement JobHandler");
             }
