@@ -232,6 +232,7 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
                 .map(node -> RedisURI.Builder.redis(node.host(), node.port()).build())
                 .toList();
         RedisClusterClient client = RedisClusterClient.create(uris);
+        client.setOptions(RedisClusterOptions.topologyRefreshing());
         try {
             return connectClusterClient(client, channel);
         } catch (RuntimeException connectFailure) {

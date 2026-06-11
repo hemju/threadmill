@@ -197,6 +197,7 @@ public final class RedisJobStore implements JobStore {
                 .map(node -> RedisURI.Builder.redis(node.host(), node.port()).build())
                 .toList();
         RedisClusterClient client = RedisClusterClient.create(uris);
+        client.setOptions(RedisClusterOptions.topologyRefreshing());
         StatefulRedisClusterConnection<String, String> connection = client.connect();
         return new ConnectionHandle(client, connection, connection.sync());
     }
