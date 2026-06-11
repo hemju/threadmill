@@ -4,6 +4,7 @@ import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -51,6 +52,7 @@ public class ThreadmillJobRegistry {
         for (Registration r : registrations) {
             recordRegistration(handlerIndex, payloadIndex, r);
         }
+        requireUniqueRecurringNames(handlerIndex.values());
         this.byHandler = Map.copyOf(handlerIndex);
         this.byPayload = copyOfPayloadIndex(payloadIndex);
     }
@@ -86,6 +88,7 @@ public class ThreadmillJobRegistry {
                     recurringSpecFor(beanType, recurring));
             recordRegistration(handlerIndex, payloadIndex, registration);
         }
+        requireUniqueRecurringNames(handlerIndex.values());
         this.byHandler = Map.copyOf(handlerIndex);
         this.byPayload = copyOfPayloadIndex(payloadIndex);
     }
@@ -160,6 +163,28 @@ public class ThreadmillJobRegistry {
                     + r.handlerType().getName());
         }
         existing.add(r);
+    }
+
+    /**
+     * Recurring tasks are keyed by name in the store: a duplicate
+     * {@code recurringName} would silently last-win at registration and one
+     * schedule would never run. Fail startup naming both handler classes,
+     * mirroring the payload-collision check.
+     */
+    private static void requireUniqueRecurringNames(Collection<Registration> registrations) {
+        var byName = new LinkedHashMap<String, Registration>();
+        for (Registration r : registrations) {
+            if (!r.isRecurring()) continue;
+            Registration prior = byName.putIfAbsent(r.recurring().name(), r);
+            if (prior != null) {
+                throw new IllegalStateException("Duplicate @Recurring name '"
+                        + r.recurring().name()
+                        + "': "
+                        + prior.handlerType().getName()
+                        + " and "
+                        + r.handlerType().getName());
+            }
+        }
     }
 
     private static Map<Class<? extends JobPayload>, List<Registration>> copyOfPayloadIndex(

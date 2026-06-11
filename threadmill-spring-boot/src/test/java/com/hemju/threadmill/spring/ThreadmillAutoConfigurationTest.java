@@ -311,6 +311,27 @@ class ThreadmillAutoConfigurationTest {
     }
 
     @Test
+    void duplicateRecurringNamesFailStartupWithBothHandlerNames() {
+        // Recurring tasks are keyed by name in the store; a duplicate
+        // recurringName previously last-won silently and one schedule never
+        // ran. Mirrors the payload-collision startup failure.
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        ThreadmillPostgresAutoConfiguration.class, ThreadmillAutoConfiguration.class))
+                .withBean(FirstClashingAction.class)
+                .withBean(SecondClashingAction.class)
+                .withPropertyValues("threadmill.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .rootCause()
+                            .hasMessageContaining("shared-name")
+                            .hasMessageContaining(FirstClashingAction.class.getName())
+                            .hasMessageContaining(SecondClashingAction.class.getName());
+                });
+    }
+
+    @Test
     void enqueueWakesLocalDispatcherViaWakeBus() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
@@ -553,6 +574,20 @@ class ThreadmillAutoConfigurationTest {
     static final class InvalidIntervalHandler implements JobHandler<NoPayload> {
         @Override
         public void run(NoPayload payload, JobExecutionContext ctx) {}
+    }
+
+    @Job(queue = "alpha")
+    @Recurring(interval = "PT5S", recurringName = "shared-name")
+    static final class FirstClashingAction implements JobAction {
+        @Override
+        public void run(JobExecutionContext ctx) {}
+    }
+
+    @Job(queue = "beta")
+    @Recurring(interval = "PT7S", recurringName = "shared-name")
+    static final class SecondClashingAction implements JobAction {
+        @Override
+        public void run(JobExecutionContext ctx) {}
     }
 
     @Job(queue = "alpha")
