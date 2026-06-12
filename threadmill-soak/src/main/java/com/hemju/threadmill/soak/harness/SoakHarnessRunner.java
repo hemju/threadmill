@@ -5,7 +5,6 @@ import java.nio.file.Files;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -25,7 +24,7 @@ import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.soak.harness.invariant.InvariantResult;
 import com.hemju.threadmill.soak.harness.invariant.SoakInvariant;
-import com.hemju.threadmill.soak.harness.invariant.TraceCorpus;
+import com.hemju.threadmill.soak.harness.invariant.TraceReplay;
 import com.hemju.threadmill.soak.harness.scenario.Scenarios;
 import com.hemju.threadmill.soak.harness.scenario.SoakRunContext;
 import com.hemju.threadmill.soak.harness.scenario.SoakScenario;
@@ -35,8 +34,8 @@ import com.hemju.threadmill.soak.harness.scenario.SoakScenario;
  *
  * <p>Build the store via the {@link BackendFixture}, start N
  * {@link ProcessingNode}s, instantiate the scenario, run its load generator
- * for {@code duration}, wait for drain, stop nodes, then load the trace,
- * run invariants, and write all artifacts.
+ * for {@code duration}, wait for drain, stop nodes, then verify the trace
+ * stream against the scenario's invariants and write all artifacts.
  */
 public final class SoakHarnessRunner {
 
@@ -138,31 +137,19 @@ public final class SoakHarnessRunner {
             }
         }
 
-        return finishRun(interceptor, runStart);
+        return finishRun(interceptor, gen.enqueuedCount().get(), runStart);
     }
 
-    private SummaryReport finishRun(SoakInterceptor interceptor, Instant runStart) throws IOException {
-        TraceCorpus corpus = TraceCorpus.load(outputDir.traceJsonl());
-
+    private SummaryReport finishRun(SoakInterceptor interceptor, long enqueued, Instant runStart) throws IOException {
         SoakScenario scenario = Scenarios.of(config.scenario());
         List<SoakInvariant> invariants = scenario.invariants();
-        List<InvariantResult> results = new ArrayList<>();
-        for (SoakInvariant inv : invariants) {
-            try {
-                results.add(inv.check(corpus));
-            } catch (RuntimeException e) {
-                results.add(InvariantResult.fail(
-                        inv.name(),
-                        List.of("invariant raised " + e.getClass().getSimpleName() + ": " + e.getMessage()),
-                        List.of()));
-            }
-        }
+        List<InvariantResult> results = TraceReplay.verify(outputDir.traceJsonl(), invariants);
         SummaryWriter.writeInvariants(outputDir, results);
 
-        SummaryReport.LockContention lockContention = LockEventsWriter.write(corpus, outputDir);
+        SummaryReport.LockContention lockContention = LockEventsWriter.write(outputDir.traceJsonl(), outputDir);
 
         SummaryReport.Performance perf =
-                buildPerformance(corpus, interceptor, Duration.between(runStart, Instant.now()), lockContention);
+                buildPerformance(enqueued, interceptor, Duration.between(runStart, Instant.now()), lockContention);
 
         boolean passed = results.stream().allMatch(InvariantResult::passed);
         SummaryReport report = new SummaryReport(
@@ -185,37 +172,14 @@ public final class SoakHarnessRunner {
     }
 
     private SummaryReport.Performance buildPerformance(
-            TraceCorpus corpus,
-            SoakInterceptor interceptor,
-            Duration wallClock,
-            SummaryReport.LockContention contention) {
-        long enqueued = corpus.events().stream()
-                .filter(e -> "enqueued".equals(e.path("event").asText()))
-                .count();
+            long enqueued, SoakInterceptor interceptor, Duration wallClock, SummaryReport.LockContention contention) {
         long durationMs = Math.max(1L, wallClock.toMillis());
         double overall = interceptor.succeeded() * 1000.0 / durationMs;
 
         Map<String, Double> byQueue = new LinkedHashMap<>();
-        Map<String, Long> succeededPerQueue = new LinkedHashMap<>();
-        Map<String, Long> succeededPerHandler = new LinkedHashMap<>();
-        Map<String, String> handlerByJobId = new HashMap<>();
-        for (JsonNode e : corpus.events()) {
-            String event = e.path("event").asText();
-            if ("enqueued".equals(event)) {
-                String h = e.path("handler").asText("");
-                String j = e.path("jobId").asText("");
-                if (!h.isEmpty() && !j.isEmpty()) handlerByJobId.put(j, h);
-            } else if ("succeeded".equals(event)) {
-                String q = e.path("queue").asText("");
-                String j = e.path("jobId").asText("");
-                if (!q.isEmpty()) succeededPerQueue.merge(q, 1L, Long::sum);
-                String h = handlerByJobId.get(j);
-                if (h != null) succeededPerHandler.merge(h, 1L, Long::sum);
-            }
-        }
-        succeededPerQueue.forEach((q, c) -> byQueue.put(q, c * 1000.0 / durationMs));
+        interceptor.succeededByQueue().forEach((q, c) -> byQueue.put(q, c * 1000.0 / durationMs));
         Map<String, Double> byHandler = new LinkedHashMap<>();
-        succeededPerHandler.forEach((h, c) -> byHandler.put(h, c * 1000.0 / durationMs));
+        interceptor.succeededByHandler().forEach((h, c) -> byHandler.put(h, c * 1000.0 / durationMs));
 
         // Read latency percentiles from latencies.jsonl after it's been closed.
         var latencyByStage = latencyPercentilesFromFile();
@@ -244,10 +208,10 @@ public final class SoakHarnessRunner {
      */
     private Map<String, Percentiles.Summary> latencyPercentilesFromFile() {
         Map<String, Percentiles.Summary> result = new LinkedHashMap<>();
-        ArrayList<Long> enqueueToClaim = new ArrayList<>();
-        ArrayList<Long> claimToStart = new ArrayList<>();
-        ArrayList<Long> startToComplete = new ArrayList<>();
-        ArrayList<Long> endToEnd = new ArrayList<>();
+        var enqueueToClaim = new GrowableLongArray();
+        var claimToStart = new GrowableLongArray();
+        var startToComplete = new GrowableLongArray();
+        var endToEnd = new GrowableLongArray();
         try (var lines = Files.lines(outputDir.latenciesJsonl())) {
             var mapper = new ObjectMapper();
             lines.forEach(line -> {
@@ -266,22 +230,16 @@ public final class SoakHarnessRunner {
         } catch (IOException ignore) {
             // Empty file or missing — leave all percentiles at zero.
         }
-        result.put("enqueueToClaimMs", Percentiles.summarise(toArray(enqueueToClaim)));
-        result.put("claimToStartMs", Percentiles.summarise(toArray(claimToStart)));
-        result.put("startToCompleteMs", Percentiles.summarise(toArray(startToComplete)));
-        result.put("endToEndMs", Percentiles.summarise(toArray(endToEnd)));
+        result.put("enqueueToClaimMs", Percentiles.summarise(enqueueToClaim.toArray()));
+        result.put("claimToStartMs", Percentiles.summarise(claimToStart.toArray()));
+        result.put("startToCompleteMs", Percentiles.summarise(startToComplete.toArray()));
+        result.put("endToEndMs", Percentiles.summarise(endToEnd.toArray()));
         return result;
     }
 
-    private static void pushIfPresent(JsonNode n, String field, ArrayList<Long> dest) {
+    private static void pushIfPresent(JsonNode n, String field, GrowableLongArray dest) {
         JsonNode v = n.get(field);
         if (v != null && !v.isNull()) dest.add(v.asLong());
-    }
-
-    private static long[] toArray(ArrayList<Long> list) {
-        long[] arr = new long[list.size()];
-        for (int i = 0; i < list.size(); i++) arr[i] = list.get(i);
-        return arr;
     }
 
     private void waitForDrain(JobStore store, Duration drainBudget) throws InterruptedException {

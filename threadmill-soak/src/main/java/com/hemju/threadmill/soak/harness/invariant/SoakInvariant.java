@@ -1,12 +1,14 @@
 package com.hemju.threadmill.soak.harness.invariant;
 
 /**
- * One named, post-run correctness check.
+ * One named correctness check a scenario registers for its runs.
  *
- * <p>Invariants run after the load generator has stopped and the engine has
- * drained (or hit the drain budget). They read the {@link TraceCorpus} and
- * produce an {@link InvariantResult} naming any violations and a handful of
- * sample event chains that illustrate the failure.
+ * <p>The invariant itself is a stateless definition; {@link #newCheck()}
+ * produces the stateful {@link StreamingInvariantCheck} that consumes one
+ * run's trace events. The harness verifies <em>live</em> — every event is fed
+ * to the checks as it is written — so checks must hold bounded state (see the
+ * {@link StreamingInvariantCheck} contract) and may be snapshotted mid-run for
+ * progress reporting and fail-fast.
  */
 public interface SoakInvariant {
 
@@ -16,6 +18,6 @@ public interface SoakInvariant {
     /** Short human description; surfaced in {@code summary.md}. */
     String description();
 
-    /** Check the invariant against the loaded trace. */
-    InvariantResult check(TraceCorpus corpus);
+    /** A fresh stateful check for one run's event stream. */
+    StreamingInvariantCheck newCheck();
 }

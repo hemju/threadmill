@@ -1,9 +1,11 @@
 package com.hemju.threadmill.soak.harness;
 
 import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.LongAdder;
 
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
@@ -36,6 +38,8 @@ public final class SoakInterceptor implements JobInterceptor {
     private final SoakTraceWriter trace;
     private final LatencyTracker latencyTracker;
     private final ConcurrentHashMap<String, Integer> attemptsByJob = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, LongAdder> succeededByQueue = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, LongAdder> succeededByHandler = new ConcurrentHashMap<>();
     private final AtomicLong succeededCount = new AtomicLong();
     private final AtomicLong failedCount = new AtomicLong();
     private final AtomicLong timedOutCount = new AtomicLong();
@@ -74,6 +78,10 @@ public final class SoakInterceptor implements JobInterceptor {
     @Override
     public void onProcessingSucceeded(Job job, JobExecutionContext ctx) {
         succeededCount.incrementAndGet();
+        succeededByQueue.computeIfAbsent(job.queue(), q -> new LongAdder()).increment();
+        succeededByHandler
+                .computeIfAbsent(handlerSimpleName(job.spec().handlerType()), h -> new LongAdder())
+                .increment();
         int attempts = attemptsByJob.getOrDefault(job.id().toString(), 0);
         var fields = new LinkedHashMap<String, Object>();
         fields.put("jobId", job.id().toString());
@@ -136,6 +144,26 @@ public final class SoakInterceptor implements JobInterceptor {
     private static String truncate(String s) {
         if (s == null) return null;
         return s.length() > 160 ? s.substring(0, 160) + "…" : s;
+    }
+
+    /** Matches the simple name the load generator records on {@code enqueued} events. */
+    private static String handlerSimpleName(String handlerType) {
+        int cut = Math.max(handlerType.lastIndexOf('.'), handlerType.lastIndexOf('$'));
+        return cut < 0 ? handlerType : handlerType.substring(cut + 1);
+    }
+
+    /** Succeeded counts per queue; snapshot for the run summary. */
+    public Map<String, Long> succeededByQueue() {
+        var snapshot = new LinkedHashMap<String, Long>();
+        succeededByQueue.forEach((queue, count) -> snapshot.put(queue, count.sum()));
+        return snapshot;
+    }
+
+    /** Succeeded counts per handler simple name; snapshot for the run summary. */
+    public Map<String, Long> succeededByHandler() {
+        var snapshot = new LinkedHashMap<String, Long>();
+        succeededByHandler.forEach((handler, count) -> snapshot.put(handler, count.sum()));
+        return snapshot;
     }
 
     public long succeeded() {
