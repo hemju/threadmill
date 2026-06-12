@@ -75,6 +75,7 @@ final class NodeChurnSmokeTest {
             "postgresUrl",
             "force",
             "redisTopology",
+            "redisUrl",
             "progressInterval",
             "nodeChurn"
         }) {

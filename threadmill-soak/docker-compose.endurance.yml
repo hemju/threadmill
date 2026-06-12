@@ -1,0 +1,45 @@
+# Long-lived local datastores for endurance soak runs.
+#
+# Endurance runs should not depend on Testcontainers' lifecycle for hours:
+# these instances outlive the harness process, survive a harness restart, and
+# remain inspectable after a failed run (the volumes keep the data).
+#
+#   docker compose -f threadmill-soak/docker-compose.endurance.yml up -d
+#
+#   ./gradlew :threadmill-soak:soakEndurance \
+#     "-PpostgresUrl=jdbc:postgresql://localhost:54320/threadmill?user=threadmill&password=threadmill" \
+#     -PredisUrl=redis://localhost:63790
+#
+# Ports are deliberately offset from the defaults (5432 / 6379) so the stack
+# never collides with a developer's everyday instances. The harness only
+# resets the Threadmill schema / `{threadmill}:*` namespace, never the whole
+# database, so the instances are safe to keep around between runs.
+services:
+  postgres:
+    image: postgres:18-alpine
+    # Each harness node pool holds up to 80 connections; 200 leaves headroom
+    # for inspection sessions while a run is live.
+    command: ["postgres", "-c", "max_connections=200"]
+    environment:
+      POSTGRES_DB: threadmill
+      POSTGRES_USER: threadmill
+      POSTGRES_PASSWORD: threadmill
+    ports:
+      - "54320:5432"
+    volumes:
+      - threadmill-endurance-postgres:/var/lib/postgresql
+
+  redis:
+    image: redis:7-alpine
+    # AOF on matches the documented production durability posture;
+    # noeviction is required by RedisJobStore's startup gate.
+    command:
+      ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "63790:6379"
+    volumes:
+      - threadmill-endurance-redis:/data
+
+volumes:
+  threadmill-endurance-postgres:
+  threadmill-endurance-redis:

@@ -30,6 +30,7 @@ public record SoakHarnessConfig(
         boolean failFast,
         Optional<String> postgresUrl,
         String redisTopology,
+        Optional<String> redisUrl,
         boolean force,
         Duration progressInterval,
         Optional<Duration> nodeChurn) {
@@ -64,6 +65,7 @@ public record SoakHarnessConfig(
         boolean force = Boolean.parseBoolean(prop("force", "false"));
         Optional<String> postgresUrl = Optional.ofNullable(prop("postgresUrl", null));
         String redisTopology = prop("redisTopology", "standalone");
+        Optional<String> redisUrl = Optional.ofNullable(prop("redisUrl", null));
         String runId = Optional.ofNullable(prop("runId", null))
                 .orElseGet(() -> defaultRunId(scenario, backend, Instant.now()));
         Path outputDir = Optional.ofNullable(prop("outputDir", null))
@@ -88,6 +90,7 @@ public record SoakHarnessConfig(
                 failFast,
                 postgresUrl,
                 redisTopology,
+                redisUrl,
                 force,
                 progressInterval,
                 nodeChurn);

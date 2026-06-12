@@ -52,7 +52,7 @@ public final class SoakHarnessMain {
         return switch (config.backend()) {
             case "memory" -> new MemoryHarnessFixture();
             case "postgres" -> new PostgresHarnessFixture(config.postgresUrl());
-            case "redis" -> new RedisHarnessFixture(config.redisTopology());
+            case "redis" -> new RedisHarnessFixture(config.redisTopology(), config.redisUrl());
             default -> throw new IllegalArgumentException("unknown backend: " + config.backend());
         };
     }

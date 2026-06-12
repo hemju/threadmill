@@ -83,6 +83,7 @@ final class SoakHarnessRunnerTest {
             "postgresUrl",
             "force",
             "redisTopology",
+            "redisUrl",
             "progressInterval",
             "nodeChurn"
         }) {

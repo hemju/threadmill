@@ -105,6 +105,7 @@ final class SoakHarnessSmokeTest {
             "postgresUrl",
             "force",
             "redisTopology",
+            "redisUrl",
             "progressInterval",
             "nodeChurn"
         }) {

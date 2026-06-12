@@ -63,6 +63,7 @@ fun JavaExec.passSoakProps() {
             "postgresUrl",
             "force",
             "redisTopology",
+            "redisUrl",
             "progressInterval",
             "nodeChurn",
         )
