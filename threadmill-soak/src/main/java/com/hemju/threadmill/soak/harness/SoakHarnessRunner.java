@@ -66,6 +66,9 @@ public final class SoakHarnessRunner {
         Scheduler scheduler = new Scheduler(store, new JsonJobSerializer());
         Instant runStart = Instant.now();
 
+        // Mutated by the main thread, read by scenario threads, and — when
+        // node churn is on — mutated by the churn thread too. Every access
+        // synchronizes on the list itself.
         List<ProcessingNode> nodes = new ArrayList<>();
         var abortRequested = new AtomicBoolean();
         LiveInvariantVerifier verifier = new LiveInvariantVerifier(scenario.invariants(), () -> {
@@ -108,34 +111,51 @@ public final class SoakHarnessRunner {
                     .build();
 
             for (int i = 0; i < config.nodes(); i++) {
-                var nb = ProcessingNode.builder(store).config(baseConfig).interceptor(interceptor);
-                scenario.configureNode(nb);
-                ProcessingNode node = nb.build();
-                trace.emit(
-                        "node_started",
-                        Map.of(
-                                "nodeId", node.nodeId().toString(),
-                                "workerCount", config.workerCount(),
-                                "backend", config.backend()));
-                node.start();
-                nodes.add(node);
+                startNode(scenario, baseConfig, store, interceptor, trace, nodes, "initial");
             }
 
             metrics.start();
             printer.start();
             progress.start();
 
-            SoakRunContext ctx =
-                    new SoakRunContext(config, store, trace, runStart, () -> List.copyOf(nodes), abortRequested);
-            scenario.runWorkload(gen, ctx);
+            NodeChurner churner = config.nodeChurn()
+                    .map(interval -> NodeChurner.start(
+                            interval,
+                            nodes,
+                            trace,
+                            abortRequested,
+                            () -> startNode(
+                                    scenario, baseConfig, store, interceptor, trace, nodes, "churn-replacement")))
+                    .orElse(null);
+
+            SoakRunContext ctx = new SoakRunContext(
+                    config,
+                    store,
+                    trace,
+                    runStart,
+                    () -> {
+                        synchronized (nodes) {
+                            return List.copyOf(nodes);
+                        }
+                    },
+                    abortRequested);
+            try {
+                scenario.runWorkload(gen, ctx);
+            } finally {
+                if (churner != null) churner.stop();
+            }
             progress.phase("draining");
             waitForDrain(store, scenario.drainBudget());
 
-            for (ProcessingNode node : new ArrayList<>(nodes)) {
+            List<ProcessingNode> remaining;
+            synchronized (nodes) {
+                remaining = List.copyOf(nodes);
+                nodes.clear();
+            }
+            for (ProcessingNode node : remaining) {
                 trace.emit("node_stopped", Map.of("nodeId", node.nodeId().toString()));
                 node.close();
             }
-            nodes.clear();
         } finally {
             printer.close();
             progress.close();
@@ -144,7 +164,11 @@ public final class SoakHarnessRunner {
             } catch (IOException ignore) {
                 // best effort
             }
-            for (ProcessingNode node : nodes) {
+            List<ProcessingNode> leftover;
+            synchronized (nodes) {
+                leftover = List.copyOf(nodes);
+            }
+            for (ProcessingNode node : leftover) {
                 try {
                     node.close();
                 } catch (RuntimeException ignore) {
@@ -164,6 +188,31 @@ public final class SoakHarnessRunner {
         }
 
         return finishRun(verifier, interceptor, gen.enqueuedCount().get(), runStart, abortRequested.get());
+    }
+
+    private ProcessingNode startNode(
+            SoakScenario scenario,
+            ProcessingNodeConfig baseConfig,
+            JobStore store,
+            SoakInterceptor interceptor,
+            SoakTraceWriter trace,
+            List<ProcessingNode> nodes,
+            String reason) {
+        var nb = ProcessingNode.builder(store).config(baseConfig).interceptor(interceptor);
+        scenario.configureNode(nb);
+        ProcessingNode node = nb.build();
+        trace.emit(
+                "node_started",
+                Map.of(
+                        "nodeId", node.nodeId().toString(),
+                        "workerCount", config.workerCount(),
+                        "backend", config.backend(),
+                        "reason", reason));
+        node.start();
+        synchronized (nodes) {
+            nodes.add(node);
+        }
+        return node;
     }
 
     private SummaryReport finishRun(

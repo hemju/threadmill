@@ -105,7 +105,8 @@ final class SoakHarnessSmokeTest {
             "postgresUrl",
             "force",
             "redisTopology",
-            "progressInterval"
+            "progressInterval",
+            "nodeChurn"
         }) {
             System.clearProperty("threadmill.soak." + k);
         }

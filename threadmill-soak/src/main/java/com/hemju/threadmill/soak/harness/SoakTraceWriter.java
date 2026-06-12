@@ -35,7 +35,7 @@ import com.hemju.threadmill.soak.harness.invariant.TraceEvent;
  * {@code check_in}, {@code succeeded}, {@code failed}, {@code retried},
  * {@code timed_out}, {@code quarantined}, {@code lock_acquired},
  * {@code lock_released}, {@code queue_paused}, {@code queue_resumed},
- * {@code node_started}, {@code node_stopped}.
+ * {@code node_started}, {@code node_stopped}, {@code node_churn_stop}.
  *
  * <p>Each write is guarded by a {@link ReentrantLock} so concurrent emitters
  * never tear a line.

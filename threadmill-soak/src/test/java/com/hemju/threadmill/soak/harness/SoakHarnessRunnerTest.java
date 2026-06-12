@@ -82,7 +82,9 @@ final class SoakHarnessRunnerTest {
             "failFast",
             "postgresUrl",
             "force",
-            "redisTopology"
+            "redisTopology",
+            "progressInterval",
+            "nodeChurn"
         }) {
             System.clearProperty("threadmill.soak." + k);
         }

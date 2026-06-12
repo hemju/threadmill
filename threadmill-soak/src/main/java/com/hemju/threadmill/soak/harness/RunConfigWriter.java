@@ -3,6 +3,7 @@ package com.hemju.threadmill.soak.harness;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -30,6 +31,7 @@ public final class RunConfigWriter {
         m.put("postgresUrl", c.postgresUrl().orElse(null));
         m.put("redisTopology", c.redisTopology());
         m.put("progressInterval", c.progressInterval().toString());
+        m.put("nodeChurn", c.nodeChurn().map(Duration::toString).orElse(null));
         return m;
     }
 

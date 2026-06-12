@@ -31,7 +31,8 @@ public record SoakHarnessConfig(
         Optional<String> postgresUrl,
         String redisTopology,
         boolean force,
-        Duration progressInterval) {
+        Duration progressInterval,
+        Optional<Duration> nodeChurn) {
 
     public static final DateTimeFormatter RUN_TIMESTAMP = new DateTimeFormatterBuilder()
             .appendValue(ChronoField.YEAR, 4)
@@ -69,6 +70,12 @@ public record SoakHarnessConfig(
                 .map(Path::of)
                 .orElseGet(() -> Path.of("build", "soak", runId));
         Duration progressInterval = parseDuration(prop("progressInterval", "30s"));
+        Optional<Duration> nodeChurn =
+                Optional.ofNullable(prop("nodeChurn", null)).map(SoakHarnessConfig::parseDuration);
+        if (nodeChurn.isPresent() && nodes < 2) {
+            throw new IllegalArgumentException(
+                    "-PnodeChurn requires -Pnodes=2 or more — churn always keeps at least one node alive");
+        }
         return new SoakHarnessConfig(
                 backend,
                 scenario,
@@ -82,7 +89,8 @@ public record SoakHarnessConfig(
                 postgresUrl,
                 redisTopology,
                 force,
-                progressInterval);
+                progressInterval,
+                nodeChurn);
     }
 
     public static String defaultRunId(String scenario, String backend, Instant now) {

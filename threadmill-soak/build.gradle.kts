@@ -64,6 +64,7 @@ fun JavaExec.passSoakProps() {
             "force",
             "redisTopology",
             "progressInterval",
+            "nodeChurn",
         )
         .forEach { name ->
             findProperty(name)?.toString()?.let { systemProperty("threadmill.soak.$name", it) }
