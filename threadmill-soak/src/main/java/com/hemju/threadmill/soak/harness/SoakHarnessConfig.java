@@ -105,7 +105,8 @@ public record SoakHarnessConfig(
         return (value == null || value.isBlank()) ? defaultValue : value;
     }
 
-    private static Duration parseDuration(String text) {
+    /** Parses the harness duration shape: {@code 90ms} / {@code 30s} / {@code 5m} / {@code 8h} / bare seconds. */
+    public static Duration parseDuration(String text) {
         String t = text.trim().toLowerCase(Locale.ROOT);
         if (t.endsWith("ms")) return Duration.ofMillis(Long.parseLong(t.substring(0, t.length() - 2)));
         if (t.endsWith("s")) return Duration.ofSeconds(Long.parseLong(t.substring(0, t.length() - 1)));

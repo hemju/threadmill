@@ -66,6 +66,7 @@ fun JavaExec.passSoakProps() {
             "redisUrl",
             "progressInterval",
             "nodeChurn",
+            "backends",
         )
         .forEach { name ->
             findProperty(name)?.toString()?.let { systemProperty("threadmill.soak.$name", it) }
@@ -103,4 +104,15 @@ tasks.register("soakAll") {
     group = "verification"
     description = "Run the chosen scenario against Postgres then Redis sequentially."
     dependsOn("soakPostgres", "soakRedis")
+}
+
+tasks.register<JavaExec>("soakEndurance") {
+    group = "verification"
+    description =
+        "Endurance run: one harness JVM per backend (default postgres,redis) in parallel for hours; " +
+            "defaults 8h × 50 jobs/s × 3 nodes, mixed-workload, node churn every 10m. " +
+            "Pair with docker-compose.endurance.yml via -PpostgresUrl / -PredisUrl."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.hemju.threadmill.soak.harness.endurance.EnduranceMain")
+    passSoakProps()
 }
