@@ -47,6 +47,14 @@ final class SoakHarnessSmokeTest {
             assertThat(outputDir.resolve("invariants.json")).exists();
             assertThat(outputDir.resolve("summary.json")).exists();
             assertThat(outputDir.resolve("summary.md")).exists();
+            assertThat(outputDir.resolve("progress.json")).exists();
+
+            ObjectMapper progressMapper = new ObjectMapper();
+            JsonNode progress = progressMapper.readTree(Files.readString(outputDir.resolve("progress.json")));
+            assertThat(progress.path("phase").asText()).isEqualTo("finished");
+            assertThat(progress.path("counts").path("enqueued").asLong()).isPositive();
+            assertThat(progress.path("invariants").isArray()).isTrue();
+            assertThat(progress.path("aborted").asBoolean()).isFalse();
 
             ObjectMapper mapper = new ObjectMapper();
             JsonNode summary = mapper.readTree(Files.readString(outputDir.resolve("summary.json")));
@@ -96,7 +104,8 @@ final class SoakHarnessSmokeTest {
             "failFast",
             "postgresUrl",
             "force",
-            "redisTopology"
+            "redisTopology",
+            "progressInterval"
         }) {
             System.clearProperty("threadmill.soak." + k);
         }

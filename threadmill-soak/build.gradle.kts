@@ -63,6 +63,7 @@ fun JavaExec.passSoakProps() {
             "postgresUrl",
             "force",
             "redisTopology",
+            "progressInterval",
         )
         .forEach { name ->
             findProperty(name)?.toString()?.let { systemProperty("threadmill.soak.$name", it) }

@@ -64,6 +64,10 @@ public final class OutputDir {
         return root.resolve("invariants.json");
     }
 
+    public Path progressJson() {
+        return root.resolve("progress.json");
+    }
+
     public Path summaryJson() {
         return root.resolve("summary.json");
     }

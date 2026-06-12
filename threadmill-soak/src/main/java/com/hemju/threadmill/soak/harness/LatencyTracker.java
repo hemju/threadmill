@@ -8,11 +8,11 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.locks.ReentrantLock;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -32,7 +32,7 @@ public final class LatencyTracker implements AutoCloseable {
     private final ObjectMapper mapper = new ObjectMapper();
     private final ReentrantLock writeLock = new ReentrantLock();
     private final ConcurrentHashMap<String, Stages> stages = new ConcurrentHashMap<>();
-    private final LongList endToEnd = new LongList();
+    private final RecentWindow endToEnd = new RecentWindow(65_536);
 
     public LatencyTracker(Path file) throws IOException {
         Objects.requireNonNull(file, "file");
@@ -84,7 +84,12 @@ public final class LatencyTracker implements AutoCloseable {
         return stages.size();
     }
 
-    /** Snapshot of the current p99 end-to-end latency, in ms; used by the live-status printer. */
+    /**
+     * Snapshot of the current p99 end-to-end latency, in ms, over the most
+     * recent window of completions; used by the live-status printer. The
+     * full-run percentiles in the summary are computed from
+     * {@code latencies.jsonl}, which holds every sample.
+     */
     public long currentP99EndToEndMs() {
         return endToEnd.snapshotPercentile(0.99);
     }
@@ -130,20 +135,29 @@ public final class LatencyTracker implements AutoCloseable {
     }
 
     /**
-     * Thread-safe append-only list of longs. We deliberately keep raw values
-     * rather than reach for HdrHistogram — a soak run records at most a few
-     * hundred thousand samples, which sort in milliseconds.
+     * Fixed-capacity ring of the most recent samples. The live-status p99 only
+     * needs a recent window; keeping every sample (an endurance run completes
+     * millions of jobs) would grow memory without bound and make each status
+     * refresh re-sort an ever-larger array.
      */
-    private static final class LongList {
-        private final ConcurrentLinkedQueue<Long> values = new ConcurrentLinkedQueue<>();
+    static final class RecentWindow {
+        private final long[] values;
+        private int next;
+        private int size;
 
-        void add(long v) {
-            values.add(v);
+        RecentWindow(int capacity) {
+            if (capacity <= 0) throw new IllegalArgumentException("capacity must be positive");
+            this.values = new long[capacity];
         }
 
-        long snapshotPercentile(double p) {
-            long[] arr = values.stream().mapToLong(Long::longValue).toArray();
-            return Percentiles.percentile(arr, p);
+        synchronized void add(long v) {
+            values[next] = v;
+            next = (next + 1) % values.length;
+            size = Math.min(size + 1, values.length);
+        }
+
+        synchronized long snapshotPercentile(double p) {
+            return Percentiles.percentile(Arrays.copyOf(values, size), p);
         }
     }
 }

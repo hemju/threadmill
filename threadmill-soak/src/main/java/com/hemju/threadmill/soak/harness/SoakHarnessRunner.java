@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -23,8 +24,7 @@ import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.soak.harness.invariant.InvariantResult;
-import com.hemju.threadmill.soak.harness.invariant.SoakInvariant;
-import com.hemju.threadmill.soak.harness.invariant.TraceReplay;
+import com.hemju.threadmill.soak.harness.invariant.LiveInvariantVerifier;
 import com.hemju.threadmill.soak.harness.scenario.Scenarios;
 import com.hemju.threadmill.soak.harness.scenario.SoakRunContext;
 import com.hemju.threadmill.soak.harness.scenario.SoakScenario;
@@ -33,9 +33,13 @@ import com.hemju.threadmill.soak.harness.scenario.SoakScenario;
  * Orchestrator for one soak run.
  *
  * <p>Build the store via the {@link BackendFixture}, start N
- * {@link ProcessingNode}s, instantiate the scenario, run its load generator
- * for {@code duration}, wait for drain, stop nodes, then verify the trace
- * stream against the scenario's invariants and write all artifacts.
+ * {@link ProcessingNode}s, instantiate the scenario, and run its load
+ * generator for {@code duration}. Invariants are verified <em>live</em>: every
+ * trace event feeds the scenario's checks as it is written, a periodically
+ * rewritten {@code progress.json} exposes the current verdict, and with
+ * {@code failFast=true} a definite violation aborts the run instead of
+ * wasting the remaining hours. After drain the final (completeness-inclusive)
+ * results and all artifacts are written.
  */
 public final class SoakHarnessRunner {
 
@@ -63,13 +67,31 @@ public final class SoakHarnessRunner {
         Instant runStart = Instant.now();
 
         List<ProcessingNode> nodes = new ArrayList<>();
-        SoakTraceWriter trace = new SoakTraceWriter(outputDir.traceJsonl());
+        var abortRequested = new AtomicBoolean();
+        LiveInvariantVerifier verifier = new LiveInvariantVerifier(scenario.invariants(), () -> {
+            if (config.failFast()) {
+                LOG.error("definite invariant violation detected — aborting run (failFast=true)");
+                abortRequested.set(true);
+            } else {
+                LOG.error("definite invariant violation detected — continuing (failFast=false)");
+            }
+        });
+        SoakTraceWriter trace = new SoakTraceWriter(outputDir.traceJsonl(), verifier::onEvent);
         LatencyTracker latency = new LatencyTracker(outputDir.latenciesJsonl());
         MetricsSampler metrics = new MetricsSampler(outputDir.metricsJsonl(), store, latency);
         SoakInterceptor interceptor = new SoakInterceptor(trace, latency);
         LoadGenerator gen = new LoadGenerator(scheduler, trace, latency, config.jobsPerSecond());
         StdoutStatusPrinter printer = new StdoutStatusPrinter(
                 taskLabel, config.scenario(), config.runId(), metrics, interceptor, gen.enqueuedCount());
+        ProgressReporter progress = new ProgressReporter(
+                outputDir.progressJson(),
+                config,
+                runStart,
+                metrics,
+                interceptor,
+                gen.enqueuedCount(),
+                verifier,
+                abortRequested::get);
 
         try {
             ProcessingNodeConfig baseConfig = scenario.tuneConfig(ProcessingNodeConfig.builder()
@@ -101,9 +123,12 @@ public final class SoakHarnessRunner {
 
             metrics.start();
             printer.start();
+            progress.start();
 
-            SoakRunContext ctx = new SoakRunContext(config, store, trace, runStart, () -> List.copyOf(nodes));
+            SoakRunContext ctx =
+                    new SoakRunContext(config, store, trace, runStart, () -> List.copyOf(nodes), abortRequested);
             scenario.runWorkload(gen, ctx);
+            progress.phase("draining");
             waitForDrain(store, scenario.drainBudget());
 
             for (ProcessingNode node : new ArrayList<>(nodes)) {
@@ -113,6 +138,7 @@ public final class SoakHarnessRunner {
             nodes.clear();
         } finally {
             printer.close();
+            progress.close();
             try {
                 metrics.close();
             } catch (IOException ignore) {
@@ -137,13 +163,21 @@ public final class SoakHarnessRunner {
             }
         }
 
-        return finishRun(interceptor, gen.enqueuedCount().get(), runStart);
+        return finishRun(verifier, interceptor, gen.enqueuedCount().get(), runStart, abortRequested.get());
     }
 
-    private SummaryReport finishRun(SoakInterceptor interceptor, long enqueued, Instant runStart) throws IOException {
-        SoakScenario scenario = Scenarios.of(config.scenario());
-        List<SoakInvariant> invariants = scenario.invariants();
-        List<InvariantResult> results = TraceReplay.verify(outputDir.traceJsonl(), invariants);
+    private SummaryReport finishRun(
+            LiveInvariantVerifier verifier,
+            SoakInterceptor interceptor,
+            long enqueued,
+            Instant runStart,
+            boolean aborted)
+            throws IOException {
+        // The verifier consumed the identical event stream that landed in
+        // trace.jsonl, so its final results ARE the trace verification —
+        // re-reading a multi-gigabyte endurance trace here would only repeat
+        // the same computation. TraceReplay remains for offline re-checks.
+        List<InvariantResult> results = verifier.finishResults();
         SummaryWriter.writeInvariants(outputDir, results);
 
         SummaryReport.LockContention lockContention = LockEventsWriter.write(outputDir.traceJsonl(), outputDir);
@@ -152,6 +186,12 @@ public final class SoakHarnessRunner {
                 buildPerformance(enqueued, interceptor, Duration.between(runStart, Instant.now()), lockContention);
 
         boolean passed = results.stream().allMatch(InvariantResult::passed);
+        List<String> notes = new ArrayList<>();
+        notes.add("Generated by threadmill-soak harness. Drop this directory into an AI agent to analyse.");
+        if (aborted) {
+            notes.add("Run was aborted early after a definite invariant violation (failFast=true);"
+                    + " the trace covers the shortened run.");
+        }
         SummaryReport report = new SummaryReport(
                 config.runId(),
                 config.scenario(),
@@ -160,7 +200,7 @@ public final class SoakHarnessRunner {
                 passed ? "passed" : "failed",
                 results,
                 perf,
-                List.of("Generated by threadmill-soak harness. Drop this directory into an AI agent to analyse."));
+                List.copyOf(notes));
 
         JsonSchema schema = SummarySchema.load();
         List<String> schemaErrors = SummarySchema.validate(schema, report);

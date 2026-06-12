@@ -82,7 +82,10 @@ public final class SoakInterceptor implements JobInterceptor {
         succeededByHandler
                 .computeIfAbsent(handlerSimpleName(job.spec().handlerType()), h -> new LongAdder())
                 .increment();
-        int attempts = attemptsByJob.getOrDefault(job.id().toString(), 0);
+        // Terminal: drop the per-job entry so the map stays bounded by
+        // in-flight work across an hours-long run.
+        Integer tracked = attemptsByJob.remove(job.id().toString());
+        int attempts = tracked == null ? 0 : tracked;
         var fields = new LinkedHashMap<String, Object>();
         fields.put("jobId", job.id().toString());
         fields.put("queue", job.queue());
@@ -95,15 +98,20 @@ public final class SoakInterceptor implements JobInterceptor {
 
     @Override
     public void onProcessingFailed(Job job, JobExecutionContext ctx, Throwable cause, FailureCause causeKind) {
-        int attempts = attemptsByJob.getOrDefault(job.id().toString(), 0);
+        boolean terminal = job.currentState() != JobState.SCHEDULED;
+        // A non-final failure keeps its entry — the retry attempt needs the
+        // running count; a terminal one is dropped to keep the map bounded.
+        Integer tracked = terminal
+                ? attemptsByJob.remove(job.id().toString())
+                : attemptsByJob.get(job.id().toString());
+        int attempts = tracked == null ? 0 : tracked;
         var fields = new LinkedHashMap<String, Object>();
         fields.put("jobId", job.id().toString());
         fields.put("queue", job.queue());
         fields.put("attempts", attempts);
         fields.put("causeKind", causeKind.name());
         fields.put("causeMessage", cause == null ? null : truncate(cause.getMessage()));
-        boolean finalState = job.currentState() != JobState.SCHEDULED;
-        fields.put("final", finalState);
+        fields.put("final", terminal);
         String event =
                 switch (causeKind) {
                     case TIMEOUT -> "timed_out";
@@ -117,7 +125,7 @@ public final class SoakInterceptor implements JobInterceptor {
         }
         trace.emit(event, fields);
         emitLockReleased(job);
-        if (!finalState) {
+        if (!terminal) {
             // A non-final failure means RetryInterceptor will schedule another attempt.
             retriedCount.incrementAndGet();
             var retryFields = new LinkedHashMap<String, Object>();

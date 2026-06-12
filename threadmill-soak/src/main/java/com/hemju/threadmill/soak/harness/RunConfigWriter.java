@@ -29,6 +29,7 @@ public final class RunConfigWriter {
         m.put("force", c.force());
         m.put("postgresUrl", c.postgresUrl().orElse(null));
         m.put("redisTopology", c.redisTopology());
+        m.put("progressInterval", c.progressInterval().toString());
         return m;
     }
 

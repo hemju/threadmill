@@ -30,7 +30,8 @@ public record SoakHarnessConfig(
         boolean failFast,
         Optional<String> postgresUrl,
         String redisTopology,
-        boolean force) {
+        boolean force,
+        Duration progressInterval) {
 
     public static final DateTimeFormatter RUN_TIMESTAMP = new DateTimeFormatterBuilder()
             .appendValue(ChronoField.YEAR, 4)
@@ -67,6 +68,7 @@ public record SoakHarnessConfig(
         Path outputDir = Optional.ofNullable(prop("outputDir", null))
                 .map(Path::of)
                 .orElseGet(() -> Path.of("build", "soak", runId));
+        Duration progressInterval = parseDuration(prop("progressInterval", "30s"));
         return new SoakHarnessConfig(
                 backend,
                 scenario,
@@ -79,7 +81,8 @@ public record SoakHarnessConfig(
                 failFast,
                 postgresUrl,
                 redisTopology,
-                force);
+                force,
+                progressInterval);
     }
 
     public static String defaultRunId(String scenario, String backend, Instant now) {
