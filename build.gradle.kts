@@ -64,19 +64,25 @@ tasks.register("dependencySecurityScan") {
                 .get()
                 .trim()
         if (osv.isBlank()) {
-            // Fail-closed: a release gate that silently passes when the scanner
-            // is absent gives false assurance. Local runs without osv-scanner can
-            // opt out explicitly with -PallowMissingDependencyScanner=true.
-            if (project.findProperty("allowMissingDependencyScanner") == "true") {
+            // Fail-closed in CI, warn-and-pass locally: a release pipeline must
+            // not silently skip the scan, but a developer's laptop without
+            // osv-scanner should not be blocked from running productionCheck.
+            // CI systems set CI=true; -PdependencyScanRequired=true|false forces
+            // either behavior explicitly.
+            val forced =
+                (project.findProperty("dependencyScanRequired") as String?)?.toBooleanStrictOrNull()
+            val required =
+                forced ?: (System.getenv("CI")?.equals("true", ignoreCase = true) == true)
+            if (!required) {
                 logger.warn(
-                    "Skipping dependencySecurityScan: osv-scanner is not installed " +
-                        "(allowMissingDependencyScanner=true)"
+                    "Skipping dependencySecurityScan: osv-scanner is not installed. " +
+                        "Install it (https://osv.dev) to scan dependencies for CVEs; this is enforced in CI."
                 )
                 return@doLast
             }
             throw GradleException(
-                "dependencySecurityScan requires osv-scanner (https://osv.dev). Install it, or pass " +
-                    "-PallowMissingDependencyScanner=true to skip (not recommended for releases)."
+                "dependencySecurityScan requires osv-scanner (https://osv.dev) in CI. Install it on the build " +
+                    "agent, or pass -PdependencyScanRequired=false to skip (not recommended for releases)."
             )
         }
         val result =
