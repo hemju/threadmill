@@ -182,6 +182,7 @@ Testing is a first-class deliverable; treat the test suite as equal in weight to
 
 **Commit conventions**
 
+- **Never commit on your own initiative.** An AI agent runs `git commit` (or push) only when the user explicitly asks for it in the current conversation — finishing a task, a green `check`, or these conventions describing commit shape are not authorization. Leave completed work uncommitted in the working tree and tell the user it is ready.
 - Conventional Commits: `feat:`, `fix:`, `test:`, `docs:`, `refactor:`, `chore:`, `build:`, `style:`. A clear scope (`feat(core): …`, `fix(store-redis): …`) is helpful.
 
 **Definition of done (every change)**
@@ -198,7 +199,7 @@ Testing is a first-class deliverable; treat the test suite as equal in weight to
 
 - You are trusted to do your own research. Validate assumptions against current Java 25, PostgreSQL, Redis, and Spring documentation; prototype where useful; choose the best design within §6. If you find a better approach than this file sketches, take it and record the rationale here.
 - Build reusable **skills** for recurring project-specific tasks (adding a store, turning a bug into a named regression test, running the soak suite, formatting a contribution) so they are done consistently rather than re-derived.
-- Work in small, coherent commits; the `check` task must stay green at each commit.
+- Shape work into small, coherent commit-sized units; the `check` task must stay green at each commit. The actual `git commit` waits for an explicit user instruction (§9).
 
 ---
 
