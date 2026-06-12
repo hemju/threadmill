@@ -122,6 +122,66 @@ final class InvariantViolationTest {
     }
 
     @Test
+    void strictInGroupOrderExcusesARetriedExclusive(@TempDir Path tempDir) throws Exception {
+        // The first endurance validation flagged this shape: an EXCLUSIVE is
+        // orphan-reclaimed and retried, which re-times its position in the
+        // engine's (current_state_at, id) pending order — SHARED jobs enqueued
+        // after its original enqueue may then legally run first.
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        try (SoakTraceWriter writer = new SoakTraceWriter(traceFile)) {
+            writer.emit("enqueued", Map.of("jobId", "job-excl", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit("enqueued", Map.of("jobId", "job-shared", "queue", "q", "lockKey", "k", "lockMode", "SHARED"));
+            writer.emit(
+                    "failed",
+                    Map.of(
+                            "jobId",
+                            "job-excl",
+                            "queue",
+                            "q",
+                            "attempts",
+                            0,
+                            "causeKind",
+                            "ORPHAN_RECLAIM",
+                            "final",
+                            false));
+            writer.emit("retried", Map.of("jobId", "job-excl", "queue", "q", "attempts", 0));
+            writer.emit("lock_acquired", Map.of("jobId", "job-shared", "lockKey", "k", "lockMode", "SHARED"));
+        }
+        assertThat(verify(traceFile, InvariantChecks.strictInGroupOrder()).passed())
+                .isTrue();
+    }
+
+    @Test
+    void noLockLeaksPassesTheOrphanReclaimRetryLifecycle(@TempDir Path tempDir) throws Exception {
+        // Attempt 0 never started a handler (no acquire, no release — the
+        // interceptor suppresses the release for never-started attempts);
+        // attempt 1 runs a full bracket. Balance must close.
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        try (SoakTraceWriter writer = new SoakTraceWriter(traceFile)) {
+            writer.emit("enqueued", Map.of("jobId", "job-1", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit(
+                    "failed",
+                    Map.of(
+                            "jobId",
+                            "job-1",
+                            "queue",
+                            "q",
+                            "attempts",
+                            0,
+                            "causeKind",
+                            "ORPHAN_RECLAIM",
+                            "final",
+                            false));
+            writer.emit("retried", Map.of("jobId", "job-1", "queue", "q", "attempts", 0));
+            writer.emit("claimed", Map.of("jobId", "job-1", "queue", "q", "attempt", 1));
+            writer.emit("lock_acquired", Map.of("jobId", "job-1", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit("succeeded", Map.of("jobId", "job-1", "queue", "q", "attempts", 1, "final", true));
+            writer.emit("lock_released", Map.of("jobId", "job-1", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+        }
+        assertThat(verify(traceFile, InvariantChecks.noLockLeaks()).passed()).isTrue();
+    }
+
+    @Test
     void retryBudgetFiresTheMomentAClaimExceedsTheCeiling(@TempDir Path tempDir) throws Exception {
         Path traceFile = tempDir.resolve("trace.jsonl");
         try (SoakTraceWriter writer = new SoakTraceWriter(traceFile)) {

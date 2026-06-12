@@ -92,7 +92,7 @@ public final class SoakInterceptor implements JobInterceptor {
         fields.put("attempts", attempts);
         fields.put("final", true);
         trace.emit("succeeded", fields);
-        emitLockReleased(job);
+        emitLockReleased(job, attempts);
         latencyTracker.recordCompleted(job.id(), attempts, "SUCCEEDED");
     }
 
@@ -124,7 +124,7 @@ public final class SoakInterceptor implements JobInterceptor {
             default -> failedCount.incrementAndGet();
         }
         trace.emit(event, fields);
-        emitLockReleased(job);
+        emitLockReleased(job, attempts);
         if (!terminal) {
             // A non-final failure means RetryInterceptor will schedule another attempt.
             retriedCount.incrementAndGet();
@@ -139,7 +139,14 @@ public final class SoakInterceptor implements JobInterceptor {
         }
     }
 
-    private void emitLockReleased(Job job) {
+    private void emitLockReleased(Job job, int attempts) {
+        // A claim whose handler never started (node churned away between the
+        // store-level claim and onProcessingStarting, then orphan-reclaimed;
+        // or a quarantine at claim time) traced no lock_acquired — emitting a
+        // release would record a bracket that never opened. attempts is only
+        // incremented by onProcessingStarting, which precedes every
+        // lock_acquired, so attempts == 0 means exactly that shape.
+        if (attempts == 0) return;
         job.concurrencyKey().ifPresent(key -> {
             var lockFields = new LinkedHashMap<String, Object>();
             lockFields.put("jobId", job.id().toString());

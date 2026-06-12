@@ -1,6 +1,6 @@
 # threadmill-soak
 
-Two complementary suites:
+Three complementary pieces:
 
 1. The **soak regression suite** — fixed JUnit-style production checks for
    sustained throughput, recurring no-skip, and induced container-pause
@@ -10,6 +10,10 @@ Two complementary suites:
    sustained load runs that produce a self-contained artifact directory rich
    enough for an AI agent to read cold. Tasks: `soakMemory`, `soakPostgres`,
    `soakRedis`, `soakAll`.
+3. The **endurance run** — the production-readiness sign-off: one harness
+   JVM per backend (PostgreSQL **and** Redis in parallel) for hours, with
+   node churn, live invariant verification, and a collated verdict. Task:
+   `soakEndurance`. See [Endurance run](#endurance-run-production-sign-off).
 
 ---
 
@@ -76,16 +80,42 @@ The harness is distinct from:
 | Property | Default | Meaning |
 |---|---|---|
 | `-Pscenario=<name>` | `mixed-workload` | Which scenario to run. |
-| `-Pduration=<duration>` | `120s` | Wall-clock time the load generator runs. |
+| `-Pduration=<duration>` | `120s` | Wall-clock time the load generator runs (`90ms` / `30s` / `5m` / `8h`). |
 | `-PjobsPerSecond=<int>` | `100` | Target enqueue rate. Real backends typically take 2–4× this; tune via `-P`. |
 | `-PworkerCount=<int>` | `8` | Workers per node. |
 | `-Pnodes=<int>` | `1` | How many `ProcessingNode`s in the same JVM. |
+| `-PnodeChurn=<duration>` | off | Close-and-replace one node every interval (requires `-Pnodes=2`+). |
 | `-PoutputDir=<path>` | `build/soak/<runId>` | Where to write artifacts. |
 | `-PrunId=<string>` | minted from scenario + backend + ISO timestamp | Explicit run id. |
-| `-PfailFast=<bool>` | `true` | Reserved for future per-violation abort. |
+| `-PfailFast=<bool>` | `true` | Abort the run on the first *definite* invariant violation (see below). |
+| `-PprogressInterval=<duration>` | `30s` | How often `progress.json` is rewritten. |
 | `-PpostgresUrl=<jdbc>` | unset → Testcontainers | External JDBC URL alternative. |
+| `-PredisUrl=<redis://…>` | unset → Testcontainers | External Redis alternative. Only the `{threadmill}:*` namespace is reset — never `FLUSHDB`. |
 | `-PredisTopology=<topology>` | `standalone` | v1 supports `standalone` only. |
 | `-Pforce=<bool>` | `false` | Allow overwriting an existing `-PoutputDir`. |
+
+### Live verification, `progress.json`, and fail-fast
+
+Invariants are verified **live**: every trace event feeds the scenario's
+streaming checks as it is written, with state bounded by in-flight work — the
+same definitions verify a five-second smoke and an eight-hour endurance run.
+Two violation kinds exist:
+
+- **Definite** violations are provable the moment the offending event arrives
+  (an EXCLUSIVE lock overlapping, a claim on a paused queue, an over-budget
+  retry). With `-PfailFast=true` the first one aborts the run — the producer
+  stops, the engine drains, and every artifact is still written, with a note
+  in `summary.json`.
+- **Completeness** violations only exist at end of run (a job that never
+  reached a terminal event, a lock never released); they appear in the final
+  results, never mid-run.
+
+`progress.json` is atomically rewritten every `-PprogressInterval` so a
+still-running soak can be inspected from outside the process: phase
+(`running` / `draining` / `finished`), counts, store states, queue depths,
+live p99, and per-invariant status. `summary.json` supersedes it once the
+run ends. `TraceReplay` (in `…soak.harness.invariant`) re-verifies a
+finished `trace.jsonl` offline, streaming, without loading it into memory.
 
 The Postgres harness uses a fixed connection pool (`maxConnections=80`)
 because the soak loop intentionally creates enough claim, completion, heartbeat,
@@ -107,10 +137,11 @@ result.
 
 ### Output directory layout
 
-Each run writes nine files. The brief one-liner:
+Each run writes ten files. The brief one-liner:
 
 - `summary.json` — verdict + invariants + performance summary; **read this first.**
 - `summary.md` — human-readable mirror of `summary.json`.
+- `progress.json` — live status while the run is underway (phase, counts, invariant snapshot).
 - `trace.jsonl` — every lifecycle event, JSON-lines.
 - `lock-events.jsonl` — derived from trace; one row per acquire/release pair with hold duration.
 - `metrics.jsonl` — once-per-second snapshots of queue depths, per-state counts, in-flight.
@@ -164,6 +195,96 @@ a human reading the files by hand. `summary.md` is the table-of-contents;
 | Queue pause didn't take effect | `pause-resume` |
 | Bulk-enqueue path slower than per-job | `bulk-enqueue` |
 | Node crash didn't trigger orphan reclaim | `crash-recover` |
+
+---
+
+## Endurance run (production sign-off)
+
+`soakEndurance` is the "run it for hours against both backends before I put
+this into production" shape. It launches **one harness JVM per backend in
+parallel** — each child is the unmodified per-backend harness, so every
+artifact contract above holds verbatim per backend — and supervises both.
+
+### Provision long-lived datastores
+
+For multi-hour runs prefer external instances over Testcontainers: they
+outlive the harness process, survive a restart, and stay inspectable after a
+failed run. The module ships a compose file on deliberately offset ports
+(54320 / 63790) so it never collides with everyday local instances:
+
+```bash
+docker compose -f threadmill-soak/docker-compose.endurance.yml up -d
+```
+
+### Run
+
+```bash
+./gradlew :threadmill-soak:soakEndurance \
+  "-PpostgresUrl=jdbc:postgresql://localhost:54320/threadmill?user=threadmill&password=threadmill" \
+  -PredisUrl=redis://localhost:63790
+```
+
+Without the URL knobs each child provisions its own Testcontainer — fine for
+short validation runs, not recommended for hours.
+
+Defaults are the sign-off profile: **8 hours**, `mixed-workload`,
+**50 jobs/second**, **3 nodes per backend**, **node churn every 10 minutes**
+(`-PnodeChurn=off` to disable), `failFast=true`. All harness `-P` knobs apply;
+`-Pbackends=memory,memory` exists for cheap orchestrator exercise.
+
+A short pre-flight before committing a night to it:
+
+```bash
+./gradlew :threadmill-soak:soakEndurance -Pduration=90s -Pnodes=2 -PnodeChurn=30s \
+  "-PpostgresUrl=…" -PredisUrl=…
+```
+
+### What it produces
+
+```
+build/soak/endurance-<timestamp>/
+├── endurance-summary.json   # combined verdict + per-backend comparison — read this first
+├── endurance-summary.md     # human-readable mirror
+├── endurance-config.json    # effective orchestrator configuration
+├── postgres-console.log     # child JVM console
+├── redis-console.log
+├── postgres/                # full per-backend artifact directory (ten files, see above)
+└── redis/
+```
+
+While the run is live the orchestrator prints one status line per backend per
+minute, built from the children's `progress.json` — elapsed/target minutes,
+counts, in-flight, live p99, and the running invariant-violation total. The
+combined verdict is `passed` only when every child exits 0 **and** reports a
+`passed` verdict; a child that dies without writing a summary fails the run.
+A fail-fast abort in one backend never stops the other — its result is still
+worth having.
+
+### What it exercises
+
+- **Correctness under parallelism** — the scenario's streaming invariants
+  (at-least-once, EXCLUSIVE/SHARED exclusion, in-group order, lock pairing,
+  retry budget) verified live over millions of events per backend.
+- **Multiple nodes** — N nodes per backend contend through the shared store;
+  node churn closes and replaces one node per cycle, repeatedly exercising
+  maintenance-lease handover, node-registry cleanup, interrupted handlers
+  retried on survivors, and queue-family rediscovery. Hard process kills are
+  covered separately by `threadmill-simulation`'s worker-churn runs.
+- **Performance** — throughput and latency percentiles per backend. Both
+  stacks share one machine: the figures are comparable *to each other under
+  equal contention*, not absolute capacity measurements.
+
+### Checking the result
+
+`endurance-summary.md` answers "did both backends pass, and how did they
+compare?". For anything deeper, drop the whole run directory into an AI
+conversation — every question reduces to the per-backend artifacts:
+
+```
+"Analyse build/soak/endurance-<timestamp>/. Both verdicts? Any invariant
+ violations? Compare lock-wait p99 between postgres/ and redis/. Did the
+ node churn cycles cause retry spikes (trace.jsonl: node_churn_stop)?"
+```
 
 ---
 

@@ -104,6 +104,14 @@ public final class InvariantChecks {
      * set of jobs that have not yet finished; a SHARED acquire walks the
      * pending order ahead of itself and flags any EXCLUSIVE it leapfrogged.
      * Finished jobs are pruned immediately, so state is bounded by backlog.
+     *
+     * <p>A <em>retried</em> job leaves the order book entirely: the engine's
+     * in-key pending order is {@code (current_state_at, id)}, so a retry
+     * legitimately re-times the job — first at the SCHEDULED transition, then
+     * again at its ENQUEUED promotion — and neither instant is observable
+     * from the trace. Asserting order against a retried job would assert the
+     * harness's guess, not the engine's contract; {@code exclusivityHeld}
+     * still guarantees retried EXCLUSIVE jobs run alone.
      */
     public static SoakInvariant strictInGroupOrder() {
         return new Def(
@@ -139,7 +147,7 @@ public final class InvariantChecks {
                                     break;
                                 }
                             }
-                        } else if (isTerminal(e)) {
+                        } else if ("retried".equals(event) || isTerminal(e)) {
                             String key = keyByJob.remove(jobId);
                             if (key == null) return;
                             var pending = pendingByKey.get(key);
