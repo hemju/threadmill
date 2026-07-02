@@ -46,6 +46,7 @@ columns are denormalised for the engine's hot queries.
 | `concurrency_key` | `TEXT` | Per-key concurrency identity (Phase 12). |
 | `concurrency_mode` | `TEXT` | `EXCLUSIVE` or `SHARED`. |
 | `workflow_root_id` | `UUID` | NOT NULL; self for non-workflow jobs. |
+| `parent_job_id` | `UUID` | Parent for workflow successors; NULL for standalone jobs. |
 
 ### Indexes
 
@@ -53,12 +54,14 @@ columns are denormalised for the engine's hot queries.
 |---|---|---|
 | `threadmill_jobs_enqueued_idx` | `(queue, priority DESC, id) WHERE state='ENQUEUED'` | Claim path. |
 | `threadmill_jobs_scheduled_idx` | `(scheduled_at) WHERE state='SCHEDULED'` | Due-for-promotion. |
-| `threadmill_jobs_processing_idx` | `(owner_heartbeat_at) WHERE state='PROCESSING'` | Orphan recovery. |
+| `threadmill_jobs_processing_idx` | `(owner_heartbeat_at) WHERE state='PROCESSING'` | Oldest-processing-heartbeat metric. |
+| `threadmill_jobs_processing_liveness_idx` | `(GREATEST(owner_heartbeat_at, COALESCE(last_checkin_at, owner_heartbeat_at))) WHERE state='PROCESSING'` | Orphan recovery (latest liveness marker: heartbeat or check-in). |
 | `threadmill_jobs_handler_idx` | `(handler_signature)` | Find-by-handler. |
 | `threadmill_jobs_state_time_idx` | `(state, current_state_at)` | Retention. |
 | `threadmill_jobs_dashboard_search_idx` | `(state, queue, handler_signature, current_state_at DESC, id)` | Dashboard/API search. |
 | `threadmill_jobs_concurrency_pending_idx` | `(concurrency_key, current_state_at, id) WHERE state IN (ENQUEUED, SCHEDULED, AWAITING)` | Claim-time concurrency pending check. |
 | `threadmill_jobs_workflow_outstanding_idx` | `(concurrency_key, workflow_root_id) WHERE state NOT IN (SUCCEEDED, FAILED, DELETED, QUARANTINED)` | Workflow-root outstanding count. |
+| `threadmill_jobs_awaiting_parent_idx` | `(parent_job_id, current_state_at, id) WHERE state='AWAITING' AND parent_job_id IS NOT NULL` | Workflow successor promotion. |
 
 ### Auxiliary tables
 
@@ -73,7 +76,8 @@ columns are denormalised for the engine's hot queries.
 - `threadmill_mutexes` — cross-cluster named mutexes with a `expires_at` lease.
 - `threadmill_leases` — store-backed leadership leases for `MaintenanceCycle`.
 - `threadmill_dedup_keys` — producer-side deduplication. Cleanup gated on the
-  referenced job being terminal.
+  referenced job being terminal. Indexed on `expires_at` (sweep) and `job_id`
+  (FK cascade check and the retention sweep's still-referenced probe).
 - `threadmill_concurrency_groups` — per-key in-flight `(exclusive, shared)`
   counts. Updated in the same transaction as the job state transition.
 - `threadmill_concurrency_workflow_holds` — workflow-root outstanding counts.

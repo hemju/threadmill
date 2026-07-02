@@ -156,6 +156,13 @@ CREATE TABLE threadmill_dedup_keys (
 CREATE INDEX threadmill_dedup_keys_expires_idx
     ON threadmill_dedup_keys (expires_at);
 
+-- The job_id FK is ON DELETE CASCADE: without this index every job row
+-- deleted by the retention sweep triggers a sequential scan of the dedup
+-- table for the cascade check, and the sweep's "still referenced by an
+-- unexpired dedup key" NOT EXISTS probe degrades the same way.
+CREATE INDEX threadmill_dedup_keys_job_idx
+    ON threadmill_dedup_keys (job_id);
+
 -- Claim-time per-key concurrency bookkeeping. Updated in the same transaction
 -- as the job state transition so counts and in-flight job state can never
 -- diverge.
