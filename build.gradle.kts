@@ -145,6 +145,9 @@ tasks.register("productionCheck") {
         ":threadmill-store-postgres:test",
         ":threadmill-store-redis:test",
         ":threadmill-soak:soakRegression",
+        // The correctness simulation is the gate that caught the C1
+        // in-memory concurrency bypass — a release candidate must run it.
+        ":threadmill-simulation:simulate",
     )
     dependsOn(":threadmill-example:run")
 }
