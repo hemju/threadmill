@@ -46,7 +46,8 @@ public final class MigrationRunner {
             "V1__baseline.sql",
             "V2__sharded_job_counts.sql",
             "V3__unkeyed_claim_index.sql",
-            "V4__exclusive_pending_index.sql");
+            "V4__exclusive_pending_index.sql",
+            "V5__queue_scoped_pending_index.sql");
     private static final long MIGRATION_LOCK_KEY = 0x5468726561646D6CL;
     private static final Logger LOG = LoggerFactory.getLogger(MigrationRunner.class);
     private static final Duration LOCK_ACQUIRE_TIMEOUT = Duration.ofMinutes(5);

@@ -722,7 +722,7 @@ public final class PostgresJobStore implements JobStore {
 
     private void collectKeyedHeadCandidates(Connection conn, String queue, int want, Map<UUID, PendingClaim> into)
             throws SQLException {
-        List<String> keys = distinctPendingKeys(conn);
+        List<String> keys = distinctEnqueuedKeys(conn, queue);
         if (keys.isEmpty()) {
             return;
         }
@@ -730,7 +730,7 @@ public final class PostgresJobStore implements JobStore {
         var keyArray = conn.createArrayOf("text", keys.toArray(String[]::new));
         try (PreparedStatement ps = conn.prepareStatement("SELECT c.* FROM unnest(?) AS fk(k) "
                 + "CROSS JOIN LATERAL (SELECT " + CLAIM_COLUMNS + " FROM threadmill_jobs "
-                + "WHERE concurrency_key = fk.k AND state = 'ENQUEUED' AND queue = ? "
+                + "WHERE queue = ? AND concurrency_key = fk.k AND state = 'ENQUEUED' "
                 + "ORDER BY current_state_at, id LIMIT ? FOR UPDATE SKIP LOCKED) c")) {
             ps.setArray(1, keyArray);
             ps.setString(2, queue);
@@ -799,23 +799,29 @@ public final class PostgresJobStore implements JobStore {
     }
 
     /**
-     * Distinct concurrency keys with pending members, via a recursive-CTE
-     * loose scan — one index probe per key against the pending partial
-     * index, independent of how many rows each key holds. (Chosen over
-     * {@code SELECT DISTINCT}, whose plan may degrade to a full index scan.)
+     * Distinct concurrency keys with ENQUEUED members in this queue, via a
+     * recursive-CTE loose scan over the queue-scoped pending index (V5) —
+     * one index probe per key, independent of how many rows each key holds.
+     * (Chosen over {@code SELECT DISTINCT}, whose plan may degrade to a full
+     * index scan.) Claims are per-queue, so keys whose pending work lives
+     * only in other queues must not be probed at all: a cross-queue key
+     * enumeration walked 1.4s of foreign-key ranges per claim call at a
+     * 415k backlog.
      */
-    private List<String> distinctPendingKeys(Connection conn) throws SQLException {
+    private List<String> distinctEnqueuedKeys(Connection conn, String queue) throws SQLException {
         try (PreparedStatement ps = conn.prepareStatement("WITH RECURSIVE keys(k) AS ("
                 + "  (SELECT concurrency_key FROM threadmill_jobs "
-                + "   WHERE concurrency_key IS NOT NULL AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
+                + "   WHERE queue = ? AND concurrency_key IS NOT NULL AND state = 'ENQUEUED' "
                 + "   ORDER BY concurrency_key LIMIT 1) "
                 + "  UNION ALL "
                 + "  SELECT (SELECT j.concurrency_key FROM threadmill_jobs j "
-                + "          WHERE j.concurrency_key > keys.k AND j.state IN ('ENQUEUED','SCHEDULED','AWAITING') "
+                + "          WHERE j.queue = ? AND j.concurrency_key > keys.k AND j.state = 'ENQUEUED' "
                 + "          ORDER BY j.concurrency_key LIMIT 1) "
                 + "  FROM keys WHERE keys.k IS NOT NULL) "
                 + "SELECT k FROM keys WHERE k IS NOT NULL LIMIT ?")) {
-            ps.setInt(1, MAX_PENDING_KEYS_PER_PASS);
+            ps.setString(1, queue);
+            ps.setString(2, queue);
+            ps.setInt(3, MAX_PENDING_KEYS_PER_PASS);
             try (ResultSet rs = ps.executeQuery()) {
                 var keys = new ArrayList<String>();
                 while (rs.next()) {
