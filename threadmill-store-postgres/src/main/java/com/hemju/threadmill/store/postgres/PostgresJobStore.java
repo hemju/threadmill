@@ -1146,8 +1146,11 @@ public final class PostgresJobStore implements JobStore {
     public Map<JobState, Long> countsByState() {
         var counts = new EnumMap<JobState, Long>(JobState.class);
         for (JobState s : JobState.values()) counts.put(s, 0L);
+        // Counts are sharded across 16 rows per state (V2) so concurrent
+        // writers touch disjoint rows; only the SUM is meaningful.
         try (Connection conn = dataSource.getConnection();
-                PreparedStatement ps = conn.prepareStatement("SELECT state, count FROM threadmill_job_counts");
+                PreparedStatement ps =
+                        conn.prepareStatement("SELECT state, SUM(count) FROM threadmill_job_counts GROUP BY state");
                 ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
                 try {

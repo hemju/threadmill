@@ -400,13 +400,17 @@ class PostgresJobStoreRegressionTest {
         }
         // ...and the emitted SQL must carry the history-table DDL itself plus
         // every shipped migration, so an external apply works on a clean DB.
-        assertThat(sql).contains("threadmill_schema_history").contains("V1__baseline.sql");
+        assertThat(sql)
+                .contains("threadmill_schema_history")
+                .contains("V1__baseline.sql")
+                .contains("V2__sharded_job_counts.sql");
         try (Connection conn = dataSource.getConnection();
                 Statement st = conn.createStatement()) {
             st.execute(sql);
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
-                assertThat(rs.getInt(1)).isEqualTo(1);
+                // One history row per shipped migration.
+                assertThat(rs.getInt(1)).isEqualTo(2);
             }
         }
         new MigrationRunner(dataSource).validate();
@@ -440,11 +444,12 @@ class PostgresJobStoreRegressionTest {
             st.execute(sql);
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
-                assertThat(rs.getInt(1)).isEqualTo(1);
+                // One history row per shipped migration.
+                assertThat(rs.getInt(1)).isEqualTo(2);
             }
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_job_counts")) {
                 assertThat(rs.next()).isTrue();
-                assertThat(rs.getInt(1)).isEqualTo(JobState.values().length);
+                assertThat(rs.getInt(1)).isEqualTo(JobState.values().length * 16); // 16 counter shards per state (V2)
             }
         }
     }
@@ -574,7 +579,8 @@ class PostgresJobStoreRegressionTest {
                 Statement st = conn.createStatement();
                 ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
             assertThat(rs.next()).isTrue();
-            assertThat(rs.getInt(1)).isEqualTo(1);
+            // One history row per shipped migration.
+            assertThat(rs.getInt(1)).isEqualTo(2);
         }
     }
 
