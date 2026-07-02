@@ -19,6 +19,13 @@ import com.hemju.threadmill.core.store.JobStore;
  * <p>The registry exposes a simple {@link #isMaster()} check the
  * {@link MaintenanceCycle} consults each tick. At most one node can hold the
  * lease; under store uncertainty, no node acts as master.
+ *
+ * <p><strong>Engine-internal.</strong> This class is {@code public} only for
+ * the engine's own cross-package wiring and its test harnesses; it is NOT
+ * part of Threadmill's supported public API. Its constructors, methods, and
+ * behavior may change in any release without notice — do not reference it
+ * from application code. The supported surface is {@code ProcessingNode},
+ * {@code Scheduler}, and the SPI interfaces.
  */
 public final class NodeRegistry {
 

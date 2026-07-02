@@ -202,6 +202,10 @@ Shipped in v1:
   remote wake hints for durable stores.
 - Observability: Micrometer integration; optional OpenTelemetry tracing;
   data-first dashboard snapshot.
+- Operations dashboard: adding `threadmill-dashboard-spring` and
+  `threadmill-dashboard-ui` to a Spring Boot app mounts the console under
+  `/threadmill`, secured by default — see
+  [threadmill-dashboard-spring/README.md](threadmill-dashboard-spring/README.md).
 - Soak / load suite (separate from `check`) for sustained throughput,
   recurring no-skip, and induced store-outage recovery on all three
   backends.

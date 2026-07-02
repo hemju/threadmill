@@ -8,6 +8,12 @@
 
 ## Deep dives
 
+- [Architecture](architecture.md) — the module map, the engine loops
+  (`ProcessingNode`, `Dispatcher`, `MaintenanceCycle`, `NodeRegistry`), the
+  `JobStore` SPI and its three backends, the state machine, wake signals.
+- [Handlers](handlers.md) — the `JobPayload` / `JobHandler` contract, handler
+  resolution, `JobExecutionContext`, the scoped-value caveat, timeouts, retry
+  precedence.
 - [**Transactions**](transactions.md) — atomic boundaries per backend, what
   happens when the handler throws inside `@Transactional`, the at-least-once
   contract, the outbox pattern. **Read this before writing a handler.**
@@ -31,6 +37,20 @@
 - [Troubleshooting](troubleshooting.md) — symptom → cause → fix.
 - [Migration](migration.md) — replacing an existing job or scheduler system.
 - [Release checklist](release-checklist.md).
+
+## Operations dashboard
+
+Threadmill ships a mountable operations console for Spring Boot
+applications. Add `threadmill-dashboard-spring` and `threadmill-dashboard-ui`
+to the classpath: the JSON API is exposed under `/threadmill/api/**` and the
+static UI is mounted under `/threadmill`. Security is required by default —
+Threadmill registers a scoped `SecurityFilterChain` that demands
+authentication (and CSRF tokens for mutating requests), and startup fails if
+no chain exists unless the unsafe read-only local mode is explicitly enabled.
+Sensitive job details (payloads, metadata, logs, results, failure messages)
+are redacted unless explicitly exposed and permitted. See
+[`threadmill-dashboard-spring/README.md`](../threadmill-dashboard-spring/README.md)
+for permissions, configuration properties, audit hooks, and operator actions.
 
 ## Per-module deep dive
 

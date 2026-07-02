@@ -33,6 +33,13 @@ import com.hemju.threadmill.core.store.JobStore;
  * exception trips the circuit breaker, the loop pauses, and a probe
  * thread re-attempts {@link JobStore#verifyWritable()} until it succeeds —
  * at which point processing resumes automatically.
+ *
+ * <p><strong>Engine-internal.</strong> This class is {@code public} only for
+ * the engine's own cross-package wiring and its test harnesses; it is NOT
+ * part of Threadmill's supported public API. Its constructors, methods, and
+ * behavior may change in any release without notice — do not reference it
+ * from application code. The supported surface is {@code ProcessingNode},
+ * {@code Scheduler}, and the SPI interfaces.
  */
 public final class Dispatcher {
 
