@@ -32,10 +32,14 @@ import com.hemju.threadmill.soak.harness.invariant.TraceEvent;
  * fields preserve insertion order so a diff over two runs is meaningful.
  *
  * <p>Event vocabulary: {@code enqueued}, {@code claimed}, {@code started},
- * {@code check_in}, {@code succeeded}, {@code failed}, {@code retried},
- * {@code timed_out}, {@code quarantined}, {@code lock_acquired},
- * {@code lock_released}, {@code queue_paused}, {@code queue_resumed},
- * {@code node_started}, {@code node_stopped}, {@code node_churn_stop}.
+ * {@code exec_started}, {@code exec_finished}, {@code check_in},
+ * {@code succeeded}, {@code failed}, {@code retried}, {@code timed_out},
+ * {@code quarantined}, {@code lock_acquired}, {@code lock_released},
+ * {@code queue_paused}, {@code queue_resumed}, {@code node_started},
+ * {@code node_stopped}, {@code node_churn_stop}. The {@code exec_*} pair is
+ * emitted by the handlers themselves (via {@link SoakExecutionTrace}) while
+ * the handler runs; everything else comes from the interceptor and producer
+ * paths, which run only after the store transition they describe committed.
  *
  * <p>Each write is guarded by a {@link ReentrantLock} so concurrent emitters
  * never tear a line.

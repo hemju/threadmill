@@ -31,16 +31,22 @@ final class LiveInvariantVerifierTest {
         var fired = new AtomicInteger();
         var verifier = new LiveInvariantVerifier(List.of(InvariantChecks.exclusivityHeld()), fired::incrementAndGet);
 
-        verifier.onEvent(event("lock_acquired", Map.of("jobId", "j1", "lockKey", "k", "lockMode", "SHARED")));
+        verifier.onEvent(event("enqueued", Map.of("jobId", "j1", "queue", "q", "lockKey", "k", "lockMode", "SHARED")));
+        verifier.onEvent(
+                event("enqueued", Map.of("jobId", "j2", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE")));
+        verifier.onEvent(
+                event("enqueued", Map.of("jobId", "j3", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE")));
+        verifier.onEvent(event("exec_started", Map.of("jobId", "j1", "attempt", 1)));
         assertThat(verifier.hasDefiniteViolation()).isFalse();
         assertThat(fired.get()).isZero();
 
-        verifier.onEvent(event("lock_acquired", Map.of("jobId", "j2", "lockKey", "k", "lockMode", "EXCLUSIVE")));
+        // EXCLUSIVE handler executing while the SHARED bracket is open.
+        verifier.onEvent(event("exec_started", Map.of("jobId", "j2", "attempt", 1)));
         assertThat(verifier.hasDefiniteViolation()).isTrue();
         assertThat(fired.get()).isEqualTo(1);
 
         // A second violation must not re-fire the callback.
-        verifier.onEvent(event("lock_acquired", Map.of("jobId", "j3", "lockKey", "k", "lockMode", "EXCLUSIVE")));
+        verifier.onEvent(event("exec_started", Map.of("jobId", "j3", "attempt", 1)));
         assertThat(fired.get()).isEqualTo(1);
     }
 
@@ -86,8 +92,11 @@ final class LiveInvariantVerifierTest {
         var verifier =
                 new LiveInvariantVerifier(List.of(broken, InvariantChecks.exclusivityHeld()), fired::incrementAndGet);
 
-        verifier.onEvent(event("lock_acquired", Map.of("jobId", "j1", "lockKey", "k", "lockMode", "SHARED")));
-        verifier.onEvent(event("lock_acquired", Map.of("jobId", "j2", "lockKey", "k", "lockMode", "EXCLUSIVE")));
+        verifier.onEvent(event("enqueued", Map.of("jobId", "j1", "queue", "q", "lockKey", "k", "lockMode", "SHARED")));
+        verifier.onEvent(
+                event("enqueued", Map.of("jobId", "j2", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE")));
+        verifier.onEvent(event("exec_started", Map.of("jobId", "j1", "attempt", 1)));
+        verifier.onEvent(event("exec_started", Map.of("jobId", "j2", "attempt", 1)));
 
         List<InvariantResult> results = verifier.finishResults();
         assertThat(results.get(0).passed()).isFalse();

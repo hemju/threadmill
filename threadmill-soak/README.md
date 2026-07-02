@@ -102,13 +102,22 @@ same definitions verify a five-second smoke and an eight-hour endurance run.
 Two violation kinds exist:
 
 - **Definite** violations are provable the moment the offending event arrives
-  (an EXCLUSIVE lock overlapping, a claim on a paused queue, an over-budget
-  retry). With `-PfailFast=true` the first one aborts the run — the producer
-  stops, the engine drains, and every artifact is still written, with a note
-  in `summary.json`.
+  (two handlers for one key executing concurrently, a claim on a paused
+  queue, an over-budget retry). With `-PfailFast=true` the first one aborts
+  the run — the producer stops, the engine drains, and every artifact is
+  still written, with a note in `summary.json`.
 - **Completeness** violations only exist at end of run (a job that never
   reached a terminal event, a lock never released); they appear in the final
   results, never mid-run.
+
+The concurrency invariants (`exclusivityHeld`, `strictInGroupOrder`) judge
+the **handler-emitted execution brackets** (`exec_started`/`exec_finished`),
+not the interceptor lock events: interceptor hooks fire only after the store
+transition committed, so a legal per-key handoff between workers can trace a
+microsecond lock-event "overlap" that never existed at store level. Bracket
+events are written while the handler runs, so an observed bracket overlap is
+a real execution overlap by construction. The lock events remain in the
+trace for `lock-events.jsonl` and the contention statistics.
 
 `progress.json` is atomically rewritten every `-PprogressInterval` so a
 still-running soak can be inspected from outside the process: phase

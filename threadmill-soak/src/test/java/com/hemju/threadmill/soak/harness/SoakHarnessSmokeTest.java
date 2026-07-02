@@ -66,6 +66,8 @@ final class SoakHarnessSmokeTest {
             assertThat(trace).contains("\"event\":\"enqueued\"");
             assertThat(trace).contains("\"event\":\"claimed\"");
             assertThat(trace).contains("\"event\":\"started\"");
+            assertThat(trace).contains("\"event\":\"exec_started\"");
+            assertThat(trace).contains("\"event\":\"exec_finished\"");
             assertThat(trace).contains("\"event\":\"succeeded\"");
             assertThat(trace).contains("\"event\":\"lock_acquired\"");
             assertThat(trace).contains("\"event\":\"lock_released\"");

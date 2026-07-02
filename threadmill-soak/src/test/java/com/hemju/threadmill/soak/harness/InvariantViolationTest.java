@@ -3,7 +3,10 @@ package com.hemju.threadmill.soak.harness;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -61,18 +64,48 @@ final class InvariantViolationTest {
     }
 
     @Test
-    void exclusivityHeldFiresWhenExclusiveOverlapsShared(@TempDir Path tempDir) throws Exception {
+    void exclusivityHeldFiresWhenHandlersExecuteConcurrently(@TempDir Path tempDir) throws Exception {
         Path traceFile = tempDir.resolve("trace.jsonl");
         try (SoakTraceWriter writer = new SoakTraceWriter(traceFile)) {
-            writer.emit("lock_acquired", Map.of("jobId", "job-1", "lockKey", "k", "lockMode", "SHARED"));
-            // EXCLUSIVE on the same key while SHARED is held is a contract violation.
-            writer.emit("lock_acquired", Map.of("jobId", "job-2", "lockKey", "k", "lockMode", "EXCLUSIVE"));
-            writer.emit("lock_released", Map.of("jobId", "job-2", "lockKey", "k", "lockMode", "EXCLUSIVE"));
-            writer.emit("lock_released", Map.of("jobId", "job-1", "lockKey", "k", "lockMode", "SHARED"));
+            writer.emit("enqueued", Map.of("jobId", "job-1", "queue", "q", "lockKey", "k", "lockMode", "SHARED"));
+            writer.emit("enqueued", Map.of("jobId", "job-2", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit("exec_started", Map.of("jobId", "job-1", "attempt", 1));
+            // EXCLUSIVE handler starts while the SHARED bracket is still open —
+            // a real concurrent execution, the thing this invariant exists for.
+            writer.emit("exec_started", Map.of("jobId", "job-2", "attempt", 1));
+            writer.emit("exec_finished", Map.of("jobId", "job-2", "attempt", 1));
+            writer.emit("exec_finished", Map.of("jobId", "job-1", "attempt", 1));
         }
         InvariantResult result = verify(traceFile, InvariantChecks.exclusivityHeld());
         assertThat(result.passed()).isFalse();
         assertThat(result.violations()).isNotEmpty();
+    }
+
+    @Test
+    void exclusivityHeldIgnoresInterceptorLockEventHandoffOverlap(@TempDir Path tempDir) throws Exception {
+        // Regression for the aborted endurance run: interceptor hooks fire
+        // after the store transition commits, so a legal per-key handoff can
+        // trace the outgoing SHARED's lock_released a few microseconds AFTER
+        // the incoming EXCLUSIVE's lock_acquired. The exec brackets are
+        // sequential — no execution overlap — and the check must judge those.
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        try (SoakTraceWriter writer = new SoakTraceWriter(traceFile)) {
+            writer.emit("enqueued", Map.of("jobId", "job-s", "queue", "q", "lockKey", "k", "lockMode", "SHARED"));
+            writer.emit("enqueued", Map.of("jobId", "job-e", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit("lock_acquired", Map.of("jobId", "job-s", "lockKey", "k", "lockMode", "SHARED"));
+            writer.emit("exec_started", Map.of("jobId", "job-s", "attempt", 1));
+            writer.emit("exec_finished", Map.of("jobId", "job-s", "attempt", 1));
+            // Store handoff happened here; the two threads' trailing emissions interleave.
+            writer.emit("lock_acquired", Map.of("jobId", "job-e", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit("succeeded", Map.of("jobId", "job-s", "queue", "q", "attempts", 1, "final", true));
+            writer.emit("lock_released", Map.of("jobId", "job-s", "lockKey", "k", "lockMode", "SHARED"));
+            writer.emit("exec_started", Map.of("jobId", "job-e", "attempt", 1));
+            writer.emit("exec_finished", Map.of("jobId", "job-e", "attempt", 1));
+            writer.emit("succeeded", Map.of("jobId", "job-e", "queue", "q", "attempts", 1, "final", true));
+            writer.emit("lock_released", Map.of("jobId", "job-e", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+        }
+        assertThat(verify(traceFile, InvariantChecks.exclusivityHeld()).passed())
+                .isTrue();
     }
 
     @Test
@@ -96,8 +129,9 @@ final class InvariantViolationTest {
         try (SoakTraceWriter writer = new SoakTraceWriter(traceFile)) {
             writer.emit("enqueued", Map.of("jobId", "job-excl", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
             writer.emit("enqueued", Map.of("jobId", "job-shared", "queue", "q", "lockKey", "k", "lockMode", "SHARED"));
-            // The later-enqueued SHARED runs while the earlier EXCLUSIVE is still pending.
-            writer.emit("lock_acquired", Map.of("jobId", "job-shared", "lockKey", "k", "lockMode", "SHARED"));
+            // The later-enqueued SHARED executes while the earlier EXCLUSIVE is
+            // still pending and never re-timed — promoted to a violation at finish().
+            writer.emit("exec_started", Map.of("jobId", "job-shared", "attempt", 1));
         }
         InvariantResult result = verify(traceFile, InvariantChecks.strictInGroupOrder());
         assertThat(result.passed()).isFalse();
@@ -105,16 +139,18 @@ final class InvariantViolationTest {
     }
 
     @Test
-    void strictInGroupOrderPassesWhenTheEarlierExclusiveAlreadyFinished(@TempDir Path tempDir) throws Exception {
+    void strictInGroupOrderPassesWhenTheEarlierExclusiveAlreadyExecuted(@TempDir Path tempDir) throws Exception {
         Path traceFile = tempDir.resolve("trace.jsonl");
         try (SoakTraceWriter writer = new SoakTraceWriter(traceFile)) {
             writer.emit("enqueued", Map.of("jobId", "job-excl", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
             writer.emit("enqueued", Map.of("jobId", "job-shared", "queue", "q", "lockKey", "k", "lockMode", "SHARED"));
-            writer.emit("lock_acquired", Map.of("jobId", "job-excl", "lockKey", "k", "lockMode", "EXCLUSIVE"));
-            writer.emit("lock_released", Map.of("jobId", "job-excl", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit("exec_started", Map.of("jobId", "job-excl", "attempt", 1));
+            writer.emit("exec_finished", Map.of("jobId", "job-excl", "attempt", 1));
+            // The EXCLUSIVE's succeeded event may still be in flight (it lags
+            // the terminal save) — the closed bracket alone must excuse this.
+            writer.emit("exec_started", Map.of("jobId", "job-shared", "attempt", 1));
+            writer.emit("exec_finished", Map.of("jobId", "job-shared", "attempt", 1));
             writer.emit("succeeded", Map.of("jobId", "job-excl", "queue", "q", "attempts", 1, "final", true));
-            writer.emit("lock_acquired", Map.of("jobId", "job-shared", "lockKey", "k", "lockMode", "SHARED"));
-            writer.emit("lock_released", Map.of("jobId", "job-shared", "lockKey", "k", "lockMode", "SHARED"));
             writer.emit("succeeded", Map.of("jobId", "job-shared", "queue", "q", "attempts", 1, "final", true));
         }
         assertThat(verify(traceFile, InvariantChecks.strictInGroupOrder()).passed())
@@ -123,32 +159,77 @@ final class InvariantViolationTest {
 
     @Test
     void strictInGroupOrderExcusesARetriedExclusive(@TempDir Path tempDir) throws Exception {
-        // The first endurance validation flagged this shape: an EXCLUSIVE is
-        // orphan-reclaimed and retried, which re-times its position in the
-        // engine's (current_state_at, id) pending order — SHARED jobs enqueued
-        // after its original enqueue may then legally run first.
+        // The endurance validations flagged both orderings of this shape: an
+        // EXCLUSIVE is orphan-reclaimed and retried, re-timing its position in
+        // the engine's (current_state_at, id) pending order. The reclaim
+        // thread's failed/retried emissions race the admitted SHARED's
+        // exec_started, so both interleavings must pass.
+        Path retriedFirst = tempDir.resolve("retried-first.jsonl");
+        try (SoakTraceWriter writer = new SoakTraceWriter(retriedFirst)) {
+            writer.emit("enqueued", Map.of("jobId", "job-excl", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit("enqueued", Map.of("jobId", "job-shared", "queue", "q", "lockKey", "k", "lockMode", "SHARED"));
+            emitOrphanReclaimFailure(writer, "job-excl");
+            writer.emit("retried", Map.of("jobId", "job-excl", "queue", "q", "attempts", 0));
+            writer.emit("exec_started", Map.of("jobId", "job-shared", "attempt", 1));
+        }
+        assertThat(verify(retriedFirst, InvariantChecks.strictInGroupOrder()).passed())
+                .isTrue();
+
+        Path execFirst = tempDir.resolve("exec-first.jsonl");
+        try (SoakTraceWriter writer = new SoakTraceWriter(execFirst)) {
+            writer.emit("enqueued", Map.of("jobId", "job-excl", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit("enqueued", Map.of("jobId", "job-shared", "queue", "q", "lockKey", "k", "lockMode", "SHARED"));
+            // SHARED's exec_started wins the emission race against the reclaim
+            // thread's failed/retried pair — µs apart in reality. The retried
+            // event inside the excuse window cancels the provisional violation.
+            writer.emit("exec_started", Map.of("jobId", "job-shared", "attempt", 1));
+            emitOrphanReclaimFailure(writer, "job-excl");
+            writer.emit("retried", Map.of("jobId", "job-excl", "queue", "q", "attempts", 0));
+        }
+        assertThat(verify(execFirst, InvariantChecks.strictInGroupOrder()).passed())
+                .isTrue();
+    }
+
+    private static void emitOrphanReclaimFailure(SoakTraceWriter writer, String jobId) {
+        writer.emit(
+                "failed",
+                Map.of("jobId", jobId, "queue", "q", "attempts", 0, "causeKind", "ORPHAN_RECLAIM", "final", false));
+    }
+
+    @Test
+    void strictInGroupOrderDoesNotLetALateRetryExcuseARealLeapfrog(@TempDir Path tempDir) throws Exception {
+        // The excuse window only absorbs the reclaim-thread emission race
+        // (µs–ms). An EXCLUSIVE retried long after the SHARED executed was
+        // genuinely leapfrogged first — the suspicion must be promoted.
         Path traceFile = tempDir.resolve("trace.jsonl");
         try (SoakTraceWriter writer = new SoakTraceWriter(traceFile)) {
             writer.emit("enqueued", Map.of("jobId", "job-excl", "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
             writer.emit("enqueued", Map.of("jobId", "job-shared", "queue", "q", "lockKey", "k", "lockMode", "SHARED"));
-            writer.emit(
-                    "failed",
-                    Map.of(
-                            "jobId",
-                            "job-excl",
-                            "queue",
-                            "q",
-                            "attempts",
-                            0,
-                            "causeKind",
-                            "ORPHAN_RECLAIM",
-                            "final",
-                            false));
-            writer.emit("retried", Map.of("jobId", "job-excl", "queue", "q", "attempts", 0));
-            writer.emit("lock_acquired", Map.of("jobId", "job-shared", "lockKey", "k", "lockMode", "SHARED"));
+            writer.emit("exec_started", Map.of("jobId", "job-shared", "attempt", 1));
         }
-        assertThat(verify(traceFile, InvariantChecks.strictInGroupOrder()).passed())
-                .isTrue();
+        appendRawEvent(
+                traceFile,
+                Instant.now().plusSeconds(30),
+                "retried",
+                Map.of("jobId", "job-excl", "queue", "q", "attempts", 0));
+        InvariantResult result = verify(traceFile, InvariantChecks.strictInGroupOrder());
+        assertThat(result.passed()).isFalse();
+        assertThat(result.violations()).anyMatch(v -> v.contains("job-shared") && v.contains("job-excl"));
+    }
+
+    /** Appends one trace line with a forged timestamp — for window-expiry tests. */
+    private static void appendRawEvent(Path traceFile, Instant timestamp, String event, Map<String, Object> fields)
+            throws IOException {
+        var mapper = new ObjectMapper();
+        var ordered = new LinkedHashMap<String, Object>();
+        ordered.put("timestamp", timestamp.toString());
+        ordered.put("event", event);
+        ordered.putAll(fields);
+        Files.writeString(
+                traceFile,
+                mapper.writeValueAsString(ordered) + "\n",
+                StandardCharsets.UTF_8,
+                StandardOpenOption.APPEND);
     }
 
     @Test

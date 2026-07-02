@@ -12,6 +12,8 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -70,21 +72,44 @@ public final class EnduranceMain {
         new OutputDir(config.outputDir(), config.force()).prepare();
         writeConfig(config);
 
-        List<ChildRun> children = new ArrayList<>();
-        List<String> labels = config.childLabels();
-        for (int i = 0; i < config.backends().size(); i++) {
-            children.add(startChild(config, config.backends().get(i), labels.get(i)));
-        }
-        Thread killChildren = new Thread(() -> children.forEach(c -> c.process.destroy()), "endurance-shutdown");
+        // The shutdown hook sees this list from another thread on Ctrl+C.
+        List<ChildRun> children = new CopyOnWriteArrayList<>();
+        // On interrupt (Ctrl+C, machine shutdown): stop the children, then
+        // still collate whatever summaries exist — the first real endurance
+        // run was interrupted and left no top-level verdict at all, which
+        // made the 4.6 hours of clean Postgres evidence easy to miss.
+        Thread killChildren = new Thread(
+                () -> {
+                    children.forEach(c -> c.process.destroy());
+                    for (ChildRun child : children) {
+                        try {
+                            child.process.waitFor(10, TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
+                    try {
+                        EnduranceSummary.collate(config, children, startedAt, true)
+                                .write(config.outputDir());
+                    } catch (IOException e) {
+                        // Best effort — the JVM is going down.
+                    }
+                },
+                "endurance-shutdown");
         Runtime.getRuntime().addShutdownHook(killChildren);
 
+        List<String> labels = config.childLabels();
         try {
+            for (int i = 0; i < config.backends().size(); i++) {
+                children.add(startChild(config, config.backends().get(i), labels.get(i)));
+            }
             supervise(children);
         } finally {
             Runtime.getRuntime().removeShutdownHook(killChildren);
         }
 
-        EnduranceSummary summary = EnduranceSummary.collate(config, children, startedAt);
+        EnduranceSummary summary = EnduranceSummary.collate(config, children, startedAt, false);
         summary.write(config.outputDir());
         LOG.info("Endurance run finished. Output: {} verdict={}", config.outputDir(), summary.verdict());
         return "passed".equals(summary.verdict()) ? 0 : 1;

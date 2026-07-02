@@ -1,5 +1,6 @@
 package com.hemju.threadmill.soak.harness.invariant;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -57,103 +58,214 @@ public final class InvariantChecks {
                 });
     }
 
-    /** No EXCLUSIVE lock overlaps with another lock for the same key. Violations are definite. */
+    /**
+     * No EXCLUSIVE handler <em>executes</em> concurrently with another handler
+     * for the same key. Judged on the handler-emitted {@code exec_started} /
+     * {@code exec_finished} brackets, never on the interceptor lock events:
+     * interceptor hooks fire only after the store transition committed, so a
+     * legal per-key handoff between workers can appear as a microsecond
+     * lock-event overlap (the false positive that aborted the first real
+     * endurance run). Bracket events are written while the handler runs and
+     * the trace writer totally orders them, so an observed bracket overlap is
+     * a real execution overlap by construction. Violations are definite.
+     */
     public static SoakInvariant exclusivityHeld() {
         return new Def(
                 "exclusivityHeld",
-                "EXCLUSIVE locks run alone for their key",
+                "EXCLUSIVE handlers execute alone for their key",
                 () -> new StreamingInvariantCheck("exclusivityHeld") {
-                    private final Map<String, ActiveLocks> activeByKey = new HashMap<>();
-
-                    @Override
-                    protected void observe(TraceEvent e) {
-                        String key = e.text("lockKey");
-                        if (key.isEmpty()) return;
-                        String event = e.event();
-                        String mode = e.text("lockMode");
-                        if ("lock_acquired".equals(event)) {
-                            ActiveLocks a = activeByKey.computeIfAbsent(key, k -> new ActiveLocks());
-                            if ("EXCLUSIVE".equals(mode) && (a.exclusive > 0 || a.shared > 0)) {
-                                recordViolation(
-                                        "EXCLUSIVE lock on " + key + " acquired while other locks active (exclusive="
-                                                + a.exclusive + ", shared=" + a.shared + ")",
-                                        List.of(e.rawLine()));
-                            }
-                            if ("SHARED".equals(mode) && a.exclusive > 0) {
-                                recordViolation(
-                                        "SHARED lock on " + key + " acquired while EXCLUSIVE active (exclusive="
-                                                + a.exclusive + ")",
-                                        List.of(e.rawLine()));
-                            }
-                            if ("EXCLUSIVE".equals(mode)) a.exclusive++;
-                            else if ("SHARED".equals(mode)) a.shared++;
-                        } else if ("lock_released".equals(event)) {
-                            ActiveLocks a = activeByKey.get(key);
-                            if (a == null) return;
-                            if ("EXCLUSIVE".equals(mode)) a.exclusive = Math.max(0, a.exclusive - 1);
-                            else if ("SHARED".equals(mode)) a.shared = Math.max(0, a.shared - 1);
-                            if (a.exclusive == 0 && a.shared == 0) activeByKey.remove(key);
-                        }
-                    }
-                });
-    }
-
-    /**
-     * For any key, a SHARED claim never precedes the completion of an
-     * earlier-enqueued EXCLUSIVE. The check keeps, per key, the enqueue-ordered
-     * set of jobs that have not yet finished; a SHARED acquire walks the
-     * pending order ahead of itself and flags any EXCLUSIVE it leapfrogged.
-     * Finished jobs are pruned immediately, so state is bounded by backlog.
-     *
-     * <p>A <em>retried</em> job leaves the order book entirely: the engine's
-     * in-key pending order is {@code (current_state_at, id)}, so a retry
-     * legitimately re-times the job — first at the SCHEDULED transition, then
-     * again at its ENQUEUED promotion — and neither instant is observable
-     * from the trace. Asserting order against a retried job would assert the
-     * harness's guess, not the engine's contract; {@code exclusivityHeld}
-     * still guarantees retried EXCLUSIVE jobs run alone.
-     */
-    public static SoakInvariant strictInGroupOrder() {
-        return new Def(
-                "strictInGroupOrder",
-                "SHARED never leapfrogs an earlier-enqueued EXCLUSIVE for the same key",
-                () -> new StreamingInvariantCheck("strictInGroupOrder") {
-                    private final Map<String, LinkedHashMap<String, PendingJob>> pendingByKey = new HashMap<>();
-                    private final Map<String, String> keyByJob = new HashMap<>();
+                    private final Map<String, KeyedJob> keyedJobById = new HashMap<>();
+                    private final Map<String, RunningExec> runningByJob = new HashMap<>();
+                    private final Map<String, ActiveLocks> runningByKey = new HashMap<>();
+                    private final Map<String, String> lastStartLineByKey = new HashMap<>();
 
                     @Override
                     protected void observe(TraceEvent e) {
                         String event = e.event();
                         String jobId = e.text("jobId");
-                        if ("enqueued".equals(event)) {
-                            String key = e.text("lockKey");
-                            if (key.isEmpty() || jobId.isEmpty()) return;
-                            pendingByKey
-                                    .computeIfAbsent(key, k -> new LinkedHashMap<>())
-                                    .putIfAbsent(jobId, new PendingJob(e.text("lockMode"), e.rawLine()));
-                            keyByJob.putIfAbsent(jobId, key);
-                        } else if ("lock_acquired".equals(event) && "SHARED".equals(e.text("lockMode"))) {
-                            String key = e.text("lockKey");
-                            var pending = pendingByKey.get(key);
-                            if (pending == null || !pending.containsKey(jobId)) return;
-                            for (var entry : pending.entrySet()) {
-                                if (entry.getKey().equals(jobId)) break;
-                                PendingJob earlier = entry.getValue();
-                                if ("EXCLUSIVE".equals(earlier.mode)) {
-                                    recordViolation(
-                                            "job " + jobId + " (SHARED on " + key + ") leapfrogged earlier EXCLUSIVE "
-                                                    + entry.getKey(),
-                                            List.of(earlier.enqueueLine, e.rawLine()));
-                                    break;
+                        if (jobId.isEmpty()) return;
+                        switch (event) {
+                            case "enqueued" -> {
+                                String key = e.text("lockKey");
+                                if (!key.isEmpty()) {
+                                    keyedJobById.putIfAbsent(jobId, new KeyedJob(key, e.text("lockMode")));
                                 }
                             }
-                        } else if ("retried".equals(event) || isTerminal(e)) {
-                            String key = keyByJob.remove(jobId);
-                            if (key == null) return;
-                            var pending = pendingByKey.get(key);
-                            if (pending == null) return;
-                            pending.remove(jobId);
-                            if (pending.isEmpty()) pendingByKey.remove(key);
+                            case "exec_started" -> {
+                                KeyedJob keyed = keyedJobById.get(jobId);
+                                if (keyed == null) return; // unkeyed job — nothing to enforce
+                                ActiveLocks a = runningByKey.computeIfAbsent(keyed.key, k -> new ActiveLocks());
+                                if ("EXCLUSIVE".equals(keyed.mode) && (a.exclusive > 0 || a.shared > 0)) {
+                                    recordViolation(
+                                            "EXCLUSIVE handler for " + keyed.key
+                                                    + " started while other handlers execute (exclusive=" + a.exclusive
+                                                    + ", shared=" + a.shared + ")",
+                                            sampleWith(keyed.key, e));
+                                }
+                                if ("SHARED".equals(keyed.mode) && a.exclusive > 0) {
+                                    recordViolation(
+                                            "SHARED handler for " + keyed.key
+                                                    + " started while an EXCLUSIVE executes (exclusive=" + a.exclusive
+                                                    + ")",
+                                            sampleWith(keyed.key, e));
+                                }
+                                if ("EXCLUSIVE".equals(keyed.mode)) a.exclusive++;
+                                else if ("SHARED".equals(keyed.mode)) a.shared++;
+                                runningByJob.put(jobId, new RunningExec(keyed.key, keyed.mode));
+                                lastStartLineByKey.put(keyed.key, e.rawLine());
+                            }
+                            case "exec_finished" -> {
+                                RunningExec running = runningByJob.remove(jobId);
+                                if (running == null) return;
+                                ActiveLocks a = runningByKey.get(running.key);
+                                if (a == null) return;
+                                if ("EXCLUSIVE".equals(running.mode)) a.exclusive = Math.max(0, a.exclusive - 1);
+                                else if ("SHARED".equals(running.mode)) a.shared = Math.max(0, a.shared - 1);
+                                if (a.exclusive == 0 && a.shared == 0) {
+                                    runningByKey.remove(running.key);
+                                    lastStartLineByKey.remove(running.key);
+                                }
+                            }
+                            default -> {
+                                if (isTerminal(e)) keyedJobById.remove(jobId);
+                            }
+                        }
+                    }
+
+                    private List<String> sampleWith(String key, TraceEvent e) {
+                        String earlier = lastStartLineByKey.get(key);
+                        return earlier == null ? List.of(e.rawLine()) : List.of(earlier, e.rawLine());
+                    }
+                });
+    }
+
+    /**
+     * For any key, a SHARED handler never <em>starts executing</em> before an
+     * earlier-enqueued EXCLUSIVE has finished executing. The check keeps, per
+     * key, the enqueue-ordered set of jobs that have not yet finished; a
+     * SHARED {@code exec_started} walks the pending order ahead of itself and
+     * flags any not-yet-executed EXCLUSIVE it leapfrogged. State is bounded
+     * by backlog.
+     *
+     * <p>Two shapes are excused, both grounded in the engine's contract, not
+     * in timing heuristics:
+     *
+     * <ul>
+     *   <li>An EXCLUSIVE that already emitted {@code exec_finished} is done
+     *       for ordering purposes — its terminal save (which actually frees
+     *       the key) strictly follows that emission, so a SHARED admitted
+     *       after the save always observes the bracket closed. This is what
+     *       makes the check immune to the interceptor-hook emission lag.</li>
+     *   <li>A <em>retried</em> job leaves the order book: the engine's in-key
+     *       pending order is {@code (current_state_at, id)}, and a retry
+     *       legitimately re-times the job. Because the retry hook's
+     *       {@code retried} emission races the next claimant's events (both
+     *       follow the same reclaim save), a suspected leapfrog is held as
+     *       provisional for {@code RETRY_EXCUSE_WINDOW} and cancelled if the
+     *       leapfrogged EXCLUSIVE's {@code retried} event arrives inside it;
+     *       otherwise it is promoted to a definite violation.</li>
+     * </ul>
+     */
+    public static SoakInvariant strictInGroupOrder() {
+        return new Def(
+                "strictInGroupOrder",
+                "SHARED never executes before an earlier-enqueued EXCLUSIVE for the same key",
+                () -> new StreamingInvariantCheck("strictInGroupOrder") {
+                    private final Map<String, LinkedHashMap<String, PendingJob>> pendingByKey = new HashMap<>();
+                    private final Map<String, String> keyByJob = new HashMap<>();
+                    private final List<ProvisionalLeapfrog> provisional = new ArrayList<>();
+
+                    @Override
+                    protected void observe(TraceEvent e) {
+                        String event = e.event();
+                        String jobId = e.text("jobId");
+                        switch (event) {
+                            case "enqueued" -> {
+                                String key = e.text("lockKey");
+                                if (key.isEmpty() || jobId.isEmpty()) return;
+                                pendingByKey
+                                        .computeIfAbsent(key, k -> new LinkedHashMap<>())
+                                        .putIfAbsent(jobId, new PendingJob(e.text("lockMode"), e.rawLine()));
+                                keyByJob.putIfAbsent(jobId, key);
+                            }
+                            case "exec_started" -> {
+                                String key = keyByJob.get(jobId);
+                                if (key == null) return;
+                                var pending = pendingByKey.get(key);
+                                if (pending == null || !pending.containsKey(jobId)) return;
+                                PendingJob self = pending.get(jobId);
+                                if (!"SHARED".equals(self.mode)) return;
+                                for (var entry : pending.entrySet()) {
+                                    if (entry.getKey().equals(jobId)) break;
+                                    PendingJob earlier = entry.getValue();
+                                    if ("EXCLUSIVE".equals(earlier.mode) && !earlier.executionDone) {
+                                        provisional.add(new ProvisionalLeapfrog(
+                                                entry.getKey(),
+                                                Instant.parse(e.text("timestamp")),
+                                                "job " + jobId + " (SHARED on " + key
+                                                        + ") executed before earlier EXCLUSIVE " + entry.getKey(),
+                                                List.of(earlier.enqueueLine, e.rawLine())));
+                                        break;
+                                    }
+                                }
+                            }
+                            case "exec_finished" -> {
+                                String key = keyByJob.get(jobId);
+                                if (key == null) return;
+                                var pending = pendingByKey.get(key);
+                                if (pending == null) return;
+                                PendingJob job = pending.get(jobId);
+                                if (job != null) job.executionDone = true;
+                            }
+                            case "retried" -> {
+                                // Excuse suspicions about this job raised inside the
+                                // race window — the reclaim save that re-timed it also
+                                // admitted the "leapfrogging" SHARED.
+                                Instant ts = Instant.parse(e.text("timestamp"));
+                                provisional.removeIf(p -> p.exclusiveJobId.equals(jobId)
+                                        && !ts.isAfter(p.observedAt.plus(RETRY_EXCUSE_WINDOW)));
+                                removeFromBook(jobId);
+                            }
+                            default -> {
+                                if (isTerminal(e)) removeFromBook(jobId);
+                            }
+                        }
+                        promoteExpired(e);
+                    }
+
+                    @Override
+                    protected void onFinish() {
+                        for (ProvisionalLeapfrog p : provisional) {
+                            recordViolation(p.message, p.sampleChain);
+                        }
+                        provisional.clear();
+                    }
+
+                    private void removeFromBook(String jobId) {
+                        String key = keyByJob.remove(jobId);
+                        if (key == null) return;
+                        var pending = pendingByKey.get(key);
+                        if (pending == null) return;
+                        pending.remove(jobId);
+                        if (pending.isEmpty()) pendingByKey.remove(key);
+                    }
+
+                    /** A suspicion not excused within the window is a definite violation. */
+                    private void promoteExpired(TraceEvent e) {
+                        if (provisional.isEmpty()) return;
+                        Instant now;
+                        try {
+                            now = Instant.parse(e.text("timestamp"));
+                        } catch (RuntimeException malformed) {
+                            return;
+                        }
+                        var it = provisional.iterator();
+                        while (it.hasNext()) {
+                            ProvisionalLeapfrog p = it.next();
+                            if (now.isAfter(p.observedAt.plus(RETRY_EXCUSE_WINDOW))) {
+                                recordViolation(p.message, p.sampleChain);
+                                it.remove();
+                            }
                         }
                     }
                 });
@@ -437,6 +549,15 @@ public final class InvariantChecks {
     // ---------------------------------------------------------------- internals
 
     /**
+     * How long a suspected leapfrog stays provisional, waiting for the
+     * leapfrogged EXCLUSIVE's {@code retried} event to excuse it. The race it
+     * absorbs is emission-scheduling jitter between two threads that both
+     * already committed against the store — microseconds normally, GC pauses
+     * worst case. A real leapfrog leaves the EXCLUSIVE pending far longer.
+     */
+    private static final Duration RETRY_EXCUSE_WINDOW = Duration.ofSeconds(1);
+
+    /**
      * A terminal lifecycle event: {@code succeeded}, {@code quarantined}, or a
      * {@code failed} / {@code timed_out} marked {@code final} (a non-final
      * failure means the retry interceptor scheduled another attempt).
@@ -448,7 +569,23 @@ public final class InvariantChecks {
                 || (("failed".equals(event) || "timed_out".equals(event)) && e.boolField("final", false));
     }
 
-    private record PendingJob(String mode, String enqueueLine) {}
+    private static final class PendingJob {
+        final String mode;
+        final String enqueueLine;
+        boolean executionDone;
+
+        PendingJob(String mode, String enqueueLine) {
+            this.mode = mode;
+            this.enqueueLine = enqueueLine;
+        }
+    }
+
+    private record KeyedJob(String key, String mode) {}
+
+    private record RunningExec(String key, String mode) {}
+
+    private record ProvisionalLeapfrog(
+            String exclusiveJobId, Instant observedAt, String message, List<String> sampleChain) {}
 
     private record Expectation(boolean expectKill, String enqueueLine) {}
 

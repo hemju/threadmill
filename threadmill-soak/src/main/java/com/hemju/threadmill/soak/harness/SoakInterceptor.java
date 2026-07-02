@@ -61,6 +61,7 @@ public final class SoakInterceptor implements JobInterceptor {
         claimedFields.put("jobId", job.id().toString());
         claimedFields.put("queue", job.queue());
         claimedFields.put("attempt", attempt);
+        claimedFields.put("node", job.ownerNodeId().map(Object::toString).orElse(null));
         trace.emit("claimed", claimedFields);
         latencyTracker.recordClaimed(job.id());
         var startedFields = new LinkedHashMap<>(claimedFields);

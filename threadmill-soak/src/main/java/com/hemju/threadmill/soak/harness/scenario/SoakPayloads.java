@@ -5,11 +5,19 @@ import java.util.concurrent.ThreadLocalRandom;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.soak.harness.SoakExecutionTrace;
 
 /**
  * Shared job payloads + handlers used by the scenarios. Each handler is
  * deliberately small and idempotent — every handler may run more than once
  * under at-least-once delivery.
+ *
+ * <p>Every handler brackets its body with
+ * {@link SoakExecutionTrace#started} / {@link SoakExecutionTrace#finished}
+ * (the latter in a {@code finally}, so a throwing or interrupted attempt
+ * still closes its bracket). The execution-level invariants judge these
+ * brackets — see {@link SoakExecutionTrace} for why interceptor-emitted lock
+ * events cannot play that role.
  */
 public final class SoakPayloads {
 
@@ -34,10 +42,15 @@ public final class SoakPayloads {
 
         @Override
         public void run(FixedWork p, JobExecutionContext ctx) throws InterruptedException {
-            if (p.failureRate > 0 && ThreadLocalRandom.current().nextDouble() < p.failureRate) {
-                throw new RuntimeException("soak: simulated failure for seq " + p.seq);
+            SoakExecutionTrace.started(ctx);
+            try {
+                if (p.failureRate > 0 && ThreadLocalRandom.current().nextDouble() < p.failureRate) {
+                    throw new RuntimeException("soak: simulated failure for seq " + p.seq);
+                }
+                if (p.durationMillis > 0) Thread.sleep(p.durationMillis);
+            } finally {
+                SoakExecutionTrace.finished(ctx);
             }
-            if (p.durationMillis > 0) Thread.sleep(p.durationMillis);
         }
     }
 
@@ -65,15 +78,20 @@ public final class SoakPayloads {
 
         @Override
         public void run(FlakyWork p, JobExecutionContext ctx) throws InterruptedException {
-            double dice = ThreadLocalRandom.current().nextDouble();
-            if (dice < p.failureRate) {
-                throw new RuntimeException("soak: flaky failure for seq " + p.seq);
+            SoakExecutionTrace.started(ctx);
+            try {
+                double dice = ThreadLocalRandom.current().nextDouble();
+                if (dice < p.failureRate) {
+                    throw new RuntimeException("soak: flaky failure for seq " + p.seq);
+                }
+                if (dice < p.failureRate + p.timeoutRate) {
+                    Thread.sleep(p.timeoutSleepMillis);
+                    return;
+                }
+                if (p.durationMillis > 0) Thread.sleep(p.durationMillis);
+            } finally {
+                SoakExecutionTrace.finished(ctx);
             }
-            if (dice < p.failureRate + p.timeoutRate) {
-                Thread.sleep(p.timeoutSleepMillis);
-                return;
-            }
-            if (p.durationMillis > 0) Thread.sleep(p.durationMillis);
         }
     }
 
@@ -96,11 +114,16 @@ public final class SoakPayloads {
 
         @Override
         public void run(CheckingInWork p, JobExecutionContext ctx) throws InterruptedException {
-            long deadline = System.currentTimeMillis() + p.totalDurationMillis;
-            long interval = Math.max(50L, p.checkInIntervalMillis);
-            while (System.currentTimeMillis() < deadline) {
-                Thread.sleep(Math.min(interval, Math.max(1L, deadline - System.currentTimeMillis())));
-                ctx.checkIn();
+            SoakExecutionTrace.started(ctx);
+            try {
+                long deadline = System.currentTimeMillis() + p.totalDurationMillis;
+                long interval = Math.max(50L, p.checkInIntervalMillis);
+                while (System.currentTimeMillis() < deadline) {
+                    Thread.sleep(Math.min(interval, Math.max(1L, deadline - System.currentTimeMillis())));
+                    ctx.checkIn();
+                }
+            } finally {
+                SoakExecutionTrace.finished(ctx);
             }
         }
     }
@@ -122,11 +145,16 @@ public final class SoakPayloads {
 
         @Override
         public void run(StalledWork p, JobExecutionContext ctx) throws InterruptedException {
-            // One initial check-in flips the engine from wall-clock jobTimeout
-            // to noProgressTimeout (per AGENTS.md). Then we go silent so the
-            // engine reclaims us — that's the path this scenario tests.
-            ctx.checkIn();
-            Thread.sleep(p.stallMillis);
+            SoakExecutionTrace.started(ctx);
+            try {
+                // One initial check-in flips the engine from wall-clock jobTimeout
+                // to noProgressTimeout (per AGENTS.md). Then we go silent so the
+                // engine reclaims us — that's the path this scenario tests.
+                ctx.checkIn();
+                Thread.sleep(p.stallMillis);
+            } finally {
+                SoakExecutionTrace.finished(ctx);
+            }
         }
     }
 }

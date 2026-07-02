@@ -80,6 +80,9 @@ public final class SoakHarnessRunner {
             }
         });
         SoakTraceWriter trace = new SoakTraceWriter(outputDir.traceJsonl(), verifier::onEvent);
+        // Handlers emit their exec_started / exec_finished brackets through
+        // the static sink — the execution-level invariants judge those.
+        SoakExecutionTrace.install(trace);
         LatencyTracker latency = new LatencyTracker(outputDir.latenciesJsonl());
         MetricsSampler metrics = new MetricsSampler(outputDir.metricsJsonl(), store, latency);
         SoakInterceptor interceptor = new SoakInterceptor(trace, latency);
@@ -175,6 +178,7 @@ public final class SoakHarnessRunner {
                     // best effort — the runner is exiting
                 }
             }
+            SoakExecutionTrace.clear();
             try {
                 trace.close();
             } catch (IOException ignore) {

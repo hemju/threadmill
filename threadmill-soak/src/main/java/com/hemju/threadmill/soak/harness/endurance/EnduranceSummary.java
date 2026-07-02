@@ -35,14 +35,21 @@ final class EnduranceSummary {
     private final String runId;
     private final String scenario;
     private final String verdict;
+    private final boolean interrupted;
     private final long wallClockMs;
     private final List<BackendOutcome> outcomes;
 
     private EnduranceSummary(
-            String runId, String scenario, String verdict, long wallClockMs, List<BackendOutcome> outcomes) {
+            String runId,
+            String scenario,
+            String verdict,
+            boolean interrupted,
+            long wallClockMs,
+            List<BackendOutcome> outcomes) {
         this.runId = runId;
         this.scenario = scenario;
         this.verdict = verdict;
+        this.interrupted = interrupted;
         this.wallClockMs = wallClockMs;
         this.outcomes = outcomes;
     }
@@ -51,10 +58,11 @@ final class EnduranceSummary {
         return verdict;
     }
 
-    static EnduranceSummary collate(EnduranceConfig config, List<ChildRun> children, Instant startedAt) {
+    static EnduranceSummary collate(
+            EnduranceConfig config, List<ChildRun> children, Instant startedAt, boolean interrupted) {
         var mapper = new ObjectMapper();
         var outcomes = new ArrayList<BackendOutcome>();
-        boolean allPassed = true;
+        boolean allPassed = !interrupted;
         for (ChildRun child : children) {
             BackendOutcome outcome = BackendOutcome.of(mapper, child);
             allPassed &= outcome.passed();
@@ -64,6 +72,7 @@ final class EnduranceSummary {
                 config.runId(),
                 config.scenario(),
                 allPassed ? "passed" : "failed",
+                interrupted,
                 Duration.between(startedAt, Instant.now()).toMillis(),
                 outcomes);
     }
@@ -74,6 +83,7 @@ final class EnduranceSummary {
         doc.put("runId", runId);
         doc.put("scenario", scenario);
         doc.put("verdict", verdict);
+        doc.put("interrupted", interrupted);
         doc.put("wallClockMs", wallClockMs);
         Map<String, Object> backends = new LinkedHashMap<>();
         for (BackendOutcome outcome : outcomes) {
@@ -98,7 +108,9 @@ final class EnduranceSummary {
         sb.append("- **Wall clock:** ")
                 .append(Duration.ofMillis(wallClockMs).toMinutes())
                 .append(" min\n");
-        sb.append("- **Verdict:** **").append(verdict).append("**\n\n");
+        sb.append("- **Verdict:** **")
+                .append(verdict)
+                .append(interrupted ? "** (run interrupted before completion)\n\n" : "**\n\n");
         sb.append("| Backend | Verdict | Exit | Enqueued | Succeeded | Failed | Retried | Jobs/sec | e2e p99 (ms) |"
                 + " Failed invariants |\n");
         sb.append("|---|---|---|---|---|---|---|---|---|---|\n");
