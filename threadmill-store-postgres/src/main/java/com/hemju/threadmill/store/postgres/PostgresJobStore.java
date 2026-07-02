@@ -11,9 +11,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -555,34 +557,42 @@ public final class PostgresJobStore implements JobStore {
                 try (Connection conn = dataSource.getConnection()) {
                     conn.setAutoCommit(false);
                     try {
-                        // 1. Atomically page through ready ids, skipping any locked by another worker.
-                        // The first page is narrow — FOR UPDATE locks every row it reads and
-                        // holds it until commit, so a wide first page would pin 64x the claim
-                        // budget and starve concurrent claimers' SKIP LOCKED scans. Only when
-                        // a page yields zero claimable candidates (a concurrency-blocked hot
-                        // key hiding claimable work deeper in the queue) does the scan
-                        // escalate to the wide page.
-                        int pageSize = narrowClaimPageSize(cap);
-                        Integer cursorPriority = null;
-                        UUID cursorId = null;
+                        // 1. Gather candidates with cost bounded by CLAIMABLE work, not
+                        // by backlog depth: the unkeyed lane pages its dedicated partial
+                        // index, and the keyed lane enumerates distinct pending keys with
+                        // bounded index probes, drops keys whose group counters show an
+                        // EXCLUSIVE in flight, and fetches each remaining key's earliest
+                        // pending heads. The historical single (priority, id) pager
+                        // walked — and FOR UPDATE locked — every concurrency-blocked row
+                        // ahead of claimable work, so claim cost grew linearly with
+                        // backlog (39/s -> 3/s over a 90-minute overload run).
 
                         // 2. For each, deserialize, transition to PROCESSING, re-serialize, and UPDATE the row.
                         // Version-matched as defense-in-depth: correctness rests on the
-                        // FOR UPDATE SKIP LOCKED row lock from readClaimPage, but if a
-                        // future refactor ever fetches candidates without it, this turns a
-                        // silent double-claim into a loud failure.
+                        // FOR UPDATE SKIP LOCKED row lock from lockClaimCandidates, but if
+                        // a future refactor ever fetches candidates without it, this turns
+                        // a silent double-claim into a loud failure.
                         try (PreparedStatement ps = conn.prepareStatement(
                                 "UPDATE threadmill_jobs SET state = 'PROCESSING', owner_node_id = ?, "
                                         + "owner_heartbeat_at = ?, last_checkin_at = NULL, current_state_at = ?, version = ?, body = ? "
                                         + "WHERE id = ? AND version = ?")) {
+                            var alreadyBatched = new HashSet<UUID>();
                             while (result.size() < cap) {
-                                List<PendingClaim> pending =
-                                        readClaimPage(conn, queue, pageSize, cursorPriority, cursorId);
+                                List<PendingClaim> pending = lockClaimCandidates(conn, queue, cap - result.size());
+                                // Rows batched for UPDATE in an earlier pass are still
+                                // ENQUEUED in the database (the batch executes after the
+                                // loop) and locked by US, so SKIP LOCKED does not hide
+                                // them from our own re-gather.
+                                pending = pending.stream()
+                                        .filter(p -> !alreadyBatched.contains(p.id))
+                                        .toList();
                                 if (pending.isEmpty()) {
                                     break;
                                 }
                                 List<PendingClaim> claimable = claimableCandidates(conn, pending, cap - result.size());
                                 Map<UUID, String> bodies = fetchBodies(conn, claimable);
+                                int quarantined = 0;
+                                int before = result.size();
                                 for (var p : claimable) {
                                     if (result.size() >= cap) break;
                                     Job j;
@@ -595,6 +605,7 @@ public final class PostgresJobStore implements JobStore {
                                         // body-independent scalar update so it leaves the
                                         // ENQUEUED claim path, and continue with the rest.
                                         quarantineUnreadable(conn, p.id, p.version, heartbeatAt);
+                                        quarantined++;
                                         continue;
                                     }
                                     acquireWorkflowHold(conn, j.snapshot());
@@ -612,16 +623,15 @@ public final class PostgresJobStore implements JobStore {
                                     ps.setObject(6, p.id);
                                     ps.setLong(7, p.version);
                                     ps.addBatch();
+                                    alreadyBatched.add(p.id);
                                     result.add(serializer.deserializeJob(newBody));
                                 }
-                                PendingClaim last = pending.get(pending.size() - 1);
-                                cursorPriority = last.priority;
-                                cursorId = last.id;
-                                if (pending.size() < pageSize) {
+                                // No claims and no quarantines means every gathered head is
+                                // concurrency-inadmissible right now — a further pass would
+                                // gather the same heads again. Quarantines are progress: the
+                                // poison left ENQUEUED, so the next pass sees its successor.
+                                if (result.size() == before && quarantined == 0) {
                                     break;
-                                }
-                                if (claimable.isEmpty()) {
-                                    pageSize = wideClaimPageSize(cap);
                                 }
                             }
                             int[] updated = ps.executeBatch();
@@ -648,37 +658,170 @@ public final class PostgresJobStore implements JobStore {
         }
     }
 
-    private List<PendingClaim> readClaimPage(
-            Connection conn, String queue, int limit, Integer cursorPriority, UUID cursorId) throws SQLException {
-        String cursorPredicate = cursorPriority == null ? "" : "AND (priority < ? OR (priority = ? AND id > ?)) ";
-        try (PreparedStatement ps = conn.prepareStatement("SELECT id, version, priority, concurrency_key, "
-                + "concurrency_mode, workflow_root_id, current_state_at FROM threadmill_jobs "
-                + "WHERE state = 'ENQUEUED' AND queue = ? "
-                + cursorPredicate
-                + "ORDER BY priority DESC, id "
-                + "LIMIT ? FOR UPDATE SKIP LOCKED")) {
+    /** Keys enumerated per gathering pass; beyond this, later passes / polls pick up the rest. */
+    private static final int MAX_PENDING_KEYS_PER_PASS = 512;
+
+    /**
+     * Gather and row-lock claim candidates with cost bounded by claimable
+     * work, never by backlog depth:
+     *
+     * <ul>
+     *   <li><b>Unkeyed lane</b> — a narrow {@code FOR UPDATE SKIP LOCKED}
+     *       page over the dedicated {@code threadmill_jobs_unkeyed_enqueued_idx}
+     *       partial index in {@code (priority DESC, id)} order; skipping
+     *       other claimers' locked rows walks deeper automatically.</li>
+     *   <li><b>Keyed lane</b> — distinct pending keys are enumerated with one
+     *       index probe each (recursive-CTE loose scan over the pending
+     *       partial index); each key contributes its earliest pending
+     *       ENQUEUED heads in the engine's {@code (current_state_at, id)}
+     *       in-key order — the order admission enforces anyway, so blocked
+     *       priority windows are never walked.</li>
+     *   <li><b>Hold lane</b> — members of an active workflow hold are
+     *       admissible regardless of their position in the key's pending
+     *       order (same-root members never block each other, and a retried
+     *       EXCLUSIVE root must reclaim under its own hold), so each active
+     *       hold's earliest members are gathered by
+     *       {@code (concurrency_key, workflow_root_id)} as well.</li>
+     * </ul>
+     *
+     * <p>The merged result is ordered {@code (priority DESC, id)} and capped
+     * at the narrow page budget, so concurrent claimers are never starved by
+     * wide lock pages. The historical single {@code (priority, id)} pager
+     * walked — and locked — every concurrency-blocked row ahead of claimable
+     * work, so claim cost grew linearly with backlog (39/s → 3/s over a
+     * 90-minute overload run).
+     */
+    private List<PendingClaim> lockClaimCandidates(Connection conn, String queue, int want) throws SQLException {
+        var candidates = new LinkedHashMap<UUID, PendingClaim>();
+        collectUnkeyedCandidates(conn, queue, want, candidates);
+        collectKeyedHeadCandidates(conn, queue, want, candidates);
+        if (candidates.isEmpty()) {
+            return List.of();
+        }
+        return candidates.values().stream()
+                .sorted(Comparator.comparingInt(PendingClaim::priority)
+                        .reversed()
+                        .thenComparing(PendingClaim::id))
+                .limit(narrowClaimPageSize(want))
+                .toList();
+    }
+
+    private static final String CLAIM_COLUMNS =
+            "id, version, priority, concurrency_key, concurrency_mode, workflow_root_id, current_state_at";
+
+    private void collectUnkeyedCandidates(Connection conn, String queue, int want, Map<UUID, PendingClaim> into)
+            throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("SELECT " + CLAIM_COLUMNS + " FROM threadmill_jobs "
+                + "WHERE state = 'ENQUEUED' AND queue = ? AND concurrency_key IS NULL "
+                + "ORDER BY priority DESC, id LIMIT ? FOR UPDATE SKIP LOCKED")) {
             ps.setString(1, queue);
-            int index = 2;
-            if (cursorPriority != null) {
-                ps.setInt(index++, cursorPriority);
-                ps.setInt(index++, cursorPriority);
-                ps.setObject(index++, cursorId);
-            }
-            ps.setInt(index, limit);
+            ps.setInt(2, narrowClaimPageSize(want));
+            readPendingClaims(ps, into);
+        }
+    }
+
+    private void collectKeyedHeadCandidates(Connection conn, String queue, int want, Map<UUID, PendingClaim> into)
+            throws SQLException {
+        List<String> keys = distinctPendingKeys(conn);
+        if (keys.isEmpty()) {
+            return;
+        }
+        int perKey = Math.max(1, want);
+        var keyArray = conn.createArrayOf("text", keys.toArray(String[]::new));
+        try (PreparedStatement ps = conn.prepareStatement("SELECT c.* FROM unnest(?) AS fk(k) "
+                + "CROSS JOIN LATERAL (SELECT " + CLAIM_COLUMNS + " FROM threadmill_jobs "
+                + "WHERE concurrency_key = fk.k AND state = 'ENQUEUED' AND queue = ? "
+                + "ORDER BY current_state_at, id LIMIT ? FOR UPDATE SKIP LOCKED) c")) {
+            ps.setArray(1, keyArray);
+            ps.setString(2, queue);
+            ps.setInt(3, perKey);
+            readPendingClaims(ps, into);
+        } finally {
+            keyArray.free();
+        }
+        collectActiveHoldMemberCandidates(conn, queue, perKey, keys, into);
+    }
+
+    private void collectActiveHoldMemberCandidates(
+            Connection conn, String queue, int perKey, List<String> keys, Map<UUID, PendingClaim> into)
+            throws SQLException {
+        var holdKeys = new ArrayList<String>();
+        var holdRoots = new ArrayList<UUID>();
+        var keyArray = conn.createArrayOf("text", keys.toArray(String[]::new));
+        try (PreparedStatement ps = conn.prepareStatement(
+                "SELECT concurrency_key, workflow_root_id FROM threadmill_concurrency_workflow_holds "
+                        + "WHERE concurrency_key = ANY (?)")) {
+            ps.setArray(1, keyArray);
             try (ResultSet rs = ps.executeQuery()) {
-                var page = new ArrayList<PendingClaim>();
                 while (rs.next()) {
-                    String mode = rs.getString(5);
-                    page.add(new PendingClaim(
-                            (UUID) rs.getObject(1),
-                            rs.getLong(2),
-                            rs.getInt(3),
-                            rs.getString(4),
-                            mode == null ? null : ConcurrencyMode.valueOf(mode),
-                            (UUID) rs.getObject(6),
-                            rs.getTimestamp(7).toInstant()));
+                    holdKeys.add(rs.getString(1));
+                    holdRoots.add((UUID) rs.getObject(2));
                 }
-                return page;
+            }
+        } finally {
+            keyArray.free();
+        }
+        if (holdKeys.isEmpty()) {
+            return;
+        }
+        var holdKeyArray = conn.createArrayOf("text", holdKeys.toArray(String[]::new));
+        var holdRootArray = conn.createArrayOf("uuid", holdRoots.toArray(UUID[]::new));
+        try (PreparedStatement ps = conn.prepareStatement("SELECT c.* FROM unnest(?, ?) AS h(k, r) "
+                + "CROSS JOIN LATERAL (SELECT " + CLAIM_COLUMNS + " FROM threadmill_jobs "
+                + "WHERE concurrency_key = h.k AND workflow_root_id = h.r AND state = 'ENQUEUED' AND queue = ? "
+                + "ORDER BY current_state_at, id LIMIT ? FOR UPDATE SKIP LOCKED) c")) {
+            ps.setArray(1, holdKeyArray);
+            ps.setArray(2, holdRootArray);
+            ps.setString(3, queue);
+            ps.setInt(4, perKey);
+            readPendingClaims(ps, into);
+        } finally {
+            holdKeyArray.free();
+            holdRootArray.free();
+        }
+    }
+
+    private static void readPendingClaims(PreparedStatement ps, Map<UUID, PendingClaim> into) throws SQLException {
+        try (ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                String mode = rs.getString(5);
+                var claim = new PendingClaim(
+                        (UUID) rs.getObject(1),
+                        rs.getLong(2),
+                        rs.getInt(3),
+                        rs.getString(4),
+                        mode == null ? null : ConcurrencyMode.valueOf(mode),
+                        (UUID) rs.getObject(6),
+                        rs.getTimestamp(7).toInstant());
+                into.putIfAbsent(claim.id(), claim);
+            }
+        }
+    }
+
+    /**
+     * Distinct concurrency keys with pending members, via a recursive-CTE
+     * loose scan — one index probe per key against the pending partial
+     * index, independent of how many rows each key holds. (Chosen over
+     * {@code SELECT DISTINCT}, whose plan may degrade to a full index scan.)
+     */
+    private List<String> distinctPendingKeys(Connection conn) throws SQLException {
+        try (PreparedStatement ps = conn.prepareStatement("WITH RECURSIVE keys(k) AS ("
+                + "  (SELECT concurrency_key FROM threadmill_jobs "
+                + "   WHERE concurrency_key IS NOT NULL AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
+                + "   ORDER BY concurrency_key LIMIT 1) "
+                + "  UNION ALL "
+                + "  SELECT (SELECT j.concurrency_key FROM threadmill_jobs j "
+                + "          WHERE j.concurrency_key > keys.k AND j.state IN ('ENQUEUED','SCHEDULED','AWAITING') "
+                + "          ORDER BY j.concurrency_key LIMIT 1) "
+                + "  FROM keys WHERE keys.k IS NOT NULL) "
+                + "SELECT k FROM keys WHERE k IS NOT NULL LIMIT ?")) {
+            ps.setInt(1, MAX_PENDING_KEYS_PER_PASS);
+            try (ResultSet rs = ps.executeQuery()) {
+                var keys = new ArrayList<String>();
+                while (rs.next()) {
+                    keys.add(rs.getString(1));
+                }
+                return keys;
             }
         }
     }
@@ -839,16 +982,25 @@ public final class PostgresJobStore implements JobStore {
         }
     }
 
+    /**
+     * Earliest pending member per key (optionally EXCLUSIVE-only), as one
+     * LATERAL head probe per key. DISTINCT ON was used historically, but
+     * Postgres gives it no per-group early termination — every claim pass
+     * scanned the entire pending population (130ms at a 415k backlog, twice
+     * per pass), which kept claim cost linear in backlog depth. The plain
+     * probe rides the pending partial index; the EXCLUSIVE probe rides
+     * {@code threadmill_jobs_exclusive_pending_idx} (V4).
+     */
     private Map<String, PendingOrder> loadFirstPendingByKey(Connection conn, Set<String> keys, boolean exclusiveOnly)
             throws SQLException {
         var keyArray = conn.createArrayOf("text", keys.toArray(String[]::new));
         String modePredicate = exclusiveOnly ? "AND concurrency_mode = 'EXCLUSIVE' " : "";
-        try (PreparedStatement ps = conn.prepareStatement("SELECT DISTINCT ON (concurrency_key) "
-                + "concurrency_key, current_state_at, id FROM threadmill_jobs "
-                + "WHERE concurrency_key = ANY (?) "
+        try (PreparedStatement ps = conn.prepareStatement("SELECT f.* FROM unnest(?) AS k(key) "
+                + "CROSS JOIN LATERAL (SELECT concurrency_key, current_state_at, id FROM threadmill_jobs "
+                + "WHERE concurrency_key = k.key "
                 + modePredicate
                 + "AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
-                + "ORDER BY concurrency_key, current_state_at, id")) {
+                + "ORDER BY current_state_at, id LIMIT 1) f")) {
             ps.setArray(1, keyArray);
             try (ResultSet rs = ps.executeQuery()) {
                 var first = new HashMap<String, PendingOrder>();

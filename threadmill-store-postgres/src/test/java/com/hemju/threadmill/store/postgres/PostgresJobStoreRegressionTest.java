@@ -466,14 +466,16 @@ class PostgresJobStoreRegressionTest {
         assertThat(sql)
                 .contains("threadmill_schema_history")
                 .contains("V1__baseline.sql")
-                .contains("V2__sharded_job_counts.sql");
+                .contains("V2__sharded_job_counts.sql")
+                .contains("V3__unkeyed_claim_index.sql")
+                .contains("V4__exclusive_pending_index.sql");
         try (Connection conn = dataSource.getConnection();
                 Statement st = conn.createStatement()) {
             st.execute(sql);
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
                 // One history row per shipped migration.
-                assertThat(rs.getInt(1)).isEqualTo(2);
+                assertThat(rs.getInt(1)).isEqualTo(4);
             }
         }
         new MigrationRunner(dataSource).validate();
@@ -508,7 +510,7 @@ class PostgresJobStoreRegressionTest {
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
                 // One history row per shipped migration.
-                assertThat(rs.getInt(1)).isEqualTo(2);
+                assertThat(rs.getInt(1)).isEqualTo(4);
             }
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_job_counts")) {
                 assertThat(rs.next()).isTrue();
@@ -643,7 +645,7 @@ class PostgresJobStoreRegressionTest {
                 ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
             assertThat(rs.next()).isTrue();
             // One history row per shipped migration.
-            assertThat(rs.getInt(1)).isEqualTo(2);
+            assertThat(rs.getInt(1)).isEqualTo(4);
         }
     }
 
@@ -675,7 +677,13 @@ class PostgresJobStoreRegressionTest {
             try (ResultSet rs = ps.executeQuery()) {
                 var plan = new StringBuilder();
                 while (rs.next()) plan.append(rs.getString(1)).append('\n');
-                assertThat(plan.toString()).contains("threadmill_jobs_concurrency_pending_idx");
+                // Either pending partial index is a win — since V4 the planner
+                // rightly prefers the dedicated exclusive-pending index for an
+                // EXCLUSIVE-filtered check; what must never appear is a scan of
+                // the jobs table itself.
+                assertThat(plan.toString())
+                        .containsAnyOf(
+                                "threadmill_jobs_concurrency_pending_idx", "threadmill_jobs_exclusive_pending_idx");
             }
         }
     }
@@ -697,17 +705,38 @@ class PostgresJobStoreRegressionTest {
                 Statement st = conn.createStatement()) {
             st.execute("SET enable_seqscan = off");
             var keyArray = conn.createArrayOf("text", new String[] {"project:hot", "project:warm"});
-            try (PreparedStatement ps = conn.prepareStatement("EXPLAIN (FORMAT TEXT) "
-                    + "SELECT DISTINCT ON (concurrency_key) concurrency_key, current_state_at, id "
-                    + "FROM threadmill_jobs "
-                    + "WHERE concurrency_key = ANY (?) "
-                    + "AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
-                    + "ORDER BY concurrency_key, current_state_at, id")) {
-                ps.setArray(1, keyArray);
-                try (ResultSet rs = ps.executeQuery()) {
-                    var plan = new StringBuilder();
-                    while (rs.next()) plan.append(rs.getString(1)).append('\n');
-                    assertThat(plan.toString()).contains("threadmill_jobs_concurrency_pending_idx");
+            try {
+                // The plain earliest-pending head probe must ride the pending
+                // partial index; the EXCLUSIVE-only probe must ride the V4
+                // exclusive-pending index. Both are LATERAL head probes with
+                // LIMIT 1 — DISTINCT ON was retired because it scans the whole
+                // pending population per call (no per-group early termination).
+                try (PreparedStatement ps = conn.prepareStatement("EXPLAIN (FORMAT TEXT) "
+                        + "SELECT f.* FROM unnest(?) AS k(key) "
+                        + "CROSS JOIN LATERAL (SELECT concurrency_key, current_state_at, id FROM threadmill_jobs "
+                        + "WHERE concurrency_key = k.key "
+                        + "AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
+                        + "ORDER BY current_state_at, id LIMIT 1) f")) {
+                    ps.setArray(1, keyArray);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        var plan = new StringBuilder();
+                        while (rs.next()) plan.append(rs.getString(1)).append('\n');
+                        assertThat(plan.toString()).contains("threadmill_jobs_concurrency_pending_idx");
+                    }
+                }
+                try (PreparedStatement ps = conn.prepareStatement("EXPLAIN (FORMAT TEXT) "
+                        + "SELECT f.* FROM unnest(?) AS k(key) "
+                        + "CROSS JOIN LATERAL (SELECT concurrency_key, current_state_at, id FROM threadmill_jobs "
+                        + "WHERE concurrency_key = k.key "
+                        + "AND concurrency_mode = 'EXCLUSIVE' "
+                        + "AND state IN ('ENQUEUED','SCHEDULED','AWAITING') "
+                        + "ORDER BY current_state_at, id LIMIT 1) f")) {
+                    ps.setArray(1, keyArray);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        var plan = new StringBuilder();
+                        while (rs.next()) plan.append(rs.getString(1)).append('\n');
+                        assertThat(plan.toString()).contains("threadmill_jobs_exclusive_pending_idx");
+                    }
                 }
             } finally {
                 keyArray.free();
