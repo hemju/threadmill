@@ -197,6 +197,64 @@ final class InvariantViolationTest {
     }
 
     @Test
+    void strictInGroupOrderUsesCreationOrderNotEmissionOrder(@TempDir Path tempDir) throws Exception {
+        // Regression from the first multi-producer stress run: with 16
+        // concurrent producers, insert latencies of seconds decouple the
+        // enqueued-event emission order from creation order. Here the
+        // EXCLUSIVE's enqueued line lands FIRST in the trace, but its UUIDv7
+        // id is 20ms NEWER than the SHARED's — by the engine's
+        // (current_state_at, id) order the SHARED is earlier, so running it
+        // first is legal and must not be flagged.
+        String sharedId = "019f21a0-f000-7aaa-8aaa-aaaaaaaaaaaa";
+        String exclusiveId = "019f21a0-f014-7bbb-8bbb-bbbbbbbbbbbb";
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        try (SoakTraceWriter writer = new SoakTraceWriter(traceFile)) {
+            writer.emit(
+                    "enqueued", Map.of("jobId", exclusiveId, "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit("enqueued", Map.of("jobId", sharedId, "queue", "q", "lockKey", "k", "lockMode", "SHARED"));
+            writer.emit("exec_started", Map.of("jobId", sharedId, "attempt", 1));
+        }
+        assertThat(verify(traceFile, InvariantChecks.strictInGroupOrder()).passed())
+                .isTrue();
+    }
+
+    @Test
+    void strictInGroupOrderStillFlagsARealLeapfrogWithUuidIds(@TempDir Path tempDir) throws Exception {
+        // EXCLUSIVE created 100ms before the SHARED — clearly earlier — and
+        // never executed: a genuine leapfrog, whatever the emission order.
+        String exclusiveId = "019f21a0-f000-7bbb-8bbb-bbbbbbbbbbbb";
+        String sharedId = "019f21a0-f064-7aaa-8aaa-aaaaaaaaaaaa";
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        try (SoakTraceWriter writer = new SoakTraceWriter(traceFile)) {
+            writer.emit("enqueued", Map.of("jobId", sharedId, "queue", "q", "lockKey", "k", "lockMode", "SHARED"));
+            writer.emit(
+                    "enqueued", Map.of("jobId", exclusiveId, "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit("exec_started", Map.of("jobId", sharedId, "attempt", 1));
+        }
+        InvariantResult result = verify(traceFile, InvariantChecks.strictInGroupOrder());
+        assertThat(result.passed()).isFalse();
+        assertThat(result.violations()).anyMatch(v -> v.contains(sharedId) && v.contains(exclusiveId));
+    }
+
+    @Test
+    void strictInGroupOrderExcusesTheSameInstantAmbiguityBand(@TempDir Path tempDir) throws Exception {
+        // Created 1ms apart: inside the band the engine's microsecond
+        // (current_state_at, id) order is not observable from the trace —
+        // asserting it would assert a guess.
+        String exclusiveId = "019f21a0-f000-7bbb-8bbb-bbbbbbbbbbbb";
+        String sharedId = "019f21a0-f001-7aaa-8aaa-aaaaaaaaaaaa";
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        try (SoakTraceWriter writer = new SoakTraceWriter(traceFile)) {
+            writer.emit(
+                    "enqueued", Map.of("jobId", exclusiveId, "queue", "q", "lockKey", "k", "lockMode", "EXCLUSIVE"));
+            writer.emit("enqueued", Map.of("jobId", sharedId, "queue", "q", "lockKey", "k", "lockMode", "SHARED"));
+            writer.emit("exec_started", Map.of("jobId", sharedId, "attempt", 1));
+        }
+        assertThat(verify(traceFile, InvariantChecks.strictInGroupOrder()).passed())
+                .isTrue();
+    }
+
+    @Test
     void strictInGroupOrderDoesNotLetALateRetryExcuseARealLeapfrog(@TempDir Path tempDir) throws Exception {
         // The excuse window only absorbs the reclaim-thread emission race
         // (µs–ms). An EXCLUSIVE retried long after the SHARED executed was

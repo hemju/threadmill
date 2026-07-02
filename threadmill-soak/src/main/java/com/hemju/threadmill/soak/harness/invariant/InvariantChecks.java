@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.Supplier;
 
 /**
@@ -141,29 +142,42 @@ public final class InvariantChecks {
 
     /**
      * For any key, a SHARED handler never <em>starts executing</em> before an
-     * earlier-enqueued EXCLUSIVE has finished executing. The check keeps, per
-     * key, the enqueue-ordered set of jobs that have not yet finished; a
-     * SHARED {@code exec_started} walks the pending order ahead of itself and
-     * flags any not-yet-executed EXCLUSIVE it leapfrogged. State is bounded
-     * by backlog.
+     * earlier-<em>created</em> EXCLUSIVE has finished executing. The check
+     * keeps, per key, the set of jobs that have not yet finished, ordered by
+     * <em>job id</em> — UUIDv7 ids embed the creation millisecond, so their
+     * canonical strings sort chronologically. A SHARED {@code exec_started}
+     * walks the ids ahead of itself and flags any not-yet-executed EXCLUSIVE
+     * it leapfrogged. State is bounded by backlog.
      *
-     * <p>Two shapes are excused, both grounded in the engine's contract, not
+     * <p>The book deliberately does NOT use trace emission order: the
+     * {@code enqueued} event is emitted after the insert commits, and with
+     * concurrent producers ({@code -Pproducers}) insert latencies of seconds
+     * decouple emission order from creation order entirely — the first
+     * multi-producer stress run false-aborted on SHAREDs that were provably
+     * (by id) created before the EXCLUSIVE they "leapfrogged".
+     *
+     * <p>Three shapes are excused, all grounded in the engine's contract, not
      * in timing heuristics:
      *
      * <ul>
+     *   <li>An EXCLUSIVE whose id-embedded creation millisecond is within
+     *       {@value #SAME_INSTANT_MARGIN_MS}ms of the SHARED's: the engine
+     *       orders by {@code (current_state_at, id)} at microsecond
+     *       precision, which the trace cannot observe inside that band — and
+     *       a real leapfrog leaves the EXCLUSIVE pending for far longer.</li>
      *   <li>An EXCLUSIVE that already emitted {@code exec_finished} is done
      *       for ordering purposes — its terminal save (which actually frees
      *       the key) strictly follows that emission, so a SHARED admitted
      *       after the save always observes the bracket closed. This is what
      *       makes the check immune to the interceptor-hook emission lag.</li>
-     *   <li>A <em>retried</em> job leaves the order book: the engine's in-key
-     *       pending order is {@code (current_state_at, id)}, and a retry
-     *       legitimately re-times the job. Because the retry hook's
-     *       {@code retried} emission races the next claimant's events (both
-     *       follow the same reclaim save), a suspected leapfrog is held as
-     *       provisional for {@code RETRY_EXCUSE_WINDOW} and cancelled if the
-     *       leapfrogged EXCLUSIVE's {@code retried} event arrives inside it;
-     *       otherwise it is promoted to a definite violation.</li>
+     *   <li>A <em>retried</em> job leaves the order book: a retry
+     *       legitimately re-times the job in the pending order. Because the
+     *       retry hook's {@code retried} emission races the next claimant's
+     *       events (both follow the same reclaim save), a suspected leapfrog
+     *       is held as provisional for {@code RETRY_EXCUSE_WINDOW} and
+     *       cancelled if the leapfrogged EXCLUSIVE's {@code retried} event
+     *       arrives inside it; otherwise it is promoted to a definite
+     *       violation.</li>
      * </ul>
      */
     public static SoakInvariant strictInGroupOrder() {
@@ -171,7 +185,7 @@ public final class InvariantChecks {
                 "strictInGroupOrder",
                 "SHARED never executes before an earlier-enqueued EXCLUSIVE for the same key",
                 () -> new StreamingInvariantCheck("strictInGroupOrder") {
-                    private final Map<String, LinkedHashMap<String, PendingJob>> pendingByKey = new HashMap<>();
+                    private final Map<String, TreeMap<String, PendingJob>> pendingByKey = new HashMap<>();
                     private final Map<String, String> keyByJob = new HashMap<>();
                     private final List<ProvisionalLeapfrog> provisional = new ArrayList<>();
 
@@ -184,7 +198,7 @@ public final class InvariantChecks {
                                 String key = e.text("lockKey");
                                 if (key.isEmpty() || jobId.isEmpty()) return;
                                 pendingByKey
-                                        .computeIfAbsent(key, k -> new LinkedHashMap<>())
+                                        .computeIfAbsent(key, k -> new TreeMap<>())
                                         .putIfAbsent(jobId, new PendingJob(e.text("lockMode"), e.rawLine()));
                                 keyByJob.putIfAbsent(jobId, key);
                             }
@@ -195,18 +209,18 @@ public final class InvariantChecks {
                                 if (pending == null || !pending.containsKey(jobId)) return;
                                 PendingJob self = pending.get(jobId);
                                 if (!"SHARED".equals(self.mode)) return;
-                                for (var entry : pending.entrySet()) {
-                                    if (entry.getKey().equals(jobId)) break;
+                                long sharedCreatedMs = uuidV7Millis(jobId);
+                                for (var entry : pending.headMap(jobId).entrySet()) {
                                     PendingJob earlier = entry.getValue();
-                                    if ("EXCLUSIVE".equals(earlier.mode) && !earlier.executionDone) {
-                                        provisional.add(new ProvisionalLeapfrog(
-                                                entry.getKey(),
-                                                Instant.parse(e.text("timestamp")),
-                                                "job " + jobId + " (SHARED on " + key
-                                                        + ") executed before earlier EXCLUSIVE " + entry.getKey(),
-                                                List.of(earlier.enqueueLine, e.rawLine())));
-                                        break;
-                                    }
+                                    if (!"EXCLUSIVE".equals(earlier.mode) || earlier.executionDone) continue;
+                                    if (!createdClearlyBefore(uuidV7Millis(entry.getKey()), sharedCreatedMs)) continue;
+                                    provisional.add(new ProvisionalLeapfrog(
+                                            entry.getKey(),
+                                            Instant.parse(e.text("timestamp")),
+                                            "job " + jobId + " (SHARED on " + key
+                                                    + ") executed before earlier EXCLUSIVE " + entry.getKey(),
+                                            List.of(earlier.enqueueLine, e.rawLine())));
+                                    break;
                                 }
                             }
                             case "exec_finished" -> {
@@ -556,6 +570,41 @@ public final class InvariantChecks {
      * worst case. A real leapfrog leaves the EXCLUSIVE pending far longer.
      */
     private static final Duration RETRY_EXCUSE_WINDOW = Duration.ofSeconds(1);
+
+    /**
+     * Two jobs created within this many milliseconds of each other have no
+     * trace-observable order: the engine ranks them by microsecond-precision
+     * {@code current_state_at} (id tie-break), the trace only sees the id's
+     * millisecond prefix. A real leapfrog leaves the EXCLUSIVE pending far
+     * longer than this.
+     */
+    private static final long SAME_INSTANT_MARGIN_MS = 2;
+
+    /**
+     * The 48-bit creation-millis prefix of a canonical UUIDv7 string, or -1
+     * when the id has another shape (hand-written ids in tests).
+     */
+    private static long uuidV7Millis(String jobId) {
+        if (jobId.length() < 13 || jobId.charAt(8) != '-') return -1;
+        try {
+            long high = Long.parseLong(jobId.substring(0, 8), 16);
+            long low = Long.parseLong(jobId.substring(9, 13), 16);
+            return (high << 16) | low;
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    /**
+     * True when the EXCLUSIVE was created clearly before the SHARED — beyond
+     * the same-instant margin the trace cannot resolve. Ids without a UUIDv7
+     * timestamp compare pessimistically (book order alone decides), which
+     * keeps hand-written test traces strict.
+     */
+    private static boolean createdClearlyBefore(long exclusiveCreatedMs, long sharedCreatedMs) {
+        if (exclusiveCreatedMs < 0 || sharedCreatedMs < 0) return true;
+        return exclusiveCreatedMs + SAME_INSTANT_MARGIN_MS <= sharedCreatedMs;
+    }
 
     /**
      * A terminal lifecycle event: {@code succeeded}, {@code quarantined}, or a
