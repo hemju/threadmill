@@ -1333,4 +1333,31 @@ class ProcessingNodeTest {
 
         closeThread.join(Duration.ofSeconds(5));
     }
+
+    @Test
+    void shutdownInterruptedJobIsRescheduledWithoutBurningAnAttempt() throws Exception {
+        Job job = enqueueHello(EngineTestHandlers.BlockingHandler.class, "default");
+        node = ProcessingNode.builder(store)
+                .config(fastConfig.toBuilder()
+                        .jobTimeout(Duration.ofSeconds(30))
+                        .shutdownGracePeriod(Duration.ofMillis(200))
+                        .build())
+                .build();
+        node.start();
+        await().atMost(Duration.ofSeconds(5))
+                .until(() -> store.findById(job.id()).orElseThrow().currentState() == JobState.PROCESSING);
+
+        // Grace expires while the handler blocks; shutdownNow() interrupts it.
+        // The failure must be classified SHUTDOWN, not EXCEPTION: rescheduled
+        // immediately with the claim-time attempt increment reverted, so a
+        // rolling deploy never consumes retry budget.
+        node.close();
+
+        // close() returns as soon as the pool is torn down; the interrupted
+        // worker finishes its failure path concurrently.
+        await().atMost(Duration.ofSeconds(5))
+                .until(() -> store.findById(job.id()).orElseThrow().currentState() == JobState.SCHEDULED);
+        Job after = store.findById(job.id()).orElseThrow();
+        assertThat(after.attempts()).as("shutdown must not burn an attempt").isZero();
+    }
 }

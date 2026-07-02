@@ -38,6 +38,13 @@ public interface JobInterceptor {
         EXCEPTION,
         TIMEOUT,
         ORPHAN_RECLAIM,
-        QUARANTINE
+        QUARANTINE,
+        /**
+         * The handler was interrupted because its node is shutting down —
+         * not the job's fault. {@code RetryInterceptor} reschedules the job
+         * immediately without consuming a retry attempt, so rolling deploys
+         * do not erode retry budgets.
+         */
+        SHUTDOWN
     }
 }

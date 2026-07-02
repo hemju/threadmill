@@ -77,6 +77,7 @@ public final class ProcessingNode implements AutoCloseable {
         this.tags = Set.copyOf(b.tags);
 
         this.runner = new JobRunner(store, nodeId, resolver, serializer, interceptors, config);
+        this.runner.shutdownSignal(stopped::get);
         this.registry = new NodeRegistry(
                 store, nodeId, config.heartbeatTimeout(), config.claimHeartbeat(), config.maintenanceLeaseDuration());
 
@@ -105,7 +106,8 @@ public final class ProcessingNode implements AutoCloseable {
         }
 
         var materializer = new RecurringMaterializer(store, wakeBus);
-        this.maintenance = new MaintenanceCycle(store, nodeId, registry, runner, materializer, config, wakeBus);
+        this.maintenance =
+                new MaintenanceCycle(store, nodeId, registry, runner, materializer, retryInterceptor, config, wakeBus);
         this.maintenance.setClaimSuspensionGate(claimingSuspended);
     }
 

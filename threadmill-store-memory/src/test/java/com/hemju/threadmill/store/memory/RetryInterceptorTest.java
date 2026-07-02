@@ -56,6 +56,60 @@ class RetryInterceptorTest {
     }
 
     @Test
+    void recoveryScanReschedulesAStrandedFailedJobWithBudget() {
+        var interceptor = new RetryInterceptor(store, 3, Duration.ofMillis(100));
+        // FAILED with attempts=1 of 3 and no reschedule — the crash window
+        // between the terminal FAILED save and the reschedule save.
+        Job stranded = failedAfterFirstAttempt(null, null);
+
+        int recovered = interceptor.recoverStrandedFailures(10, Duration.ZERO);
+
+        assertThat(recovered).isEqualTo(1);
+        assertThat(store.findById(stranded.id()).orElseThrow().currentState()).isEqualTo(JobState.SCHEDULED);
+    }
+
+    @Test
+    void recoveryScanLeavesFinalFailedJobsAlone() {
+        var interceptor = new RetryInterceptor(store, 3, Duration.ofMillis(100));
+        // Per-job override caps the budget at 1 — this FAILED job is final.
+        Job finalFailure = failedAfterFirstAttempt("threadmill.retry.maxAttempts", "1");
+
+        int recovered = interceptor.recoverStrandedFailures(10, Duration.ZERO);
+
+        assertThat(recovered).isZero();
+        assertThat(store.findById(finalFailure.id()).orElseThrow().currentState())
+                .isEqualTo(JobState.FAILED);
+    }
+
+    @Test
+    void recoveryScanLeavesYoungFailedJobsToTheLiveHook() {
+        var interceptor = new RetryInterceptor(store, 3, Duration.ofMillis(100));
+        Job young = failedAfterFirstAttempt(null, null);
+
+        int recovered = interceptor.recoverStrandedFailures(10, Duration.ofMinutes(5));
+
+        assertThat(recovered).isZero();
+        assertThat(store.findById(young.id()).orElseThrow().currentState()).isEqualTo(JobState.FAILED);
+    }
+
+    @Test
+    void shutdownInterruptRescheduledImmediatelyWithoutConsumingAnAttempt() {
+        var interceptor = new RetryInterceptor(store, 3, Duration.ofSeconds(10));
+        Job failed = failedAfterFirstAttempt(null, null);
+        assertThat(failed.attempts()).isEqualTo(1);
+
+        interceptor.onProcessingFailed(
+                failed, null, new InterruptedException("node closing"), JobInterceptor.FailureCause.SHUTDOWN);
+
+        Job rescheduled = store.findById(failed.id()).orElseThrow();
+        assertThat(rescheduled.currentState()).isEqualTo(JobState.SCHEDULED);
+        // Immediately due — a surviving node picks it up at the next promotion.
+        assertThat(rescheduled.scheduledFor().orElseThrow()).isBeforeOrEqualTo(Instant.now());
+        // The claim-time increment is reverted: rolling deploys never erode budget.
+        assertThat(rescheduled.attempts()).isZero();
+    }
+
+    @Test
     void firstRetryDelayEqualsInitialBackoff() {
         var interceptor = new RetryInterceptor(store, 3, Duration.ofSeconds(10));
         Job failed = failedAfterFirstAttempt(null, null);

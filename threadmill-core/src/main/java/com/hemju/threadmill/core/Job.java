@@ -263,6 +263,15 @@ public final class Job {
     }
 
     /**
+     * Undo one claim-time attempt increment. Engine use only: when a handler
+     * is interrupted because its node is shutting down, the attempt did not
+     * fail on its own merits and must not consume retry budget.
+     */
+    public synchronized void revertAttempt() {
+        this.attempts = Math.max(0, this.attempts - 1);
+    }
+
+    /**
      * Adopt a new persisted version after a successful save. The store calls
      * this <em>after</em> the write commits; never before. A failed save
      * leaves the in-memory version untouched and the job reusable.

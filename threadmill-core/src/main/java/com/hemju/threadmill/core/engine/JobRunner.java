@@ -9,6 +9,7 @@ import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BooleanSupplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,6 +37,13 @@ import com.hemju.threadmill.core.store.JobStore;
  *
  * <p>A job whose handler cannot be resolved or whose payload cannot be
  * deserialized is moved to {@code QUARANTINED}; it never crashes a loop.
+ *
+ * <p><strong>Engine-internal.</strong> This class is {@code public} only for
+ * the engine's own cross-package wiring and its test harnesses; it is NOT
+ * part of Threadmill's supported public API. Its constructors, methods, and
+ * behavior may change in any release without notice — do not reference it
+ * from application code. The supported surface is {@code ProcessingNode},
+ * {@code Scheduler}, and the SPI interfaces.
  */
 public final class JobRunner {
 
@@ -50,6 +58,9 @@ public final class JobRunner {
     private final Duration jobTimeout;
     private final ProcessingNodeConfig config;
     private final ScheduledExecutorService timeoutExecutor;
+    // Set by the owning ProcessingNode; true once close() has begun. Lets the
+    // failure path distinguish a shutdown interrupt from a handler fault.
+    private volatile BooleanSupplier shuttingDown = () -> false;
 
     public JobRunner(
             JobStore store,
@@ -79,6 +90,11 @@ public final class JobRunner {
                         .unstarted(r));
         executor.setRemoveOnCancelPolicy(true);
         this.timeoutExecutor = executor;
+    }
+
+    /** Wire the owning node's shutdown signal; claimed before {@link #run} is first called. */
+    public void shutdownSignal(BooleanSupplier signal) {
+        this.shuttingDown = Objects.requireNonNull(signal, "signal");
     }
 
     /** Stops the timeout watchdog. Intended for engine shutdown. */
@@ -175,10 +191,18 @@ public final class JobRunner {
             watchdog.cancel(false);
             Thread.interrupted();
             ctx.flushBestEffort();
-            JobInterceptor.FailureCause cause = (t instanceof HandlerTimeoutException || timedOut.get())
-                    ? JobInterceptor.FailureCause.TIMEOUT
-                    : JobInterceptor.FailureCause.EXCEPTION;
-            recordFailure(job, ctx, unwrap(t), cause);
+            Throwable unwrapped = unwrap(t);
+            JobInterceptor.FailureCause cause;
+            if (t instanceof HandlerTimeoutException || timedOut.get()) {
+                cause = JobInterceptor.FailureCause.TIMEOUT;
+            } else if (unwrapped instanceof InterruptedException && shuttingDown.getAsBoolean()) {
+                // The node is closing and shutdownNow() interrupted the
+                // handler mid-run — not the job's fault.
+                cause = JobInterceptor.FailureCause.SHUTDOWN;
+            } else {
+                cause = JobInterceptor.FailureCause.EXCEPTION;
+            }
+            recordFailure(job, ctx, unwrapped, cause);
         }
     }
 
@@ -375,6 +399,7 @@ public final class JobRunner {
             case TIMEOUT -> "engine.timeout";
             case ORPHAN_RECLAIM -> "engine.orphan-reclaim";
             case QUARANTINE -> "engine.quarantine";
+            case SHUTDOWN -> "engine.shutdown";
         };
     }
 

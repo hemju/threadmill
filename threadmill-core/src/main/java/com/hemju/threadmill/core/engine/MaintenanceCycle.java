@@ -45,6 +45,13 @@ import com.hemju.threadmill.core.store.JobStore;
  *   <li>{@code retentionInterval} drives retention sweeps — old SUCCEEDED jobs,
  *       expired dedup keys, and stale node-heartbeat rows. Default 1 h.</li>
  * </ul>
+ *
+ * <p><strong>Engine-internal.</strong> This class is {@code public} only for
+ * the engine's own cross-package wiring and its test harnesses; it is NOT
+ * part of Threadmill's supported public API. Its constructors, methods, and
+ * behavior may change in any release without notice — do not reference it
+ * from application code. The supported surface is {@code ProcessingNode},
+ * {@code Scheduler}, and the SPI interfaces.
  */
 public final class MaintenanceCycle {
 
@@ -55,6 +62,7 @@ public final class MaintenanceCycle {
     private final NodeRegistry registry;
     private final JobRunner runner;
     private final RecurringMaterializer materializer;
+    private final RetryInterceptor retryInterceptor;
     private final ProcessingNodeConfig config;
     private final LocalWakeBus wakeBus;
     private final AtomicBoolean running = new AtomicBoolean(false);
@@ -67,8 +75,9 @@ public final class MaintenanceCycle {
             NodeRegistry registry,
             JobRunner runner,
             RecurringMaterializer materializer,
+            RetryInterceptor retryInterceptor,
             ProcessingNodeConfig config) {
-        this(store, nodeId, registry, runner, materializer, config, new LocalWakeBus());
+        this(store, nodeId, registry, runner, materializer, retryInterceptor, config, new LocalWakeBus());
     }
 
     public MaintenanceCycle(
@@ -77,6 +86,7 @@ public final class MaintenanceCycle {
             NodeRegistry registry,
             JobRunner runner,
             RecurringMaterializer materializer,
+            RetryInterceptor retryInterceptor,
             ProcessingNodeConfig config,
             LocalWakeBus wakeBus) {
         this.store = Objects.requireNonNull(store, "store");
@@ -84,6 +94,7 @@ public final class MaintenanceCycle {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.runner = Objects.requireNonNull(runner, "runner");
         this.materializer = Objects.requireNonNull(materializer, "materializer");
+        this.retryInterceptor = Objects.requireNonNull(retryInterceptor, "retryInterceptor");
         this.config = Objects.requireNonNull(config, "config");
         this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
     }
@@ -178,6 +189,7 @@ public final class MaintenanceCycle {
                     reclaimOrphans();
                     if (!now.isBefore(nextRetention)) {
                         retentionSweep();
+                        recoverStrandedFailedJobs();
                         nodeHeartbeatRetentionSweep();
                         dedupRetentionSweep();
                         reconcileOrphanedWorkflowChildren();
@@ -230,6 +242,26 @@ public final class MaintenanceCycle {
 
     /** Cap on AWAITING jobs inspected per reconciliation pass. */
     private static final int WORKFLOW_RECONCILE_SCAN = 500;
+
+    /**
+     * A FAILED job younger than this is left to the live retry hook — the
+     * reschedule save normally lands within milliseconds of the FAILED save.
+     */
+    private static final Duration STRANDED_FAILED_MIN_AGE = Duration.ofMinutes(5);
+
+    /**
+     * Rescue jobs stranded in FAILED with unspent retry budget (a crash in
+     * the window between the FAILED save and the reschedule save). Must run
+     * BEFORE the workflow reconciliation sweep: a recovered parent is
+     * SCHEDULED again by the time the sweep judges its AWAITING children,
+     * so they are left alone instead of abandoned.
+     */
+    private void recoverStrandedFailedJobs() {
+        int recovered = retryInterceptor.recoverStrandedFailures(WORKFLOW_RECONCILE_SCAN, STRANDED_FAILED_MIN_AGE);
+        if (recovered > 0) {
+            LOG.info("Recovered {} jobs stranded in FAILED with unspent retry budget", recovered);
+        }
+    }
 
     /**
      * Recover workflow children stranded in AWAITING because their predecessor
