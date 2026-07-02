@@ -75,4 +75,29 @@ class WorkflowReconciliationTest {
 
         assertThat(store.findById(child.id()).orElseThrow().currentState()).isEqualTo(JobState.AWAITING);
     }
+
+    @Test
+    @DisplayName("a stranded child beyond the first search window is still rescued")
+    void rescuesAStrandedChildBeyondTheFirstSearchWindow() {
+        // The stranded child is the OLDEST awaiting job; searches return
+        // newest-first, so with a fixed single window it would be permanently
+        // shadowed the moment the live AWAITING population exceeds the
+        // window. The sweep must page through the whole population.
+        Job root = Jobs.enqueued("com.example.Root");
+        Job stranded = Jobs.awaitingWorkflowStep("com.example.Stranded", root);
+        store.insert(stranded);
+        driveToTerminal(root, JobState.SUCCEEDED);
+
+        // Flood with newer, legitimately-waiting children of a live parent.
+        Job activeParent = Jobs.enqueued("com.example.ActiveParent");
+        store.insert(activeParent);
+        for (int i = 0; i < 12; i++) {
+            store.insert(Jobs.awaitingWorkflowStep("com.example.Waiting" + i, activeParent));
+        }
+
+        // Page size 5 — far smaller than the 13-job AWAITING population.
+        new WorkflowInterceptor(store).reconcileOrphanedAwaitingChildren(5);
+
+        assertThat(store.findById(stranded.id()).orElseThrow().currentState()).isEqualTo(JobState.ENQUEUED);
+    }
 }

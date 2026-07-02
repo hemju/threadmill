@@ -76,29 +76,43 @@ public final class WorkflowInterceptor implements JobInterceptor {
                 && store.countsByState().getOrDefault(JobState.AWAITING, 0L) == 0L) {
             return;
         }
-        List<Job> awaiting = store.searchJobs(new JobSearch(JobState.AWAITING, null, null, max, 0));
+        // Page through the WHOLE AWAITING population, not just the first
+        // window: stores return the search newest-first, and a stranded
+        // child's current_state_at never changes — a single fixed window
+        // would permanently shadow exactly the jobs this sweep exists to
+        // rescue once the live AWAITING population outgrows it. Pages keep
+        // memory flat; offset drift from concurrent promotions can skip or
+        // repeat entries within one sweep, which is fine — every decision is
+        // idempotent and the sweep reruns each retention tick.
         var handledParents = new HashSet<JobId>();
-        for (Job child : awaiting) {
-            if (child.relationship().isEmpty()) continue;
-            JobRelationship rel = child.relationship().get();
-            if (rel.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
-            JobId parentId = rel.parentId();
-            if (!handledParents.add(parentId)) continue;
-            JobState parentState =
-                    store.findById(parentId).map(Job::currentState).orElse(null);
-            if (parentState == JobState.SUCCEEDED) {
-                promoteAwaitingSuccessorsOf(parentId);
-            } else if (parentState == null
-                    || parentState == JobState.FAILED
-                    || parentState == JobState.QUARANTINED
-                    || parentState == JobState.DELETED) {
-                // Failed (no pending retry), quarantined, deleted, or hard-deleted
-                // by retention: the predecessor can never promote this child, so
-                // abandon the subtree. ENQUEUED/SCHEDULED/PROCESSING/AWAITING all
-                // mean the predecessor is still in flight — leave the child be.
-                // (FAILED is not state.isTerminal() because a retry can resurrect
-                // it, but a predecessor sitting in FAILED at this cadence is done.)
-                abandonAwaitingSuccessorsOf(parentId);
+        int pageSize = Math.max(1, max);
+        for (int offset = 0; ; offset += pageSize) {
+            List<Job> awaiting = store.searchJobs(new JobSearch(JobState.AWAITING, null, null, pageSize, offset));
+            for (Job child : awaiting) {
+                if (child.relationship().isEmpty()) continue;
+                JobRelationship rel = child.relationship().get();
+                if (rel.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
+                JobId parentId = rel.parentId();
+                if (!handledParents.add(parentId)) continue;
+                JobState parentState =
+                        store.findById(parentId).map(Job::currentState).orElse(null);
+                if (parentState == JobState.SUCCEEDED) {
+                    promoteAwaitingSuccessorsOf(parentId);
+                } else if (parentState == null
+                        || parentState == JobState.FAILED
+                        || parentState == JobState.QUARANTINED
+                        || parentState == JobState.DELETED) {
+                    // Failed (no pending retry), quarantined, deleted, or hard-deleted
+                    // by retention: the predecessor can never promote this child, so
+                    // abandon the subtree. ENQUEUED/SCHEDULED/PROCESSING/AWAITING all
+                    // mean the predecessor is still in flight — leave the child be.
+                    // (FAILED is not state.isTerminal() because a retry can resurrect
+                    // it, but a predecessor sitting in FAILED at this cadence is done.)
+                    abandonAwaitingSuccessorsOf(parentId);
+                }
+            }
+            if (awaiting.size() < pageSize) {
+                return;
             }
         }
     }
