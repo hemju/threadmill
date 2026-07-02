@@ -737,14 +737,35 @@ public final class PostgresJobStore implements JobStore {
      * the counts trigger reconciles ENQUEUED → QUARANTINED.
      */
     private void quarantineUnreadable(Connection conn, UUID id, long version, Instant now) throws SQLException {
+        String concurrencyKey;
+        String concurrencyMode;
+        UUID workflowRoot;
         try (PreparedStatement ps = conn.prepareStatement(
                 "UPDATE threadmill_jobs SET state = 'QUARANTINED', current_state_at = ?, version = ? "
-                        + "WHERE id = ? AND version = ? AND state = 'ENQUEUED'")) {
+                        + "WHERE id = ? AND version = ? AND state = 'ENQUEUED' "
+                        + "RETURNING concurrency_key, concurrency_mode, workflow_root_id")) {
             ps.setTimestamp(1, Timestamp.from(now));
             ps.setLong(2, version + 1);
             ps.setObject(3, id);
             ps.setLong(4, version);
-            ps.executeUpdate();
+            try (ResultSet rs = ps.executeQuery()) {
+                if (!rs.next()) {
+                    return; // raced away — nothing was quarantined
+                }
+                concurrencyKey = rs.getString(1);
+                concurrencyMode = rs.getString(2);
+                workflowRoot = (UUID) rs.getObject(3);
+            }
+        }
+        // QUARANTINED is terminal: if the job's workflow root holds the key,
+        // this member's share must be released, or the key stays held forever
+        // (the queue-level wedge would just move to the concurrency key).
+        if (concurrencyKey != null && workflowRoot != null) {
+            releaseWorkflowHoldShare(
+                    conn,
+                    concurrencyKey,
+                    concurrencyMode == null ? null : ConcurrencyMode.valueOf(concurrencyMode),
+                    workflowRoot);
         }
         LOG.warn("Quarantined job {} during claim: its persisted body could not be deserialized", id);
     }
@@ -1933,13 +1954,28 @@ public final class PostgresJobStore implements JobStore {
         if (isTerminal(oldSnapshot.currentState()) || !isTerminal(newState)) {
             return;
         }
+        releaseWorkflowHoldShare(
+                conn,
+                oldSnapshot.concurrencyKey(),
+                oldSnapshot.concurrencyMode(),
+                oldSnapshot.workflowRootId().asUuid());
+    }
+
+    /**
+     * One member of the root's workflow left the non-terminal population:
+     * decrement the hold's outstanding count and, when it reaches zero,
+     * delete the hold and free its in-flight slot. A missing hold row is a
+     * no-op — never-claimed standalone jobs hold nothing.
+     */
+    private void releaseWorkflowHoldShare(Connection conn, String concurrencyKey, ConcurrencyMode mode, UUID root)
+            throws SQLException {
         int outstanding;
         try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_concurrency_workflow_holds "
                 + "SET outstanding = outstanding - 1 "
                 + "WHERE concurrency_key = ? AND workflow_root_id = ? "
                 + "RETURNING outstanding")) {
-            ps.setString(1, oldSnapshot.concurrencyKey());
-            ps.setObject(2, oldSnapshot.workflowRootId().asUuid());
+            ps.setString(1, concurrencyKey);
+            ps.setObject(2, root);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) {
                     return;
@@ -1952,16 +1988,15 @@ public final class PostgresJobStore implements JobStore {
         }
         try (PreparedStatement ps = conn.prepareStatement("DELETE FROM threadmill_concurrency_workflow_holds "
                 + "WHERE concurrency_key = ? AND workflow_root_id = ?")) {
-            ps.setString(1, oldSnapshot.concurrencyKey());
-            ps.setObject(2, oldSnapshot.workflowRootId().asUuid());
+            ps.setString(1, concurrencyKey);
+            ps.setObject(2, root);
             ps.executeUpdate();
         }
-        String column =
-                oldSnapshot.concurrencyMode() == ConcurrencyMode.EXCLUSIVE ? "exclusive_in_flight" : "shared_in_flight";
+        String column = mode == ConcurrencyMode.EXCLUSIVE ? "exclusive_in_flight" : "shared_in_flight";
         try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_concurrency_groups SET "
                 + column + " = GREATEST(" + column + " - 1, 0), last_modified = clock_timestamp() "
                 + "WHERE concurrency_key = ?")) {
-            ps.setString(1, oldSnapshot.concurrencyKey());
+            ps.setString(1, concurrencyKey);
             ps.executeUpdate();
         }
     }

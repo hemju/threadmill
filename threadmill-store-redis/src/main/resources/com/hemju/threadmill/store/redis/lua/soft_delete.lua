@@ -96,16 +96,23 @@ if old_concurrency_key ~= '' and old_workflows_key ~= '' and old_counters_key ~=
             redis.call('HDEL', old_workflow_counts_key, old_workflow_root_id)
         end
     end
-    local outstanding = redis.call('HINCRBY', old_workflows_key, old_workflow_root_id, -1)
-    if outstanding <= 0 then
-        redis.call('HDEL', old_workflows_key, old_workflow_root_id)
-        local field = 'shared_in_flight'
-        if old_concurrency_mode == 'EXCLUSIVE' then
-            field = 'exclusive_in_flight'
-        end
-        local next_count = redis.call('HINCRBY', old_counters_key, field, -1)
-        if next_count < 0 then
-            redis.call('HSET', old_counters_key, field, '0')
+    -- Release the hold share only when a hold actually exists for this root.
+    -- A never-claimed standalone keyed job has no hold entry; the insert path
+    -- guards its increment on hold existence, so an unguarded decrement here
+    -- would fabricate a -1 entry and then wrongly decrement the in-flight
+    -- counter other roots on this key rely on for admission.
+    if redis.call('HGET', old_workflows_key, old_workflow_root_id) ~= false then
+        local outstanding = redis.call('HINCRBY', old_workflows_key, old_workflow_root_id, -1)
+        if outstanding <= 0 then
+            redis.call('HDEL', old_workflows_key, old_workflow_root_id)
+            local field = 'shared_in_flight'
+            if old_concurrency_mode == 'EXCLUSIVE' then
+                field = 'exclusive_in_flight'
+            end
+            local next_count = redis.call('HINCRBY', old_counters_key, field, -1)
+            if next_count < 0 then
+                redis.call('HSET', old_counters_key, field, '0')
+            end
         end
     end
 end

@@ -136,6 +136,69 @@ class PostgresJobStoreRegressionTest {
         }
     }
 
+    @Test
+    void quarantinedKeyedWorkflowMemberReleasesTheWorkflowHold() throws SQLException {
+        JobStore store = store();
+        Job root = Job.builder()
+                .spec(JobSpec.of("com.example.Root", new JobArgument("java.lang.String", "\"x\"")))
+                .queue("default")
+                .concurrencyKey("project:corrupt")
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .build();
+        store.insert(root);
+        Job claimedRoot =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+
+        // A member enqueued under the root's active hold, then corrupted.
+        Job member = Job.builder()
+                .spec(JobSpec.of("com.example.Member", new JobArgument("java.lang.String", "\"x\"")))
+                .queue("default")
+                .concurrencyKey("project:corrupt")
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .workflowRootId(claimedRoot.id())
+                .build();
+        store.insert(member);
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps =
+                        conn.prepareStatement("UPDATE threadmill_jobs SET body = '{not valid json' WHERE id = ?")) {
+            ps.setObject(1, member.id().asUuid());
+            ps.executeUpdate();
+        }
+
+        // Root finishes; the hold survives on the member's account.
+        long rootVersion = claimedRoot.version();
+        claimedRoot.transitionTo(JobState.SUCCEEDED, Instant.now(), "test", null);
+        claimedRoot.clearOwner();
+        store.saveAtomic(claimedRoot, rootVersion);
+
+        // The claim pass quarantines the member — and must release the hold,
+        // or the key stays held forever (the queue-level wedge would just
+        // move to the concurrency key).
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .isEmpty();
+        try (Connection conn = dataSource.getConnection();
+                PreparedStatement ps = conn.prepareStatement(
+                        "SELECT count(*) FROM threadmill_concurrency_workflow_holds WHERE concurrency_key = ?")) {
+            ps.setString(1, "project:corrupt");
+            try (ResultSet rs = ps.executeQuery()) {
+                assertThat(rs.next()).isTrue();
+                assertThat(rs.getInt(1)).as("hold rows left for the key").isZero();
+            }
+        }
+
+        // The key is claimable again for a fresh EXCLUSIVE.
+        Job next = Job.builder()
+                .spec(JobSpec.of("com.example.Next", new JobArgument("java.lang.String", "\"x\"")))
+                .queue("default")
+                .concurrencyKey("project:corrupt")
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .build();
+        store.insert(next);
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(next.id());
+    }
+
     private static Job sampleOnDefault() {
         return Job.builder()
                 .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))

@@ -682,6 +682,87 @@ class RedisJobStoreRegressionTest {
     }
 
     @Test
+    void quarantinedKeyedWorkflowMemberReleasesItsPendingEntryAndHoldShare() {
+        JobStore store = store();
+        Job root = keyedJob("com.example.Root", "project:corrupt", ConcurrencyMode.EXCLUSIVE);
+        store.insert(root);
+        Job claimedRoot =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+
+        // A member enqueued under the root's active hold — outstanding rises to 2.
+        Job member = Job.builder()
+                .spec(JobSpec.of("com.example.Member", new JobArgument("java.lang.String", "\"x\"")))
+                .concurrencyKey("project:corrupt")
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .workflowRootId(claimedRoot.id())
+                .build();
+        store.insert(member);
+        assertActiveWorkflowHold("project:corrupt", claimedRoot.id(), 2);
+
+        // Corrupt the member's body, then finish the root — the hold survives
+        // on the member's account.
+        RedisCommands<String, String> r = adminConnection.sync();
+        r.hset(RedisKeys.job(member.id()), "body", "{not valid json");
+        finish(store, claimedRoot, JobState.SUCCEEDED);
+        assertActiveWorkflowHold("project:corrupt", claimedRoot.id(), 1);
+
+        // Claiming hits the corrupt member: it must be quarantined AND release
+        // its concurrency state — pending entry, workflow count, hold share.
+        // Before the fix the quarantine left all three behind, wedging the KEY
+        // forever (the queue-level wedge just moved to the concurrency key).
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .isEmpty();
+        assertThat(r.hget(RedisKeys.job(member.id()), "state")).isEqualTo("QUARANTINED");
+        assertThat(r.zcard(RedisKeys.concurrencyPending("project:corrupt"))).isZero();
+        assertActiveWorkflowHold("project:corrupt", claimedRoot.id(), null);
+        assertWorkflowCount("project:corrupt", claimedRoot.id(), null);
+
+        // The key is claimable again for a fresh EXCLUSIVE.
+        Job next = keyedJob("com.example.Next", "project:corrupt", ConcurrencyMode.EXCLUSIVE);
+        store.insert(next);
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(next.id());
+        assertRedisIndexesConsistent();
+    }
+
+    @Test
+    void softDeleteOfANeverClaimedKeyedJobDoesNotReleaseAnotherRootsHold() {
+        JobStore store = store();
+        // Root A claims and holds the key SHARED (shared_in_flight = 1).
+        Job rootA = keyedJob("com.example.RootA", "project:guard", ConcurrencyMode.SHARED);
+        store.insert(rootA);
+        Job claimedA =
+                store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
+
+        // A never-claimed standalone SHARED job on the same key: it has no
+        // hold of its own (the insert-side increment is guarded on hold
+        // existence for ITS root).
+        Job pendingB = keyedJob("com.example.PendingB", "project:guard", ConcurrencyMode.SHARED);
+        store.insert(pendingB);
+
+        assertThat(store.softDelete(pendingB.id())).isTrue();
+
+        // Before the guard, soft_delete fabricated a -1 hold entry for B's
+        // root and then decremented shared_in_flight — releasing A's slot
+        // while A still runs, letting an EXCLUSIVE claim alongside it.
+        assertThat(adminConnection.sync().hget(RedisKeys.concurrencyCounters("project:guard"), "shared_in_flight"))
+                .isEqualTo("1");
+        assertActiveWorkflowHold("project:guard", claimedA.id(), 1);
+        Job exclusive = keyedJob("com.example.Excl", "project:guard", ConcurrencyMode.EXCLUSIVE);
+        store.insert(exclusive);
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .as("EXCLUSIVE must not be admitted while root A's SHARED hold is active")
+                .isEmpty();
+
+        finish(store, claimedA, JobState.SUCCEEDED);
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+                .extracting(Job::id)
+                .containsExactly(exclusive.id());
+        assertRedisIndexesConsistent();
+    }
+
+    @Test
     void findDueForPromotionSelfHealsDanglingIdsAndStillReturnsDueJobs() {
         JobStore store = store();
         Job scheduled = Job.builder()
