@@ -25,21 +25,35 @@ import com.hemju.threadmill.core.schedule.Scheduler;
  * <p>Pacing is intentionally simple: a deadline-based sleep loop, no
  * sliding-window jitter. Burstiness from natural Gradle / JVM jitter is
  * exactly what soak runs want to expose.
+ *
+ * <p>With {@code -Pproducers=N} the runner builds one generator per producer
+ * thread, each pacing at the split rate but all sharing one enqueued counter
+ * so the status line and {@code progress.json} report run totals.
  */
 public final class LoadGenerator {
 
     private final Scheduler scheduler;
     private final SoakTraceWriter trace;
     private final LatencyTracker latencyTracker;
-    private final AtomicLong enqueuedCount = new AtomicLong();
+    private final AtomicLong enqueuedCount;
     private final int jobsPerSecond;
 
     public LoadGenerator(Scheduler scheduler, SoakTraceWriter trace, LatencyTracker latencyTracker, int jobsPerSecond) {
+        this(scheduler, trace, latencyTracker, jobsPerSecond, new AtomicLong());
+    }
+
+    public LoadGenerator(
+            Scheduler scheduler,
+            SoakTraceWriter trace,
+            LatencyTracker latencyTracker,
+            int jobsPerSecond,
+            AtomicLong sharedEnqueuedCount) {
         this.scheduler = Objects.requireNonNull(scheduler, "scheduler");
         this.trace = Objects.requireNonNull(trace, "trace");
         this.latencyTracker = Objects.requireNonNull(latencyTracker, "latencyTracker");
         if (jobsPerSecond <= 0) throw new IllegalArgumentException("jobsPerSecond must be positive");
         this.jobsPerSecond = jobsPerSecond;
+        this.enqueuedCount = Objects.requireNonNull(sharedEnqueuedCount, "sharedEnqueuedCount");
     }
 
     public int jobsPerSecond() {

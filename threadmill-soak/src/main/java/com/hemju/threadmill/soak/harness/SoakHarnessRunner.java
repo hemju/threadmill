@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -62,6 +63,10 @@ public final class SoakHarnessRunner {
         RunConfigWriter.write(config, outputDir);
 
         SoakScenario scenario = Scenarios.of(config.scenario());
+        if (config.producers() > 1 && !scenario.supportsConcurrentProducers()) {
+            throw new IllegalArgumentException("scenario '" + scenario.name()
+                    + "' does not support -Pproducers > 1 — its workload has run-level side effects");
+        }
         JobStore store = fixture.store();
         Scheduler scheduler = new Scheduler(store, new JsonJobSerializer());
         Instant runStart = Instant.now();
@@ -86,7 +91,10 @@ public final class SoakHarnessRunner {
         LatencyTracker latency = new LatencyTracker(outputDir.latenciesJsonl());
         MetricsSampler metrics = new MetricsSampler(outputDir.metricsJsonl(), store, latency);
         SoakInterceptor interceptor = new SoakInterceptor(trace, latency);
-        LoadGenerator gen = new LoadGenerator(scheduler, trace, latency, config.jobsPerSecond());
+        // jobsPerSecond is the run's total target; each producer paces at the split.
+        int perProducerRate = Math.max(1, config.jobsPerSecond() / config.producers());
+        var enqueuedCount = new AtomicLong();
+        LoadGenerator gen = new LoadGenerator(scheduler, trace, latency, perProducerRate, enqueuedCount);
         StdoutStatusPrinter printer = new StdoutStatusPrinter(
                 taskLabel, config.scenario(), config.runId(), metrics, interceptor, gen.enqueuedCount());
         ProgressReporter progress = new ProgressReporter(
@@ -143,7 +151,11 @@ public final class SoakHarnessRunner {
                     },
                     abortRequested);
             try {
-                scenario.runWorkload(gen, ctx);
+                if (config.producers() == 1) {
+                    scenario.runWorkload(gen, ctx);
+                } else {
+                    runProducers(scenario, ctx, gen, scheduler, trace, latency, perProducerRate, enqueuedCount);
+                }
             } finally {
                 if (churner != null) churner.stop();
             }
@@ -192,6 +204,43 @@ public final class SoakHarnessRunner {
         }
 
         return finishRun(verifier, interceptor, gen.enqueuedCount().get(), runStart, abortRequested.get());
+    }
+
+    /**
+     * Fan the workload out over {@code producers} virtual threads. The first
+     * producer reuses {@code gen}; the rest get their own generator at the
+     * same split rate, all sharing the run-total enqueued counter. A producer
+     * that dies is logged and the rest keep producing — losing one stream is
+     * a degraded stress test, not a reason to stop the others.
+     */
+    private void runProducers(
+            SoakScenario scenario,
+            SoakRunContext ctx,
+            LoadGenerator gen,
+            Scheduler scheduler,
+            SoakTraceWriter trace,
+            LatencyTracker latency,
+            int perProducerRate,
+            AtomicLong enqueuedCount)
+            throws InterruptedException {
+        var producerThreads = new ArrayList<Thread>(config.producers());
+        for (int p = 0; p < config.producers(); p++) {
+            LoadGenerator producerGen =
+                    p == 0 ? gen : new LoadGenerator(scheduler, trace, latency, perProducerRate, enqueuedCount);
+            int producerIndex = p;
+            producerThreads.add(Thread.ofVirtual().name("soak-producer-" + p).start(() -> {
+                try {
+                    scenario.runWorkload(producerGen, ctx);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                } catch (Exception e) {
+                    LOG.error("producer {} failed — the remaining producers keep running", producerIndex, e);
+                }
+            }));
+        }
+        for (Thread producer : producerThreads) {
+            producer.join();
+        }
     }
 
     private ProcessingNode startNode(

@@ -48,8 +48,24 @@ public interface SoakScenario {
      * Produce work for the duration of the run. The scenario may call into
      * the {@link SoakRunContext}'s pause/resume helpers for scenarios that
      * exercise those primitives.
+     *
+     * <p>With {@code -Pproducers=N} the harness invokes this method from N
+     * concurrent virtual threads against one scenario instance, each with its
+     * own rate-split {@link LoadGenerator}. Implementations that return
+     * {@code true} from {@link #supportsConcurrentProducers()} must therefore
+     * keep their workload state in locals (or thread-safe instance fields).
      */
     void runWorkload(LoadGenerator gen, SoakRunContext ctx) throws Exception;
+
+    /**
+     * Whether {@code runWorkload} may run on several producer threads at
+     * once. Scenarios whose workload has run-level side effects (closing a
+     * node, pausing queues) opt out — multiplying those effects per producer
+     * would change what the scenario tests.
+     */
+    default boolean supportsConcurrentProducers() {
+        return true;
+    }
 
     /**
      * Maximum wait after the producer stops before the harness assumes drain

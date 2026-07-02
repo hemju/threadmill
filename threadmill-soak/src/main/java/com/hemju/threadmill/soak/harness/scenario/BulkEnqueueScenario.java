@@ -6,6 +6,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
 
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.soak.harness.LoadGenerator;
@@ -25,6 +26,10 @@ import com.hemju.threadmill.soak.harness.invariant.SoakInvariant;
 public final class BulkEnqueueScenario implements SoakScenario {
 
     private static final int BATCH_SIZE = 50;
+
+    // Batch ids must stay unique when several producer threads run this
+    // workload concurrently — the bulkInsertAtomic invariant keys on them.
+    private final AtomicLong batchIdSequence = new AtomicLong();
 
     @Override
     public String name() {
@@ -54,7 +59,7 @@ public final class BulkEnqueueScenario implements SoakScenario {
             Instant batchDeadline = runStart.plusNanos(batchIdx * nanosPerBatch);
             gen.pace(batchDeadline);
 
-            String batchId = "batch-" + batchIdx;
+            String batchId = "batch-" + batchIdSequence.getAndIncrement();
             List<SoakPayloads.FixedWork> payloads = new ArrayList<>(BATCH_SIZE);
             for (int i = 0; i < BATCH_SIZE; i++) {
                 payloads.add(new SoakPayloads.FixedWork((int) (n + i), 4, 0.0));

@@ -23,6 +23,7 @@ public final class RunConfigWriter {
         m.put("duration", c.duration().toString());
         m.put("durationMillis", c.duration().toMillis());
         m.put("jobsPerSecond", c.jobsPerSecond());
+        m.put("producers", c.producers());
         m.put("workerCount", c.workerCount());
         m.put("nodes", c.nodes());
         m.put("outputDir", c.outputDir().toString());

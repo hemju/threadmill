@@ -27,6 +27,7 @@ public record EnduranceConfig(
         String scenario,
         Duration duration,
         int jobsPerSecond,
+        int producers,
         int workerCount,
         int nodes,
         Optional<Duration> nodeChurn,
@@ -58,6 +59,7 @@ public record EnduranceConfig(
         String scenario = prop("scenario", "mixed-workload");
         Duration duration = SoakHarnessConfig.parseDuration(prop("duration", "8h"));
         int jobsPerSecond = Integer.parseInt(prop("jobsPerSecond", "50"));
+        int producers = Integer.parseInt(prop("producers", "1"));
         int workerCount = Integer.parseInt(prop("workerCount", "8"));
         int nodes = Integer.parseInt(prop("nodes", "3"));
         String churnText = prop("nodeChurn", "10m");
@@ -83,6 +85,7 @@ public record EnduranceConfig(
                 scenario,
                 duration,
                 jobsPerSecond,
+                producers,
                 workerCount,
                 nodes,
                 nodeChurn,

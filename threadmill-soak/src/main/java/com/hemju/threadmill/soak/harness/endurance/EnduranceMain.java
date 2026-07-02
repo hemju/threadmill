@@ -124,6 +124,7 @@ public final class EnduranceMain {
         addProp(command, "scenario", config.scenario());
         addProp(command, "duration", config.duration().toMillis() + "ms");
         addProp(command, "jobsPerSecond", Integer.toString(config.jobsPerSecond()));
+        addProp(command, "producers", Integer.toString(config.producers()));
         addProp(command, "workerCount", Integer.toString(config.workerCount()));
         addProp(command, "nodes", Integer.toString(config.nodes()));
         addProp(command, "failFast", Boolean.toString(config.failFast()));
@@ -221,6 +222,7 @@ public final class EnduranceMain {
         m.put("duration", config.duration().toString());
         m.put("durationMillis", config.duration().toMillis());
         m.put("jobsPerSecond", config.jobsPerSecond());
+        m.put("producers", config.producers());
         m.put("workerCount", config.workerCount());
         m.put("nodes", config.nodes());
         m.put("nodeChurn", config.nodeChurn().map(Duration::toString).orElse(null));

@@ -81,7 +81,8 @@ The harness is distinct from:
 |---|---|---|
 | `-Pscenario=<name>` | `mixed-workload` | Which scenario to run. |
 | `-Pduration=<duration>` | `120s` | Wall-clock time the load generator runs (`90ms` / `30s` / `5m` / `8h`). |
-| `-PjobsPerSecond=<int>` | `100` | Target enqueue rate. Real backends typically take 2–4× this; tune via `-P`. |
+| `-PjobsPerSecond=<int>` | `100` | Target enqueue rate for the whole run (split across producers). Real backends typically take 2–4× this; tune via `-P`. |
+| `-Pproducers=<int>` | `1` | Concurrent producer threads. A single producer is capped by synchronous enqueue latency (~13/s on Postgres on a laptop); stress runs want 10+. `crash-recover` and `pause-resume` reject >1. |
 | `-PworkerCount=<int>` | `8` | Workers per node. |
 | `-Pnodes=<int>` | `1` | How many `ProcessingNode`s in the same JVM. |
 | `-PnodeChurn=<duration>` | off | Close-and-replace one node every interval (requires `-Pnodes=2`+). |

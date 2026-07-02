@@ -35,6 +35,13 @@ public final class CrashRecoverScenario implements SoakScenario {
     }
 
     @Override
+    public boolean supportsConcurrentProducers() {
+        // Each workload invocation closes one node mid-run; N producers would
+        // close N nodes and change what the scenario tests.
+        return false;
+    }
+
+    @Override
     public void runWorkload(LoadGenerator gen, SoakRunContext ctx) throws InterruptedException {
         Instant runStart = ctx.runStart();
         Duration total = ctx.duration();

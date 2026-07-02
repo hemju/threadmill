@@ -23,6 +23,7 @@ public record SoakHarnessConfig(
         String scenario,
         Duration duration,
         int jobsPerSecond,
+        int producers,
         int workerCount,
         int nodes,
         Path outputDir,
@@ -59,6 +60,12 @@ public record SoakHarnessConfig(
         // real backends or larger hardware will want to push -PjobsPerSecond
         // and -Pnodes higher; both are direct knobs.
         int jobsPerSecond = Integer.parseInt(prop("jobsPerSecond", "100"));
+        // jobsPerSecond stays the run's TOTAL target; each producer thread
+        // paces at jobsPerSecond / producers.
+        int producers = Integer.parseInt(prop("producers", "1"));
+        if (producers < 1) {
+            throw new IllegalArgumentException("-Pproducers must be at least 1");
+        }
         int workerCount = Integer.parseInt(prop("workerCount", "8"));
         int nodes = Integer.parseInt(prop("nodes", "1"));
         boolean failFast = Boolean.parseBoolean(prop("failFast", "true"));
@@ -83,6 +90,7 @@ public record SoakHarnessConfig(
                 scenario,
                 duration,
                 jobsPerSecond,
+                producers,
                 workerCount,
                 nodes,
                 outputDir,

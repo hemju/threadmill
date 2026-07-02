@@ -55,6 +55,7 @@ fun JavaExec.passSoakProps() {
             "scenario",
             "duration",
             "jobsPerSecond",
+            "producers",
             "workerCount",
             "nodes",
             "outputDir",

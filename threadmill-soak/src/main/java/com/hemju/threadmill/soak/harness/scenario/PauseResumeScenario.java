@@ -37,6 +37,14 @@ public final class PauseResumeScenario implements SoakScenario {
     }
 
     @Override
+    public boolean supportsConcurrentProducers() {
+        // Each workload invocation runs its own pause/resume bracket; N
+        // producers pausing and resuming the same queues concurrently would
+        // interleave brackets and make pauseObeyed unjudgeable.
+        return false;
+    }
+
+    @Override
     public void configureNode(ProcessingNode.Builder b) {
         b.lane("project:*", 8, QueueWeights.uniform());
     }
