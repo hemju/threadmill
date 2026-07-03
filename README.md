@@ -1,5 +1,9 @@
 # Threadmill
 
+[![Maven Central](https://img.shields.io/maven-central/v/com.hemju.threadmill/threadmill-core.svg?label=Maven%20Central)](https://central.sonatype.com/namespace/com.hemju.threadmill)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![Java 25](https://img.shields.io/badge/Java-25-orange.svg)](https://openjdk.org/projects/jdk/25/)
+
 A modern, lightweight background-job-processing library for Java 25.
 
 Threadmill runs your idempotent background work durably, on a cluster of
@@ -33,6 +37,32 @@ look expired, after a transient store outage. **Job handlers must be
 idempotent.** This is the single most important fact about the library.
 Design your handlers as if they will run twice for the same logical job —
 because, occasionally, they will.
+
+## Installation
+
+Threadmill is published to Maven Central under the `com.hemju.threadmill`
+group. Pick the core plus the store you run against (and the Spring Boot
+starter if you use Spring):
+
+```kotlin
+// build.gradle.kts
+implementation("com.hemju.threadmill:threadmill-core:0.1.0")
+implementation("com.hemju.threadmill:threadmill-store-postgres:0.1.0") // or -store-redis / -store-memory
+implementation("com.hemju.threadmill:threadmill-spring-boot:0.1.0")    // optional Spring Boot integration
+```
+
+```xml
+<!-- Maven -->
+<dependency>
+  <groupId>com.hemju.threadmill</groupId>
+  <artifactId>threadmill-core</artifactId>
+  <version>0.1.0</version>
+</dependency>
+```
+
+Optional modules: `threadmill-metrics` (Micrometer), `threadmill-tracing`
+(OpenTelemetry), and `threadmill-dashboard-spring` + `threadmill-dashboard-ui`
+(operations console).
 
 ## Quick start
 
