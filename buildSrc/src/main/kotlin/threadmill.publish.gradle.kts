@@ -5,6 +5,9 @@ plugins {
     `java-library`
     `maven-publish`
     signing
+    // Exposes this module's Maven publication to the root nmcp aggregation
+    // (com.gradleup.nmcp.aggregation) that uploads the Central Portal bundle.
+    id("com.gradleup.nmcp")
 }
 
 // A stable JPMS module name so a later jar rename cannot break downstream

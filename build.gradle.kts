@@ -1,7 +1,10 @@
 plugins {
     base
     alias(libs.plugins.spotless)
-    alias(libs.plugins.nmcp.aggregation)
+    // Applied without a version: the nmcp plugin is on the build classpath via
+    // buildSrc (so the per-module `com.gradleup.nmcp` plugin is applicable from
+    // the threadmill.publish convention plugin). Version is pinned in buildSrc.
+    id("com.gradleup.nmcp.aggregation")
 }
 
 // ---------------------------------------------------------------- Publishing

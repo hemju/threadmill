@@ -18,11 +18,9 @@ postgresql = "42.7.7"
 lettuce = "6.6.0.RELEASE"
 netty = "4.1.118.Final"
 networkntJsonschema = "1.5.4"
-nmcp = "1.6.1"
 
 [plugins]
 spotless = { id = "com.diffplug.spotless", version.ref = "spotless" }
-nmcp-aggregation = { id = "com.gradleup.nmcp.aggregation", version.ref = "nmcp" }
 
 [libraries]
 spring-boot-autoconfigure = { module = "org.springframework.boot:spring-boot-autoconfigure", version.ref = "springBoot" }
