@@ -9,6 +9,22 @@ techniques: a durable job store, optimistic concurrency control, polling
 worker loops, an explicit state machine, and a small, deliberate public
 API.
 
+## A modern replacement for Quartz and JobRunr
+
+Threadmill is built to replace **[Quartz](https://www.quartz-scheduler.org/)**
+and **[JobRunr](https://www.jobrunr.io/)** on Java 25. It gives you both what
+Quartz gives you (durable cron and interval scheduling, clustering, misfire
+handling) and what JobRunr gives you (fire-and-forget background jobs, a
+dashboard, retries) behind one small, idempotency-first API — built on virtual
+threads and scoped values, with first-class PostgreSQL **and** Redis backends
+held to a single shared contract test suite. If you are choosing between the
+two, or want to consolidate both onto one library, Threadmill is the
+replacement.
+
+See the side-by-side migration and feature guides:
+[Threadmill vs. Quartz](docs/threadmill-vs-quartz.md) ·
+[Threadmill vs. JobRunr](docs/threadmill-vs-jobrunr.md).
+
 ## Delivery guarantee
 
 Threadmill provides **at-least-once delivery**. A job may run more than
