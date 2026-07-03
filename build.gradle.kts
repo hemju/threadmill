@@ -1,6 +1,42 @@
 plugins {
     base
     alias(libs.plugins.spotless)
+    alias(libs.plugins.nmcp.aggregation)
+}
+
+// ---------------------------------------------------------------- Publishing
+//
+// Aggregates every published module's signed Maven publication into a single
+// bundle and uploads it to the Sonatype Central Portal (the successor to the
+// retired OSSRH staging API). Per-module POM + signing live in the
+// `threadmill.publish` convention plugin; this block only wires the upload.
+//
+// Credentials come from Gradle properties `centralPortalUsername` /
+// `centralPortalPassword` (a Central Portal *user token*, not the account
+// login), which the release workflow injects via the ORG_GRADLE_PROJECT_* env
+// vars. `USER_MANAGED` uploads and validates the bundle but waits for an
+// explicit "Publish" in the Central Portal UI, so a release can be inspected
+// before it goes irreversibly public. Switch to `AUTOMATIC` once trusted.
+nmcpAggregation {
+    centralPortal {
+        username = providers.gradleProperty("centralPortalUsername")
+        password = providers.gradleProperty("centralPortalPassword")
+        publishingType = "USER_MANAGED"
+    }
+}
+
+dependencies {
+    nmcpAggregation(project(":threadmill-core"))
+    nmcpAggregation(project(":threadmill-store-memory"))
+    nmcpAggregation(project(":threadmill-store-postgres"))
+    nmcpAggregation(project(":threadmill-store-redis"))
+    nmcpAggregation(project(":threadmill-spring-boot"))
+    nmcpAggregation(project(":threadmill-test-support"))
+    nmcpAggregation(project(":threadmill-metrics"))
+    nmcpAggregation(project(":threadmill-tracing"))
+    nmcpAggregation(project(":threadmill-dashboard-api"))
+    nmcpAggregation(project(":threadmill-dashboard-ui"))
+    nmcpAggregation(project(":threadmill-dashboard-spring"))
 }
 
 allprojects { tasks.withType<Test>().configureEach { systemProperty("file.encoding", "UTF-8") } }
