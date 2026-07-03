@@ -1,6 +1,9 @@
 # Changelog
 
-## 0.1.0-rc.1
+## 0.1.0
+
+First public release under the Apache-2.0 license.
+
 
 - Added claim-time per-key concurrency with `ConcurrencyMode`, workflow-root
   inheritance, store-backed enforcement in memory/Postgres/Redis, and
