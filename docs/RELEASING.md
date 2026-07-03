@@ -88,13 +88,14 @@ GitHub Environment named `release` with required reviewers for an approval gate.
 4. The tag push triggers `.github/workflows/release.yml`, which runs
    `./gradlew publishAggregationToCentralPortal`. This signs all 11 published
    modules, assembles one bundle, and uploads it to the Central Portal.
-5. Because the build uses `publishingType = "USER_MANAGED"`, the bundle is
-   **validated but not released**. Go to
-   <https://central.sonatype.com/publishing/deployments>, inspect the
-   deployment, and click **Publish** to release it to Maven Central (sync to
-   `repo.maven.apache.org` takes ~15–30 min; the search UI can lag a few hours).
-   - To skip the manual click on future releases, change `publishingType` to
-     `"AUTOMATIC"` in the root `build.gradle.kts`.
+5. The build uses `publishingType = "AUTOMATIC"`, so the deployment is
+   validated and then **published to Maven Central automatically** — no manual
+   click. Sync to `repo.maven.apache.org` takes ~15–30 min; the search UI can
+   lag a few hours. Track the deployment at
+   <https://central.sonatype.com/publishing/deployments>.
+   - To gate releases behind a manual review instead, change `publishingType`
+     back to `"USER_MANAGED"` in the root `build.gradle.kts`; the deployment
+     then waits for a **Publish** click in the Central Portal UI.
 6. Bump the version back to the next `-SNAPSHOT`/`rc` on `main`.
 
 ### Local dry-run (optional)

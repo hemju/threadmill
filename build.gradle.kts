@@ -17,14 +17,15 @@ plugins {
 // Credentials come from Gradle properties `centralPortalUsername` /
 // `centralPortalPassword` (a Central Portal *user token*, not the account
 // login), which the release workflow injects via the ORG_GRADLE_PROJECT_* env
-// vars. `USER_MANAGED` uploads and validates the bundle but waits for an
-// explicit "Publish" in the Central Portal UI, so a release can be inspected
-// before it goes irreversibly public. Switch to `AUTOMATIC` once trusted.
+// vars. `AUTOMATIC` uploads, validates, and then publishes the bundle to Maven
+// Central without a manual click — a tagged `v*` release goes live on its own.
+// Switch back to `USER_MANAGED` if you want to inspect a deployment in the
+// Central Portal UI and click "Publish" yourself before it goes public.
 nmcpAggregation {
     centralPortal {
         username = providers.gradleProperty("centralPortalUsername")
         password = providers.gradleProperty("centralPortalPassword")
-        publishingType = "USER_MANAGED"
+        publishingType = "AUTOMATIC"
     }
 }
 
