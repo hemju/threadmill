@@ -11,6 +11,9 @@
 --   [8] concurrency workflow counts HASH, or empty
 --   [9] awaiting_by_parent SET, or empty
 --   [10] queue registry SET
+--   [11] queue_keys HASH (key -> ENQUEUED count in this queue)
+--   [12] queue_unkeyed ZSET
+--   [13] concurrency pending_root ZSET, or empty (only for workflow members)
 --
 -- ARGV:
 --   [1] job id (string)
@@ -44,6 +47,9 @@ local workflows_key  = KEYS[7]
 local workflow_counts_key = KEYS[8]
 local awaiting_parent_key = KEYS[9]
 local queues_key          = KEYS[10]
+local queue_keys_key      = KEYS[11]
+local unkeyed_key         = KEYS[12]
+local pending_root_key    = KEYS[13]
 
 local job_id           = ARGV[1]
 local body             = ARGV[2]
@@ -92,6 +98,9 @@ end
 if concurrency_key ~= '' and pending_key ~= '' and pending_member ~= '' and
    (state == 'ENQUEUED' or state == 'SCHEDULED' or state == 'AWAITING') then
     redis.call('ZADD', pending_key, pending_score, pending_member)
+    if pending_root_key ~= '' then
+        redis.call('ZADD', pending_root_key, pending_score, pending_member)
+    end
 end
 if concurrency_key ~= '' and workflows_key ~= '' and
    redis.call('HGET', workflows_key, workflow_root_id) ~= false and
@@ -110,6 +119,11 @@ if state == 'ENQUEUED' then
     -- crash between the two would otherwise leave a durably ENQUEUED job in
     -- a queue the discovery paths cannot see.
     redis.call('SADD', queues_key, queue)
+    if concurrency_key ~= '' then
+        redis.call('HINCRBY', queue_keys_key, concurrency_key, 1)
+    else
+        redis.call('ZADD', unkeyed_key, active_score, job_id)
+    end
 end
 redis.call('ZADD', state_time_key, state_time, job_id)
 redis.call('SADD', handler_key, job_id)

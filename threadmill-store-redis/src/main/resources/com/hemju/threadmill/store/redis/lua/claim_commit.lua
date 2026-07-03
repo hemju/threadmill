@@ -15,6 +15,9 @@
 --   [9] concurrency pending ZSET, or empty
 --   [10] concurrency workflows HASH, or empty
 --   [11] concurrency workflow counts HASH, or empty
+--   [12] queue_keys HASH (key -> ENQUEUED count in this queue)
+--   [13] queue_unkeyed ZSET
+--   [14] concurrency pending_root ZSET, or empty
 
 -- ARGV:
 --   [1] job id
@@ -40,6 +43,9 @@ local counters_key = KEYS[8]
 local pending_key = KEYS[9]
 local workflows_key = KEYS[10]
 local workflow_counts_key = KEYS[11]
+local queue_keys_key = KEYS[12]
+local unkeyed_key = KEYS[13]
+local pending_root_key = KEYS[14]
 
 local job_id = ARGV[1]
 local expected_version = tonumber(ARGV[2])
@@ -129,8 +135,19 @@ if concurrency_key ~= '' then
         redis.call('HSET', workflows_key, workflow_root_id, tostring(outstanding_count))
     end
     redis.call('ZREM', pending_key, pending_member)
+    if pending_root_key ~= '' then
+        redis.call('ZREM', pending_root_key, pending_member)
+    end
 end
 
+if concurrency_key ~= '' then
+    local remaining = redis.call('HINCRBY', queue_keys_key, concurrency_key, -1)
+    if remaining <= 0 then
+        redis.call('HDEL', queue_keys_key, concurrency_key)
+    end
+else
+    redis.call('ZREM', unkeyed_key, job_id)
+end
 redis.call('ZREM', queue_key, job_id)
 redis.call('ZREM', enqueued_state_time, job_id)
 redis.call('ZADD', processing_all, heartbeat_ms, job_id)

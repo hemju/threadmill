@@ -42,6 +42,18 @@ import com.hemju.threadmill.core.NodeId;
  *       counts for claim-time per-key concurrency.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:pending} — ZSET of pending
  *       concurrency members, scored by enqueue-time micros.</li>
+ *   <li>{@code {threadmill}:concurrency:{key}:pending_root:{rootId}} — per
+ *       workflow-root mirror of the pending ZSET (same members and scores),
+ *       maintained only for jobs whose {@code workflow_root_id} differs from
+ *       their own id. Lets the claim path find active-hold members without
+ *       scanning the whole pending population.</li>
+ *   <li>{@code {threadmill}:queue_keys:{queue}} — HASH concurrency-key &rarr;
+ *       count of ENQUEUED keyed jobs of that key in the queue. The claim
+ *       path enumerates keys from here so its cost scales with keys, never
+ *       with backlog depth.</li>
+ *   <li>{@code {threadmill}:queue_unkeyed:{queue}} — ZSET of ENQUEUED
+ *       unkeyed job ids, scored like the queue ZSET, so the unkeyed claim
+ *       lane never pages past keyed work.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflows} — HASH workflow root
  *       id → active outstanding hold count.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflow_counts} — HASH workflow
@@ -142,6 +154,28 @@ public final class RedisKeys {
     public static String concurrencyPending(String key) {
         Objects.requireNonNull(key, "key");
         return PREFIX + "concurrency:" + userSegment(key) + ":pending";
+    }
+
+    /**
+     * Per workflow-root mirror of {@link #concurrencyPending(String)}, kept only
+     * for members whose workflow root differs from their own job id.
+     */
+    public static String concurrencyPendingRoot(String key, String rootId) {
+        Objects.requireNonNull(key, "key");
+        Objects.requireNonNull(rootId, "rootId");
+        return PREFIX + "concurrency:" + userSegment(key) + ":pending_root:" + rootId;
+    }
+
+    /** HASH concurrency-key &rarr; count of ENQUEUED keyed jobs of that key in the queue. */
+    public static String queueKeys(String queue) {
+        Objects.requireNonNull(queue, "queue");
+        return PREFIX + "queue_keys:" + userSegment(queue);
+    }
+
+    /** ZSET of ENQUEUED unkeyed job ids in the queue, scored like the queue ZSET. */
+    public static String queueUnkeyed(String queue) {
+        Objects.requireNonNull(queue, "queue");
+        return PREFIX + "queue_unkeyed:" + userSegment(queue);
     }
 
     public static String concurrencyWorkflows(String key) {

@@ -140,7 +140,7 @@ sequenceDiagram
     participant H as Handler
 
     D->>R: claimReady(queue, capacity)
-    R->>Q: page candidate ids by queue order
+    R->>Q: gather candidates from key-driven lanes
     loop each candidate
         R->>R: read job hash and prepare PROCESSING body
         alt candidate has concurrency key
@@ -182,8 +182,12 @@ slot.
   serial.
 - Multiple Java dispatchers can scan candidates concurrently, but only a Lua
   script can commit a claim.
-- A blocked hot-key page does not end the claim. Redis keeps paging through the
-  queue ZSET until it fills the claim batch or exhausts the queue.
+- Candidate gathering is key-driven, never backlog-walking: unkeyed heads come
+  from a per-queue unkeyed ZSET, keyed candidates come from each key's
+  pending-order head (keys are discovered through a per-queue key registry),
+  and active-workflow-hold members come from per-root pending mirrors. A
+  blocked hot key costs a handful of reads per pass regardless of how many
+  jobs are queued behind it.
 - Different concurrency keys avoid logical interference, although they still
   share one Redis server execution lane.
 - The same concurrency key is additionally serialized by the per-key claim

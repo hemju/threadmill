@@ -13,6 +13,9 @@
 --   [9] old concurrency workflows HASH, or empty
 --   [10] old concurrency workflow counts HASH, or empty
 --   [11] awaiting_by_parent SET, or empty
+--   [12] old queue_keys HASH (key -> ENQUEUED count in old queue)
+--   [13] old queue_unkeyed ZSET
+--   [14] old concurrency pending_root ZSET, or empty
 --
 -- ARGV:
 --   [1] job id
@@ -39,6 +42,9 @@ local old_counters_key   = KEYS[8]
 local old_workflows_key  = KEYS[9]
 local old_workflow_counts_key = KEYS[10]
 local awaiting_parent_key = KEYS[11]
+local old_queue_keys_key = KEYS[12]
+local old_unkeyed_key = KEYS[13]
+local old_pending_root_key = KEYS[14]
 
 local job_id   = ARGV[1]
 local new_body = ARGV[2]
@@ -82,6 +88,19 @@ end
 redis.call('ZREM', old_state_time_key, job_id)
 if old_pending_key ~= '' and old_pending_member ~= '' then
     redis.call('ZREM', old_pending_key, old_pending_member)
+    if old_pending_root_key ~= '' then
+        redis.call('ZREM', old_pending_root_key, old_pending_member)
+    end
+end
+if old_state == 'ENQUEUED' then
+    if old_concurrency_key ~= '' then
+        local remaining = redis.call('HINCRBY', old_queue_keys_key, old_concurrency_key, -1)
+        if remaining <= 0 then
+            redis.call('HDEL', old_queue_keys_key, old_concurrency_key)
+        end
+    else
+        redis.call('ZREM', old_unkeyed_key, job_id)
+    end
 end
 if awaiting_parent_key ~= '' and old_state == 'AWAITING' then
     redis.call('SREM', awaiting_parent_key, job_id)

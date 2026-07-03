@@ -37,8 +37,11 @@ class RedisKeysTest {
                 RedisKeys.concurrencyClaimLock("project:42"),
                 RedisKeys.concurrencyCounters("project:42"),
                 RedisKeys.concurrencyPending("project:42"),
+                RedisKeys.concurrencyPendingRoot("project:42", JobId.newId().toString()),
                 RedisKeys.concurrencyWorkflows("project:42"),
-                RedisKeys.concurrencyWorkflowCounts("project:42"));
+                RedisKeys.concurrencyWorkflowCounts("project:42"),
+                RedisKeys.queueKeys("default"),
+                RedisKeys.queueUnkeyed("default"));
 
         assertThat(keys)
                 .allSatisfy(key -> assertThat(SlotHash.getSlot(key)).as(key).isEqualTo(slot));

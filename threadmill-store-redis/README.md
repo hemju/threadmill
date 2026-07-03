@@ -46,6 +46,8 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:by_state_time:{STATE}` | ZSET | Ids scored by `current_state_at`. Used for retention. |
 | `{threadmill}:counts` | HASH | State → cardinality. `HINCRBY` inside every state-changing script. **Never** `SCARD` / `ZCARD` for live counts. |
 | `{threadmill}:queues` | SET | Active queue names (membership maintained by `claim_commit`). |
+| `{threadmill}:queue_keys:{queue}` | HASH | Concurrency key → count of ENQUEUED keyed jobs of that key in the queue. The claim path enumerates keys from here so its cost scales with keys, never with backlog depth. |
+| `{threadmill}:queue_unkeyed:{queue}` | ZSET | ENQUEUED unkeyed job ids, scored like the queue ZSET. The unkeyed claim lane never pages past keyed work. |
 | `{threadmill}:queue_pauses` | HASH | Paused queue → reason. |
 | `{threadmill}:cron_task_namespace:{namespace}` | SET | Cron task names owned by one reconciliation namespace. |
 | `{threadmill}:cron_task_namespaces` | SET | Known recurring reconciliation namespaces. |
@@ -56,6 +58,7 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:dedup_expiry` | ZSET | Dedup record expiries; maintenance cleanup reads this. |
 | `{threadmill}:concurrency:{key}:counters` | HASH | Per-key in-flight counts (`exclusive_in_flight`, `shared_in_flight`). |
 | `{threadmill}:concurrency:{key}:pending` | ZSET | Pending concurrency members, scored by enqueue-time micros. |
+| `{threadmill}:concurrency:{key}:pending_root:{root}` | ZSET | Per workflow-root mirror of `pending` (same members and scores), kept only for members whose workflow root differs from their own job id. Lets the claim path find active-hold members without scanning the pending population. |
 | `{threadmill}:concurrency:{key}:workflows` | HASH | Workflow root id → active outstanding hold count. Presence means the workflow currently owns the key. |
 | `{threadmill}:concurrency:{key}:workflow_counts` | HASH | Workflow root id → total non-terminal job count. Maintained incrementally so claim does not scan active jobs. |
 | `{threadmill}:concurrency:{key}:claim_lock` | STRING | Short-lived mutex around per-key claim bookkeeping. |
@@ -106,11 +109,19 @@ server (single-threaded execution).
 
 Never a destructive `BLPOP` / `ZPOPMIN`. The flow is:
 
-1. Java reads candidate ids from `{threadmill}:queue:{queue}` (ZRANGE).
+1. Java gathers candidates from bounded, key-driven lanes — unkeyed heads
+   from `{threadmill}:queue_unkeyed:{queue}`, per-concurrency-key
+   pending-order head runs discovered through `{threadmill}:queue_keys:{queue}`,
+   and active-workflow-hold members via the `pending_root` mirrors — then
+   sorts them by queue-ZSET score (priority-aware). The gathering cost
+   scales with the number of keys and in-flight holds, never with backlog
+   depth; it deliberately never pages the queue ZSET past blocked work.
 2. For each candidate, Java prepares the new body with the `PROCESSING`
    state-history entry appended and the version bumped.
-3. `claim_commit.lua` verifies version / state / queue membership and
-   commits the new body + every index update + counts in one atomic call.
+3. `claim_commit.lua` verifies version / state / queue membership plus the
+   concurrency admission rules (it is the single admission authority — the
+   gathering reads are unlocked approximations) and commits the new body +
+   every index update + counts in one atomic call.
 
 A crash before step 3 leaves the job in ENQUEUED. A crash after step 3
 leaves a complete PROCESSING record for the orphan-recovery path.

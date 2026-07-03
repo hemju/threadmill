@@ -10,6 +10,7 @@ import java.util.EnumMap;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -21,12 +22,14 @@ import java.util.concurrent.locks.LockSupport;
 
 import io.lettuce.core.AbstractRedisClient;
 import io.lettuce.core.KeyScanCursor;
+import io.lettuce.core.KeyValue;
 import io.lettuce.core.Limit;
 import io.lettuce.core.Range;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisCommandExecutionException;
 import io.lettuce.core.RedisURI;
 import io.lettuce.core.ScanArgs;
+import io.lettuce.core.ScoredValue;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.SetArgs;
 import io.lettuce.core.ZAddArgs;
@@ -373,7 +376,10 @@ public final class RedisJobStore implements JobStore {
             concurrencyWorkflowsKey(snapshot.concurrencyKey()),
             concurrencyWorkflowCountsKey(snapshot.concurrencyKey()),
             awaitingParentKey(snapshot),
-            RedisKeys.QUEUES
+            RedisKeys.QUEUES,
+            RedisKeys.queueKeys(snapshot.queue()),
+            RedisKeys.queueUnkeyed(snapshot.queue()),
+            pendingRootKey(snapshot)
         };
         var args = new String[] {
             snapshot.id().toString(),
@@ -469,9 +475,9 @@ public final class RedisJobStore implements JobStore {
         }
 
         try {
-            // Pack 10 keys + 18 args per job for the batched Lua script.
+            // Pack 13 keys + 18 args per job for the batched Lua script.
             int n = snapshots.size();
-            var keyList = new ArrayList<String>(n * 10);
+            var keyList = new ArrayList<String>(n * 13);
             var argList = new ArrayList<String>(1 + n * 18);
             argList.add(Integer.toString(n));
             for (int i = 0; i < n; i++) {
@@ -489,6 +495,9 @@ public final class RedisJobStore implements JobStore {
                 keyList.add(concurrencyWorkflowCountsKey(snap.concurrencyKey()));
                 keyList.add(awaitingParentKey(snap));
                 keyList.add(RedisKeys.QUEUES);
+                keyList.add(RedisKeys.queueKeys(snap.queue()));
+                keyList.add(RedisKeys.queueUnkeyed(snap.queue()));
+                keyList.add(pendingRootKey(snap));
 
                 argList.add(snap.id().toString());
                 argList.add(bodies.get(i));
@@ -606,7 +615,10 @@ public final class RedisJobStore implements JobStore {
                         concurrencyWorkflowsKey(snapshot.concurrencyKey()),
                         concurrencyWorkflowCountsKey(snapshot.concurrencyKey()),
                         awaitingParentKey(snapshot),
-                        RedisKeys.QUEUES
+                        RedisKeys.QUEUES,
+                        RedisKeys.queueKeys(snapshot.queue()),
+                        RedisKeys.queueUnkeyed(snapshot.queue()),
+                        pendingRootKey(snapshot)
                     },
                     snapshot.id().toString(),
                     body,
@@ -711,7 +723,13 @@ public final class RedisJobStore implements JobStore {
             concurrencyWorkflowCountsKey(oldConcurrencyKey),
             concurrencyWorkflowCountsKey(snapshot.concurrencyKey()),
             awaitingParentKey(snapshot),
-            RedisKeys.QUEUES
+            RedisKeys.QUEUES,
+            RedisKeys.queueKeys(oldQueue),
+            RedisKeys.queueKeys(snapshot.queue()),
+            RedisKeys.queueUnkeyed(oldQueue),
+            RedisKeys.queueUnkeyed(snapshot.queue()),
+            pendingRootKey(oldConcurrencyKey, oldWorkflowRoot, snapshot.id()),
+            pendingRootKey(snapshot)
         };
         var args = new String[] {
             snapshot.id().toString(),
@@ -807,7 +825,10 @@ public final class RedisJobStore implements JobStore {
                 concurrencyCountersKey(oldConcurrencyKey),
                 concurrencyWorkflowsKey(oldConcurrencyKey),
                 concurrencyWorkflowCountsKey(oldConcurrencyKey),
-                awaitingParentKey(snapshot)
+                awaitingParentKey(snapshot),
+                RedisKeys.queueKeys(oldQueue),
+                RedisKeys.queueUnkeyed(oldQueue),
+                pendingRootKey(oldConcurrencyKey, oldWorkflowRoot, id)
             };
             var args = new String[] {
                 id.toString(),
@@ -844,96 +865,11 @@ public final class RedisJobStore implements JobStore {
 
         RedisClusterCommands<String, String> r = sync();
         List<Job> result = new ArrayList<>(cap);
-        long pageSize = Math.max(cap * 128L, cap);
         for (int attempt = 0; attempt < 20; attempt++) {
             boolean blocked = false;
-            long offset = 0L;
-            while (result.size() < cap) {
-                List<String> candidateIds = r.zrange(RedisKeys.queue(queue), offset, offset + pageSize - 1L);
-                if (candidateIds == null || candidateIds.isEmpty()) break;
-
-                for (String idStr : candidateIds) {
-                    if (result.size() >= cap) break;
-                    var id = JobId.parse(idStr);
-                    String jobKey = RedisKeys.job(id);
-                    Map<String, String> hash = r.hgetall(jobKey);
-                    if (hash == null || hash.isEmpty()) continue;
-                    if (!"ENQUEUED".equals(hash.get("state"))) continue;
-                    String oldBody = hash.get("body");
-                    String oldVersion = hash.get("version");
-                    if (oldBody == null || oldVersion == null) continue;
-                    long newVersion = Long.parseLong(oldVersion) + 1L;
-                    Job j;
-                    try {
-                        j = serializer.deserializeJob(oldBody);
-                    } catch (RuntimeException corrupt) {
-                        // An undeserializable body must not unwind the whole claim
-                        // (stranding earlier same-pass claims in PROCESSING) or
-                        // wedge the queue. Quarantine it (no body deserialize) and
-                        // continue with the rest of the candidates.
-                        quarantineUnreadable(r, id, queue, oldVersion, heartbeatAt, hash);
-                        continue;
-                    }
-                    String lockKey = j.concurrencyKey()
-                            .map(RedisKeys::concurrencyClaimLock)
-                            .orElse(null);
-                    String lockToken =
-                            lockKey == null ? null : UUID.randomUUID().toString();
-                    if (lockKey != null && !tryClaimLock(r, lockKey, lockToken)) {
-                        blocked = true;
-                        continue;
-                    }
-                    try {
-                        j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
-                        j.assignOwner(nodeId, heartbeatAt);
-                        j.incrementAttempts();
-                        JobSnapshot snap = withVersion(j, newVersion);
-                        String newBody = serializer.serializeJob(snap, capabilities);
-                        String concurrencyKey = snap.concurrencyKey();
-                        String reply = evalScript(
-                                LuaScripts.claimCommit(),
-                                ScriptOutputType.VALUE,
-                                new String[] {
-                                    jobKey,
-                                    RedisKeys.queue(queue),
-                                    RedisKeys.PROCESSING_ALL,
-                                    RedisKeys.processingFor(nodeId),
-                                    RedisKeys.byStateTime(JobState.ENQUEUED),
-                                    RedisKeys.byStateTime(JobState.PROCESSING),
-                                    RedisKeys.COUNTS,
-                                    concurrencyCountersKey(concurrencyKey),
-                                    concurrencyPendingKey(concurrencyKey),
-                                    concurrencyWorkflowsKey(concurrencyKey),
-                                    concurrencyWorkflowCountsKey(concurrencyKey)
-                                },
-                                idStr,
-                                oldVersion,
-                                Long.toString(newVersion),
-                                newBody,
-                                nodeId.toString(),
-                                Long.toString(heartbeatAt.toEpochMilli()),
-                                Integer.toString(snap.attempts()),
-                                concurrencyKey == null ? "" : concurrencyKey,
-                                snap.concurrencyMode() == null
-                                        ? ""
-                                        : snap.concurrencyMode().name(),
-                                snap.workflowRootId().toString(),
-                                concurrencyPendingMember(snap));
-                        if ("OK".equals(reply)) {
-                            result.add(serializer.deserializeJob(newBody));
-                        } else if ("BLOCKED".equals(reply)) {
-                            blocked = true;
-                        }
-                    } finally {
-                        if (lockKey != null) {
-                            releaseClaimLock(r, lockKey, lockToken);
-                        }
-                    }
-                }
-                if (candidateIds.size() < pageSize) {
-                    break;
-                }
-                offset += pageSize;
+            for (ClaimCandidate candidate : gatherClaimCandidates(r, queue, cap)) {
+                if (result.size() >= cap) break;
+                blocked |= tryClaim(r, queue, candidate.id(), nodeId, heartbeatAt, result);
             }
             if (!result.isEmpty() || !blocked) {
                 return result;
@@ -941,6 +877,201 @@ public final class RedisJobStore implements JobStore {
             LockSupport.parkNanos(Duration.ofMillis(2).toNanos());
         }
         return result;
+    }
+
+    /** A claimable candidate id ordered by its queue-ZSET score (priority, then age). */
+    private record ClaimCandidate(double queueScore, String id) {}
+
+    /**
+     * Gathers claim candidates without walking the queue backlog: unkeyed heads
+     * from the queue's unkeyed ZSET, plus — per concurrency key registered for
+     * this queue — the pending-order head run and the members of active
+     * workflow holds. Cost scales with the number of keys and in-flight holds,
+     * never with backlog depth (the same lesson the Postgres claim learned:
+     * candidate gathering must be key-driven, never backlog-walking). These
+     * reads are unlocked and approximate; claim_commit.lua stays the single
+     * admission authority.
+     */
+    private List<ClaimCandidate> gatherClaimCandidates(RedisClusterCommands<String, String> r, String queue, int cap) {
+        var candidates = new ArrayList<ClaimCandidate>();
+        List<ScoredValue<String>> unkeyed = r.zrangeWithScores(RedisKeys.queueUnkeyed(queue), 0, cap - 1L);
+        if (unkeyed != null) {
+            for (ScoredValue<String> entry : unkeyed) {
+                candidates.add(new ClaimCandidate(entry.getScore(), entry.getValue()));
+            }
+        }
+        Map<String, String> registeredKeys = r.hgetall(RedisKeys.queueKeys(queue));
+        if (registeredKeys != null) {
+            for (String key : registeredKeys.keySet()) {
+                for (String id : admissibleIdsForKey(r, key, cap)) {
+                    // The queue-ZSET score doubles as the "ENQUEUED in *this*
+                    // queue" filter: an admissible job living in another queue
+                    // is claimed by that queue's own dispatcher.
+                    Double score = r.zscore(RedisKeys.queue(queue), id);
+                    if (score != null) {
+                        candidates.add(new ClaimCandidate(score, id));
+                    }
+                }
+            }
+        }
+        candidates.sort(Comparator.comparingDouble(ClaimCandidate::queueScore).thenComparing(ClaimCandidate::id));
+        return candidates;
+    }
+
+    /**
+     * The ids on this key that the admission rules could let through right
+     * now: when no EXCLUSIVE job is in flight, the pending-order head run (an
+     * EXCLUSIVE head alone, or the leading run of SHARED members); plus every
+     * pending member of an active workflow hold — those bypass both the
+     * counters and the pending order.
+     */
+    private List<String> admissibleIdsForKey(RedisClusterCommands<String, String> r, String key, int cap) {
+        var ids = new LinkedHashSet<String>();
+        List<KeyValue<String, String>> counters =
+                r.hmget(RedisKeys.concurrencyCounters(key), "exclusive_in_flight", "shared_in_flight");
+        long exclusiveInFlight = counterValue(counters, 0);
+        long sharedInFlight = counterValue(counters, 1);
+        if (exclusiveInFlight == 0) {
+            List<ScoredValue<String>> window = r.zrangeWithScores(RedisKeys.concurrencyPending(key), 0, cap + 7L);
+            // ZRANGE breaks score ties lexicographically by member, which
+            // orders by mode prefix first — but admission ties break by job
+            // id. Re-sort the window the way claim_commit.lua judges it.
+            var head = new ArrayList<ScoredValue<String>>(window == null ? List.of() : window);
+            head.sort(Comparator.<ScoredValue<String>>comparingDouble(ScoredValue::getScore)
+                    .thenComparing(sv -> memberJobId(sv.getValue())));
+            for (int i = 0; i < head.size(); i++) {
+                String member = head.get(i).getValue();
+                if (member.startsWith("EXCLUSIVE:")) {
+                    // An EXCLUSIVE head only goes when nothing else runs, and
+                    // nothing behind an EXCLUSIVE member is admissible without
+                    // an active hold.
+                    if (i == 0 && sharedInFlight == 0) {
+                        ids.add(memberJobId(member));
+                    }
+                    break;
+                }
+                ids.add(memberJobId(member));
+            }
+        }
+        List<String> holdRoots = r.hkeys(RedisKeys.concurrencyWorkflows(key));
+        if (holdRoots != null) {
+            for (String root : holdRoots) {
+                // A retried root reclaims under its own hold; it sits in the
+                // main pending ZSET under its own id.
+                for (ConcurrencyMode mode : ConcurrencyMode.values()) {
+                    String member = RedisKeys.concurrencyPendingMember(mode, JobId.parse(root));
+                    if (r.zscore(RedisKeys.concurrencyPending(key), member) != null) {
+                        ids.add(root);
+                    }
+                }
+                List<String> members = r.zrange(RedisKeys.concurrencyPendingRoot(key, root), 0, cap + 7L);
+                if (members != null) {
+                    for (String member : members) {
+                        ids.add(memberJobId(member));
+                    }
+                }
+            }
+        }
+        return List.copyOf(ids);
+    }
+
+    private static long counterValue(List<KeyValue<String, String>> counters, int index) {
+        if (counters == null || counters.size() <= index) return 0L;
+        KeyValue<String, String> kv = counters.get(index);
+        return kv == null || !kv.hasValue() ? 0L : Long.parseLong(kv.getValue());
+    }
+
+    private static String memberJobId(String pendingMember) {
+        int sep = pendingMember.indexOf(':');
+        return sep < 0 ? pendingMember : pendingMember.substring(sep + 1);
+    }
+
+    /**
+     * Attempts to claim one candidate: read, validate, lock the key (keyed
+     * jobs only), prepare the PROCESSING body, and commit through
+     * claim_commit.lua. Returns {@code true} when the attempt was blocked by
+     * concurrency (lock contention or a BLOCKED admission reply) so the
+     * caller's retry loop can spin briefly instead of reporting an empty
+     * queue.
+     */
+    private boolean tryClaim(
+            RedisClusterCommands<String, String> r,
+            String queue,
+            String idStr,
+            NodeId nodeId,
+            Instant heartbeatAt,
+            List<Job> result) {
+        var id = JobId.parse(idStr);
+        String jobKey = RedisKeys.job(id);
+        Map<String, String> hash = r.hgetall(jobKey);
+        if (hash == null || hash.isEmpty()) return false;
+        if (!"ENQUEUED".equals(hash.get("state"))) return false;
+        String oldBody = hash.get("body");
+        String oldVersion = hash.get("version");
+        if (oldBody == null || oldVersion == null) return false;
+        long newVersion = Long.parseLong(oldVersion) + 1L;
+        Job j;
+        try {
+            j = serializer.deserializeJob(oldBody);
+        } catch (RuntimeException corrupt) {
+            // An undeserializable body must not unwind the whole claim
+            // (stranding earlier same-pass claims in PROCESSING) or wedge the
+            // queue. Quarantine it (no body deserialize) and move on.
+            quarantineUnreadable(r, id, queue, oldVersion, heartbeatAt, hash);
+            return false;
+        }
+        String lockKey = j.concurrencyKey().map(RedisKeys::concurrencyClaimLock).orElse(null);
+        String lockToken = lockKey == null ? null : UUID.randomUUID().toString();
+        if (lockKey != null && !tryClaimLock(r, lockKey, lockToken)) {
+            return true;
+        }
+        try {
+            j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
+            j.assignOwner(nodeId, heartbeatAt);
+            j.incrementAttempts();
+            JobSnapshot snap = withVersion(j, newVersion);
+            String newBody = serializer.serializeJob(snap, capabilities);
+            String concurrencyKey = snap.concurrencyKey();
+            String reply = evalScript(
+                    LuaScripts.claimCommit(),
+                    ScriptOutputType.VALUE,
+                    new String[] {
+                        jobKey,
+                        RedisKeys.queue(queue),
+                        RedisKeys.PROCESSING_ALL,
+                        RedisKeys.processingFor(nodeId),
+                        RedisKeys.byStateTime(JobState.ENQUEUED),
+                        RedisKeys.byStateTime(JobState.PROCESSING),
+                        RedisKeys.COUNTS,
+                        concurrencyCountersKey(concurrencyKey),
+                        concurrencyPendingKey(concurrencyKey),
+                        concurrencyWorkflowsKey(concurrencyKey),
+                        concurrencyWorkflowCountsKey(concurrencyKey),
+                        RedisKeys.queueKeys(queue),
+                        RedisKeys.queueUnkeyed(queue),
+                        pendingRootKey(snap)
+                    },
+                    idStr,
+                    oldVersion,
+                    Long.toString(newVersion),
+                    newBody,
+                    nodeId.toString(),
+                    Long.toString(heartbeatAt.toEpochMilli()),
+                    Integer.toString(snap.attempts()),
+                    concurrencyKey == null ? "" : concurrencyKey,
+                    snap.concurrencyMode() == null ? "" : snap.concurrencyMode().name(),
+                    snap.workflowRootId().toString(),
+                    concurrencyPendingMember(snap));
+            if ("OK".equals(reply)) {
+                result.add(serializer.deserializeJob(newBody));
+                return false;
+            }
+            return "BLOCKED".equals(reply);
+        } finally {
+            if (lockKey != null) {
+                releaseClaimLock(r, lockKey, lockToken);
+            }
+        }
     }
 
     // ---------------------------------------------------------------- queue pauses
@@ -1433,7 +1564,12 @@ public final class RedisJobStore implements JobStore {
             concurrencyPendingKey(snap),
             RedisKeys.byHandler(oldHandler),
             RedisKeys.byHandler(snap.spec().handlerType()),
-            RedisKeys.QUEUES
+            RedisKeys.QUEUES,
+            RedisKeys.queueKeys(oldQueue),
+            RedisKeys.queueKeys(snap.queue()),
+            RedisKeys.queueUnkeyed(oldQueue),
+            RedisKeys.queueUnkeyed(snap.queue()),
+            pendingRootKey(snap)
         };
         var args = new String[] {
             id.toString(),
@@ -1801,6 +1937,26 @@ public final class RedisJobStore implements JobStore {
                 : RedisKeys.concurrencyPendingMember(snapshot.concurrencyMode(), snapshot.id());
     }
 
+    /**
+     * Per-root pending mirror key, or {@code ""} for unkeyed jobs and for jobs
+     * that are their own workflow root (standalone keyed jobs carry no mirror
+     * entry — only workflow members need to be findable by root).
+     */
+    private static String pendingRootKey(String concurrencyKey, String workflowRootId, JobId id) {
+        if (concurrencyKey == null || workflowRootId == null || workflowRootId.isEmpty()) return "";
+        if (workflowRootId.equals(id.toString())) return "";
+        return RedisKeys.concurrencyPendingRoot(concurrencyKey, workflowRootId);
+    }
+
+    private static String pendingRootKey(JobSnapshot snapshot) {
+        return pendingRootKey(
+                snapshot.concurrencyKey(),
+                snapshot.workflowRootId() == null
+                        ? null
+                        : snapshot.workflowRootId().toString(),
+                snapshot.id());
+    }
+
     private static String concurrencyPendingMember(String mode, JobId id) {
         return mode == null ? "" : RedisKeys.concurrencyPendingMember(ConcurrencyMode.valueOf(mode), id);
     }
@@ -1860,6 +2016,15 @@ public final class RedisJobStore implements JobStore {
                 if KEYS[6] ~= '' and ARGV[4] ~= '' then
                   redis.call('ZREM', KEYS[6], ARGV[4])
                 end
+                if KEYS[12] ~= '' and ARGV[4] ~= '' then
+                  redis.call('ZREM', KEYS[12], ARGV[4])
+                end
+                if ARGV[7] ~= '' then
+                  local remaining = redis.call('HINCRBY', KEYS[10], ARGV[7], -1)
+                  if remaining <= 0 then redis.call('HDEL', KEYS[10], ARGV[7]) end
+                else
+                  redis.call('ZREM', KEYS[11], ARGV[1])
+                end
                 if KEYS[8] ~= '' and ARGV[5] ~= '' then
                   local workflow_count = redis.call('HINCRBY', KEYS[8], ARGV[5], -1)
                   if workflow_count <= 0 then redis.call('HDEL', KEYS[8], ARGV[5]) end
@@ -1891,14 +2056,18 @@ public final class RedisJobStore implements JobStore {
                     concurrencyPendingKey(concurrencyKey),
                     concurrencyWorkflowsKey(concurrencyKey),
                     concurrencyWorkflowCountsKey(concurrencyKey),
-                    concurrencyCountersKey(concurrencyKey)
+                    concurrencyCountersKey(concurrencyKey),
+                    RedisKeys.queueKeys(queue),
+                    RedisKeys.queueUnkeyed(queue),
+                    pendingRootKey(concurrencyKey, workflowRootId, id)
                 },
                 id.toString(),
                 Long.toString(now.toEpochMilli()),
                 expectedVersion,
                 concurrencyMode == null ? "" : concurrencyPendingMember(concurrencyMode, id),
                 workflowRootId == null ? "" : workflowRootId,
-                concurrencyMode == null ? "" : concurrencyMode);
+                concurrencyMode == null ? "" : concurrencyMode,
+                concurrencyKey == null ? "" : concurrencyKey);
     }
 
     private static String emptyToNull(String s) {

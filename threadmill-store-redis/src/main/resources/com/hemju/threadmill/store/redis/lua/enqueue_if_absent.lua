@@ -12,6 +12,9 @@ local workflows_key  = KEYS[9]
 local workflow_counts_key = KEYS[10]
 local awaiting_parent_key = KEYS[11]
 local queues_key          = KEYS[12]
+local queue_keys_key      = KEYS[13]
+local unkeyed_key         = KEYS[14]
+local pending_root_key    = KEYS[15]
 
 local job_id           = ARGV[1]
 local body             = ARGV[2]
@@ -86,6 +89,9 @@ end
 if concurrency_key ~= '' and pending_key ~= '' and pending_member ~= '' and
    (state == 'ENQUEUED' or state == 'SCHEDULED' or state == 'AWAITING') then
     redis.call('ZADD', pending_key, pending_score, pending_member)
+    if pending_root_key ~= '' then
+        redis.call('ZADD', pending_root_key, pending_score, pending_member)
+    end
 end
 if concurrency_key ~= '' and workflows_key ~= '' and
    redis.call('HGET', workflows_key, workflow_root_id) ~= false and
@@ -101,6 +107,11 @@ if awaiting_parent_key ~= '' and state == 'AWAITING' then
 end
 if state == 'ENQUEUED' then
     redis.call('SADD', queues_key, queue)
+    if concurrency_key ~= '' then
+        redis.call('HINCRBY', queue_keys_key, concurrency_key, 1)
+    else
+        redis.call('ZADD', unkeyed_key, active_score, job_id)
+    end
 end
 redis.call('ZADD', state_time_key, state_time, job_id)
 redis.call('SADD', handler_key, job_id)

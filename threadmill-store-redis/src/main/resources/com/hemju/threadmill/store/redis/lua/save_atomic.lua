@@ -20,6 +20,12 @@
 --   [14] new concurrency workflow counts HASH, or empty
 --   [15] awaiting_by_parent SET, or empty (relationship is immutable)
 --   [16] queue registry SET
+--   [17] old queue_keys HASH (key -> ENQUEUED count in old queue)
+--   [18] new queue_keys HASH
+--   [19] old queue_unkeyed ZSET
+--   [20] new queue_unkeyed ZSET
+--   [21] old concurrency pending_root ZSET, or empty
+--   [22] new concurrency pending_root ZSET, or empty
 --
 -- ARGV:
 --   [1] job id
@@ -65,6 +71,12 @@ local old_workflow_counts_key = KEYS[13]
 local new_workflow_counts_key = KEYS[14]
 local awaiting_parent_key     = KEYS[15]
 local queues_key              = KEYS[16]
+local old_queue_keys_key      = KEYS[17]
+local new_queue_keys_key      = KEYS[18]
+local old_unkeyed_key         = KEYS[19]
+local new_unkeyed_key         = KEYS[20]
+local old_pending_root_key    = KEYS[21]
+local new_pending_root_key    = KEYS[22]
 
 local job_id              = ARGV[1]
 local expected_version    = tonumber(ARGV[2])
@@ -123,6 +135,19 @@ end
 redis.call('ZREM', old_state_time_key, job_id)
 if old_pending_key ~= '' and old_pending_member ~= '' then
     redis.call('ZREM', old_pending_key, old_pending_member)
+    if old_pending_root_key ~= '' then
+        redis.call('ZREM', old_pending_root_key, old_pending_member)
+    end
+end
+if old_state == 'ENQUEUED' then
+    if old_concurrency_key ~= '' then
+        local remaining = redis.call('HINCRBY', old_queue_keys_key, old_concurrency_key, -1)
+        if remaining <= 0 then
+            redis.call('HDEL', old_queue_keys_key, old_concurrency_key)
+        end
+    else
+        redis.call('ZREM', old_unkeyed_key, job_id)
+    end
 end
 
 -- Update counts only when the state actually changed.
@@ -202,6 +227,11 @@ if new_active_key ~= '' and new_active_score ~= nil then
 end
 if new_state == 'ENQUEUED' then
     redis.call('SADD', queues_key, new_queue)
+    if concurrency_key ~= '' then
+        redis.call('HINCRBY', new_queue_keys_key, concurrency_key, 1)
+    else
+        redis.call('ZADD', new_unkeyed_key, new_active_score, job_id)
+    end
 end
 if new_active_node_key ~= '' and new_active_score ~= nil then
     redis.call('ZADD', new_active_node_key, new_active_score, job_id)
@@ -209,6 +239,9 @@ end
 if concurrency_key ~= '' and new_pending_key ~= '' and new_pending_member ~= '' and
    (new_state == 'ENQUEUED' or new_state == 'SCHEDULED' or new_state == 'AWAITING') then
     redis.call('ZADD', new_pending_key, new_pending_score, new_pending_member)
+    if new_pending_root_key ~= '' then
+        redis.call('ZADD', new_pending_root_key, new_pending_score, new_pending_member)
+    end
 end
 redis.call('ZADD', new_state_time_key, new_state_time, job_id)
 

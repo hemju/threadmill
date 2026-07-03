@@ -1,9 +1,9 @@
 -- Atomic batch insert. All-or-nothing: every job is inserted or none are.
 --
--- Layout: 10 keys + 18 args per job, matching insert.lua exactly. The leading
+-- Layout: 13 keys + 18 args per job, matching insert.lua exactly. The leading
 -- ARGV[1] is the job count N (so the total ARGV length is 1 + 18*N).
 --
--- KEYS[i*10+1 .. i*10+10] are the 10 keys for job i (0-based).
+-- KEYS[i*13+1 .. i*13+13] are the 13 keys for job i (0-based).
 -- ARGV[i*18+2 .. i*18+19] are the 18 args for job i.
 --
 -- Returns 'OK' on success. On a duplicate id, returns 'EXISTS:N' where N is
@@ -21,7 +21,7 @@ for i = 1, n do
     if redis.call('EXISTS', KEYS[key_offset + 1]) == 1 then
         return 'EXISTS:' .. tostring(i - 1)
     end
-    key_offset = key_offset + 10
+    key_offset = key_offset + 13
 end
 
 -- All clear — apply every insert.
@@ -38,6 +38,9 @@ for i = 1, n do
     local workflow_counts_key = KEYS[key_offset + 8]
     local awaiting_parent_key = KEYS[key_offset + 9]
     local queues_key          = KEYS[key_offset + 10]
+    local queue_keys_key      = KEYS[key_offset + 11]
+    local unkeyed_key         = KEYS[key_offset + 12]
+    local pending_root_key    = KEYS[key_offset + 13]
 
     local job_id           = ARGV[arg_offset + 1]
     local body             = ARGV[arg_offset + 2]
@@ -82,6 +85,9 @@ for i = 1, n do
     if concurrency_key ~= '' and pending_key ~= '' and pending_member ~= '' and
        (state == 'ENQUEUED' or state == 'SCHEDULED' or state == 'AWAITING') then
         redis.call('ZADD', pending_key, pending_score, pending_member)
+        if pending_root_key ~= '' then
+            redis.call('ZADD', pending_root_key, pending_score, pending_member)
+        end
     end
     if concurrency_key ~= '' and workflows_key ~= '' and
        redis.call('HGET', workflows_key, workflow_root_id) ~= false and
@@ -97,12 +103,17 @@ for i = 1, n do
     end
     if state == 'ENQUEUED' then
         redis.call('SADD', queues_key, queue)
+        if concurrency_key ~= '' then
+            redis.call('HINCRBY', queue_keys_key, concurrency_key, 1)
+        else
+            redis.call('ZADD', unkeyed_key, active_score, job_id)
+        end
     end
     redis.call('ZADD', state_time_key, state_time, job_id)
     redis.call('SADD', handler_key, job_id)
     redis.call('HINCRBY', counts_key, state, 1)
 
-    key_offset = key_offset + 10
+    key_offset = key_offset + 13
     arg_offset = arg_offset + 18
 end
 

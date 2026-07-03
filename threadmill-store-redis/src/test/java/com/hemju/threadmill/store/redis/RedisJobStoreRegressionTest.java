@@ -53,6 +53,7 @@ import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.serialization.SerializationException;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
@@ -285,6 +286,69 @@ class RedisJobStoreRegressionTest {
                 .as("no double-claim across concurrent virtual-thread workers")
                 .isEmpty();
         assertThat(seen).hasSize(total);
+    }
+
+    @Test
+    void claimCandidateGatheringIsBoundedByKeysNotBacklogDepth() {
+        JobStore store = store();
+        // Wedge a hot key: an EXCLUSIVE claim in flight, then a deep blocked
+        // backlog behind it on the same key.
+        Job gate = keyedJob("com.example.Import", "project:deep", ConcurrencyMode.EXCLUSIVE);
+        store.insert(gate);
+        List<Job> gateClaim = store.claimReady(NodeId.newId(), "default", 1, Instant.now());
+        assertThat(gateClaim).extracting(Job::id).containsExactly(gate.id());
+
+        int backlog = 2_000;
+        var batch = new ArrayList<Job>();
+        for (int i = 0; i < backlog; i++) {
+            batch.add(keyedJob("com.example.Export", "project:deep", ConcurrencyMode.SHARED));
+            if (batch.size() == 500) {
+                store.insertAll(batch);
+                batch.clear();
+            }
+        }
+        // Independent claimable work must not hide behind the blocked mountain.
+        Job independentKeyed = keyedJob("com.example.Import", "project:other", ConcurrencyMode.EXCLUSIVE);
+        Job independentUnkeyed = sample();
+        store.insert(independentKeyed);
+        store.insert(independentUnkeyed);
+
+        RedisCommands<String, String> r = adminConnection.sync();
+        r.configResetstat();
+        List<Job> claimed = store.claimReady(NodeId.newId(), "default", 8, Instant.now());
+        long commands = totalCommandCalls(r);
+
+        assertThat(claimed)
+                .extracting(Job::id)
+                .containsExactlyInAnyOrder(independentKeyed.id(), independentUnkeyed.id());
+        // The backlog-walking claim spent at least one HGETALL per blocked
+        // job (2,000+ commands and a per-key lock cycle each) before finding
+        // the independent work. Key-driven gathering is bounded by the number
+        // of keys and claims — never reintroduce a candidate path whose cost
+        // scales with pending jobs rather than keys.
+        assertThat(commands)
+                .as("claim-pass command count with a %s-deep blocked backlog", backlog)
+                .isLessThan(200L);
+
+        // Once the gate releases, the deep key drains from its pending head.
+        finish(store, gateClaim.get(0), JobState.SUCCEEDED);
+        assertThat(store.claimReady(NodeId.newId(), "default", 8, Instant.now()))
+                .hasSize(8)
+                .allSatisfy(j -> assertThat(j.concurrencyKey()).contains("project:deep"));
+        assertRedisIndexesConsistent();
+    }
+
+    private static long totalCommandCalls(RedisCommands<String, String> r) {
+        long total = 0;
+        for (String line : r.info("commandstats").split("\n")) {
+            if (!line.startsWith("cmdstat_")) continue;
+            int callsIndex = line.indexOf("calls=");
+            if (callsIndex < 0) continue;
+            int end = line.indexOf(',', callsIndex);
+            total += Long.parseLong(
+                    line.substring(callsIndex + "calls=".length(), end).trim());
+        }
+        return total;
     }
 
     @Test
@@ -1113,13 +1177,24 @@ class RedisJobStoreRegressionTest {
         var expectedExclusiveInFlight = new HashMap<String, Long>();
         var expectedWorkflowCounts = new HashMap<String, Map<String, Long>>();
         var expectedWorkflowHolds = new HashMap<String, Map<String, Long>>();
+        var expectedUnkeyed = new HashMap<String, Set<String>>();
+        var expectedQueueKeys = new HashMap<String, Map<String, Long>>();
+        var expectedPendingRoots = new HashMap<String, Set<String>>();
 
         for (String jobKey : r.keys(RedisKeys.PREFIX + "job:*")) {
             Map<String, String> hash = r.hgetall(jobKey);
             var id = JobId.parse(jobKey.substring((RedisKeys.PREFIX + "job:").length()));
             JobState state = JobState.valueOf(hash.get("state"));
-            Job body = serializer.deserializeJob(hash.get("body"));
-            assertThat(body.currentState()).as("body state for " + id).isEqualTo(state);
+            try {
+                Job body = serializer.deserializeJob(hash.get("body"));
+                assertThat(body.currentState()).as("body state for " + id).isEqualTo(state);
+            } catch (SerializationException unreadable) {
+                // A quarantined job legitimately keeps its corrupt body; any
+                // other state with an unreadable body is an index bug.
+                assertThat(state)
+                        .as("only QUARANTINED jobs may carry an unreadable body: " + id)
+                        .isEqualTo(JobState.QUARANTINED);
+            }
             expectedCounts.merge(state, 1L, Long::sum);
             assertThat(r.zscore(RedisKeys.byStateTime(state), id.toString()))
                     .as("by-state index for " + id)
@@ -1145,7 +1220,60 @@ class RedisJobStoreRegressionTest {
                     expectedExclusiveInFlight,
                     expectedWorkflowCounts,
                     expectedWorkflowHolds);
+
+            String concurrencyKey = hash.get("concurrency_key");
+            boolean keyed = concurrencyKey != null && !concurrencyKey.isBlank();
+            if (state == JobState.ENQUEUED) {
+                if (keyed) {
+                    expectedQueueKeys
+                            .computeIfAbsent(queue, ignored -> new HashMap<>())
+                            .merge(concurrencyKey, 1L, Long::sum);
+                } else {
+                    expectedUnkeyed
+                            .computeIfAbsent(queue, ignored -> new HashSet<>())
+                            .add(id.toString());
+                }
+            }
+            String workflowRootId = hash.get("workflow_root_id");
+            boolean pendingState =
+                    state == JobState.ENQUEUED || state == JobState.SCHEDULED || state == JobState.AWAITING;
+            if (keyed && pendingState && workflowRootId != null && !workflowRootId.equals(id.toString())) {
+                expectedPendingRoots
+                        .computeIfAbsent(
+                                RedisKeys.concurrencyPendingRoot(concurrencyKey, workflowRootId),
+                                ignored -> new HashSet<>())
+                        .add(RedisKeys.concurrencyPendingMember(
+                                ConcurrencyMode.valueOf(hash.get("concurrency_mode")), id));
+            }
         }
+
+        // Claim-lane indexes: unkeyed ready ZSETs, per-queue key registries,
+        // and per-root pending mirrors must match the job population exactly —
+        // no missing entries, no strays.
+        var strayUnkeyed = new HashSet<>(r.keys(RedisKeys.PREFIX + "queue_unkeyed:*"));
+        for (var entry : expectedUnkeyed.entrySet()) {
+            assertThat(r.zrange(RedisKeys.queueUnkeyed(entry.getKey()), 0, -1))
+                    .as("unkeyed ready index for queue " + entry.getKey())
+                    .containsExactlyInAnyOrderElementsOf(entry.getValue());
+            strayUnkeyed.remove(RedisKeys.queueUnkeyed(entry.getKey()));
+        }
+        assertThat(strayUnkeyed).as("stray unkeyed ready indexes").isEmpty();
+
+        var strayQueueKeys = new HashSet<>(r.keys(RedisKeys.PREFIX + "queue_keys:*"));
+        for (var entry : expectedQueueKeys.entrySet()) {
+            assertLongHashEquals(r.hgetall(RedisKeys.queueKeys(entry.getKey())), entry.getValue());
+            strayQueueKeys.remove(RedisKeys.queueKeys(entry.getKey()));
+        }
+        assertThat(strayQueueKeys).as("stray queue key registries").isEmpty();
+
+        var strayPendingRoots = new HashSet<>(r.keys(RedisKeys.PREFIX + "concurrency:*:pending_root:*"));
+        for (var entry : expectedPendingRoots.entrySet()) {
+            assertThat(r.zrange(entry.getKey(), 0, -1))
+                    .as("pending-root mirror " + entry.getKey())
+                    .containsExactlyInAnyOrderElementsOf(entry.getValue());
+            strayPendingRoots.remove(entry.getKey());
+        }
+        assertThat(strayPendingRoots).as("stray pending-root mirrors").isEmpty();
 
         for (JobState state : JobState.values()) {
             assertThat(parseLong(r.hget(RedisKeys.COUNTS, state.name())))
