@@ -463,20 +463,14 @@ class PostgresJobStoreRegressionTest {
         }
         // ...and the emitted SQL must carry the history-table DDL itself plus
         // every shipped migration, so an external apply works on a clean DB.
-        assertThat(sql)
-                .contains("threadmill_schema_history")
-                .contains("V1__baseline.sql")
-                .contains("V2__sharded_job_counts.sql")
-                .contains("V3__unkeyed_claim_index.sql")
-                .contains("V4__exclusive_pending_index.sql")
-                .contains("V5__queue_scoped_pending_index.sql");
+        assertThat(sql).contains("threadmill_schema_history").contains("V1__baseline.sql");
         try (Connection conn = dataSource.getConnection();
                 Statement st = conn.createStatement()) {
             st.execute(sql);
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
                 // One history row per shipped migration.
-                assertThat(rs.getInt(1)).isEqualTo(5);
+                assertThat(rs.getInt(1)).isEqualTo(1);
             }
         }
         new MigrationRunner(dataSource).validate();
@@ -511,11 +505,11 @@ class PostgresJobStoreRegressionTest {
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
                 // One history row per shipped migration.
-                assertThat(rs.getInt(1)).isEqualTo(5);
+                assertThat(rs.getInt(1)).isEqualTo(1);
             }
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_job_counts")) {
                 assertThat(rs.next()).isTrue();
-                assertThat(rs.getInt(1)).isEqualTo(JobState.values().length * 16); // 16 counter shards per state (V2)
+                assertThat(rs.getInt(1)).isEqualTo(JobState.values().length * 16); // 16 counter shards per state
             }
         }
     }
@@ -646,7 +640,7 @@ class PostgresJobStoreRegressionTest {
                 ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
             assertThat(rs.next()).isTrue();
             // One history row per shipped migration.
-            assertThat(rs.getInt(1)).isEqualTo(5);
+            assertThat(rs.getInt(1)).isEqualTo(1);
         }
     }
 

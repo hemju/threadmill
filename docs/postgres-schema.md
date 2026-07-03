@@ -63,9 +63,10 @@ Migrations are classpath SQL files named `V<n>__<description>.sql`, and the
 runner applies them in numeric order. The shipped list is explicit for
 native-image friendliness.
 
-For v1 pre-release builds, the schema is consolidated into one
-`V1__baseline.sql`. After release, new schema changes must be additive
-`V2__*.sql`, `V3__*.sql`, and so on.
+The entire v1 schema is consolidated into one `V1__baseline.sql`, so a fresh
+database installs in a single step. After release, new schema changes must be
+additive `V2__*.sql`, `V3__*.sql`, and so on — the baseline is never edited
+again.
 
 ## Reinitialization
 

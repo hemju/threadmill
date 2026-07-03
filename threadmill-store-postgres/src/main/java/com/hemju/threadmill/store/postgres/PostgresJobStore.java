@@ -800,7 +800,7 @@ public final class PostgresJobStore implements JobStore {
 
     /**
      * Distinct concurrency keys with ENQUEUED members in this queue, via a
-     * recursive-CTE loose scan over the queue-scoped pending index (V5) —
+     * recursive-CTE loose scan over the queue-scoped pending index —
      * one index probe per key, independent of how many rows each key holds.
      * (Chosen over {@code SELECT DISTINCT}, whose plan may degrade to a full
      * index scan.) Claims are per-queue, so keys whose pending work lives
@@ -995,7 +995,7 @@ public final class PostgresJobStore implements JobStore {
      * scanned the entire pending population (130ms at a 415k backlog, twice
      * per pass), which kept claim cost linear in backlog depth. The plain
      * probe rides the pending partial index; the EXCLUSIVE probe rides
-     * {@code threadmill_jobs_exclusive_pending_idx} (V4).
+     * {@code threadmill_jobs_exclusive_pending_idx}.
      */
     private Map<String, PendingOrder> loadFirstPendingByKey(Connection conn, Set<String> keys, boolean exclusiveOnly)
             throws SQLException {
@@ -1325,8 +1325,8 @@ public final class PostgresJobStore implements JobStore {
     public Map<JobState, Long> countsByState() {
         var counts = new EnumMap<JobState, Long>(JobState.class);
         for (JobState s : JobState.values()) counts.put(s, 0L);
-        // Counts are sharded across 16 rows per state (V2) so concurrent
-        // writers touch disjoint rows; only the SUM is meaningful.
+        // Counts are sharded across 16 rows per state so concurrent writers
+        // touch disjoint rows; only the SUM is meaningful.
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps =
                         conn.prepareStatement("SELECT state, SUM(count) FROM threadmill_job_counts GROUP BY state");
