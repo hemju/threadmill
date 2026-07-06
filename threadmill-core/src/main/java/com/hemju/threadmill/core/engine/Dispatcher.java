@@ -19,9 +19,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.Job;
-import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
-import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.store.JobStore;
 
 /**
@@ -218,8 +216,8 @@ public final class Dispatcher {
      * isolation. A failure dispatching one job must not abandon the
      * remaining claimed jobs in PROCESSING — the node-wide owner heartbeat
      * would shield them from orphan reclaim indefinitely. A job that cannot
-     * be dispatched is released back via the SCHEDULED-with-short-backoff
-     * path, and a submit failure after the permit was acquired releases the
+     * be dispatched is released through {@link JobRunner#releaseWithoutRunning},
+     * and a submit failure after the permit was acquired releases the
      * permit so lane capacity cannot leak.
      */
     private void dispatchClaimed(List<Job> claimed) throws InterruptedException {
@@ -394,21 +392,13 @@ public final class Dispatcher {
     }
 
     private void releaseClaimed(Job job, String reason) {
-        // Re-schedule with a small backoff so this node doesn't immediately re-claim
-        // a job it can't run, busy-looping it between ENQUEUED and PROCESSING. A
-        // properly-tagged node either picks up the rescheduled job promptly, or
-        // the promotion loop puts it back on the queue and another node tries.
-        try {
-            long v = job.version();
-            job.transitionTo(JobState.SCHEDULED, Instant.now(), reason, null);
-            job.scheduleAt(Instant.now().plusSeconds(2));
-            job.clearOwner();
-            store.saveAtomic(job, v);
-        } catch (StaleJobException ignored) {
-            // Another node already claimed it
-        } catch (Throwable t) {
-            LOG.warn("Could not release claimed job {} — it stays PROCESSING until reclaimed", job.id(), t);
-        }
+        // PROCESSING has no legal transition back to a pending state, and the
+        // concurrency slot taken at claim is only freed by a terminal save —
+        // so an unrun claimed job goes through the single failure path with
+        // SHUTDOWN semantics: FAILED frees the slot, and the retry interceptor
+        // reschedules without consuming the claim-time attempt increment. The
+        // promotion loop then puts it back on the queue for any eligible node.
+        runner.releaseWithoutRunning(job, reason);
     }
 
     private boolean probeStore() {

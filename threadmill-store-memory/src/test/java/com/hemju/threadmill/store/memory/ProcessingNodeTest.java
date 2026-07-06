@@ -10,6 +10,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.AfterEach;
@@ -1359,5 +1360,96 @@ class ProcessingNodeTest {
                 .until(() -> store.findById(job.id()).orElseThrow().currentState() == JobState.SCHEDULED);
         Job after = store.findById(job.id()).orElseThrow();
         assertThat(after.attempts()).as("shutdown must not burn an attempt").isZero();
+    }
+
+    @Test
+    void tagMismatchReleaseRoutesThroughTheFailurePathWithoutBurningAnAttempt() {
+        // A claimed job whose required tags this node lacks used to be
+        // "released" via an illegal PROCESSING -> SCHEDULED transition that
+        // always threw, leaving the job PROCESSING (heartbeat-shielded) until
+        // orphan reclaim burned a retry attempt on it. The release must route
+        // through the single failure path with SHUTDOWN semantics: prompt
+        // reschedule, no attempt consumed, concurrency slot freed.
+        JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("tagged"));
+        Job job = Job.builder()
+                .spec(new JobSpec(EngineTestHandlers.CountingHandler.class.getName(), List.of(arg)))
+                .queue(fastConfig.defaultQueue())
+                .metadata(Dispatcher.REQUIRED_TAGS_META, "gpu")
+                .concurrencyKey("tag-release")
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .build();
+        store.insert(job);
+        // Heartbeats far outlive the assertion window, so orphan reclaim
+        // cannot be the mechanism that moves the job out of PROCESSING here.
+        node = ProcessingNode.builder(store)
+                .config(fastConfig.toBuilder()
+                        .heartbeatTimeout(Duration.ofSeconds(60))
+                        .build())
+                .build();
+        node.start();
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            Job loaded = store.findById(job.id()).orElseThrow();
+            assertThat(loaded.stateHistory())
+                    .anySatisfy(e -> assertThat(e.reason()).isEqualTo("engine.retry-after-shutdown"));
+            assertThat(loaded.attempts()).as("release must not burn an attempt").isZero();
+        });
+
+        node.close();
+        node = null;
+
+        // A properly-tagged node runs it. The EXCLUSIVE key it cycled through
+        // must not be left held by the releases, or this claim never happens.
+        secondNode = ProcessingNode.builder(store).config(fastConfig).tag("gpu").build();
+        secondNode.start();
+        await().atMost(Duration.ofSeconds(10))
+                .until(() -> store.findById(job.id()).orElseThrow().currentState() == JobState.SUCCEEDED);
+        assertThat(store.findById(job.id()).orElseThrow().attempts()).isEqualTo(1);
+    }
+
+    @Test
+    void interruptedMidBatchDispatchReleasesRemainingClaimedJobsForRedelivery() {
+        // A dispatcher interrupted between the batch claim and worker
+        // submission (node shutdown mid-batch, e.g. rolling-deploy churn) must
+        // release every remaining claimed job for prompt redelivery — not
+        // leave them PROCESSING until orphan reclaim, and not burn their
+        // claim-time attempt increments.
+        Job first = enqueueHello(EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue());
+        Job second = enqueueHello(EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue());
+        Job third = enqueueHello(EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue());
+
+        var interrupting = new ForwardingJobStore(store) {
+            final AtomicBoolean fired = new AtomicBoolean(false);
+
+            @Override
+            public List<Job> claimReady(NodeId nodeId, String queue, int max, Instant now) {
+                List<Job> claimed = super.claimReady(nodeId, queue, max, now);
+                if (!claimed.isEmpty() && fired.compareAndSet(false, true)) {
+                    // Simulates stop() interrupting the loop mid-batch: the
+                    // next workerCapacity.acquire() throws InterruptedException.
+                    Thread.currentThread().interrupt();
+                }
+                return claimed;
+            }
+        };
+        node = ProcessingNode.builder(interrupting)
+                .config(fastConfig.toBuilder()
+                        .claimBatchSize(3)
+                        .heartbeatTimeout(Duration.ofSeconds(60))
+                        .build())
+                .build();
+        node.start();
+
+        await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+            for (Job job : List.of(first, second, third)) {
+                Job loaded = store.findById(job.id()).orElseThrow();
+                assertThat(loaded.currentState()).isIn(JobState.SCHEDULED, JobState.ENQUEUED);
+                assertThat(loaded.attempts())
+                        .as("release must not burn an attempt")
+                        .isZero();
+                assertThat(loaded.stateHistory())
+                        .anySatisfy(e -> assertThat(e.reason()).isEqualTo("engine.retry-after-shutdown"));
+            }
+        });
     }
 }

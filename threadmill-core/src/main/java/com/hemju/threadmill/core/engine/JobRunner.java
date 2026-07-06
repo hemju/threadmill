@@ -206,6 +206,33 @@ public final class JobRunner {
         }
     }
 
+    /**
+     * Release a claimed job this node will not run (tag mismatch, dispatch
+     * failure, shutdown mid-batch). The job is PROCESSING but no handler ever
+     * started; PROCESSING has no legal transition back to a pending state, and
+     * the concurrency slot taken at claim is only freed by a terminal save. So
+     * the release routes through the single failure path with
+     * {@link JobInterceptor.FailureCause#SHUTDOWN} semantics: the FAILED save
+     * frees the slot, and {@link RetryInterceptor} reschedules the job
+     * immediately without consuming the claim-time attempt increment.
+     */
+    public void releaseWithoutRunning(Job job, String reason) {
+        Objects.requireNonNull(job, "job");
+        var ctx = new ExecutionContext(
+                job,
+                store,
+                job.id(),
+                nodeId,
+                job.attempts(),
+                job.ownerHeartbeatAt().orElse(Instant.now()),
+                job.log(),
+                job.progress(),
+                job.metadata(),
+                serializer,
+                config);
+        recordFailure(job, ctx, new IllegalStateException(reason), JobInterceptor.FailureCause.SHUTDOWN);
+    }
+
     /** Called by orphan-recovery code in MaintenanceCycle. */
     public void reclaimOrphan(Job job) {
         var ctx = new ExecutionContext(
