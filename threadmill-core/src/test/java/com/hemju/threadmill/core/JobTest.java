@@ -3,7 +3,9 @@ package com.hemju.threadmill.core;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.time.Clock;
 import java.time.Instant;
+import java.time.ZoneOffset;
 
 import org.junit.jupiter.api.Test;
 
@@ -99,6 +101,40 @@ class JobTest {
         JobSnapshot after = j.snapshot();
         assertThat(after.currentState()).isEqualTo(JobState.PROCESSING);
         assertThat(after.metadata()).containsEntry("k", "v");
+    }
+
+    @Test
+    void defaultIdTimePrefixMatchesCreatedAtFromASingleClockRead() {
+        var fixed = Clock.fixed(Instant.parse("2026-07-05T10:15:30.123456Z"), ZoneOffset.UTC);
+        Job j = Job.builder()
+                .spec(JobSpec.of("com.example.Handler", new JobArgument("java.lang.String", "\"x\"")))
+                .clock(fixed)
+                .build();
+        long idMillis = j.id().asUuid().getMostSignificantBits() >>> 16;
+        assertThat(idMillis).isEqualTo(j.createdAt().toEpochMilli());
+        assertThat(j.stateHistory().getFirst().at()).isEqualTo(j.createdAt());
+    }
+
+    @Test
+    void explicitIdAndCreatedAtAreNotOverriddenByTheDerivedDefaults() {
+        var explicitId = JobId.newId();
+        var explicitCreatedAt = Instant.parse("2020-01-01T00:00:00Z");
+        Job j = Job.builder()
+                .spec(JobSpec.of("com.example.Handler", new JobArgument("java.lang.String", "\"x\"")))
+                .id(explicitId)
+                .createdAt(explicitCreatedAt)
+                .build();
+        assertThat(j.id()).isEqualTo(explicitId);
+        assertThat(j.createdAt()).isEqualTo(explicitCreatedAt);
+    }
+
+    @Test
+    void millisSeededIdKeepsUuidV7VersionAndVariantBits() {
+        long millis = Instant.parse("2026-07-05T10:15:30.123Z").toEpochMilli();
+        var uuid = JobId.newId(millis).asUuid();
+        assertThat(uuid.getMostSignificantBits() >>> 16).isEqualTo(millis);
+        assertThat(uuid.version()).isEqualTo(7);
+        assertThat(uuid.variant()).isEqualTo(2);
     }
 
     @Test

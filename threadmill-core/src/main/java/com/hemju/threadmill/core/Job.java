@@ -322,7 +322,7 @@ public final class Job {
 
     /** Builder for a newly-created job. */
     public static final class Builder {
-        private JobId id = JobId.newId();
+        private JobId id;
         private JobSpec spec;
         private Instant createdAt;
         private String queue;
@@ -431,6 +431,14 @@ public final class Job {
         public Job build() {
             if (createdAt == null) {
                 createdAt = clock.instant();
+            }
+            if (id == null) {
+                // The id's UUIDv7 time prefix and createdAt (the initial
+                // current_state_at, i.e. the in-key admission-order key) must
+                // derive from one clock read: two separate reads can diverge
+                // unboundedly under a thread stall, making id order contradict
+                // the order the engine claims by.
+                id = JobId.newId(createdAt.toEpochMilli());
             }
             return new Job(this);
         }

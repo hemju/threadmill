@@ -32,7 +32,20 @@ public final class JobId {
 
     /** Generates a fresh, time-ordered job id. */
     public static JobId newId() {
-        return new JobId(newUuidV7());
+        return new JobId(newUuidV7(System.currentTimeMillis()));
+    }
+
+    /**
+     * Generates a fresh, time-ordered job id whose 48-bit time prefix is the
+     * given Unix-epoch millisecond instant instead of a fresh clock read.
+     *
+     * <p>Used by {@link Job.Builder#build()} so the id's time prefix and the
+     * job's {@code createdAt} derive from one clock read: with two separate
+     * reads a thread stall between them lets id order contradict the
+     * created-time order the engine schedules by.
+     */
+    public static JobId newId(long unixMillis) {
+        return new JobId(newUuidV7(unixMillis));
     }
 
     /** Wraps an existing {@link UUID} as a {@code JobId}. */
@@ -66,8 +79,7 @@ public final class JobId {
         return value.toString();
     }
 
-    private static UUID newUuidV7() {
-        long unixMillis = System.currentTimeMillis();
+    private static UUID newUuidV7(long unixMillis) {
         byte[] randomBytes = new byte[10];
         RNG.nextBytes(randomBytes);
 
