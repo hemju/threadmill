@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.1
+
+- Fixed `Dispatcher` release of claimed-but-unrun jobs (node-tag mismatch,
+  dispatch failure, shutdown mid-batch): releases now route through the single
+  failure path as `FailureCause.SHUTDOWN`, so the job is rescheduled
+  immediately without consuming a retry attempt and its claim-time concurrency
+  slot is freed. Previously the release attempted an illegal
+  PROCESSING→SCHEDULED transition, always threw, and left the job to orphan
+  reclaim.
+- Fixed the default job id and `createdAt` to derive from a single clock read
+  in `Job.Builder.build()`, keeping UUIDv7 id ordering consistent with the
+  engine's in-key claim-admission order.
+- Validated with a 12-hour PostgreSQL endurance soak (mixed workload,
+  ~5.5 million jobs, 3 nodes, node churn every 10 minutes): passed with all
+  invariants green.
+
 ## 0.1.0
 
 First public release under the Apache-2.0 license.
