@@ -23,7 +23,9 @@ import com.hemju.threadmill.core.JobResult;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.JobStateMachine;
+import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
+import com.hemju.threadmill.core.engine.RetryInterceptor;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
@@ -291,12 +293,19 @@ public final class DashboardApiService {
 
     public ActionResponse triggerRecurring(String name) {
         CronTask task = store.findCronTask(name).orElseThrow(() -> notFound("recurring task not found"));
-        Job job = Job.builder()
+        var builder = Job.builder()
                 .spec(new JobSpec(task.handlerType(), List.of(task.payloadArgument())))
                 .queue(task.queue())
                 .priority(task.priority())
-                .cronTaskName(task.name())
-                .build();
+                .cronTaskName(task.name());
+        if (task.timeout() != null) {
+            builder.metadata(
+                    JobRunner.META_TIMEOUT_SECONDS, Long.toString(task.timeout().toSeconds()));
+        }
+        if (task.maxAttempts() != null) {
+            builder.metadata(RetryInterceptor.META_MAX_ATTEMPTS, Integer.toString(task.maxAttempts()));
+        }
+        Job job = builder.build();
         withTaskMutex(name, () -> {
             store.insert(job);
             var prior = store.findCronTaskState(name).orElse(CronTaskScheduleState.initial(name, null));
@@ -333,6 +342,8 @@ public final class DashboardApiService {
                 request.payloadArgument() == null ? existing.payloadArgument() : request.payloadArgument(),
                 request.queue() == null ? existing.queue() : request.queue(),
                 request.priority() == null ? existing.priority() : request.priority(),
+                existing.timeout(),
+                existing.maxAttempts(),
                 request.missedRunPolicy() == null ? existing.missedRunPolicy() : request.missedRunPolicy(),
                 request.zone() == null ? existing.zone() : parseZone(request.zone()),
                 request.enabled() == null ? existing.enabled() : request.enabled());

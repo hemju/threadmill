@@ -1623,6 +1623,49 @@ public abstract class AbstractJobStoreContractTest {
     }
 
     @Test
+    @DisplayName("cron-task timeout and max-attempts round-trip and an override-less re-upsert clears them")
+    void cronTaskTimeoutRoundTripsAndClearsOnReUpsert() {
+        // Regression for github issue #84: the recurring path dropped the
+        // per-instance overrides (timeout, max attempts) entirely. The
+        // definition must round-trip them, and null must round-trip as null
+        // ("use the engine defaults").
+        var timed = new CronTask(
+                "timed",
+                new CronTask.Trigger.CronExpr(CronExpression.parse("* * * * *")),
+                "com.example.Handler",
+                new JobArgument("com.example.Payload", "{}"),
+                "default",
+                0,
+                Duration.ofMinutes(30),
+                7,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
+        store.upsertCronTask(timed);
+        var loaded = store.findCronTask("timed").orElseThrow();
+        assertThat(loaded.timeout()).isEqualTo(Duration.ofMinutes(30));
+        assertThat(loaded.maxAttempts()).isEqualTo(7);
+        assertThat(store.listCronTasks())
+                .filteredOn(t -> t.name().equals("timed"))
+                .singleElement()
+                .satisfies(t -> {
+                    assertThat(t.timeout()).isEqualTo(Duration.ofMinutes(30));
+                    assertThat(t.maxAttempts()).isEqualTo(7);
+                });
+
+        // Re-registering without the overrides must clear the stored ones.
+        store.upsertCronTask(cronTask("timed"));
+        var cleared = store.findCronTask("timed").orElseThrow();
+        assertThat(cleared.timeout()).isNull();
+        assertThat(cleared.maxAttempts()).isNull();
+
+        store.upsertCronTask(cronTask("untimed"));
+        var plain = store.findCronTask("untimed").orElseThrow();
+        assertThat(plain.timeout()).isNull();
+        assertThat(plain.maxAttempts()).isNull();
+    }
+
+    @Test
     @DisplayName("cron-task ownership tracks namespace-owned tasks")
     void cronTaskOwnershipTracksNamespace() {
         store.upsertCronTask(cronTask("owned-a"));

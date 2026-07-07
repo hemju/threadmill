@@ -96,9 +96,13 @@ executor.submit(EngineScopedValues.capturing(() -> {
 Every job runs under a wall-clock timeout (`threadmill.jobTimeout`, default
 5m). A per-job override lives in job metadata under
 `threadmill.job.timeoutSeconds` (`JobRunner.META_TIMEOUT_SECONDS`); Spring's
-`@Job(timeout = "PT2M")` writes it for you. On timeout the watchdog interrupts
-the handler thread, and the failure routes through the same single failure
-path as a thrown exception.
+`@Job(timeout = "PT2M")` writes it for you. Recurring tasks carry the same
+override on their definition — `@Job(timeout = ...)` on a `@Recurring`
+handler, or the `timeout` parameter of `Scheduler.defineCronTask` /
+`defineIntervalTask` / `defineRecurring` — and every materialized instance
+(including a manual dashboard trigger) inherits it. On timeout the watchdog
+interrupts the handler thread, and the failure routes through the same single
+failure path as a thrown exception.
 
 Once a job has checked in at least once, the wall-clock timeout no longer
 applies; instead `noProgressTimeout` (default 15m) runs from the most recent
@@ -113,7 +117,11 @@ first:
 
 1. **Per-job metadata override** — `threadmill.retry.maxAttempts` (integer)
    and/or `threadmill.retry.initialBackoffSeconds` (long); either key alone
-   activates the override. Spring's `@Job(maxRetries = 5)` maps to it.
+   activates the override. Spring's `@Job(maxRetries = 5)` maps to it, on the
+   enqueue path and (like the timeout) on every materialized instance of a
+   `@Recurring` handler; core users set it per recurring definition via the
+   `maxAttempts` parameter of `Scheduler.defineCronTask` / `defineIntervalTask`
+   / `defineRecurring`.
 2. **Per-exception-type policy** — registered via
    `RetryInterceptor.policyFor(Class, RetryPolicy)`; the most specific class
    match in the exception's hierarchy wins.

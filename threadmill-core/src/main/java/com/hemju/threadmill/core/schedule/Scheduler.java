@@ -184,6 +184,26 @@ public final class Scheduler {
             int priority,
             CronTask.MissedRunPolicy policy,
             ZoneId zone) {
+        defineCronTask(name, cronExpression, payload, handler, queue, priority, null, null, policy, zone);
+    }
+
+    /**
+     * Full cron-task registration including the per-instance overrides: an
+     * execution {@code timeout} ({@code null} keeps the engine's global job
+     * timeout) and a retry budget {@code maxAttempts} ({@code null} keeps the
+     * {@code RetryInterceptor} defaults).
+     */
+    public <P extends JobPayload> void defineCronTask(
+            String name,
+            String cronExpression,
+            P payload,
+            Class<? extends JobHandler<P>> handler,
+            String queue,
+            int priority,
+            Duration timeout,
+            Integer maxAttempts,
+            CronTask.MissedRunPolicy policy,
+            ZoneId zone) {
         var cron = CronExpression.parse(cronExpression);
         upsertCron(new CronTask(
                 name,
@@ -192,6 +212,8 @@ public final class Scheduler {
                 serializer.serializePayload(payload),
                 queue,
                 priority,
+                timeout,
+                maxAttempts,
                 policy,
                 zone,
                 true));
@@ -214,6 +236,25 @@ public final class Scheduler {
             String queue,
             int priority,
             CronTask.MissedRunPolicy policy) {
+        defineIntervalTask(name, interval, payload, handler, queue, priority, null, null, policy);
+    }
+
+    /**
+     * Full interval-task registration including the per-instance overrides: an
+     * execution {@code timeout} ({@code null} keeps the engine's global job
+     * timeout) and a retry budget {@code maxAttempts} ({@code null} keeps the
+     * {@code RetryInterceptor} defaults).
+     */
+    public <P extends JobPayload> void defineIntervalTask(
+            String name,
+            Duration interval,
+            P payload,
+            Class<? extends JobHandler<P>> handler,
+            String queue,
+            int priority,
+            Duration timeout,
+            Integer maxAttempts,
+            CronTask.MissedRunPolicy policy) {
         upsertCron(new CronTask(
                 name,
                 new CronTask.Trigger.Interval(interval),
@@ -221,6 +262,8 @@ public final class Scheduler {
                 serializer.serializePayload(payload),
                 queue,
                 priority,
+                timeout,
+                maxAttempts,
                 policy,
                 ZoneId.systemDefault(),
                 true));
@@ -273,6 +316,25 @@ public final class Scheduler {
             String queue,
             int priority,
             CronTask.MissedRunPolicy missedRunPolicy) {
+        defineRecurring(name, trigger, payload, handlerClassName, queue, priority, null, null, missedRunPolicy);
+    }
+
+    /**
+     * Full recurring registration including the per-instance overrides: an
+     * execution {@code timeout} ({@code null} keeps the engine's global job
+     * timeout) and a retry budget {@code maxAttempts} ({@code null} keeps the
+     * {@code RetryInterceptor} defaults).
+     */
+    public void defineRecurring(
+            String name,
+            CronTask.Trigger trigger,
+            JobPayload payload,
+            String handlerClassName,
+            String queue,
+            int priority,
+            Duration timeout,
+            Integer maxAttempts,
+            CronTask.MissedRunPolicy missedRunPolicy) {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(trigger, "trigger");
         Objects.requireNonNull(payload, "payload");
@@ -286,6 +348,8 @@ public final class Scheduler {
                 serializer.serializePayload(payload),
                 queue,
                 priority,
+                timeout,
+                maxAttempts,
                 missedRunPolicy,
                 ZoneId.systemDefault(),
                 true));

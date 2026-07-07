@@ -13,7 +13,9 @@ import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.Names;
+import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
+import com.hemju.threadmill.core.engine.RetryInterceptor;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
@@ -154,14 +156,21 @@ public final class RecurringMaterializer {
     }
 
     private JobId materialize(CronTask task, Instant when) {
-        Job job = Job.builder()
+        var builder = Job.builder()
                 .spec(new JobSpec(task.handlerType(), List.of(task.payloadArgument())))
                 .queue(task.queue())
                 .priority(task.priority())
                 .cronTaskName(task.name())
                 .metadata(JobExecutionContext.CRON_FIRE_TIME_META, when.toString())
-                .initialState(JobState.ENQUEUED)
-                .build();
+                .initialState(JobState.ENQUEUED);
+        if (task.timeout() != null) {
+            builder.metadata(
+                    JobRunner.META_TIMEOUT_SECONDS, Long.toString(task.timeout().toSeconds()));
+        }
+        if (task.maxAttempts() != null) {
+            builder.metadata(RetryInterceptor.META_MAX_ATTEMPTS, Integer.toString(task.maxAttempts()));
+        }
+        Job job = builder.build();
         store.insert(job);
         wakeBus.wake(task.queue());
         return job.id();

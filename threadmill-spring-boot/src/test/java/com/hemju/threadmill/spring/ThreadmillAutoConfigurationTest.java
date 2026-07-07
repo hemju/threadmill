@@ -2,6 +2,7 @@ package com.hemju.threadmill.spring;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.time.Duration;
 import java.time.ZoneId;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -273,6 +274,37 @@ class ThreadmillAutoConfigurationTest {
                             .isEmpty();
                     assertThat(store.findCronTask(currentHandlerName)).isPresent();
                     assertThat(store.listCronTaskNamesOwnedBy("billing")).containsExactly(currentHandlerName);
+                });
+    }
+
+    @Test
+    void recurringHandlerTimeoutLandsOnTheRegisteredCronTask() {
+        // Regression for github issue #84: @Job(timeout) and @Job(maxRetries)
+        // were silently ignored for @Recurring handlers — the CronTask could
+        // not carry them, so every materialized instance ran under the engine
+        // defaults.
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
+                .withBean(TimedRecurringHandler.class)
+                .withBean(RecurringIntervalHandler.class)
+                .withPropertyValues("threadmill.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    JobStore store = context.getBean(JobStore.class);
+                    var timed = store.findCronTask(TimedRecurringHandler.class.getName())
+                            .orElseThrow();
+                    assertThat(timed.timeout()).isEqualTo(Duration.ofMinutes(30));
+                    assertThat(timed.maxAttempts()).isEqualTo(7);
+                    // A handler without annotation overrides mirrors the
+                    // enqueue path: it carries the configured global defaults.
+                    var properties = context.getBean(ThreadmillProperties.class);
+                    var untimed = store.findCronTask(RecurringIntervalHandler.class.getName())
+                            .orElseThrow();
+                    assertThat(untimed.timeout()).isEqualTo(properties.getJobTimeout());
+                    assertThat(untimed.maxAttempts()).isEqualTo(properties.getDefaultMaxAttempts());
                 });
     }
 
@@ -628,6 +660,13 @@ class ThreadmillAutoConfigurationTest {
     @Job
     @Recurring(interval = "PT5S", cron = "*/5 * * * *")
     static final class BothScheduleFieldsHandler implements JobHandler<NoPayload> {
+        @Override
+        public void run(NoPayload payload, JobExecutionContext ctx) {}
+    }
+
+    @Job(timeout = "PT30M", maxRetries = 7)
+    @Recurring(interval = "PT5S")
+    static final class TimedRecurringHandler implements JobHandler<NoPayload> {
         @Override
         public void run(NoPayload payload, JobExecutionContext ctx) {}
     }

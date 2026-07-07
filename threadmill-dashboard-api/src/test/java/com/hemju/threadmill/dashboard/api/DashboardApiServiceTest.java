@@ -17,7 +17,9 @@ import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
+import com.hemju.threadmill.core.engine.RetryInterceptor;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.schedule.RecurringMaterializer;
@@ -127,6 +129,57 @@ class DashboardApiServiceTest {
         var state = store.findCronTaskState("report").orElseThrow();
         assertThat(state.inFlightJobId()).isEqualTo(state.lastRunJobId());
         assertThat(state.inFlightJobId()).isNotNull();
+    }
+
+    @Test
+    void manualTriggerCarriesTheTaskTimeoutAsPerJobTimeoutMetadata() {
+        // Companion to github issue #84: a manually triggered instance of a
+        // recurring task must run under the task's timeout and retry budget,
+        // like a scheduled one.
+        var store = new InMemoryJobStore();
+        var service = new DashboardApiService(store, new LocalWakeBus());
+        store.upsertCronTask(timedCronTask("report", Duration.ofMinutes(30), 7));
+
+        service.triggerRecurring("report");
+
+        var state = store.findCronTaskState("report").orElseThrow();
+        var instance = store.findById(JobId.of(state.lastRunJobId())).orElseThrow();
+        assertThat(instance.metadata().get(JobRunner.META_TIMEOUT_SECONDS)).contains("1800");
+        assertThat(instance.metadata().get(RetryInterceptor.META_MAX_ATTEMPTS)).contains("7");
+    }
+
+    @Test
+    void updateRecurringPreservesTheTaskTimeout() {
+        // The update endpoint rebuilds the CronTask field-by-field; the
+        // timeout and retry budget are not operator-editable yet and must
+        // survive unchanged.
+        var store = new InMemoryJobStore();
+        var service = new DashboardApiService(store, new LocalWakeBus());
+        store.upsertCronTask(timedCronTask("report", Duration.ofMinutes(30), 9));
+
+        service.updateRecurring(
+                "report",
+                new DashboardPayloads.UpdateRecurringRequest(null, null, null, null, null, 7, null, null, null));
+
+        var updated = store.findCronTask("report").orElseThrow();
+        assertThat(updated.priority()).isEqualTo(7);
+        assertThat(updated.timeout()).isEqualTo(Duration.ofMinutes(30));
+        assertThat(updated.maxAttempts()).isEqualTo(9);
+    }
+
+    private static CronTask timedCronTask(String name, Duration timeout, Integer maxAttempts) {
+        return new CronTask(
+                name,
+                new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
+                "com.example.ReportHandler",
+                new JobArgument("com.hemju.threadmill.core.handler.NoPayload", "{}"),
+                "default",
+                0,
+                timeout,
+                maxAttempts,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
     }
 
     @Test

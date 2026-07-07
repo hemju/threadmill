@@ -23,6 +23,12 @@ import com.hemju.threadmill.core.spec.JobArgument;
  * @param payloadArgument   pre-serialized payload to feed to each materialised instance
  * @param queue             target queue
  * @param priority          job priority
+ * @param timeout           per-instance execution timeout, or {@code null} to
+ *                          use the engine's global job timeout; stamped on each
+ *                          materialised instance
+ * @param maxAttempts       per-instance retry budget, or {@code null} to use
+ *                          the {@code RetryInterceptor} defaults; stamped on
+ *                          each materialised instance
  * @param missedRunPolicy   what to do with runs missed during downtime
  * @param zone              time zone for the cron expression (ignored for interval triggers)
  * @param enabled           whether the task is currently active
@@ -34,6 +40,8 @@ public record CronTask(
         JobArgument payloadArgument,
         String queue,
         int priority,
+        Duration timeout,
+        Integer maxAttempts,
         MissedRunPolicy missedRunPolicy,
         ZoneId zone,
         boolean enabled) {
@@ -47,6 +55,32 @@ public record CronTask(
         Objects.requireNonNull(queue, "queue");
         Objects.requireNonNull(missedRunPolicy, "missedRunPolicy");
         Objects.requireNonNull(zone, "zone");
+        // The materialised instance carries the timeout as whole seconds
+        // (JobRunner.META_TIMEOUT_SECONDS), so sub-second values would
+        // silently truncate to "use the global timeout".
+        if (timeout != null && timeout.toSeconds() < 1) {
+            throw new IllegalArgumentException("timeout must be at least one second when set");
+        }
+        if (maxAttempts != null && maxAttempts < 1) {
+            throw new IllegalArgumentException("maxAttempts must be at least one when set");
+        }
+    }
+
+    /**
+     * Convenience constructor for tasks that run under the engine's global
+     * job timeout and the {@code RetryInterceptor} defaults.
+     */
+    public CronTask(
+            String name,
+            Trigger trigger,
+            String handlerType,
+            JobArgument payloadArgument,
+            String queue,
+            int priority,
+            MissedRunPolicy missedRunPolicy,
+            ZoneId zone,
+            boolean enabled) {
+        this(name, trigger, handlerType, payloadArgument, queue, priority, null, null, missedRunPolicy, zone, enabled);
     }
 
     /** A trigger is either a cron expression or a fixed interval. */

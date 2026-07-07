@@ -1634,22 +1634,42 @@ public final class RedisJobStore implements JobStore {
         } else {
             throw new IllegalStateException("Unknown trigger: " + trigger);
         }
-        RedisClusterCommands<String, String> r = sync();
+        Map<String, String> fields = new LinkedHashMap<>();
+        fields.put("trigger_kind", kind);
+        fields.put("trigger_value", value);
+        fields.put("handler_signature", task.handlerType());
+        fields.put("payload_type_tag", task.payloadArgument().typeTag());
+        fields.put("payload_serialized", task.payloadArgument().serialized());
+        fields.put("queue", task.queue());
+        fields.put("priority", Integer.toString(task.priority()));
+        if (task.timeout() != null) {
+            fields.put("timeout_seconds", Long.toString(task.timeout().toSeconds()));
+        }
+        if (task.maxAttempts() != null) {
+            fields.put("max_attempts", Integer.toString(task.maxAttempts()));
+        }
+        fields.put("missed_run_policy", task.missedRunPolicy().name());
+        fields.put("time_zone", task.zone().getId());
+        fields.put("enabled", Boolean.toString(task.enabled()));
+        var argv = new ArrayList<String>(fields.size() * 2);
+        fields.forEach((k, v) -> {
+            argv.add(k);
+            argv.add(v);
+        });
         try {
-            r.hset(
-                    RedisKeys.userKey("cron_task", task.name()),
-                    Map.of(
-                            "trigger_kind", kind,
-                            "trigger_value", value,
-                            "handler_signature", task.handlerType(),
-                            "payload_type_tag", task.payloadArgument().typeTag(),
-                            "payload_serialized", task.payloadArgument().serialized(),
-                            "queue", task.queue(),
-                            "priority", Integer.toString(task.priority()),
-                            "missed_run_policy", task.missedRunPolicy().name(),
-                            "time_zone", task.zone().getId(),
-                            "enabled", Boolean.toString(task.enabled())));
-            r.sadd(CRON_TASKS_INDEX, task.name());
+            // DEL + HSET in one atomic script (overwrite semantics) so an
+            // optional field cleared by a re-upsert — the timeout — does not
+            // linger from the previous definition.
+            evalScript(
+                    """
+                    redis.call('DEL', KEYS[1])
+                    redis.call('HSET', KEYS[1], unpack(ARGV))
+                    return 1
+                    """,
+                    ScriptOutputType.INTEGER,
+                    new String[] {RedisKeys.userKey("cron_task", task.name())},
+                    argv.toArray(String[]::new));
+            sync().sadd(CRON_TASKS_INDEX, task.name());
         } catch (RuntimeException e) {
             throw translateCapacity(e);
         }
@@ -1773,6 +1793,10 @@ public final class RedisJobStore implements JobStore {
                 new JobArgument(hash.get("payload_type_tag"), hash.get("payload_serialized")),
                 hash.get("queue"),
                 Integer.parseInt(hash.get("priority")),
+                hash.containsKey("timeout_seconds")
+                        ? Duration.ofSeconds(Long.parseLong(hash.get("timeout_seconds")))
+                        : null,
+                hash.containsKey("max_attempts") ? Integer.valueOf(hash.get("max_attempts")) : null,
                 CronTask.MissedRunPolicy.valueOf(hash.get("missed_run_policy")),
                 ZoneId.of(hash.get("time_zone")),
                 Boolean.parseBoolean(hash.get("enabled")));

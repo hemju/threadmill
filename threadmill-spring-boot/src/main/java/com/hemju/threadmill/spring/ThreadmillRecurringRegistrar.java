@@ -78,6 +78,8 @@ public class ThreadmillRecurringRegistrar {
                     registration.handlerType().getName(),
                     registration.queue(),
                     registration.priority(),
+                    registration.timeout(),
+                    registration.maxRetries(),
                     recurring.missedRunPolicy());
             logRegistered(task, null);
         }
@@ -110,6 +112,8 @@ public class ThreadmillRecurringRegistrar {
                 serializer.serializePayload(NoPayload.INSTANCE),
                 registration.queue(),
                 registration.priority(),
+                registration.timeout(),
+                registration.maxRetries(),
                 recurring.missedRunPolicy(),
                 ZoneId.systemDefault(),
                 true);

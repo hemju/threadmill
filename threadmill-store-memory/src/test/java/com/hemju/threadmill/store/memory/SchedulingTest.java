@@ -17,10 +17,12 @@ import org.junit.jupiter.api.Test;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.engine.QueueLane;
+import com.hemju.threadmill.core.engine.RetryInterceptor;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
@@ -363,6 +365,51 @@ class SchedulingTest {
         Job instance = store.findById(JobId.of(state.lastRunJobId())).orElseThrow();
         // The materialized instance must back-link to its recurring definition.
         assertThat(instance.cronTaskName()).contains("linked");
+    }
+
+    @Test
+    void recurringInstancesCarryTheTaskTimeoutAsPerJobTimeoutMetadata() {
+        // Regression: a recurring definition's per-instance overrides (timeout,
+        // max attempts) used to be dropped on materialization, so every
+        // recurring instance silently ran under the engine defaults
+        // (github issue #84).
+        scheduler.defineIntervalTask(
+                "timed",
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                Duration.ofMinutes(30),
+                7,
+                CronTask.MissedRunPolicy.DROP);
+        var existing = store.findCronTaskState("timed").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+
+        new RecurringMaterializer(store).tick(Instant.now());
+
+        var state = store.findCronTaskState("timed").orElseThrow();
+        Job instance = store.findById(JobId.of(state.lastRunJobId())).orElseThrow();
+        assertThat(instance.metadata().get(JobRunner.META_TIMEOUT_SECONDS)).contains("1800");
+        assertThat(instance.metadata().get(RetryInterceptor.META_MAX_ATTEMPTS)).contains("7");
+    }
+
+    @Test
+    void recurringInstancesWithoutATaskTimeoutCarryNoTimeoutMetadata() {
+        scheduler.defineIntervalTask(
+                "untimed", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);
+        var existing = store.findCronTaskState("untimed").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+
+        new RecurringMaterializer(store).tick(Instant.now());
+
+        var state = store.findCronTaskState("untimed").orElseThrow();
+        Job instance = store.findById(JobId.of(state.lastRunJobId())).orElseThrow();
+        // Absent metadata means "use the engine defaults".
+        assertThat(instance.metadata().get(JobRunner.META_TIMEOUT_SECONDS)).isEmpty();
+        assertThat(instance.metadata().get(RetryInterceptor.META_MAX_ATTEMPTS)).isEmpty();
     }
 
     @Test

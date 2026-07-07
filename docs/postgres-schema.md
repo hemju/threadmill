@@ -27,6 +27,8 @@ databases.
 The full clean-install DDL is the checked-in migration SQL:
 
 [`V1__baseline.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V1__baseline.sql)
+plus the additive migrations that followed it (currently
+[`V2__cron_task_overrides.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V2__cron_task_overrides.sql)).
 
 For applications that want to apply SQL from their own deployment system,
 `MigrationRunner` can emit the same statements:
@@ -37,7 +39,7 @@ String sql = new MigrationRunner(dataSource).emitCleanInstallSql();
 
 Apply that output to a clean PostgreSQL 18+ database. It creates
 `threadmill_schema_history`, the Threadmill tables, indexes, trigger function,
-trigger, and the migration-history row for the baseline.
+trigger, and one migration-history row per shipped migration.
 
 For an existing schema, use pending SQL instead:
 

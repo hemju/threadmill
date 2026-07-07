@@ -1700,14 +1700,17 @@ public final class PostgresJobStore implements JobStore {
                 try (Connection conn = dataSource.getConnection();
                         PreparedStatement ps = conn.prepareStatement(
                                 "INSERT INTO threadmill_cron_tasks (name, trigger_kind, trigger_value, handler_signature, "
-                                        + "payload_type_tag, payload_serialized, queue, priority, missed_run_policy, time_zone, enabled) "
-                                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                                        + "payload_type_tag, payload_serialized, queue, priority, timeout_seconds, "
+                                        + "max_attempts, missed_run_policy, time_zone, enabled) "
+                                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                                         + "ON CONFLICT (name) DO UPDATE SET "
                                         + "trigger_kind = EXCLUDED.trigger_kind, trigger_value = EXCLUDED.trigger_value, "
                                         + "handler_signature = EXCLUDED.handler_signature, "
                                         + "payload_type_tag = EXCLUDED.payload_type_tag, "
                                         + "payload_serialized = EXCLUDED.payload_serialized, "
                                         + "queue = EXCLUDED.queue, priority = EXCLUDED.priority, "
+                                        + "timeout_seconds = EXCLUDED.timeout_seconds, "
+                                        + "max_attempts = EXCLUDED.max_attempts, "
                                         + "missed_run_policy = EXCLUDED.missed_run_policy, "
                                         + "time_zone = EXCLUDED.time_zone, enabled = EXCLUDED.enabled")) {
                     ps.setString(1, task.name());
@@ -1718,9 +1721,19 @@ public final class PostgresJobStore implements JobStore {
                     ps.setString(6, task.payloadArgument().serialized());
                     ps.setString(7, task.queue());
                     ps.setInt(8, task.priority());
-                    ps.setString(9, task.missedRunPolicy().name());
-                    ps.setString(10, task.zone().getId());
-                    ps.setBoolean(11, task.enabled());
+                    if (task.timeout() == null) {
+                        ps.setNull(9, Types.BIGINT);
+                    } else {
+                        ps.setLong(9, task.timeout().toSeconds());
+                    }
+                    if (task.maxAttempts() == null) {
+                        ps.setNull(10, Types.INTEGER);
+                    } else {
+                        ps.setInt(10, task.maxAttempts());
+                    }
+                    ps.setString(11, task.missedRunPolicy().name());
+                    ps.setString(12, task.zone().getId());
+                    ps.setBoolean(13, task.enabled());
                     ps.executeUpdate();
                     return null;
                 }
@@ -1735,7 +1748,8 @@ public final class PostgresJobStore implements JobStore {
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(
                         "SELECT name, trigger_kind, trigger_value, handler_signature, payload_type_tag, "
-                                + "payload_serialized, queue, priority, missed_run_policy, time_zone, enabled "
+                                + "payload_serialized, queue, priority, timeout_seconds, max_attempts, "
+                                + "missed_run_policy, time_zone, enabled "
                                 + "FROM threadmill_cron_tasks WHERE name = ?")) {
             ps.setString(1, name);
             try (ResultSet rs = ps.executeQuery()) {
@@ -1753,7 +1767,8 @@ public final class PostgresJobStore implements JobStore {
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(
                         "SELECT name, trigger_kind, trigger_value, handler_signature, payload_type_tag, "
-                                + "payload_serialized, queue, priority, missed_run_policy, time_zone, enabled "
+                                + "payload_serialized, queue, priority, timeout_seconds, max_attempts, "
+                                + "missed_run_policy, time_zone, enabled "
                                 + "FROM threadmill_cron_tasks ORDER BY name");
                 ResultSet rs = ps.executeQuery()) {
             while (rs.next()) out.add(readCronTask(rs));
@@ -1879,6 +1894,10 @@ public final class PostgresJobStore implements JobStore {
         } else {
             throw new SQLException("Unknown trigger_kind: " + kind);
         }
+        long timeoutSeconds = rs.getLong(9);
+        Duration timeout = rs.wasNull() ? null : Duration.ofSeconds(timeoutSeconds);
+        int maxAttemptsValue = rs.getInt(10);
+        Integer maxAttempts = rs.wasNull() ? null : maxAttemptsValue;
         return new CronTask(
                 name,
                 trigger,
@@ -1886,9 +1905,11 @@ public final class PostgresJobStore implements JobStore {
                 new JobArgument(rs.getString(5), rs.getString(6)),
                 rs.getString(7),
                 rs.getInt(8),
-                CronTask.MissedRunPolicy.valueOf(rs.getString(9)),
-                ZoneId.of(rs.getString(10)),
-                rs.getBoolean(11));
+                timeout,
+                maxAttempts,
+                CronTask.MissedRunPolicy.valueOf(rs.getString(11)),
+                ZoneId.of(rs.getString(12)),
+                rs.getBoolean(13));
     }
 
     // ---------------------------------------------------------------- helpers
