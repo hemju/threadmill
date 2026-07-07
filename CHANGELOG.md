@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.1.2
+
+- Fixed `@Job(timeout)` and `@Job(maxRetries)` being silently ignored for
+  `@Recurring` handlers (issue #84). A `CronTask` now carries an optional
+  per-instance `timeout` and `maxAttempts`; `RecurringMaterializer` and the
+  dashboard's manual trigger stamp them onto every materialized instance as
+  `JobRunner.META_TIMEOUT_SECONDS` / `RetryInterceptor.META_MAX_ATTEMPTS`, so
+  the annotations behave identically on the recurring and enqueue paths.
+  Previously every recurring instance ran under the global `jobTimeout` and the
+  default retry budget, so a long-running recurring job could be interrupted
+  mid-run and retried (duplicating external side effects).
+- Added a per-instance `timeout` / `maxAttempts` parameter to
+  `Scheduler.defineCronTask`, `defineIntervalTask`, and `defineRecurring` for
+  core (non-Spring) callers. Existing signatures are unchanged (`null` keeps
+  the engine defaults).
+- Added the additive Postgres migration `V2__cron_task_overrides.sql`
+  (nullable `timeout_seconds` and `max_attempts` on `threadmill_cron_tasks`);
+  existing rows default to the engine behaviour. Redis stores the same as
+  optional hash fields cleared by an override-less re-registration.
+
 ## 0.1.1
 
 - Fixed `Dispatcher` release of claimed-but-unrun jobs (node-tag mismatch,
