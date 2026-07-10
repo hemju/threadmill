@@ -49,8 +49,7 @@ import com.hemju.threadmill.core.NodeId;
  *       scanning the whole pending population.</li>
  *   <li>{@code {threadmill}:queue_keys:{queue}} — HASH concurrency-key &rarr;
  *       count of ENQUEUED keyed jobs of that key in the queue. The claim
- *       path enumerates keys from here so its cost scales with keys, never
- *       with backlog depth.</li>
+ *       path advances a bounded rotating HSCAN cursor over this registry.</li>
  *   <li>{@code {threadmill}:queue_unkeyed:{queue}} — ZSET of ENQUEUED
  *       unkeyed job ids, scored like the queue ZSET, so the unkeyed claim
  *       lane never pages past keyed work.</li>

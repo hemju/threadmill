@@ -17,6 +17,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.LockSupport;
 
@@ -27,8 +28,10 @@ import io.lettuce.core.Limit;
 import io.lettuce.core.Range;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisCommandExecutionException;
+import io.lettuce.core.RedisFuture;
 import io.lettuce.core.RedisURI;
 import io.lettuce.core.ScanArgs;
+import io.lettuce.core.ScanCursor;
 import io.lettuce.core.ScoredValue;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.SetArgs;
@@ -36,6 +39,7 @@ import io.lettuce.core.ZAddArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.cluster.RedisClusterClient;
 import io.lettuce.core.cluster.api.StatefulRedisClusterConnection;
+import io.lettuce.core.cluster.api.async.RedisClusterAsyncCommands;
 import io.lettuce.core.cluster.api.sync.RedisClusterCommands;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
@@ -113,11 +117,13 @@ public final class RedisJobStore implements JobStore {
     private final AbstractRedisClient client;
     private final AutoCloseable connection;
     private final RedisClusterCommands<String, String> commands;
+    private final RedisClusterAsyncCommands<String, String> asyncCommands;
     private final JobSerializer serializer;
     private final JobStoreCapabilities capabilities;
     private final boolean ownsClient;
     private final RedisStoreConfig.RedisSafetyValidation safetyValidation;
     private final String topologyDescription;
+    private final Map<String, String> claimKeyScanCursors = new LinkedHashMap<>();
 
     public RedisJobStore(RedisURI uri) {
         this(
@@ -164,7 +170,10 @@ public final class RedisJobStore implements JobStore {
     }
 
     private record ConnectionHandle(
-            AbstractRedisClient client, AutoCloseable connection, RedisClusterCommands<String, String> commands) {}
+            AbstractRedisClient client,
+            AutoCloseable connection,
+            RedisClusterCommands<String, String> commands,
+            RedisClusterAsyncCommands<String, String> asyncCommands) {}
 
     private record ClaimLock(String key, String token) {}
 
@@ -180,7 +189,7 @@ public final class RedisJobStore implements JobStore {
 
     private static ConnectionHandle connectStandalone(RedisClient client) {
         StatefulRedisConnection<String, String> connection = client.connect();
-        return new ConnectionHandle(client, connection, connection.sync());
+        return new ConnectionHandle(client, connection, connection.sync(), connection.async());
     }
 
     private static ConnectionHandle connectSentinel(RedisStoreConfig.Sentinel config) {
@@ -213,7 +222,7 @@ public final class RedisJobStore implements JobStore {
         RedisClusterClient client = RedisClusterClient.create(uris);
         client.setOptions(RedisClusterOptions.topologyRefreshing());
         StatefulRedisClusterConnection<String, String> connection = client.connect();
-        return new ConnectionHandle(client, connection, connection.sync());
+        return new ConnectionHandle(client, connection, connection.sync(), connection.async());
     }
 
     private RedisJobStore(
@@ -226,6 +235,7 @@ public final class RedisJobStore implements JobStore {
         this.client = handle.client();
         this.connection = handle.connection();
         this.commands = handle.commands();
+        this.asyncCommands = handle.asyncCommands();
         this.serializer = Objects.requireNonNull(serializer, "serializer");
         this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
         this.ownsClient = ownsClient;
@@ -882,15 +892,33 @@ public final class RedisJobStore implements JobStore {
     /** A claimable candidate id ordered by its queue-ZSET score (priority, then age). */
     private record ClaimCandidate(double queueScore, String id) {}
 
+    private record KeyAdmissionRead(
+            String key,
+            RedisFuture<List<KeyValue<String, String>>> counters,
+            RedisFuture<List<ScoredValue<String>>> pending,
+            RedisFuture<List<String>> holdRoots) {}
+
+    private record HoldAdmissionRead(
+            String key,
+            String root,
+            RedisFuture<Double> sharedRoot,
+            RedisFuture<Double> exclusiveRoot,
+            RedisFuture<List<String>> members) {}
+
+    private static final int MIN_KEYS_PER_CLAIM_PASS = 32;
+    private static final int MAX_KEYS_PER_CLAIM_PASS = 256;
+    private static final int MAX_TRACKED_QUEUE_CURSORS = 1024;
+
     /**
      * Gathers claim candidates without walking the queue backlog: unkeyed heads
      * from the queue's unkeyed ZSET, plus — per concurrency key registered for
      * this queue — the pending-order head run and the members of active
-     * workflow holds. Cost scales with the number of keys and in-flight holds,
-     * never with backlog depth (the same lesson the Postgres claim learned:
-     * candidate gathering must be key-driven, never backlog-walking). These
-     * reads are unlocked and approximate; claim_commit.lua stays the single
-     * admission authority.
+     * workflow holds. A rotating HSCAN cursor bounds each pass instead of
+     * HGETALL-walking every registered key. Per-key reads and queue-score probes
+     * are issued asynchronously in batches, so latency is bounded by network
+     * round trips rather than multiplied by the number of keys. These reads are
+     * unlocked and approximate; claim_commit.lua stays the single admission
+     * authority.
      */
     private List<ClaimCandidate> gatherClaimCandidates(RedisClusterCommands<String, String> r, String queue, int cap) {
         var candidates = new ArrayList<ClaimCandidate>();
@@ -900,22 +928,46 @@ public final class RedisJobStore implements JobStore {
                 candidates.add(new ClaimCandidate(entry.getScore(), entry.getValue()));
             }
         }
-        Map<String, String> registeredKeys = r.hgetall(RedisKeys.queueKeys(queue));
-        if (registeredKeys != null) {
-            for (String key : registeredKeys.keySet()) {
-                for (String id : admissibleIdsForKey(r, key, cap)) {
-                    // The queue-ZSET score doubles as the "ENQUEUED in *this*
-                    // queue" filter: an admissible job living in another queue
-                    // is claimed by that queue's own dispatcher.
-                    Double score = r.zscore(RedisKeys.queue(queue), id);
-                    if (score != null) {
-                        candidates.add(new ClaimCandidate(score, id));
-                    }
-                }
+        List<String> registeredKeys = scanRegisteredKeys(r, queue, cap);
+        Map<String, LinkedHashSet<String>> admissible = admissibleIdsForKeys(registeredKeys, cap);
+        var scoreReads = new LinkedHashMap<String, RedisFuture<Double>>();
+        for (var ids : admissible.values()) {
+            for (String id : ids) {
+                scoreReads.computeIfAbsent(id, candidate -> asyncCommands.zscore(RedisKeys.queue(queue), candidate));
+            }
+        }
+        awaitAll(scoreReads.values());
+        for (var scoreRead : scoreReads.entrySet()) {
+            // The queue-ZSET score doubles as the "ENQUEUED in this queue"
+            // filter: another queue's admissible job is ignored here.
+            Double score = resultOf(scoreRead.getValue());
+            if (score != null) {
+                candidates.add(new ClaimCandidate(score, scoreRead.getKey()));
             }
         }
         candidates.sort(Comparator.comparingDouble(ClaimCandidate::queueScore).thenComparing(ClaimCandidate::id));
         return candidates;
+    }
+
+    private List<String> scanRegisteredKeys(RedisClusterCommands<String, String> r, String queue, int cap) {
+        int count = Math.max(MIN_KEYS_PER_CLAIM_PASS, (int)
+                Math.min(MAX_KEYS_PER_CLAIM_PASS, Math.max(0L, (long) cap * 8L)));
+        synchronized (claimKeyScanCursors) {
+            String cursorValue = claimKeyScanCursors.getOrDefault(queue, ScanCursor.INITIAL.getCursor());
+            var cursor = r.hscanNovalues(
+                    RedisKeys.queueKeys(queue), ScanCursor.of(cursorValue), ScanArgs.Builder.limit(count));
+            if (cursor.isFinished()) {
+                claimKeyScanCursors.remove(queue);
+            } else {
+                if (!claimKeyScanCursors.containsKey(queue)
+                        && claimKeyScanCursors.size() >= MAX_TRACKED_QUEUE_CURSORS) {
+                    claimKeyScanCursors.remove(
+                            claimKeyScanCursors.keySet().iterator().next());
+                }
+                claimKeyScanCursors.put(queue, cursor.getCursor());
+            }
+            return cursor.getKeys() == null ? List.of() : List.copyOf(cursor.getKeys());
+        }
     }
 
     /**
@@ -925,54 +977,102 @@ public final class RedisJobStore implements JobStore {
      * pending member of an active workflow hold — those bypass both the
      * counters and the pending order.
      */
-    private List<String> admissibleIdsForKey(RedisClusterCommands<String, String> r, String key, int cap) {
-        var ids = new LinkedHashSet<String>();
-        List<KeyValue<String, String>> counters =
-                r.hmget(RedisKeys.concurrencyCounters(key), "exclusive_in_flight", "shared_in_flight");
-        long exclusiveInFlight = counterValue(counters, 0);
-        long sharedInFlight = counterValue(counters, 1);
-        if (exclusiveInFlight == 0) {
-            List<ScoredValue<String>> window = r.zrangeWithScores(RedisKeys.concurrencyPending(key), 0, cap + 7L);
-            // ZRANGE breaks score ties lexicographically by member, which
-            // orders by mode prefix first — but admission ties break by job
-            // id. Re-sort the window the way claim_commit.lua judges it.
-            var head = new ArrayList<ScoredValue<String>>(window == null ? List.of() : window);
-            head.sort(Comparator.<ScoredValue<String>>comparingDouble(ScoredValue::getScore)
-                    .thenComparing(sv -> memberJobId(sv.getValue())));
-            for (int i = 0; i < head.size(); i++) {
-                String member = head.get(i).getValue();
-                if (member.startsWith("EXCLUSIVE:")) {
-                    // An EXCLUSIVE head only goes when nothing else runs, and
-                    // nothing behind an EXCLUSIVE member is admissible without
-                    // an active hold.
-                    if (i == 0 && sharedInFlight == 0) {
-                        ids.add(memberJobId(member));
-                    }
-                    break;
-                }
-                ids.add(memberJobId(member));
-            }
+    private Map<String, LinkedHashSet<String>> admissibleIdsForKeys(List<String> keys, int cap) {
+        var reads = new ArrayList<KeyAdmissionRead>(keys.size());
+        for (String key : keys) {
+            reads.add(new KeyAdmissionRead(
+                    key,
+                    asyncCommands.hmget(RedisKeys.concurrencyCounters(key), "exclusive_in_flight", "shared_in_flight"),
+                    asyncCommands.zrangeWithScores(RedisKeys.concurrencyPending(key), 0, cap + 7L),
+                    asyncCommands.hkeys(RedisKeys.concurrencyWorkflows(key))));
         }
-        List<String> holdRoots = r.hkeys(RedisKeys.concurrencyWorkflows(key));
-        if (holdRoots != null) {
+        var initialFutures = new ArrayList<RedisFuture<?>>(reads.size() * 3);
+        for (var read : reads) {
+            initialFutures.add(read.counters());
+            initialFutures.add(read.pending());
+            initialFutures.add(read.holdRoots());
+        }
+        awaitAll(initialFutures);
+
+        var idsByKey = new LinkedHashMap<String, LinkedHashSet<String>>();
+        var holdReads = new ArrayList<HoldAdmissionRead>();
+        for (var read : reads) {
+            var ids = idsByKey.computeIfAbsent(read.key(), ignored -> new LinkedHashSet<>());
+            List<KeyValue<String, String>> counters = resultOf(read.counters());
+            long exclusiveInFlight = counterValue(counters, 0);
+            long sharedInFlight = counterValue(counters, 1);
+            if (exclusiveInFlight == 0) {
+                addPendingHead(ids, resultOf(read.pending()), sharedInFlight);
+            }
+            List<String> holdRoots = resultOf(read.holdRoots());
+            if (holdRoots == null) continue;
             for (String root : holdRoots) {
-                // A retried root reclaims under its own hold; it sits in the
-                // main pending ZSET under its own id.
-                for (ConcurrencyMode mode : ConcurrencyMode.values()) {
-                    String member = RedisKeys.concurrencyPendingMember(mode, JobId.parse(root));
-                    if (r.zscore(RedisKeys.concurrencyPending(key), member) != null) {
-                        ids.add(root);
-                    }
-                }
-                List<String> members = r.zrange(RedisKeys.concurrencyPendingRoot(key, root), 0, cap + 7L);
-                if (members != null) {
-                    for (String member : members) {
-                        ids.add(memberJobId(member));
-                    }
+                holdReads.add(new HoldAdmissionRead(
+                        read.key(),
+                        root,
+                        asyncCommands.zscore(
+                                RedisKeys.concurrencyPending(read.key()),
+                                RedisKeys.concurrencyPendingMember(ConcurrencyMode.SHARED, JobId.parse(root))),
+                        asyncCommands.zscore(
+                                RedisKeys.concurrencyPending(read.key()),
+                                RedisKeys.concurrencyPendingMember(ConcurrencyMode.EXCLUSIVE, JobId.parse(root))),
+                        asyncCommands.zrange(RedisKeys.concurrencyPendingRoot(read.key(), root), 0, cap + 7L)));
+            }
+        }
+        var holdFutures = new ArrayList<RedisFuture<?>>(holdReads.size() * 3);
+        for (var read : holdReads) {
+            holdFutures.add(read.sharedRoot());
+            holdFutures.add(read.exclusiveRoot());
+            holdFutures.add(read.members());
+        }
+        awaitAll(holdFutures);
+        for (var read : holdReads) {
+            var ids = idsByKey.get(read.key());
+            if (resultOf(read.sharedRoot()) != null || resultOf(read.exclusiveRoot()) != null) {
+                ids.add(read.root());
+            }
+            List<String> members = resultOf(read.members());
+            if (members != null) {
+                for (String member : members) {
+                    ids.add(memberJobId(member));
                 }
             }
         }
-        return List.copyOf(ids);
+        return idsByKey;
+    }
+
+    private static void addPendingHead(Set<String> ids, List<ScoredValue<String>> window, long sharedInFlight) {
+        // ZRANGE breaks score ties lexicographically by member, which
+        // orders by mode prefix first — but admission ties break by job
+        // id. Re-sort the window the way claim_commit.lua judges it.
+        var head = new ArrayList<ScoredValue<String>>(window == null ? List.of() : window);
+        head.sort(Comparator.<ScoredValue<String>>comparingDouble(ScoredValue::getScore)
+                .thenComparing(sv -> memberJobId(sv.getValue())));
+        for (int i = 0; i < head.size(); i++) {
+            String member = head.get(i).getValue();
+            if (member.startsWith("EXCLUSIVE:")) {
+                // An EXCLUSIVE head only goes when nothing else runs, and
+                // nothing behind an EXCLUSIVE member is admissible without
+                // an active hold.
+                if (i == 0 && sharedInFlight == 0) {
+                    ids.add(memberJobId(member));
+                }
+                break;
+            }
+            ids.add(memberJobId(member));
+        }
+    }
+
+    private static void awaitAll(Iterable<? extends RedisFuture<?>> futures) {
+        var completions = new ArrayList<CompletableFuture<?>>();
+        for (var future : futures) {
+            completions.add(future.toCompletableFuture());
+        }
+        CompletableFuture.allOf(completions.toArray(CompletableFuture[]::new)).join();
+    }
+
+    private static <T> T resultOf(RedisFuture<T> future) {
+        return future.toCompletableFuture().join();
     }
 
     private static long counterValue(List<KeyValue<String, String>> counters, int index) {

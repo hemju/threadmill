@@ -338,6 +338,54 @@ class RedisJobStoreRegressionTest {
         assertRedisIndexesConsistent();
     }
 
+    @Test
+    void claimCandidateGatheringUsesABoundedRotatingKeyScan() {
+        JobStore store = store();
+        RedisCommands<String, String> r = adminConnection.sync();
+        seedBlockedKeyRegistry(r, "high-cardinality", 600);
+
+        r.configResetstat();
+        assertThat(store.claimReady(NodeId.newId(), "high-cardinality", 1, Instant.now()))
+                .isEmpty();
+
+        assertThat(commandCalls(r, "hscan")).isPositive();
+        assertThat(commandCalls(r, "hgetall")).isZero();
+        assertThat(commandCalls(r, "hmget"))
+                .as("one pass must not probe every registered key")
+                .isLessThan(600L);
+    }
+
+    @Test
+    void rotatingKeyScanEventuallyReachesClaimableWorkBeyondTheFirstPage() {
+        JobStore store = store();
+        RedisCommands<String, String> r = adminConnection.sync();
+        seedBlockedKeyRegistry(r, "high-cardinality", 600);
+        Job claimable = Job.builder()
+                .spec(JobSpec.of("com.example.Import", new JobArgument("java.lang.String", "\"x\"")))
+                .queue("high-cardinality")
+                .concurrencyKey("eventually-claimable")
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .build();
+        store.insert(claimable);
+
+        var claimed = new ArrayList<Job>();
+        for (int pass = 0; pass < 30 && claimed.isEmpty(); pass++) {
+            claimed.addAll(store.claimReady(NodeId.newId(), "high-cardinality", 1, Instant.now()));
+        }
+
+        assertThat(claimed).extracting(Job::id).containsExactly(claimable.id());
+    }
+
+    private static void seedBlockedKeyRegistry(RedisCommands<String, String> r, String queue, int keys) {
+        var registry = new HashMap<String, String>();
+        for (int i = 0; i < keys; i++) {
+            String key = "blocked-key-" + i;
+            registry.put(key, "1");
+            r.hset(RedisKeys.concurrencyCounters(key), "exclusive_in_flight", "1");
+        }
+        r.hset(RedisKeys.queueKeys(queue), registry);
+    }
+
     private static long totalCommandCalls(RedisCommands<String, String> r) {
         long total = 0;
         for (String line : r.info("commandstats").split("\n")) {
@@ -349,6 +397,18 @@ class RedisJobStoreRegressionTest {
                     line.substring(callsIndex + "calls=".length(), end).trim());
         }
         return total;
+    }
+
+    private static long commandCalls(RedisCommands<String, String> r, String command) {
+        String prefix = "cmdstat_" + command + ":";
+        for (String line : r.info("commandstats").split("\n")) {
+            if (!line.startsWith(prefix)) continue;
+            int callsIndex = line.indexOf("calls=");
+            int end = line.indexOf(',', callsIndex);
+            return Long.parseLong(
+                    line.substring(callsIndex + "calls=".length(), end).trim());
+        }
+        return 0L;
     }
 
     @Test
