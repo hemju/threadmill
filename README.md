@@ -46,9 +46,9 @@ starter if you use Spring):
 
 ```kotlin
 // build.gradle.kts
-implementation("com.hemju.threadmill:threadmill-core:0.1.0")
-implementation("com.hemju.threadmill:threadmill-store-postgres:0.1.0") // or -store-redis / -store-memory
-implementation("com.hemju.threadmill:threadmill-spring-boot:0.1.0")    // optional Spring Boot integration
+implementation("com.hemju.threadmill:threadmill-core:0.1.2")
+implementation("com.hemju.threadmill:threadmill-store-postgres:0.1.2") // or -store-redis / -store-memory
+implementation("com.hemju.threadmill:threadmill-spring-boot:0.1.2")    // optional Spring Boot integration
 ```
 
 ```xml
@@ -56,7 +56,7 @@ implementation("com.hemju.threadmill:threadmill-spring-boot:0.1.0")    // option
 <dependency>
   <groupId>com.hemju.threadmill</groupId>
   <artifactId>threadmill-core</artifactId>
-  <version>0.1.0</version>
+  <version>0.1.2</version>
 </dependency>
 ```
 
@@ -261,13 +261,18 @@ Not yet in v1 (design-compatible, additive when needed):
 - Batches; external-trigger jobs (the `PROCESSED` state is reserved);
   rate limiters; richer cron expressions (business-day, last-of-month).
 - Additional dashboard adapters beyond Spring MVC.
-- Reproducible production-grade benchmarks; Maven Central publishing
-  automation.
+- Reproducible production-grade benchmarks.
 
-## Soak / benchmark numbers
+## Soak regression reference results
 
 Run with `./gradlew :threadmill-soak:soakRegression`. Numbers from a developer laptop
 (Apple Silicon, Docker Desktop, single node, 8 workers, 32-batch claim):
+
+These are smoke-test reference results, not portable capacity claims or a
+production benchmark. Hardware, container runtime, datastore configuration,
+payload size, handler duration, and concurrency-key distribution materially
+change throughput. Run the checked-in harness in the target environment for
+capacity planning.
 
 | Backend | Throughput (5–10k jobs end-to-end) | Contention / queue-family soak | Recurring (100 ms interval over 5 s) | Induced container-pause recovery |
 |---|---|---|---|---|

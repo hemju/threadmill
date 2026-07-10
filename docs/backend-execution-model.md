@@ -107,8 +107,9 @@ sequenceDiagram
 - Different queues can be claimed by different dispatchers and lanes.
 - Different candidates in the same queue are protected by
   `FOR UPDATE SKIP LOCKED`, so competing nodes skip rows already being claimed.
-- A blocked hot-key page does not end the claim. Postgres keeps paging by
-  queue order until it fills the claim batch or exhausts the queue.
+- Candidate gathering uses bounded unkeyed, keyed-head, and active-hold lanes.
+  The keyed lane currently examines a capped set of queue-scoped keys per
+  poll; later keys are reconsidered on subsequent polls as that page changes.
 - Claim decisions are scalar-first: group counters, active workflow holds, and
   earliest pending order are loaded once per page, and job bodies are fetched
   only for candidates that will actually claim.

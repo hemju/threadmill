@@ -4,8 +4,9 @@
 
 Please do not open a public issue for a suspected security vulnerability.
 
-Until GitHub private vulnerability reporting is configured for this repository,
-send a private report to the repository owner with:
+Use GitHub's enabled
+[private vulnerability reporting](https://github.com/hemju/threadmill/security/advisories/new)
+to send the maintainers:
 
 - a description of the issue;
 - affected modules or versions, if known;
@@ -17,8 +18,9 @@ will be handled with a coordinated fix and release note.
 
 ## Supported Versions
 
-Threadmill is currently pre-1.0. Security fixes target the current active
-release candidate unless otherwise stated in the release notes.
+Threadmill is currently pre-1.0. Security fixes target the latest published
+release and `main`. Older pre-1.0 releases are not supported unless a release
+note explicitly says otherwise.
 
 ## Operational Notes
 

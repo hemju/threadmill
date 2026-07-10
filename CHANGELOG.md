@@ -49,8 +49,8 @@ First public release under the Apache-2.0 license.
   across all stores.
 - Fixed workflow-root concurrency release for failed intermediate workflow
   steps by abandoning descendants that can no longer be promoted.
-- Added Spring ergonomic API: `@ThreadmillJob`, payload-type handler discovery,
-  and `JobEnqueuer`.
+- Added the Spring ergonomic API: `@Job`, typed handler discovery, and
+  `JobScheduler`.
 - Added Redis standalone, Sentinel, and Cluster configuration. Cluster uses a
   single `{threadmill}` hash slot for v1 Lua correctness.
 - Added producer-side deduplication with `Created` / `Coalesced` results.

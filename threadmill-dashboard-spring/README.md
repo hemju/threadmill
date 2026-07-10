@@ -19,10 +19,11 @@ permissions. The default implementation grants permissions from authorities
 named `THREADMILL_<PERMISSION>` or `ROLE_THREADMILL_<PERMISSION>`; `ADMIN` or
 `ROLE_THREADMILL_ADMIN` grants all dashboard permissions.
 
-By default, Threadmill registers a `SecurityFilterChain` for
-`/threadmill/api/**`. It requires authentication and CSRF tokens for mutating
-requests, using `CookieCsrfTokenRepository.withHttpOnlyFalse()` so the static
-UI can send the token back in the configured header. Set
+By default, Threadmill registers a `SecurityFilterChain` for the configured API
+path and `/threadmill/**`, covering both JSON endpoints and mounted UI assets.
+It requires authentication and CSRF tokens for mutating requests, using
+`CookieCsrfTokenRepository.withHttpOnlyFalse()` so the static UI can send the
+token back in the configured header. Set
 `threadmill.dashboard.security.auto-configure=false` to provide a custom chain.
 If no `SecurityFilterChain` exists, startup fails unless unsafe read-only local
 mode is enabled.
