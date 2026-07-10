@@ -62,21 +62,24 @@ start; `JobScheduler` verifies the handler/payload pair at enqueue time.
    wired from the application's existing `DataSource`. The auto-configured
    store applies pending Threadmill schema migrations by default before it is
    created.
-3. **Otherwise** → `InMemoryJobStore` with a loud warning that jobs won't
-   survive restart.
+3. **Explicit development opt-in** (`threadmill.store.memory.enabled=true`) →
+   `InMemoryJobStore` with a loud warning that jobs won't survive restart.
+4. **Otherwise** → startup fails with an actionable error instead of silently
+   selecting volatile storage.
 
 Define your own `JobStore` bean to override everything.
 
 ## Lifecycle (`SmartLifecycle`)
 
-`ThreadmillLifecycle` wraps `ProcessingNode` and registers at phase
-`Integer.MAX_VALUE / 2`. That's deliberate:
+`ThreadmillLifecycle` wraps `ProcessingNode` and registers at Spring's default
+maximum phase (`Integer.MAX_VALUE`). That's deliberate:
 
-- Spring's `DataSourceAutoConfiguration` and `RedisAutoConfiguration` register
-  their lifecycle objects at the default phase (`Integer.MAX_VALUE`).
-- Spring stops higher phases first.
-- So at this phase: engine starts **after** the `DataSource` / `Redis` is
-  fully ready, and stops **before** they're torn down on graceful shutdown.
+- Spring starts lower phases first and stops higher phases first.
+- The maximum phase therefore starts Threadmill as late as possible and stops
+  it as early as possible.
+- Store beans and their connections are constructed before lifecycle startup.
+- Remote-wake subscriptions share the engine lifecycle: they subscribe after
+  the node starts and close before the node drains.
 
 You don't need to do anything to use this — `ProcessingNode.start()` is called
 when the context completes startup; `node.close()` is called as part of
@@ -198,6 +201,7 @@ list). The most common:
 | `threadmill.remote-wake.enabled` | `true` | Publish cross-node wake hints for auto-configured Postgres / Redis stores. |
 | `threadmill.remote-wake.channel` | backend default | Optional channel override for deployment isolation. |
 | `threadmill.spring.enqueue-mode` | `after_commit` | `after_commit`, `join_transaction`, or `immediate`. |
+| `threadmill.store.memory.enabled` | `false` | Explicitly allow volatile in-memory storage for development or tests. Without a durable store or this opt-in, startup fails. |
 | `threadmill.store.postgres.schema-mode` | `migrate` | `migrate`, `validate`, `none`, or `drop-and-migrate`. |
 | `threadmill.store.postgres.allow-destructive-schema-reset` | `false` | Required for `drop-and-migrate`; destroys stored Threadmill jobs. |
 | `threadmill.store.redis.mode` | `standalone` | `standalone` / `sentinel` / `cluster`. |

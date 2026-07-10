@@ -419,8 +419,17 @@ public class ThreadmillProperties {
     }
 
     public static final class StoreProperties {
+        private MemoryProperties memory = new MemoryProperties();
         private PostgresProperties postgres = new PostgresProperties();
         private RedisProperties redis = new RedisProperties();
+
+        public MemoryProperties getMemory() {
+            return memory;
+        }
+
+        public void setMemory(MemoryProperties memory) {
+            this.memory = memory;
+        }
 
         public PostgresProperties getPostgres() {
             return postgres;
@@ -436,6 +445,18 @@ public class ThreadmillProperties {
 
         public void setRedis(RedisProperties redis) {
             this.redis = redis;
+        }
+    }
+
+    public static final class MemoryProperties {
+        private boolean enabled;
+
+        public boolean isEnabled() {
+            return enabled;
+        }
+
+        public void setEnabled(boolean enabled) {
+            this.enabled = enabled;
         }
     }
 

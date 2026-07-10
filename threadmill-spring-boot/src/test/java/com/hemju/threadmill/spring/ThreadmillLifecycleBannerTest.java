@@ -3,11 +3,15 @@ package com.hemju.threadmill.spring;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.context.SmartLifecycle;
 
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
+import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 
 class ThreadmillLifecycleBannerTest {
@@ -59,6 +63,35 @@ class ThreadmillLifecycleBannerTest {
                 .isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("cannot be restarted");
         assertThat(lifecycle.isRunning()).isFalse();
+    }
+
+    @Test
+    void lifecycleUsesLatestPhaseAndOwnsRemoteWakeOrdering() {
+        var store = new InMemoryJobStore();
+        node = ProcessingNode.builder(store).build();
+        var subscribedAfterNodeStart = new AtomicBoolean();
+        var closedBeforeNodeStop = new AtomicBoolean();
+        RemoteWakeChannel channel = new RemoteWakeChannel() {
+            @Override
+            public void publish(String queue) {}
+
+            @Override
+            public void start(java.util.function.Consumer<String> wakeSink) {
+                subscribedAfterNodeStart.set(!store.listNodeHeartbeats().isEmpty());
+            }
+
+            @Override
+            public void close() {
+                closedBeforeNodeStop.set(!node.isStopped());
+            }
+        };
+        var lifecycle = new ThreadmillLifecycle(node, ThreadmillRemoteWakeChannels.ofManaged(channel));
+
+        assertThat(lifecycle.getPhase()).isEqualTo(SmartLifecycle.DEFAULT_PHASE);
+        lifecycle.start();
+        assertThat(subscribedAfterNodeStart).isTrue();
+        lifecycle.stop();
+        assertThat(closedBeforeNodeStop).isTrue();
     }
 
     @Test
