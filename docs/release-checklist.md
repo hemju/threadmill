@@ -36,38 +36,16 @@ versions, no unresolved security findings, and a non-SNAPSHOT release version.
 
 ## Publish
 
-Publishing is configured by the `threadmill.publish` convention plugin
-(`buildSrc/src/main/kotlin/threadmill.publish.gradle.kts`). Every public
-library module applies it; the internal modules (`threadmill-example`,
-`threadmill-soak`, `threadmill-simulation`) deliberately do not, so they are
-never shipped.
+[`RELEASING.md`](RELEASING.md) is the canonical publishing runbook. In short:
 
-1. **Dry-run locally.** `./gradlew publishToMavenLocal` publishes every
-   library module to `~/.m2/repository`. Inspect the POMs there (name,
-   description, license, SCM, developer info are populated by the plugin)
-   and the jars — each carries a stable `Automatic-Module-Name` derived from
-   the artifact id.
-2. **Configure signing.** Release artifacts are signed with an in-memory
-   ASCII-armored GPG key supplied via the `signingKey` / `signingPassword`
-   Gradle properties, or equivalently the `ORG_GRADLE_PROJECT_signingKey` /
-   `ORG_GRADLE_PROJECT_signingPassword` environment variables. Signing is
-   skipped automatically when no key is configured — that keeps local and
-   unsigned CI builds working, but it also means an unsigned publish will not
-   fail loudly. Verify the key is present in the release environment before
-   publishing: Maven Central rejects unsigned deployments.
-3. **Publish.** `./gradlew publish` publishes the signed `mavenJava`
-   publication of every library module to the configured release repository.
-4. **Stage and promote on Maven Central.** Releases go through the Central
-   Portal (<https://central.sonatype.com>). After the upload, check that the
-   staged deployment passes the portal's validation (signatures, POM
-   completeness, sources / javadoc jars), then promote it. Nothing is public
-   until the deployment is promoted; a failed validation is fixed locally and
-   re-published — never patched in place.
-5. **Tag the release.** Tag the exact commit the artifacts were built from
-   with the published version, `v`-prefixed (`v0.1.0-rc.1` style), and push
-   the tag:
+1. Set and commit the release version.
+2. Tag that exact commit with the matching `v<version>` tag.
+3. Push `main` and the tag.
+4. The GitHub Release workflow signs all 11 public modules, runs
+   `publishAggregationToCentralPortal`, and submits one aggregated bundle.
+5. Central Portal validates and publishes the bundle automatically because
+   `publishingType` is `AUTOMATIC`.
 
-   ```bash
-   git tag -a v0.1.0-rc.1 -m "Threadmill 0.1.0-rc.1"
-   git push origin v0.1.0-rc.1
-   ```
+Do not run the obsolete unconfigured `./gradlew publish` path and do not wait
+for a manual Central Portal promotion. If the automated deployment fails,
+correct the source and cut a new version; never patch a published release.
