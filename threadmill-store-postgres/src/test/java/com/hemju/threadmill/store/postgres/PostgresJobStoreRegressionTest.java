@@ -466,14 +466,15 @@ class PostgresJobStoreRegressionTest {
         assertThat(sql)
                 .contains("threadmill_schema_history")
                 .contains("V1__baseline.sql")
-                .contains("V2__cron_task_overrides.sql");
+                .contains("V2__cron_task_overrides.sql")
+                .contains("V3__integrity_constraints.sql");
         try (Connection conn = dataSource.getConnection();
                 Statement st = conn.createStatement()) {
             st.execute(sql);
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
                 // One history row per shipped migration.
-                assertThat(rs.getInt(1)).isEqualTo(2);
+                assertThat(rs.getInt(1)).isEqualTo(3);
             }
         }
         new MigrationRunner(dataSource).validate();
@@ -500,7 +501,10 @@ class PostgresJobStoreRegressionTest {
         }
 
         String sql = new MigrationRunner(dataSource).emitCleanInstallSql();
-        assertThat(sql).contains("V1__baseline.sql").contains("V2__cron_task_overrides.sql");
+        assertThat(sql)
+                .contains("V1__baseline.sql")
+                .contains("V2__cron_task_overrides.sql")
+                .contains("V3__integrity_constraints.sql");
 
         try (Connection conn = dataSource.getConnection();
                 Statement st = conn.createStatement()) {
@@ -508,7 +512,7 @@ class PostgresJobStoreRegressionTest {
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
                 // One history row per shipped migration.
-                assertThat(rs.getInt(1)).isEqualTo(2);
+                assertThat(rs.getInt(1)).isEqualTo(3);
             }
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_job_counts")) {
                 assertThat(rs.next()).isTrue();
@@ -569,6 +573,51 @@ class PostgresJobStoreRegressionTest {
                 ps.setString(1, original);
                 ps.executeUpdate();
             }
+        }
+    }
+
+    @Test
+    void migrateAlsoFailsWhenAnAppliedMigrationFileWasEditedInPlace() throws SQLException {
+        String original;
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT checksum FROM threadmill_schema_history WHERE version = 1")) {
+            rs.next();
+            original = rs.getString(1);
+        }
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute("UPDATE threadmill_schema_history SET checksum = 'tampered' WHERE version = 1");
+        }
+        try {
+            assertThatThrownBy(() -> new MigrationRunner(dataSource).migrate())
+                    .isInstanceOf(MigrationRunner.MigrationException.class)
+                    .hasMessageContaining("edited after it was applied");
+        } finally {
+            try (Connection conn = dataSource.getConnection();
+                    PreparedStatement ps = conn.prepareStatement(
+                            "UPDATE threadmill_schema_history SET checksum = ? WHERE version = 1")) {
+                ps.setString(1, original);
+                ps.executeUpdate();
+            }
+        }
+    }
+
+    @Test
+    void integrityMigrationRejectsInvalidScalarAndConcurrencyState() throws SQLException {
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            assertThatThrownBy(() -> st.execute("INSERT INTO threadmill_concurrency_groups "
+                            + "(concurrency_key, exclusive_in_flight, shared_in_flight, last_modified) "
+                            + "VALUES ('invalid', -1, 0, now())"))
+                    .isInstanceOf(SQLException.class)
+                    .hasMessageContaining("threadmill_concurrency_groups_exclusive_check");
+            assertThatThrownBy(() -> st.execute("INSERT INTO threadmill_cron_tasks "
+                            + "(name, trigger_kind, trigger_value, handler_signature, payload_type_tag, "
+                            + "payload_serialized, missed_run_policy) VALUES "
+                            + "('invalid', 'UNKNOWN', 'PT1M', 'example.Handler', 'example.Payload', '{}', 'DROP')"))
+                    .isInstanceOf(SQLException.class)
+                    .hasMessageContaining("threadmill_cron_tasks_trigger_kind_check");
         }
     }
 
@@ -643,7 +692,7 @@ class PostgresJobStoreRegressionTest {
                 ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
             assertThat(rs.next()).isTrue();
             // One history row per shipped migration.
-            assertThat(rs.getInt(1)).isEqualTo(2);
+            assertThat(rs.getInt(1)).isEqualTo(3);
         }
     }
 

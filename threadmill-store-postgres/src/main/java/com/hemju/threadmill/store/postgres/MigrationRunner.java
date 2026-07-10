@@ -5,6 +5,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -42,7 +44,8 @@ public final class MigrationRunner {
 
     private static final Pattern FILE_PATTERN = Pattern.compile("V(\\d+)__([A-Za-z0-9_]+)\\.sql");
     private static final String RESOURCE_ROOT = "com/hemju/threadmill/store/postgres/migrations/";
-    private static final List<String> SHIPPED_MIGRATIONS = List.of("V1__baseline.sql", "V2__cron_task_overrides.sql");
+    private static final List<String> SHIPPED_MIGRATIONS =
+            List.of("V1__baseline.sql", "V2__cron_task_overrides.sql", "V3__integrity_constraints.sql");
     private static final long MIGRATION_LOCK_KEY = 0x5468726561646D6CL;
     private static final Logger LOG = LoggerFactory.getLogger(MigrationRunner.class);
     private static final Duration LOCK_ACQUIRE_TIMEOUT = Duration.ofMinutes(5);
@@ -77,21 +80,7 @@ public final class MigrationRunner {
             acquireMigrationLock(conn);
             try {
                 ensureHistoryTable(conn);
-                List<Integer> applied = readApplied(conn);
-                // Downgrade guard: an applied version this binary does not ship
-                // means the schema was migrated by a NEWER binary. The default
-                // migrate mode would otherwise skip the missing lower versions and
-                // run silently against a schema it was never tested against (the
-                // classic rollback footgun). Fail fast with an actionable message.
-                Set<Integer> shippedVersions =
-                        all.stream().map(Migration::version).collect(java.util.stream.Collectors.toSet());
-                for (int appliedVersion : applied) {
-                    if (!shippedVersions.contains(appliedVersion)) {
-                        throw new MigrationException("Threadmill schema history contains version " + appliedVersion
-                                + ", which this binary does not ship — the database was migrated by a newer"
-                                + " Threadmill version. Roll the binary forward, or repair the schema history.");
-                    }
-                }
+                Set<Integer> applied = validateAppliedMigrations(conn, all, false);
                 for (Migration m : all) {
                     if (applied.contains(m.version())) continue;
                     applyOne(conn, m);
@@ -157,64 +146,68 @@ public final class MigrationRunner {
             if (!historyTableExists(conn)) {
                 throw new MigrationException("Threadmill schema is missing: threadmill_schema_history does not exist");
             }
-            List<AppliedMigration> applied = readAppliedMigrations(conn);
-            List<Migration> shipped = loadAll();
-            if (applied.size() != shipped.size()) {
-                throw new MigrationException("Threadmill schema history has "
-                        + applied.size()
-                        + " migration(s), but this version ships "
-                        + shipped.size()
-                        + "; run migrations or repair the schema history");
-            }
-            Set<Integer> seen = new HashSet<>();
-            for (AppliedMigration actual : applied) {
-                if (!seen.add(actual.version())) {
-                    throw new MigrationException(
-                            "Threadmill schema history contains duplicate version " + actual.version());
-                }
-                Migration expected = shipped.stream()
-                        .filter(m -> m.version() == actual.version())
-                        .findFirst()
-                        .orElseThrow(() -> new MigrationException(
-                                "Threadmill schema history contains unknown version " + actual.version()));
-                if (!expected.description().equals(actual.description())) {
-                    throw new MigrationException("Threadmill schema history version "
-                            + actual.version()
-                            + " has description '"
-                            + actual.description()
-                            + "', expected '"
-                            + expected.description()
-                            + "'");
-                }
-                // Detect a shipped migration file that was edited in place after
-                // it was applied (the fleet would silently diverge). NULL checksums
-                // are pre-checksum rows — skip them rather than fail.
-                String expectedChecksum = checksum(expected.sql());
-                if (actual.checksum() != null && !expectedChecksum.equals(actual.checksum())) {
-                    throw new MigrationException("Threadmill schema history version "
-                            + actual.version()
-                            + " has checksum "
-                            + actual.checksum()
-                            + " but the shipped migration hashes to "
-                            + expectedChecksum
-                            + " — the migration file was edited after it was applied");
-                }
-            }
+            validateAppliedMigrations(conn, loadAll(), true);
         } catch (SQLException e) {
             throw new MigrationException("Schema validation failed", e);
         }
     }
 
+    private static Set<Integer> validateAppliedMigrations(Connection conn, List<Migration> shipped, boolean requireAll)
+            throws SQLException {
+        List<AppliedMigration> applied = readAppliedMigrations(conn);
+        if (requireAll && applied.size() != shipped.size()) {
+            throw new MigrationException("Threadmill schema history has "
+                    + applied.size()
+                    + " migration(s), but this version ships "
+                    + shipped.size()
+                    + "; run migrations or repair the schema history");
+        }
+        Set<Integer> seen = new HashSet<>();
+        for (AppliedMigration actual : applied) {
+            if (!seen.add(actual.version())) {
+                throw new MigrationException(
+                        "Threadmill schema history contains duplicate version " + actual.version());
+            }
+            Migration expected = shipped.stream()
+                    .filter(m -> m.version() == actual.version())
+                    .findFirst()
+                    .orElseThrow(() -> new MigrationException("Threadmill schema history contains unknown version "
+                            + actual.version()
+                            + "; the database was migrated by a newer Threadmill binary"));
+            if (!expected.description().equals(actual.description())) {
+                throw new MigrationException("Threadmill schema history version "
+                        + actual.version()
+                        + " with description '"
+                        + actual.description()
+                        + "', expected '"
+                        + expected.description()
+                        + "'");
+            }
+            // Detect a shipped migration file that was edited in place after it
+            // was applied. NULL checksums are pre-checksum rows and remain valid.
+            String expectedChecksum = checksum(expected.sql());
+            if (actual.checksum() != null && !expectedChecksum.equals(actual.checksum())) {
+                throw new MigrationException("Threadmill schema history version "
+                        + actual.version()
+                        + " has checksum "
+                        + actual.checksum()
+                        + " but the shipped migration hashes to "
+                        + expectedChecksum
+                        + " — the migration file was edited after it was applied");
+            }
+        }
+        return seen;
+    }
+
     private static String checksum(String sql) {
         try {
-            byte[] digest =
-                    java.security.MessageDigest.getInstance("SHA-256").digest(sql.getBytes(StandardCharsets.UTF_8));
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(sql.getBytes(StandardCharsets.UTF_8));
             var sb = new StringBuilder(digest.length * 2);
             for (byte b : digest) {
                 sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
             }
             return sb.toString();
-        } catch (java.security.NoSuchAlgorithmException e) {
+        } catch (NoSuchAlgorithmException e) {
             throw new MigrationException("SHA-256 unavailable", e);
         }
     }
@@ -334,7 +327,7 @@ public final class MigrationRunner {
         return applied;
     }
 
-    private List<AppliedMigration> readAppliedMigrations(Connection conn) throws SQLException {
+    private static List<AppliedMigration> readAppliedMigrations(Connection conn) throws SQLException {
         List<AppliedMigration> applied = new ArrayList<>();
         try (Statement st = conn.createStatement();
                 ResultSet rs = st.executeQuery(

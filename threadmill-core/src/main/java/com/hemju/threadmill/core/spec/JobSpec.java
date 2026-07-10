@@ -28,6 +28,8 @@ import java.util.Optional;
 public record JobSpec(String handlerType, List<JobArgument> arguments, String dedupKey, Duration dedupTtl) {
 
     public static final int MAX_DEDUP_KEY_BYTES = 256;
+    /** Maximum UTF-8 bytes accepted for a handler type name. */
+    public static final int MAX_HANDLER_TYPE_BYTES = 1024;
 
     public JobSpec(String handlerType, List<JobArgument> arguments) {
         this(handlerType, arguments, null, null);
@@ -37,6 +39,9 @@ public record JobSpec(String handlerType, List<JobArgument> arguments, String de
         Objects.requireNonNull(handlerType, "handlerType");
         if (handlerType.isBlank()) {
             throw new IllegalArgumentException("handlerType must not be blank");
+        }
+        if (handlerType.getBytes(StandardCharsets.UTF_8).length > MAX_HANDLER_TYPE_BYTES) {
+            throw new IllegalArgumentException("handlerType must be at most 1024 UTF-8 bytes");
         }
         Objects.requireNonNull(arguments, "arguments");
         arguments = List.copyOf(arguments);

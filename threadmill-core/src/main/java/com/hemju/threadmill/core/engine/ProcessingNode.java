@@ -160,7 +160,8 @@ public final class ProcessingNode implements AutoCloseable {
         return store.findById(id);
     }
 
-    public void start() {
+    public synchronized void start() {
+        if (stopped.get()) return;
         if (!started.compareAndSet(false, true)) return;
         // NodeRegistry.start() performs the first heartbeat + election
         // synchronously, so dispatchers can start immediately.
@@ -170,7 +171,7 @@ public final class ProcessingNode implements AutoCloseable {
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
         if (!stopped.compareAndSet(false, true)) return;
         // Stop claiming new work, then drain the in-flight handlers BEFORE
         // stopping maintenance. maintenance owns the owner-heartbeat thread; if

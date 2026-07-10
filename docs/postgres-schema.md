@@ -28,7 +28,9 @@ The full clean-install DDL is the checked-in migration SQL:
 
 [`V1__baseline.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V1__baseline.sql)
 plus the additive migrations that followed it (currently
-[`V2__cron_task_overrides.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V2__cron_task_overrides.sql)).
+[`V2__cron_task_overrides.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V2__cron_task_overrides.sql)
+and
+[`V3__integrity_constraints.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V3__integrity_constraints.sql)).
 
 For applications that want to apply SQL from their own deployment system,
 `MigrationRunner` can emit the same statements:
@@ -61,6 +63,9 @@ threadmill:
 ## Upgrades
 
 Threadmill uses a deliberately small migration runner, not Flyway or Liquibase.
+The default `migrate` mode validates every already-applied migration description
+and checksum before it applies pending files; an edited shipped migration fails
+startup instead of allowing fleet schema drift.
 Migrations are classpath SQL files named `V<n>__<description>.sql`, and the
 runner applies them in numeric order. The shipped list is explicit for
 native-image friendliness.
