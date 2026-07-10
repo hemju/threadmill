@@ -12,6 +12,13 @@ java {
 
 repositories { mavenCentral() }
 
+dependencyLocking { lockAllConfigurations() }
+
+tasks.named<Jar>("jar") {
+    from(rootProject.file("LICENSE")) { into("META-INF") }
+    from(rootProject.file("NOTICE")) { into("META-INF") }
+}
+
 tasks.withType<JavaCompile>().configureEach {
     options.release.set(25)
     options.encoding = "UTF-8"

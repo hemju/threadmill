@@ -5,6 +5,8 @@ repositories {
     mavenCentral()
 }
 
+dependencyLocking { lockAllConfigurations() }
+
 dependencies {
     // Makes `id("com.gradleup.nmcp")` applicable from the `threadmill.publish`
     // precompiled convention plugin so every published module contributes its

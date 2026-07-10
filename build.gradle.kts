@@ -140,7 +140,7 @@ tasks.register("dependencySecurityScan") {
 
 tasks.register("artifactInspection") {
     group = "verification"
-    description = "Inspect release jars for private local material and test classes."
+    description = "Inspect release jars for legal files, private local material, and test classes."
     dependsOn(subprojects.map { it.tasks.matching { task -> task.name == "jar" } })
     doLast {
         val problems = mutableListOf<String>()
@@ -156,20 +156,24 @@ tasks.register("artifactInspection") {
                         !it.name.endsWith("-javadoc.jar")
                 }
                 ?.forEach { jar ->
-                    zipTree(jar)
-                        .matching { include("**/*") }
-                        .files
-                        .forEach { entry ->
-                            val path = entry.invariantSeparatorsPath
-                            if (path.contains(".local-reference"))
-                                problems.add("${jar.name} contains private local material")
-                            if (
-                                project.name != "threadmill-test-support" &&
-                                    (path.contains("/src/test/") || path.endsWith("Test.class"))
-                            ) {
-                                problems.add("${jar.name} appears to contain test material: $path")
-                            }
+                    val entries = zipTree(jar).matching { include("**/*") }.files
+                    var hasLicense = false
+                    var hasNotice = false
+                    entries.forEach { entry ->
+                        val path = entry.invariantSeparatorsPath
+                        hasLicense = hasLicense || path.endsWith("/META-INF/LICENSE")
+                        hasNotice = hasNotice || path.endsWith("/META-INF/NOTICE")
+                        if (path.contains(".local-reference"))
+                            problems.add("${jar.name} contains private local material")
+                        if (
+                            project.name != "threadmill-test-support" &&
+                                (path.contains("/src/test/") || path.endsWith("Test.class"))
+                        ) {
+                            problems.add("${jar.name} appears to contain test material: $path")
                         }
+                    }
+                    if (!hasLicense) problems.add("${jar.name} does not contain META-INF/LICENSE")
+                    if (!hasNotice) problems.add("${jar.name} does not contain META-INF/NOTICE")
                 }
         }
         if (problems.isNotEmpty()) throw GradleException(problems.joinToString("\n"))
