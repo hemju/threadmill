@@ -47,6 +47,16 @@ Spring Boot binds most core values directly under `threadmill.*`, for example
 `threadmill.worker-count`, `threadmill.claim-batch-size`, and
 `threadmill.maintenance-lease-duration`.
 
+## In-Memory Store Property
+
+Spring does not silently select volatile storage. When neither a durable store
+nor an application-provided `JobStore` is available, startup fails unless the
+development/test-only in-memory store is explicitly enabled.
+
+| Setting | Default | Notes |
+|---|---:|---|
+| `threadmill.store.memory.enabled` | `false` | Set to `true` only when losing all jobs on process restart is acceptable. |
+
 ## PostgreSQL Store Properties
 
 Spring auto-creates a PostgreSQL store when a `DataSource` bean exists and

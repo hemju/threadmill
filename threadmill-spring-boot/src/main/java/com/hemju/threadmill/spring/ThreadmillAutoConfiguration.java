@@ -36,9 +36,8 @@ import com.hemju.threadmill.store.memory.InMemoryJobStore;
  * <p>Wires the following beans (each conditional on the application not already
  * defining its own):
  * <ul>
- *   <li>A {@link JobStore} — defaults to {@link InMemoryJobStore}. Applications
- *       that want Postgres or Redis define their own bean and this default is
- *       skipped.</li>
+ *   <li>A {@link JobStore}. Applications provide a durable store or explicitly opt
+ *       into the volatile {@link InMemoryJobStore} for development and tests.</li>
  *   <li>A {@link JobSerializer} — defaults to Threadmill JSON serialization backed
  *       by Threadmill's mapper; applications may override with their own
  *       Jackson-backed serializer to share the host application's mapper.</li>
@@ -91,13 +90,17 @@ public class ThreadmillAutoConfiguration {
      */
     @Bean
     @ConditionalOnMissingBean
-    public JobStore threadmillJobStore() {
+    public JobStore threadmillJobStore(ThreadmillProperties properties) {
         // Durable stores are contributed by ThreadmillRedisAutoConfiguration and
         // ThreadmillPostgresAutoConfiguration, both @AutoConfigureBefore this one
         // and gated on their store class + configuration; this is the in-memory
         // fallback when neither matched.
-        LOG.warn("Threadmill: using in-memory store — jobs will not survive restart. Configure"
-                + " threadmill.store.redis.* or define a DataSource bean for durable storage.");
+        if (!properties.getStore().getMemory().isEnabled()) {
+            throw new IllegalStateException("Threadmill has no durable JobStore. Configure threadmill.store.redis.*,"
+                    + " provide a DataSource or JobStore bean, or explicitly opt into volatile development storage"
+                    + " with threadmill.store.memory.enabled=true.");
+        }
+        LOG.warn("Threadmill: using explicitly enabled in-memory store — jobs will not survive restart.");
         return new InMemoryJobStore();
     }
 
@@ -318,24 +321,16 @@ public class ThreadmillAutoConfiguration {
 
     /**
      * Wraps the {@link ProcessingNode} in a {@link ThreadmillLifecycle} so Spring drives
-     * start/stop through its lifecycle protocol — guaranteeing the engine starts after
-     * the DataSource / RedisConnectionFactory is ready and stops before they are torn
-     * down on graceful shutdown.
+     * start/stop through its lifecycle protocol. Remote-wake subscriptions are folded
+     * into the same lifecycle to guarantee node-before-subscription startup and
+     * subscription-before-node shutdown.
      */
     @Bean
     @ConditionalOnMissingBean
     @ConditionalOnProperty(prefix = "threadmill", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public ThreadmillLifecycle threadmillLifecycle(ProcessingNode node) {
-        return new ThreadmillLifecycle(node);
-    }
-
-    @Bean
-    @ConditionalOnMissingBean
-    @ConditionalOnBean(ThreadmillRemoteWakeChannels.class)
-    @ConditionalOnProperty(prefix = "threadmill", name = "enabled", havingValue = "true", matchIfMissing = true)
-    public ThreadmillRemoteWakeLifecycle threadmillRemoteWakeLifecycle(
-            ThreadmillRemoteWakeChannels remoteWakeChannels, ProcessingNode node) {
-        return new ThreadmillRemoteWakeLifecycle(remoteWakeChannels, node);
+    public ThreadmillLifecycle threadmillLifecycle(
+            ProcessingNode node, ObjectProvider<ThreadmillRemoteWakeChannels> remoteWakeChannels) {
+        return new ThreadmillLifecycle(node, remoteWakeChannels.getIfAvailable());
     }
 
     private static String recurringNamespace(ThreadmillProperties properties, ApplicationContext context) {

@@ -67,13 +67,13 @@ class SpringAutoConfigurationOrderingTest {
     }
 
     @Test
-    void withoutADataSourceTheInMemoryFallbackStillApplies() {
+    void withoutADataSourceTheInMemoryStoreRequiresExplicitOptIn() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
                         ThreadmillRedisAutoConfiguration.class,
                         ThreadmillPostgresAutoConfiguration.class,
                         ThreadmillAutoConfiguration.class))
-                .withPropertyValues("threadmill.enabled=false")
+                .withPropertyValues("threadmill.enabled=false", "threadmill.store.memory.enabled=true")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context.getBean(JobStore.class)).isInstanceOf(InMemoryJobStore.class);

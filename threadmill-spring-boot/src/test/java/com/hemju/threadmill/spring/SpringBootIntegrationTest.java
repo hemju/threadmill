@@ -30,6 +30,7 @@ import com.hemju.threadmill.core.handler.JobPayload;
             "threadmill.workerCount=2",
             "threadmill.pollInterval=PT0.05S",
             "threadmill.jobTimeout=PT2S",
+            "threadmill.store.memory.enabled=true",
             // spring-boot-jdbc is on the test classpath for the ordering
             // regression; this in-memory app must not auto-configure a pool.
             "spring.autoconfigure.exclude=org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration"

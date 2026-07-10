@@ -14,35 +14,40 @@ import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 
 /**
- * {@link SmartLifecycle} wrapper around a Threadmill {@link ProcessingNode} so the
- * engine starts after the application's DataSource / RedisConnectionFactory beans are
- * fully ready, and stops <em>before</em> those beans are torn down on shutdown.
+ * {@link SmartLifecycle} wrapper around a Threadmill {@link ProcessingNode}. The
+ * engine starts in Spring's latest lifecycle phase and stops in the earliest shutdown
+ * phase. Remote-wake subscriptions, when present, are owned by this lifecycle so their
+ * ordering relative to the node is deterministic.
  *
  * <h2>Phase choice</h2>
  *
- * <p>Spring's {@code DataSourceAutoConfiguration} registers its lifecycle objects at
- * {@code Integer.MAX_VALUE} (the default). To stop the engine before the data source
- * is closed during graceful shutdown, the engine's phase must be lower than that
- * value (Spring stops higher phases first). We use {@code Integer.MAX_VALUE / 2}
- * — high enough to start after any "infrastructure" bean that opted into the
- * default phase, low enough that the data source still wins the stop race.
+ * <p>Spring starts lower phases first and stops higher phases first. The default
+ * {@link SmartLifecycle} phase ({@link Integer#MAX_VALUE}) therefore gives Threadmill
+ * the desired edge: start after lower-phase application infrastructure and stop before
+ * it. Store beans and their connections are constructed before lifecycle startup.
  */
 public final class ThreadmillLifecycle implements SmartLifecycle {
 
     /**
-     * Phase value used by the auto-configured engine lifecycle. Picked deliberately
-     * so the engine starts after the DataSource / Redis beans (which sit at the
-     * default high phase) and stops before them on graceful shutdown.
+     * Phase value used by the auto-configured engine lifecycle. Spring starts lower
+     * phases first and stops higher phases first, so the default maximum phase starts
+     * Threadmill as late as possible and stops it as early as possible.
      */
-    public static final int PHASE = Integer.MAX_VALUE / 2;
+    public static final int PHASE = SmartLifecycle.DEFAULT_PHASE;
 
     private static final Logger LOG = LoggerFactory.getLogger(ThreadmillLifecycle.class);
 
     private final ProcessingNode node;
+    private final ThreadmillRemoteWakeChannels remoteWakeChannels;
     private volatile boolean running = false;
 
     public ThreadmillLifecycle(ProcessingNode node) {
+        this(node, null);
+    }
+
+    ThreadmillLifecycle(ProcessingNode node, ThreadmillRemoteWakeChannels remoteWakeChannels) {
         this.node = Objects.requireNonNull(node, "node");
+        this.remoteWakeChannels = remoteWakeChannels;
     }
 
     @Override
@@ -52,9 +57,7 @@ public final class ThreadmillLifecycle implements SmartLifecycle {
         // no-op. Re-running this lifecycle after a stop (e.g. actuator /pause then
         // /resume, which does context stop()/start()) would log a "started"
         // banner over a permanently dead engine — a silent total processing
-        // outage. Fail loudly instead. Because this lifecycle's phase is below
-        // the remote-wake lifecycle's, throwing here also prevents that bean from
-        // re-subscribing (and leaking) its listener on the same broken restart.
+        // outage. Fail loudly instead.
         if (node.isStopped()) {
             throw new IllegalStateException("Threadmill ProcessingNode " + node.nodeId()
                     + " has been stopped and cannot be restarted in place. A SmartLifecycle stop()/start()"
@@ -62,6 +65,9 @@ public final class ThreadmillLifecycle implements SmartLifecycle {
                     + " context instead.");
         }
         node.start();
+        if (remoteWakeChannels != null) {
+            remoteWakeChannels.start(node::wake);
+        }
         running = true;
         LOG.info("\n{}", renderBanner(node));
     }
@@ -70,6 +76,9 @@ public final class ThreadmillLifecycle implements SmartLifecycle {
     public void stop() {
         if (!running) return;
         try {
+            if (remoteWakeChannels != null) {
+                remoteWakeChannels.close();
+            }
             node.close();
         } finally {
             running = false;
