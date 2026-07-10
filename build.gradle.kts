@@ -125,11 +125,47 @@ tasks.register("dependencySecurityScan") {
                     "agent, or pass -PdependencyScanRequired=false to skip (not recommended for releases)."
             )
         }
-        val result =
-            providers
-                .exec { commandLine(osv, "scan", "--lockfile", "gradle/libs.versions.toml", ".") }
-                .result
-                .get()
+        val lockfiles =
+            fileTree(rootDir) {
+                    include("**/gradle.lockfile", "**/package-lock.json")
+                    exclude(
+                        "**/build/**",
+                        "**/.gradle/**",
+                        "**/node_modules/**",
+                        "**/.worktrees/**",
+                    )
+                }
+                .files
+                .sortedBy { it.absolutePath }
+        if (lockfiles.isEmpty()) {
+            throw GradleException("dependencySecurityScan found no supported lockfiles")
+        }
+        val arguments =
+            mutableListOf(
+                "scan",
+                "source",
+                "--config",
+                rootProject.file("osv-scanner.toml").absolutePath,
+                "--experimental-no-default-plugins",
+                "--experimental-plugins",
+                "lockfile",
+                "--format",
+                "table",
+            )
+        lockfiles.forEach {
+            arguments.add("--lockfile")
+            arguments.add(it.absolutePath)
+        }
+        val scan =
+            providers.exec {
+                commandLine(osv, *arguments.toTypedArray())
+                isIgnoreExitValue = true
+            }
+        val standardOutput = scan.standardOutput.asText.get().trim()
+        val standardError = scan.standardError.asText.get().trim()
+        if (standardOutput.isNotEmpty()) logger.lifecycle(standardOutput)
+        if (standardError.isNotEmpty()) logger.warn(standardError)
+        val result = scan.result.get()
         if (result.exitValue != 0) {
             throw GradleException(
                 "dependencySecurityScan failed with exit code ${result.exitValue}"

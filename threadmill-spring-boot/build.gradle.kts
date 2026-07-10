@@ -46,6 +46,7 @@ dependencies {
     testImplementation(libs.hikaricp)
     testImplementation(libs.postgresql.jdbc)
     testImplementation(libs.spring.boot.starter.test)
+    testImplementation(libs.logback.classic)
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
     testRuntimeOnly(libs.junit.platform.launcher)

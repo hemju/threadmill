@@ -123,7 +123,7 @@ public final class JsonJobSerializer implements JobSerializer {
                 .registerModule(new JavaTimeModule())
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
                 .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
-                .setSerializationInclusion(JsonInclude.Include.NON_NULL);
+                .setDefaultPropertyInclusion(JsonInclude.Include.NON_NULL);
     }
 
     // ---------------------------------------------------------------- Job

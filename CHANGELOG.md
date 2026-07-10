@@ -25,6 +25,10 @@
   inspection for every published JAR. Refreshed dashboard build tooling to
   patched Babel, esbuild, and Vite releases; `npm audit` reports zero known
   vulnerabilities for the release lockfile.
+- Upgraded Jackson, Spring Boot, Spring Framework, Spring Security, Netty,
+  PostgreSQL JDBC, Logback, and AssertJ to patched maintenance releases. The
+  release OSV gate now scans every committed Gradle and npm lockfile instead of
+  passing an unsupported version-catalog file to the scanner.
 - Synchronized installation versions, release/security guidance, API names,
   dashboard security documentation, Redis execution-model documentation, and
   soak-result wording.
