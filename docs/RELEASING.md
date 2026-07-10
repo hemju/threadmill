@@ -106,6 +106,10 @@ You can exercise everything except the upload without credentials:
 ./gradlew publishToMavenLocal   # installs all modules to ~/.m2 (unsigned)
 ```
 
+Dependency locks and SHA-256 verification metadata are enforced during this
+build. Each binary JAR must contain `META-INF/LICENSE` and `META-INF/NOTICE`;
+the release-candidate `artifactInspection` task checks both files.
+
 To build the exact bundle that would be uploaded (needs a signing key + dummy
 Central Portal props), run `./gradlew zipAggregation` and inspect the zip under
 `build/`.

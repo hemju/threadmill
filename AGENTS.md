@@ -23,7 +23,7 @@ The delivery guarantee is **at-least-once**: a job may run more than once (for e
   - Virtual threads are the default worker model.
   - Scoped values (final in Java 25), not `ThreadLocal`, propagate per-execution context (job id, attempt number, log/MDC) into handler code and its structured-concurrency forks; threads the handler spawns directly via an executor do not inherit the binding (use `EngineScopedValues.capturing(...)`).
   - No preview features in the public API.
-- **Build tool:** Gradle (≥ 9.5), multi-module. The wrapper is committed.
+- **Build tool:** Gradle (≥ 9.5), multi-module. The wrapper is committed and its distribution SHA-256 is pinned. Gradle dependency locking and checksum verification cover every project, including `buildSrc`; dependency changes update both the relevant `gradle.lockfile` files and `gradle/verification-metadata.xml` in the same contribution.
 - **Frameworks:** usable from Spring Boot. The core is framework-agnostic so additional adapters can return later as real integrations. Native image remains a future target — minimise reflection.
 - **Storage backends:** PostgreSQL and Redis are both first-class, plus an in-memory store for tests and local development. All three satisfy one storage SPI and pass one shared contract test suite.
   - **PostgreSQL 18+ only.** Build, tests, and example all run against `postgres:18-alpine`. No back-compat shims for earlier majors.
@@ -179,6 +179,7 @@ Testing is a first-class deliverable; treat the test suite as equal in weight to
 - No framework types in `threadmill-core`.
 - Public types are documented with Javadoc that stands alone.
 - Source style is enforced by Spotless (Palantir Java Format for Java; ktfmt `kotlinlang` style for Kotlin / `*.gradle.kts`). Import order is fixed: `java`, `javax`, `jakarta`, third-party, `com.hemju`. Trailing whitespace and EOL newlines are enforced on Java, Kotlin, gradle scripts, `*.md`, and `.gitignore`. The formatter version is pinned in `gradle/libs.versions.toml` so everyone produces byte-identical output.
+- Binary JARs include the repository `LICENSE` and `NOTICE` under `META-INF/`; `artifactInspection` fails a release candidate when either legal file is missing. GitHub Actions are pinned to immutable commit SHAs with their human-readable release tags retained as comments.
 
 **Commit conventions**
 

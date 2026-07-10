@@ -12,6 +12,9 @@ storage or framework code in `threadmill-core`.
 
 - Use Java 25.
 - Use the committed Gradle wrapper: `./gradlew`.
+- When changing a Gradle dependency, regenerate and commit dependency locks and
+  checksum verification metadata with
+  `./gradlew dependencies --write-locks --write-verification-metadata sha256`.
 - Keep handlers, docs, and examples clear that jobs can run more than once and
   handlers must be idempotent.
 - Do not commit private local notes, generated build output, IDE metadata, or
