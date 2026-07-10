@@ -11,9 +11,6 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.EnqueueResult;
 import com.hemju.threadmill.core.Job;
@@ -43,7 +40,6 @@ public final class Scheduler {
     public static final String SYSTEM_QUEUE = "system";
     public static final Duration DEFAULT_MAX_DEDUP_TTL = Duration.ofDays(30);
 
-    private static final Logger LOG = LoggerFactory.getLogger(Scheduler.class);
     private static final Duration CRON_MUTEX_LEASE = Duration.ofSeconds(30);
 
     private final JobStore store;
@@ -270,7 +266,7 @@ public final class Scheduler {
     }
 
     public void deleteCronTask(String name) {
-        store.deleteCronTask(name);
+        withCronMutex(name, () -> store.deleteCronTask(name));
     }
 
     /**
@@ -292,7 +288,7 @@ public final class Scheduler {
         }
         for (String owned : store.listCronTaskNamesOwnedBy(namespace)) {
             if (!desiredNames.contains(owned)) {
-                store.deleteCronTask(owned);
+                deleteCronTask(owned);
             }
         }
     }
@@ -454,7 +450,7 @@ public final class Scheduler {
         // between our read and write, and the re-registration would clobber
         // it with the stale value — defeating the pile-up guard.
         String mutex = RecurringMaterializer.taskMutexName(task.name());
-        boolean locked = acquireCronMutex(mutex);
+        acquireCronMutex(mutex);
         try {
             var existingState = store.findCronTaskState(task.name());
             var now = Instant.now();
@@ -468,20 +464,32 @@ public final class Scheduler {
                         task.name(), s.lastRunAt(), s.lastRunJobId(), next, s.inFlightJobId()));
             }
         } finally {
-            if (locked) {
-                try {
-                    store.releaseMutex(mutex, cronMutexHolder);
-                } catch (RuntimeException ignored) {
-                    // the lease expires on its own
-                }
+            try {
+                store.releaseMutex(mutex, cronMutexHolder);
+            } catch (RuntimeException ignored) {
+                // the lease expires on its own
             }
         }
     }
 
-    private boolean acquireCronMutex(String mutex) {
+    private void withCronMutex(String name, Runnable action) {
+        String mutex = RecurringMaterializer.taskMutexName(name);
+        acquireCronMutex(mutex);
+        try {
+            action.run();
+        } finally {
+            try {
+                store.releaseMutex(mutex, cronMutexHolder);
+            } catch (RuntimeException ignored) {
+                // the lease expires on its own
+            }
+        }
+    }
+
+    private void acquireCronMutex(String mutex) {
         for (int i = 0; i < 100; i++) {
             if (store.tryAcquireMutex(mutex, cronMutexHolder, CRON_MUTEX_LEASE)) {
-                return true;
+                return;
             }
             try {
                 Thread.sleep(50);
@@ -490,9 +498,7 @@ public final class Scheduler {
                 break;
             }
         }
-        // Registration must not fail application startup; the poll-interval
-        // materializer remains the correctness fallback.
-        LOG.warn("Could not acquire recurring-state mutex {} — proceeding unguarded", mutex);
-        return false;
+        throw new IllegalStateException("Could not acquire recurring-state mutex " + mutex
+                + "; another node is mutating this recurring task. Retry after the current mutation completes.");
     }
 }

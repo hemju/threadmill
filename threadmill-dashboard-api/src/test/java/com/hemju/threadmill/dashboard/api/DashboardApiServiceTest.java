@@ -167,6 +167,30 @@ class DashboardApiServiceTest {
         assertThat(updated.maxAttempts()).isEqualTo(9);
     }
 
+    @Test
+    void recurringDeletionReturnsConflictInsteadOfProceedingWithoutTheTaskMutex() {
+        var store = new InMemoryJobStore();
+        store.upsertCronTask(timedCronTask("report", Duration.ofMinutes(30), 9));
+        store.upsertCronTaskState(CronTaskScheduleState.initial("report", Instant.now()));
+        assertThat(store.tryAcquireMutex(
+                        RecurringMaterializer.taskMutexName("report"), "materializer", Duration.ofMinutes(1)))
+                .isTrue();
+        var service = new DashboardApiService(store, new LocalWakeBus());
+
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(() -> service.deleteRecurring("report"))
+                    .isInstanceOf(DashboardApiException.class)
+                    .satisfies(error -> assertThat(((DashboardApiException) error).code())
+                            .isEqualTo(DashboardApiException.Code.CONFLICT));
+        } finally {
+            Thread.interrupted();
+        }
+
+        assertThat(store.findCronTask("report")).isPresent();
+        assertThat(store.findCronTaskState("report")).isPresent();
+    }
+
     private static CronTask timedCronTask(String name, Duration timeout, Integer maxAttempts) {
         return new CronTask(
                 name,
