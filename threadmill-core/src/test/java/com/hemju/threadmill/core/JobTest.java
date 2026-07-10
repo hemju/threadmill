@@ -6,6 +6,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
 
 import org.junit.jupiter.api.Test;
 
@@ -101,6 +103,45 @@ class JobTest {
         JobSnapshot after = j.snapshot();
         assertThat(after.currentState()).isEqualTo(JobState.PROCESSING);
         assertThat(after.metadata()).containsEntry("k", "v");
+    }
+
+    @Test
+    void snapshotConstructorDefensivelyCopiesMutableCollections() {
+        JobSnapshot source = freshEnqueued().snapshot();
+        var history = new ArrayList<>(source.stateHistory());
+        var metadata = new HashMap<>(source.metadata());
+        var log = new ArrayList<>(source.log());
+        var snapshot = new JobSnapshot(
+                source.id(),
+                source.spec(),
+                source.queue(),
+                source.priority(),
+                source.createdAt(),
+                source.cronTaskName(),
+                source.relationship(),
+                source.workflowRootId(),
+                source.concurrencyKey(),
+                source.concurrencyMode(),
+                history,
+                metadata,
+                log,
+                source.progress(),
+                source.version(),
+                source.ownerNodeId(),
+                source.ownerHeartbeatAt(),
+                source.lastCheckinAt(),
+                source.scheduledFor(),
+                source.result(),
+                source.attempts());
+
+        history.clear();
+        metadata.put("later", "mutation");
+        log.clear();
+
+        assertThat(snapshot.stateHistory()).isNotEmpty();
+        assertThat(snapshot.metadata()).doesNotContainKey("later");
+        assertThatThrownBy(() -> snapshot.metadata().put("blocked", "mutation"))
+                .isInstanceOf(UnsupportedOperationException.class);
     }
 
     @Test

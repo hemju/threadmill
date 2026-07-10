@@ -47,6 +47,18 @@ class ProcessingNodeTest {
     private ProcessingNodeConfig fastConfig;
     private final JsonJobSerializer serializer = new JsonJobSerializer();
 
+    @Test
+    void closeBeforeStartMakesLaterStartASilentNoOp() {
+        node = ProcessingNode.builder(store).config(fastConfig).build();
+
+        node.close();
+        var heartbeatsAfterClose = store.listNodeHeartbeats();
+        node.start();
+
+        assertThat(node.isStopped()).isTrue();
+        assertThat(store.listNodeHeartbeats()).isEqualTo(heartbeatsAfterClose);
+    }
+
     @BeforeEach
     void setUp() {
         EngineTestHandlers.reset();

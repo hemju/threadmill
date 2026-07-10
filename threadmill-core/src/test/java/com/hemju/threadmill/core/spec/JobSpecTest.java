@@ -41,4 +41,16 @@ class JobSpecTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("dedupKey");
     }
+
+    @Test
+    void handlerTypeIsBoundedByUtf8BytesForEveryStore() {
+        var oversized = "x".repeat(JobSpec.MAX_HANDLER_TYPE_BYTES + 1);
+
+        assertThatThrownBy(() -> new JobSpec(oversized, List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("handlerType");
+        assertThatThrownBy(() -> new JobSpec("ü".repeat(JobSpec.MAX_HANDLER_TYPE_BYTES), List.of()))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("UTF-8");
+    }
 }
