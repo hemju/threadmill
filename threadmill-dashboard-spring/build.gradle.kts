@@ -20,6 +20,7 @@ dependencies {
     testImplementation(libs.spring.boot.starter.webmvc)
     testImplementation(libs.spring.boot.starter.security)
     testImplementation(libs.spring.boot.starter.test)
+    testImplementation(libs.logback.classic)
     testImplementation(libs.spring.security.test)
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)

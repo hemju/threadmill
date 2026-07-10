@@ -2,21 +2,22 @@
 java = "25"
 spotless = "8.5.0"
 palantirJavaFormat = "2.90.0"
-springBoot = "4.0.4"
-springFramework = "7.0.4"
-springSecurity = "7.0.5"
+springBoot = "4.0.7"
+springFramework = "7.0.8"
+springSecurity = "7.0.6"
 servlet = "6.1.0"
-jackson = "2.18.6"
+jackson = "2.21.5"
+logback = "1.5.35"
 slf4j = "2.0.16"
 micrometer = "1.14.1"
 opentelemetry = "1.62.0"
 junit = "5.11.4"
-assertj = "3.27.0"
+assertj = "3.27.7"
 awaitility = "4.2.2"
 testcontainers = "2.0.5"
-postgresql = "42.7.7"
+postgresql = "42.7.11"
 lettuce = "6.6.0.RELEASE"
-netty = "4.1.118.Final"
+netty = "4.1.135.Final"
 networkntJsonschema = "1.5.4"
 
 [plugins]
@@ -40,6 +41,7 @@ spring-security-web = { module = "org.springframework.security:spring-security-w
 jakarta-servlet-api = { module = "jakarta.servlet:jakarta.servlet-api", version.ref = "servlet" }
 jackson-databind = { module = "com.fasterxml.jackson.core:jackson-databind", version.ref = "jackson" }
 jackson-datatype-jsr310 = { module = "com.fasterxml.jackson.datatype:jackson-datatype-jsr310", version.ref = "jackson" }
+logback-classic = { module = "ch.qos.logback:logback-classic", version.ref = "logback" }
 micrometer-core = { module = "io.micrometer:micrometer-core", version.ref = "micrometer" }
 opentelemetry-api = { module = "io.opentelemetry:opentelemetry-api", version.ref = "opentelemetry" }
 opentelemetry-sdk = { module = "io.opentelemetry:opentelemetry-sdk", version.ref = "opentelemetry" }

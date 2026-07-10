@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.1.3
+
+- Fixed Spring lifecycle ordering so `ProcessingNode` starts before remote-wake
+  subscription and stops after the subscription closes. Spring applications
+  now fail fast when no durable store is configured; the in-memory store must
+  be explicitly enabled with `threadmill.store.memory.enabled=true`.
+- Required the per-task correctness mutex for recurring definition
+  registration, reconciliation, dashboard mutation, and deletion. Contended
+  mutations now fail explicitly instead of proceeding without their lock.
+- Retained terminal-save responsibility through store outages. A worker keeps
+  retrying `PROCESSING -> SUCCEEDED` / `FAILED` with capped backoff until the
+  write commits or node shutdown begins, preventing completed attempts from
+  being stranded behind refreshed owner heartbeats.
+- Hardened persisted invariants with defensive `JobSnapshot` copies, bounded
+  handler type names, safe `ProcessingNode` lifecycle behavior, startup
+  migration checksum/description validation, and additive PostgreSQL V3
+  integrity constraints.
+- Bounded Redis claim candidate discovery with rotating `HSCAN` cursors and
+  pipelined per-key probes, avoiding backlog-wide registry reads under large
+  keyed workloads.
+- Added Gradle wrapper verification, dependency locking and SHA-256 metadata,
+  immutable GitHub Action pins, and mandatory `META-INF/LICENSE` / `NOTICE`
+  inspection for every published JAR. Refreshed dashboard build tooling to
+  patched Babel, esbuild, and Vite releases; `npm audit` reports zero known
+  vulnerabilities for the release lockfile.
+- Upgraded Jackson, Spring Boot, Spring Framework, Spring Security, Netty,
+  PostgreSQL JDBC, Logback, and AssertJ to patched maintenance releases. The
+  release OSV gate now scans every committed Gradle and npm lockfile instead of
+  passing an unsupported version-catalog file to the scanner.
+- Synchronized installation versions, release/security guidance, API names,
+  dashboard security documentation, Redis execution-model documentation, and
+  soak-result wording.
+
 ## 0.1.2
 
 - Fixed `@Job(timeout)` and `@Job(maxRetries)` being silently ignored for
