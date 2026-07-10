@@ -3,6 +3,8 @@ package com.hemju.threadmill.test;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -35,9 +37,14 @@ import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.engine.JobInterceptor;
+import com.hemju.threadmill.core.engine.JobInterceptors;
+import com.hemju.threadmill.core.engine.JobRunner;
+import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.engine.WorkflowInterceptor;
+import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
+import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobSearch;
@@ -194,6 +201,96 @@ public abstract class AbstractJobStoreContractTest {
         store.saveAtomic(recovered, v);
         assertThat(recovered.version()).isEqualTo(v + 1);
         assertThat(capacity).isPositive();
+    }
+
+    @Test
+    @DisplayName("successful completion retains terminal finalization responsibility through a store outage")
+    void successfulCompletionRetainsTerminalFinalizationThroughStoreOutage() throws Exception {
+        assertTerminalFinalizationSurvivesOutage((payload, context) -> {}, JobState.SUCCEEDED);
+    }
+
+    @Test
+    @DisplayName("failed completion retains terminal finalization responsibility through a store outage")
+    void failedCompletionRetainsTerminalFinalizationThroughStoreOutage() throws Exception {
+        assertTerminalFinalizationSurvivesOutage(
+                (payload, context) -> {
+                    throw new IllegalStateException("handler failed");
+                },
+                JobState.FAILED);
+    }
+
+    private void assertTerminalFinalizationSurvivesOutage(
+            JobHandler<JobRunner.EmptyPayload> handler, JobState expectedState) throws Exception {
+        var outage = new AtomicBoolean(true);
+        var terminalSaveAttempted = new CountDownLatch(1);
+        JobStore flaky = failTerminalSavesWhile(store, outage, terminalSaveAttempted);
+        var nodeId = NodeId.newId();
+        Job job = Job.builder().spec(JobSpec.of("contract.TerminalHandler")).build();
+        flaky.insert(job);
+        Job claimed = flaky.claimReady(nodeId, job.queue(), 1, Instant.now()).getFirst();
+        var runner = new JobRunner(
+                flaky,
+                nodeId,
+                ignored -> handler,
+                new JsonJobSerializer(),
+                new JobInterceptors(),
+                ProcessingNodeConfig.builder()
+                        .jobTimeout(Duration.ofSeconds(10))
+                        .build());
+        Thread execution = Thread.ofVirtual()
+                .name("threadmill-contract-terminal-finalizer")
+                .start(() -> runner.run(claimed));
+        try {
+            assertThat(terminalSaveAttempted.await(5, TimeUnit.SECONDS)).isTrue();
+
+            // This is four times longer than the historical three-attempt
+            // retry budget. The runner must still own finalization rather than
+            // return and leave a heartbeat-shielded PROCESSING row behind.
+            Thread.sleep(600);
+            assertThat(execution.isAlive())
+                    .as("terminal finalizer remains active during outage")
+                    .isTrue();
+
+            // Owner heartbeats deliberately do not advance the optimistic
+            // version. Reproduce the exact shielding condition from #94 while
+            // the active finalizer still retains responsibility.
+            store.touchOwnerHeartbeat(nodeId, Instant.now());
+            assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.PROCESSING);
+
+            outage.set(false);
+            execution.join(5_000);
+            assertThat(execution.isAlive())
+                    .as("terminal finalizer completes after recovery")
+                    .isFalse();
+            assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(expectedState);
+        } finally {
+            outage.set(false);
+            execution.interrupt();
+            execution.join(5_000);
+            runner.shutdown();
+        }
+    }
+
+    private static JobStore failTerminalSavesWhile(
+            JobStore delegate, AtomicBoolean outage, CountDownLatch terminalSaveAttempted) {
+        return (JobStore) Proxy.newProxyInstance(
+                JobStore.class.getClassLoader(), new Class<?>[] {JobStore.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("saveAtomic")
+                            && args != null
+                            && args.length > 0
+                            && args[0] instanceof Job job
+                            && (job.currentState() == JobState.SUCCEEDED || job.currentState() == JobState.FAILED)) {
+                        terminalSaveAttempted.countDown();
+                        if (outage.get()) {
+                            throw new RuntimeException("store unavailable during terminal save");
+                        }
+                    }
+                    try {
+                        return method.invoke(delegate, args);
+                    } catch (InvocationTargetException failure) {
+                        throw failure.getCause();
+                    }
+                });
     }
 
     // ================================================================ claimReady

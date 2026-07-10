@@ -160,7 +160,7 @@ The Gradle wrapper is committed; new clones run `./gradlew` without a system Gra
 
 Testing is a first-class deliverable; treat the test suite as equal in weight to the code.
 
-- The `JobStore` contract is an **abstract test suite written first**. Every store (in-memory, Postgres, Redis) extends `AbstractJobStoreContractTest` and is held to the **identical** 78-test suite — that is the only thing guaranteeing all three backends behave the same.
+- The `JobStore` contract is an **abstract test suite written first**. Every store (in-memory, Postgres, Redis) extends `AbstractJobStoreContractTest` and is held to the **identical** 80-test suite — that is the only thing guaranteeing all three backends behave the same.
 - Integration tests run against **real PostgreSQL and real Redis via Testcontainers**. Never mock the datastore — the hard bugs live in the datastore's real locking, atomicity, and encoding behaviour.
 - **Every bug becomes a named, permanent regression test** added with (or before) the fix. See the regression-coverage matrix in §11.
 - Concurrency tests (N simulated nodes claiming from one store), serialization round-trip tests (including 4-byte Unicode and oversized payloads), and the soak/load module are first-class.
@@ -218,6 +218,7 @@ This section is the project's memory: the load-bearing decisions worth knowing b
 - **`claimReady` is atomic across nodes.** In-memory: single mutex. Postgres: `SELECT … FOR UPDATE SKIP LOCKED` + version-matched UPDATE in one transaction. Redis: a single Lua script. The contract test runs concurrent virtual-thread workers against a pre-populated queue and asserts no double-claim.
 - **Concurrency groups are enforced at claim time.** `SHARED` jobs for one key run together only while no earlier pending `EXCLUSIVE` job exists; `EXCLUSIVE` jobs run alone. Workflow successors inherit the root job's key/mode and hold the key until the last descendant terminates.
 - **Orphan recovery routes through `FAILED`, never directly to `ENQUEUED`.** This funnels orphan, timeout, and exception failures through one code path with one set of interceptor hooks. `PROCESSING → ENQUEUED` is explicitly illegal in the state machine.
+- **Terminal persistence retains a worker until it commits or shutdown begins.** A handler may finish while the store is unavailable, but its `JobRunner` virtual thread keeps retrying the `PROCESSING → SUCCEEDED` / `FAILED` save with capped backoff. This makes owner-heartbeat refresh truthful: every heartbeat-shielded attempt still has an active finalizer. On node shutdown the retry stops, heartbeats stop with the node, and ordinary orphan recovery takes responsibility. Deterministic stale-version, oversize, and serialization failures are never retried as outages.
 - **JSON is the default wire format.** `JsonJobSerializer` uses Jackson and accepts a host-supplied `ObjectMapper` so applications can reuse the mapper they already configure. The serializer is the only place that enforces the size cap. Handler / payload class renames are explicit migrations: use `TypeNameAliases` for compatible name moves, `PayloadMigrations` for breaking JSON shape changes, and `JobDefinitionMigrator` to rewrite already-persisted non-running jobs.
 
 ### Postgres-specific
@@ -345,6 +346,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Poison job is quarantined without crashing the loop | `ProcessingNodeTest.poisonJobIsQuarantinedWithoutCrashingTheLoop` |
 | Circuit-breaker decay on success | `CircuitBreakerTest.successDecaysTheCounter` |
 | Store-outage cluster pause/resume | `StoreOutageTest.clusterPausesAndResumesAroundAStoreOutage` |
+| Store outage after successful / failed handler completion strands a heartbeat-shielded PROCESSING row | `AbstractJobStoreContractTest.successfulCompletionRetainsTerminalFinalizationThroughStoreOutage` + `failedCompletionRetainsTerminalFinalizationThroughStoreOutage` (identical memory / Postgres / Redis coverage) |
 | Recurring catch-up-storm (DROP policy) | `SchedulingTest.dropPolicyDoesNotCauseACatchUpStorm` |
 | Recurring CATCH_UP policy fires every missed run | `SchedulingTest.catchUpPolicyMaterializesEveryMissedFire` |
 | Per-queue starvation prevention | `SchedulingTest.systemLaneIsNotStarvedByAdHocFlood` |
@@ -414,7 +416,7 @@ Every hard-won failure mode that has come up during development, and the test th
 | Failure-message truncation splits surrogate pairs or exceeds maxBytes; malformed wire escapes as raw runtime exceptions | `JsonJobSerializerTest.capFailureMessageNeverSplitsSurrogatePairsAndRespectsMaxBytes` + `malformedWireYieldsSerializationExceptionNotRawRuntimeExceptions` |
 | Persisted type tag initializes an arbitrary classpath class before the payload assignability check | `JsonJobSerializerTest.deserializeArgumentRejectsNonPayloadTypesWithoutRunningTheirInitializers` |
 | Unbounded metadata or state-history entry count blocks the terminal FAILED/SUCCEEDED save | `JsonJobSerializerTest.hugeMetadataAndLongRetryHistoryStillFitTheTerminalSave` |
-| Failed SUCCEEDED-save leaves the job stuck in PROCESSING (and its key held) forever | `ProcessingNodeTest.transientSucceededSaveFailureIsRetriedAndTheJobSucceeds` + `failedSucceededSaveRoutesThroughTheSingleFailurePathAndReleasesTheKey` + `oversizedHandlerResultIsDroppedRatherThanBlockingTheSucceededSave` |
+| Failed SUCCEEDED-save leaves the job stuck in PROCESSING (and its key held) forever | `ProcessingNodeTest.transientSucceededSaveFailureIsRetriedAndTheJobSucceeds` + `deterministicSucceededSaveFailureRoutesThroughTheSingleFailurePathAndReleasesTheKey` + `oversizedHandlerResultIsDroppedRatherThanBlockingTheSucceededSave` |
 | Per-job timeout ignored in the watchdog's initial delay; malformed timeout metadata disables enforcement | `ProcessingNodeTest.perJobTimeoutShorterThanTheGlobalDefaultFiresOnTime` + `malformedTimeoutMetadataStillEnforcesTheGlobalTimeout` |
 | Retry backoff off-by-one, sub-second truncation to zero, malformed retry metadata cancelling retry, racy policy map | `RetryInterceptorTest.firstRetryDelayEqualsInitialBackoff` + `subSecondBackoffIsNotTruncatedToZero` + `malformedRetryMetadataFallsBackToTheDefaultPolicyAndStillRetries` + `concurrentPolicyRegistrationDoesNotBreakTheFailurePath` |
 | Recurring instance loses the back-link to its recurring definition | `SchedulingTest.recurringInstancesCarryTheirCronTaskName` + `JsonJobSerializerTest.jobRoundTripsAllCoreFields` |

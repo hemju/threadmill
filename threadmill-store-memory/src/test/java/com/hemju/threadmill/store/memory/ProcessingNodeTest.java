@@ -30,6 +30,7 @@ import com.hemju.threadmill.core.engine.QueueLane;
 import com.hemju.threadmill.core.engine.QueueWeights;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.serialization.SerializationException;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.test.ForwardingJobStore;
@@ -1200,7 +1201,7 @@ class ProcessingNodeTest {
     }
 
     @Test
-    void failedSucceededSaveRoutesThroughTheSingleFailurePathAndReleasesTheKey() {
+    void deterministicSucceededSaveFailureRoutesThroughTheSingleFailurePathAndReleasesTheKey() {
         var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
         Job poisoned = enqueueHello(
                 EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue(), "k", ConcurrencyMode.EXCLUSIVE);
@@ -1211,7 +1212,7 @@ class ProcessingNodeTest {
             @Override
             public void saveAtomic(Job job, long expectedVersion) {
                 if (job.currentState() == JobState.SUCCEEDED && job.id().equals(poisoned.id())) {
-                    throw new RuntimeException("store rejects this SUCCEEDED save");
+                    throw new SerializationException("store rejects this SUCCEEDED snapshot");
                 }
                 super.saveAtomic(job, expectedVersion);
             }
