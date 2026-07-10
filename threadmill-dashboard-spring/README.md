@@ -51,3 +51,8 @@ The controller exposes pause/resume queue, requeue, retry scheduling, soft-delet
 pending-job replacement, recurring trigger/update/delete, and node/queue/job
 read endpoints. Actions always re-check permissions server-side and reject
 illegal state transitions.
+
+Recurring trigger, update, and delete actions take the same per-task store mutex
+as the maintenance materializer. When another node is already mutating the task,
+the API returns a conflict and the operator can retry; it never proceeds with an
+unguarded schedule-state write.

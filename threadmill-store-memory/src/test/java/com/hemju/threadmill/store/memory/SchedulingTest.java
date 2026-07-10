@@ -1,6 +1,7 @@
 package com.hemju.threadmill.store.memory;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import java.time.Duration;
@@ -162,6 +163,46 @@ class SchedulingTest {
         node = ProcessingNode.builder(store).config(fastConfig()).build();
         node.start();
         await().atMost(Duration.ofSeconds(5)).until(() -> RecorderHandler.RECORD.size() >= 3);
+    }
+
+    @Test
+    void recurringRegistrationNeverMutatesWithoutItsTaskMutex() {
+        String mutex = RecurringMaterializer.taskMutexName("locked");
+        assertThat(store.tryAcquireMutex(mutex, "other-node", Duration.ofMinutes(1)))
+                .isTrue();
+
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(() -> scheduler.defineIntervalTask(
+                            "locked", Duration.ofMinutes(1), new HelloPayload("tick"), RecorderHandler.class))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("recurring-state mutex");
+        } finally {
+            Thread.interrupted();
+        }
+
+        assertThat(store.findCronTask("locked")).isEmpty();
+        assertThat(store.findCronTaskState("locked")).isEmpty();
+    }
+
+    @Test
+    void recurringDeletionNeverRacesTheMaterializerTaskMutex() {
+        scheduler.defineIntervalTask("locked", Duration.ofMinutes(1), new HelloPayload("tick"), RecorderHandler.class);
+        String mutex = RecurringMaterializer.taskMutexName("locked");
+        assertThat(store.tryAcquireMutex(mutex, "materializer", Duration.ofMinutes(1)))
+                .isTrue();
+
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(() -> scheduler.deleteCronTask("locked"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("recurring-state mutex");
+        } finally {
+            Thread.interrupted();
+        }
+
+        assertThat(store.findCronTask("locked")).isPresent();
+        assertThat(store.findCronTaskState("locked")).isPresent();
     }
 
     @Test

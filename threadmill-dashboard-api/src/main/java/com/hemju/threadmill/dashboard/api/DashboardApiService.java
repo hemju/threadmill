@@ -13,9 +13,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobReplacement;
@@ -48,7 +45,6 @@ import com.hemju.threadmill.dashboard.api.DashboardPayloads.UpdateRecurringReque
 /** Dashboard read and mutation service. */
 public final class DashboardApiService {
 
-    private static final Logger LOG = LoggerFactory.getLogger(DashboardApiService.class);
     private static final int MAX_PAUSE_REASON_BYTES = 256;
     private static final Duration CRON_MUTEX_LEASE = Duration.ofSeconds(30);
 
@@ -356,7 +352,7 @@ public final class DashboardApiService {
     }
 
     public ActionResponse deleteRecurring(String name) {
-        store.deleteCronTask(name);
+        withTaskMutex(name, () -> store.deleteCronTask(name));
         invalidateSnapshotCache();
         return new ActionResponse("deleted", name);
     }
@@ -375,8 +371,8 @@ public final class DashboardApiService {
      * per-task store mutex the {@code RecurringMaterializer} and
      * {@code Scheduler.upsertCron} take, so dashboard mutations cannot
      * clobber a concurrently-set {@code inFlightJobId} on the maintenance
-     * master. If the mutex never frees, proceed with a warning — the
-     * operator action must not hang indefinitely, and the lease expires.
+     * master. If the mutex never frees, reject the mutation with a conflict so
+     * correctness is never traded for an unguarded operator action.
      */
     private void withTaskMutex(String name, Runnable action) {
         String mutex = RecurringMaterializer.taskMutexName(name);
@@ -393,7 +389,7 @@ public final class DashboardApiService {
             }
         }
         if (!locked) {
-            LOG.warn("Could not acquire recurring-state mutex {} — proceeding unguarded", mutex);
+            throw conflict("recurring task is busy; retry after the current mutation completes");
         }
         try {
             action.run();
