@@ -46,7 +46,7 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:by_state_time:{STATE}` | ZSET | Ids scored by `current_state_at`. Used for retention. |
 | `{threadmill}:counts` | HASH | State → cardinality. `HINCRBY` inside every state-changing script. **Never** `SCARD` / `ZCARD` for live counts. |
 | `{threadmill}:queues` | SET | Active queue names (membership maintained by `claim_commit`). |
-| `{threadmill}:queue_keys:{queue}` | HASH | Concurrency key → count of ENQUEUED keyed jobs of that key in the queue. The claim path enumerates keys from here so its cost scales with keys, never with backlog depth. |
+| `{threadmill}:queue_keys:{queue}` | HASH | Concurrency key → count of ENQUEUED keyed jobs of that key in the queue. The claim path uses a rotating bounded HSCAN cursor, so one pass stays bounded even at high key cardinality. |
 | `{threadmill}:queue_unkeyed:{queue}` | ZSET | ENQUEUED unkeyed job ids, scored like the queue ZSET. The unkeyed claim lane never pages past keyed work. |
 | `{threadmill}:queue_pauses` | HASH | Paused queue → reason. |
 | `{threadmill}:cron_task_namespace:{namespace}` | SET | Cron task names owned by one reconciliation namespace. |
@@ -111,11 +111,13 @@ Never a destructive `BLPOP` / `ZPOPMIN`. The flow is:
 
 1. Java gathers candidates from bounded, key-driven lanes — unkeyed heads
    from `{threadmill}:queue_unkeyed:{queue}`, per-concurrency-key
-   pending-order head runs discovered through `{threadmill}:queue_keys:{queue}`,
+   pending-order head runs discovered through a rotating HSCAN over
+   `{threadmill}:queue_keys:{queue}`,
    and active-workflow-hold members via the `pending_root` mirrors — then
-   sorts them by queue-ZSET score (priority-aware). The gathering cost
-   scales with the number of keys and in-flight holds, never with backlog
-   depth; it deliberately never pages the queue ZSET past blocked work.
+   sorts them by queue-ZSET score (priority-aware). Per-key admission reads
+   and queue-score probes are asynchronously pipelined. Each pass is bounded
+   by a key-page budget and never scales with backlog depth or requires one
+   network round trip per registered key.
 2. For each candidate, Java prepares the new body with the `PROCESSING`
    state-history entry appended and the version bumped.
 3. `claim_commit.lua` verifies version / state / queue membership plus the
