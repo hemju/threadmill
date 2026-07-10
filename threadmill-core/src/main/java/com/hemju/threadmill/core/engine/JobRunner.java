@@ -58,6 +58,7 @@ public final class JobRunner {
     private final Duration jobTimeout;
     private final ProcessingNodeConfig config;
     private final ScheduledExecutorService timeoutExecutor;
+    private final AtomicBoolean shutdownRequested = new AtomicBoolean(false);
     // Set by the owning ProcessingNode; true once close() has begun. Lets the
     // failure path distinguish a shutdown interrupt from a handler fault.
     private volatile BooleanSupplier shuttingDown = () -> false;
@@ -99,6 +100,7 @@ public final class JobRunner {
 
     /** Stops the timeout watchdog. Intended for engine shutdown. */
     public void shutdown() {
+        shutdownRequested.set(true);
         timeoutExecutor.shutdownNow();
     }
 
@@ -256,8 +258,8 @@ public final class JobRunner {
 
     // ---------------------------------------------------------------- the single failure path
 
-    private static final int TERMINAL_SAVE_ATTEMPTS = 3;
     private static final long TERMINAL_SAVE_BACKOFF_MS = 50L;
+    private static final long TERMINAL_SAVE_MAX_BACKOFF_MS = 1_000L;
 
     private void recordFailure(Job job, ExecutionContext ctx, Throwable cause, JobInterceptor.FailureCause kind) {
         try {
@@ -310,31 +312,47 @@ public final class JobRunner {
     }
 
     /**
-     * Persist a terminal transition, retrying transient store errors with a
-     * short bounded backoff. {@link StaleJobException} and
-     * {@link OversizedJobException} are not transient and rethrow immediately.
+     * Persist a terminal transition, retaining responsibility until the write
+     * succeeds or node shutdown begins. The worker remains occupied while the
+     * store is unavailable, so owner heartbeats protect an attempt that still
+     * has an active finalizer rather than an abandoned PROCESSING row.
+     * {@link StaleJobException}, {@link OversizedJobException}, and
+     * {@link SerializationException} are deterministic and rethrow immediately.
      */
     private void saveTerminalWithRetry(Job job, long expectedVersion) {
-        int attempt = 0;
+        int failures = 0;
         while (true) {
             try {
                 store.saveAtomic(job, expectedVersion);
                 return;
-            } catch (StaleJobException | OversizedJobException notTransient) {
+            } catch (StaleJobException | OversizedJobException | SerializationException notTransient) {
                 throw notTransient;
             } catch (RuntimeException e) {
-                attempt++;
-                if (attempt >= TERMINAL_SAVE_ATTEMPTS) {
+                failures++;
+                if (isShuttingDown()) {
                     throw e;
                 }
+                if (failures == 3 || failures % 30 == 0) {
+                    LOG.warn(
+                            "Terminal save for job {} has failed {} times; retaining finalization responsibility",
+                            job.id(),
+                            failures,
+                            e);
+                }
+                long backoff = Math.min(
+                        TERMINAL_SAVE_MAX_BACKOFF_MS, TERMINAL_SAVE_BACKOFF_MS * (1L << Math.min(failures - 1, 5)));
                 try {
-                    Thread.sleep(TERMINAL_SAVE_BACKOFF_MS * attempt);
+                    Thread.sleep(backoff);
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
                     throw e;
                 }
             }
         }
+    }
+
+    private boolean isShuttingDown() {
+        return shutdownRequested.get() || shuttingDown.getAsBoolean();
     }
 
     private Job reloadForFailure(Job job) {

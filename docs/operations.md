@@ -13,6 +13,17 @@ maintenance lease. Only the lease holder promotes scheduled jobs, materializes
 recurring jobs, reclaims orphans, and runs retention. If the store is
 unreachable, nodes stop acting as maintenance leader.
 
+## Store Outages During Completion
+
+If a handler finishes while its job store is unavailable, the worker remains
+occupied and retries the terminal transition with capped backoff. Threadmill
+does not return that worker to the pool or abandon the persisted job in
+`PROCESSING`. Owner heartbeats continue while finalization is active so another
+node cannot execute the same attempt concurrently. Once the store recovers,
+the terminal save completes normally. If the node shuts down first, its retry
+and heartbeats stop; the maintenance leader then reclaims the job after
+`heartbeatTimeout` under the usual at-least-once semantics.
+
 ## Metrics
 
 Use `ThreadmillMetrics` with a Micrometer registry. Key meters include job

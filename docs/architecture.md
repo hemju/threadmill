@@ -54,7 +54,10 @@ JVM. It composes four cooperating parts:
   housekeeping at a time and a dead master's lease simply expires.
 - **`JobRunner`** — executes the user handler on a virtual thread with the
   per-execution context bound as a `ScopedValue`, enforces the per-job
-  timeout, and persists the terminal transition.
+  timeout, and persists the terminal transition. If the store disappears
+  after a handler returns, the worker retains finalization responsibility and
+  retries with capped backoff until the write commits or node shutdown begins.
+  Owner heartbeats therefore never protect an abandoned completed attempt.
 
 `Scheduler` is the user-facing enqueue / schedule / recurring API. It needs
 only a `JobStore` and a serializer — no running engine — so submission-only
