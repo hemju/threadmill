@@ -301,10 +301,12 @@ Spring-bound PostgreSQL connection and registers only the local wake signal for
 
 ### `SmartLifecycle` phase
 
-`ThreadmillLifecycle` runs at phase `Integer.MAX_VALUE / 2`. Spring stops
-higher phases first, so the engine starts after infrastructure beans
-(DataSource, RedisConnectionFactory at the default `Integer.MAX_VALUE`)
-and stops before them on graceful shutdown.
+`ThreadmillLifecycle` runs at Spring's maximum/default phase
+`Integer.MAX_VALUE`. Spring starts lower phases first and stops higher phases
+first, so Threadmill starts as late and stops as early as the lifecycle protocol
+allows. Store connections are constructed before lifecycle startup. Remote-wake
+subscriptions share the lifecycle: they subscribe after the node starts and
+close before the node drains.
 
 ### What happens if a `@Transactional` method throws after enqueue?
 

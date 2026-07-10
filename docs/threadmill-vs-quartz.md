@@ -16,7 +16,7 @@ not to argue one is universally better.
 | Job payload | Untyped `JobDataMap` (`Map<String, Object>` serialized to JDBC blob) | Typed `JobPayload` record + `JobHandler<P>`; serialized as JSON with a class-name tag |
 | Missed firings | Per-trigger misfire instructions, resolved on scheduler start | Per-task `MissedRunPolicy` (`DROP` or `CATCH_UP`) set at registration time |
 | Runtime pause | `scheduler.standby()` pauses dispatch on the local node | `pauseQueue(queue)` pauses claims on every node, cluster-wide |
-| Startup gate | `scheduler.standby()` then `scheduler.start()` after registration | `SmartLifecycle` phase `Integer.MAX_VALUE / 2` fires `node.start()` after all beans are wired |
+| Startup gate | `scheduler.standby()` then `scheduler.start()` after registration | Maximum/default `SmartLifecycle` phase starts the node as late as possible; remote wake is ordered inside the same lifecycle |
 | Storage backends | JDBC (`QRTZ_*` tables across many vendors) or RAM | PostgreSQL 18+, Redis (standalone / Sentinel / Cluster), in-memory |
 | Threading | Configurable thread pool of platform threads | Virtual threads (Java 25) per worker; lanes give per-queue capacity |
 | Result of a run | Write-back through `JobDataMap` | Typed `JobResult` slot persisted on `SUCCEEDED` |
