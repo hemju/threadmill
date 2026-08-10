@@ -172,4 +172,21 @@ public final class CronExpression {
     public String toString() {
         return expression;
     }
+
+    /**
+     * Value equality on the source expression — the same identity the
+     * expression serializes as, so a deserialized instance equals its
+     * original. Two spellings of the same schedule ({@code *} vs
+     * <code>*&#47;1</code>) are deliberately unequal: for schedule-change
+     * detection, a rewritten expression counts as an edit.
+     */
+    @Override
+    public boolean equals(Object o) {
+        return o instanceof CronExpression other && expression.equals(other.expression);
+    }
+
+    @Override
+    public int hashCode() {
+        return expression.hashCode();
+    }
 }

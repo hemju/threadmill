@@ -304,7 +304,7 @@ public final class DashboardApiService {
         Job job = builder.build();
         withTaskMutex(name, () -> {
             store.insert(job);
-            var prior = store.findCronTaskState(name).orElse(CronTaskScheduleState.initial(name, null));
+            var prior = store.findCronTaskState(name).orElse(new CronTaskScheduleState(name, null, null, null, null));
             // The materializer's pile-up guard tracks inFlightJobId. While a
             // scheduled instance is still running, the manual job runs but
             // must NOT take over the guard — otherwise the guard is released
@@ -321,7 +321,8 @@ public final class DashboardApiService {
                     Instant.now(),
                     job.id().asUuid(),
                     prior.nextRunAt(),
-                    priorStillRunning ? inFlight : job.id().asUuid()));
+                    priorStillRunning ? inFlight : job.id().asUuid(),
+                    prior.timingFingerprint()));
         });
         wakeBus.wake(task.queue());
         invalidateSnapshotCache();
@@ -358,12 +359,19 @@ public final class DashboardApiService {
     }
 
     private CronTaskScheduleState stateAfterRecurringUpdate(CronTask task) {
+        // Dashboard edits are explicit operator actions on the definition, so
+        // — unlike an unchanged startup re-registration in Scheduler.upsertCron
+        // — every update deliberately recomputes the next run from now, even
+        // when only non-timing fields changed. An operator editing a task
+        // expects it to schedule forward from the edit, never to fire a
+        // pre-edit overdue time.
         var existing = store.findCronTaskState(task.name());
         Instant next = task.enabled() ? task.trigger().nextAfter(Instant.now(), task.zone()) : null;
-        if (existing.isEmpty()) return CronTaskScheduleState.initial(task.name(), next);
+        String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
+        if (existing.isEmpty()) return CronTaskScheduleState.initial(task.name(), next, fingerprint);
         var state = existing.get();
         return new CronTaskScheduleState(
-                task.name(), state.lastRunAt(), state.lastRunJobId(), next, state.inFlightJobId());
+                task.name(), state.lastRunAt(), state.lastRunJobId(), next, state.inFlightJobId(), fingerprint);
     }
 
     /**

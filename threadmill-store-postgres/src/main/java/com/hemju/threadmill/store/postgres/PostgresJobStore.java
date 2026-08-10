@@ -1843,15 +1843,17 @@ public final class PostgresJobStore implements JobStore {
                 try (Connection conn = dataSource.getConnection();
                         PreparedStatement ps = conn.prepareStatement(
                                 "INSERT INTO threadmill_cron_task_state (task_name, last_run_at, last_run_job_id, "
-                                        + "next_run_at, in_flight_job_id) VALUES (?, ?, ?, ?, ?) "
+                                        + "next_run_at, in_flight_job_id, timing_fingerprint) VALUES (?, ?, ?, ?, ?, ?) "
                                         + "ON CONFLICT (task_name) DO UPDATE SET "
                                         + "last_run_at = EXCLUDED.last_run_at, last_run_job_id = EXCLUDED.last_run_job_id, "
-                                        + "next_run_at = EXCLUDED.next_run_at, in_flight_job_id = EXCLUDED.in_flight_job_id")) {
+                                        + "next_run_at = EXCLUDED.next_run_at, in_flight_job_id = EXCLUDED.in_flight_job_id, "
+                                        + "timing_fingerprint = EXCLUDED.timing_fingerprint")) {
                     ps.setString(1, state.taskName());
                     setNullableTimestamp(ps, 2, state.lastRunAt());
                     setNullableUuid(ps, 3, state.lastRunJobId());
                     setNullableTimestamp(ps, 4, state.nextRunAt());
                     setNullableUuid(ps, 5, state.inFlightJobId());
+                    ps.setString(6, state.timingFingerprint());
                     ps.executeUpdate();
                     return null;
                 }
@@ -1865,7 +1867,8 @@ public final class PostgresJobStore implements JobStore {
     public Optional<CronTaskScheduleState> findCronTaskState(String name) {
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(
-                        "SELECT task_name, last_run_at, last_run_job_id, next_run_at, in_flight_job_id "
+                        "SELECT task_name, last_run_at, last_run_job_id, next_run_at, in_flight_job_id, "
+                                + "timing_fingerprint "
                                 + "FROM threadmill_cron_task_state WHERE task_name = ?")) {
             ps.setString(1, name);
             try (ResultSet rs = ps.executeQuery()) {
@@ -1875,7 +1878,8 @@ public final class PostgresJobStore implements JobStore {
                         rs.getTimestamp(2) == null ? null : rs.getTimestamp(2).toInstant(),
                         (UUID) rs.getObject(3),
                         rs.getTimestamp(4) == null ? null : rs.getTimestamp(4).toInstant(),
-                        (UUID) rs.getObject(5)));
+                        (UUID) rs.getObject(5),
+                        rs.getString(6)));
             }
         } catch (SQLException e) {
             throw new JdbcException("findCronTaskState failed", e);

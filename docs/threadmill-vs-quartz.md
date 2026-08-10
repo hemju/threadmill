@@ -71,7 +71,7 @@ Threadmill discovers handlers as Spring beans:
 
 ```java
 @Component
-@Job(queue = "email", timeout = "PT2M", maxRetries = 5)
+@Job(queue = "email", timeout = "PT2M", maxAttempts = 5)
 final class SendEmailHandler implements JobHandler<SendEmail> {
     @Override public void run(SendEmail payload, JobExecutionContext ctx) { … }
 }
@@ -109,9 +109,19 @@ Threadmill has no misfires by design. Every `CronTask` carries a
   drop everything that should have fired while the engine was down.
 - `CATCH_UP` — materialise every missed fire.
 
+The policy applies to application restarts too: re-registering an unchanged
+task at startup preserves an overdue next-run, so downtime spanning a firing
+is recovered per the policy — one make-up run under `DROP` (carrying the most
+recent nominal fire time, with the following run phase-aligned to the
+original schedule), every missed fire under `CATCH_UP`. Only a real schedule
+edit — a different trigger, a different zone on a cron trigger, or
+re-enabling a disabled task — recomputes the next-run from now.
+
 The policy is per-task, not scheduler-wide, and the choice is made at
-registration time. Tests `SchedulingTest.dropPolicyDoesNotCauseACatchUpStorm`
-and `catchUpPolicyMaterializesEveryMissedFire` pin both behaviours.
+registration time. Tests `SchedulingTest.dropPolicyDoesNotCauseACatchUpStorm`,
+`catchUpPolicyMaterializesEveryMissedFire`, and
+`restartReRegistrationPreservesOverdueNextRunSoCatchUpRecoversMissedFires`
+pin these behaviours.
 
 ### No standby mode
 

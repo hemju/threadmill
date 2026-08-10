@@ -1837,6 +1837,7 @@ public final class RedisJobStore implements JobStore {
             fields.put("next_run_at", Long.toString(state.nextRunAt().toEpochMilli()));
         if (state.inFlightJobId() != null)
             fields.put("in_flight_job_id", state.inFlightJobId().toString());
+        if (state.timingFingerprint() != null) fields.put("timing_fingerprint", state.timingFingerprint());
         String key = RedisKeys.userKey("cron_task_state", state.taskName());
         // DEL (overwrite semantics so cleared fields clear) + HSET must be ONE
         // atomic script: a crash or failover between two separate commands would
@@ -1874,7 +1875,8 @@ public final class RedisJobStore implements JobStore {
                 hash.containsKey("last_run_at") ? Instant.ofEpochMilli(Long.parseLong(hash.get("last_run_at"))) : null,
                 hash.containsKey("last_run_job_id") ? UUID.fromString(hash.get("last_run_job_id")) : null,
                 hash.containsKey("next_run_at") ? Instant.ofEpochMilli(Long.parseLong(hash.get("next_run_at"))) : null,
-                hash.containsKey("in_flight_job_id") ? UUID.fromString(hash.get("in_flight_job_id")) : null));
+                hash.containsKey("in_flight_job_id") ? UUID.fromString(hash.get("in_flight_job_id")) : null,
+                hash.get("timing_fingerprint")));
     }
 
     private CronTask readCronTask(String name, Map<String, String> hash) {

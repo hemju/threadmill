@@ -301,8 +301,11 @@ public final class Scheduler {
      * adapter that validates annotation-level recurring specs at startup and
      * does not want the {@code Scheduler} to re-parse a string. Restart
      * semantics match {@link #defineCronTask}: existing schedule state
-     * (last-run, in-flight) is preserved; only the next-run timestamp is
-     * recomputed from {@code now} against the new trigger.
+     * (last-run, next-run, in-flight) is preserved while the trigger and zone
+     * are unchanged — an overdue next-run survives a restart so the task's
+     * {@code MissedRunPolicy} decides what happens to missed firings — and the
+     * next-run is recomputed from {@code now} only when the timing actually
+     * changed.
      */
     public void defineRecurring(
             String name,
@@ -438,10 +441,18 @@ public final class Scheduler {
 
     private void upsertCron(CronTask task) {
         // Identity vs schedule-state: re-registering a task replaces only the
-        // definition. The state is initialised on first registration; on
-        // re-registration we preserve in-flight job tracking but recompute
-        // the next-run from the new trigger relative to now (so a freshly
-        // edited cron does not fire stale times).
+        // definition. The state is initialised on first registration. When the
+        // re-registered definition keeps the same timing fingerprint (trigger,
+        // plus zone for cron triggers; no disabled→enabled flip), the existing
+        // schedule state stays authoritative — including an overdue nextRunAt,
+        // so firings missed while the application was down remain observable
+        // and the materializer applies the task's MissedRunPolicy (github
+        // issue #105: the unconditional recompute wiped restart-missed
+        // firings before CATCH_UP could ever see them). Only a real timing
+        // edit recomputes the next-run from now, so a freshly edited cron
+        // does not fire stale times. Storm safety for preserved overdue state
+        // lives in the materializer: DROP collapses the backlog to one run,
+        // CATCH_UP is capped per tick.
         //
         // The read-modify-write of the schedule state is guarded by the same
         // store mutex the materializer takes per task: without it, a
@@ -452,16 +463,33 @@ public final class Scheduler {
         String mutex = RecurringMaterializer.taskMutexName(task.name());
         acquireCronMutex(mutex);
         try {
+            // The preserve-vs-recompute decision reads the state row's own
+            // timing fingerprint, not the stored task definition: the task
+            // and state are two separate store writes, so a crash between
+            // them could pair a new trigger with old timing — the
+            // fingerprint travels atomically with nextRunAt in the state
+            // record, making that pairing detectable (the mismatch forces a
+            // recompute on the retry). The stored task is only consulted for
+            // the disabled→enabled flip, where a wrong answer merely causes
+            // a safe recompute.
+            String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
+            var existingTask = store.findCronTask(task.name());
             var existingState = store.findCronTaskState(task.name());
-            var now = Instant.now();
-            Instant next = task.trigger().nextAfter(now, task.zone());
             store.upsertCronTask(task);
-            if (existingState.isEmpty()) {
-                store.upsertCronTaskState(CronTaskScheduleState.initial(task.name(), next));
-            } else {
+            boolean reEnabled = existingTask.isPresent() && !existingTask.get().enabled() && task.enabled();
+            if (existingState.isPresent()) {
                 var s = existingState.get();
+                boolean timingUnchanged =
+                        s.nextRunAt() != null && fingerprint.equals(s.timingFingerprint()) && !reEnabled;
+                if (timingUnchanged) {
+                    return;
+                }
+                Instant next = task.trigger().nextAfter(Instant.now(), task.zone());
                 store.upsertCronTaskState(new CronTaskScheduleState(
-                        task.name(), s.lastRunAt(), s.lastRunJobId(), next, s.inFlightJobId()));
+                        task.name(), s.lastRunAt(), s.lastRunJobId(), next, s.inFlightJobId(), fingerprint));
+            } else {
+                Instant next = task.trigger().nextAfter(Instant.now(), task.zone());
+                store.upsertCronTaskState(CronTaskScheduleState.initial(task.name(), next, fingerprint));
             }
         } finally {
             try {

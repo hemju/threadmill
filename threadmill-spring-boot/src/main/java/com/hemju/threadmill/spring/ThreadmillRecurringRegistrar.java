@@ -26,7 +26,8 @@ import com.hemju.threadmill.core.serialization.JsonJobSerializer;
  *
  * <p>The registrar is idempotent. {@link Scheduler#defineRecurring} upserts the
  * task definition and preserves existing schedule state across restarts (last
- * run, in-flight job) while recomputing the next-run from the current trigger.
+ * run, next run, in-flight job) while the trigger is unchanged; the next-run
+ * is recomputed from now only when the schedule was actually edited.
  */
 public class ThreadmillRecurringRegistrar {
 
@@ -79,7 +80,7 @@ public class ThreadmillRecurringRegistrar {
                     registration.queue(),
                     registration.priority(),
                     registration.timeout(),
-                    registration.maxRetries(),
+                    registration.maxAttempts(),
                     recurring.missedRunPolicy());
             logRegistered(task, null);
         }
@@ -113,7 +114,7 @@ public class ThreadmillRecurringRegistrar {
                 registration.queue(),
                 registration.priority(),
                 registration.timeout(),
-                registration.maxRetries(),
+                registration.maxAttempts(),
                 recurring.missedRunPolicy(),
                 ZoneId.systemDefault(),
                 true);

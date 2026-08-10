@@ -44,8 +44,11 @@ public final class MigrationRunner {
 
     private static final Pattern FILE_PATTERN = Pattern.compile("V(\\d+)__([A-Za-z0-9_]+)\\.sql");
     private static final String RESOURCE_ROOT = "com/hemju/threadmill/store/postgres/migrations/";
-    private static final List<String> SHIPPED_MIGRATIONS =
-            List.of("V1__baseline.sql", "V2__cron_task_overrides.sql", "V3__integrity_constraints.sql");
+    private static final List<String> SHIPPED_MIGRATIONS = List.of(
+            "V1__baseline.sql",
+            "V2__cron_task_overrides.sql",
+            "V3__integrity_constraints.sql",
+            "V4__cron_state_timing_fingerprint.sql");
     private static final long MIGRATION_LOCK_KEY = 0x5468726561646D6CL;
     private static final Logger LOG = LoggerFactory.getLogger(MigrationRunner.class);
     private static final Duration LOCK_ACQUIRE_TIMEOUT = Duration.ofMinutes(5);

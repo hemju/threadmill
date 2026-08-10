@@ -281,12 +281,12 @@ public class ThreadmillAutoConfiguration {
         ProcessingNode node = builder.build();
         for (var registration : registry.registrations()) {
             LOG.info(
-                    "Threadmill: registered handler {} for payload {} on queue '{}' (timeout={}, maxRetries={})",
+                    "Threadmill: registered handler {} for payload {} on queue '{}' (timeout={}, maxAttempts={})",
                     registration.handlerType().getName(),
                     registration.payloadType().getName(),
                     registration.queue(),
                     registration.timeout(),
-                    registration.maxRetries());
+                    registration.maxAttempts() == null ? "retry-interceptor default" : registration.maxAttempts());
         }
         LOG.info(
                 "Threadmill: {} handlers registered; polling lanes={} with {} workers each; store={}; node={}",

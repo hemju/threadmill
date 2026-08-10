@@ -115,14 +115,26 @@ public record CronTask(
     }
 
     /**
-     * The contract for runs missed during downtime.
+     * The contract for runs missed while no materializer observed the task —
+     * a downtime window, a paused maintenance master, or a long stall. The
+     * policy applies identically to all of them: an overdue next-run survives
+     * application restarts (re-registration preserves it while the schedule
+     * is unchanged), so restart-missed firings are recovered the same way as
+     * stall-missed ones.
      * <ul>
-     *   <li>{@link #DROP} — only the next run from <em>now</em> is enqueued.
-     *       Default. This is the right behaviour for monitoring and
-     *       housekeeping jobs.</li>
+     *   <li>{@link #DROP} — the whole missed backlog collapses into one
+     *       instance for the single most recent nominal fire; everything
+     *       older is dropped. The instance's
+     *       {@code JobExecutionContext.CRON_FIRE_TIME_META} carries that
+     *       nominal fire time, and the next run is computed from it, so an
+     *       interval trigger's phase never drifts. Default. This is the
+     *       right behaviour for monitoring, housekeeping, and latest-state
+     *       sweeps.</li>
      *   <li>{@link #CATCH_UP} — every missed firing is enqueued as its own
-     *       instance. Opt-in; use only for jobs that must run for every
-     *       interval (idempotent ledger updates, for example).</li>
+     *       instance, each carrying its distinct nominal fire time, capped
+     *       per materializer tick with carry-over. Opt-in; use only for jobs
+     *       that must run for every interval (idempotent ledger updates, for
+     *       example).</li>
      * </ul>
      */
     public enum MissedRunPolicy {

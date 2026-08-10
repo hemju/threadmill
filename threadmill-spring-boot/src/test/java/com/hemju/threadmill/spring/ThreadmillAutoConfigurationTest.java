@@ -301,7 +301,7 @@ class ThreadmillAutoConfigurationTest {
 
     @Test
     void recurringHandlerTimeoutLandsOnTheRegisteredCronTask() {
-        // Regression for github issue #84: @Job(timeout) and @Job(maxRetries)
+        // Regression for github issue #84: @Job(timeout) and @Job(maxAttempts)
         // were silently ignored for @Recurring handlers — the CronTask could
         // not carry them, so every materialized instance ran under the engine
         // defaults.
@@ -320,13 +320,45 @@ class ThreadmillAutoConfigurationTest {
                             .orElseThrow();
                     assertThat(timed.timeout()).isEqualTo(Duration.ofMinutes(30));
                     assertThat(timed.maxAttempts()).isEqualTo(7);
-                    // A handler without annotation overrides mirrors the
-                    // enqueue path: it carries the configured global defaults.
+                    // A handler without an explicit maxAttempts leaves the
+                    // CronTask retry budget null so materialized instances run
+                    // under the RetryInterceptor defaults — a later change to
+                    // threadmill.default-max-attempts is honored (github
+                    // issue #104: the registry used to freeze the startup-time
+                    // default onto the task).
                     var properties = context.getBean(ThreadmillProperties.class);
                     var untimed = store.findCronTask(RecurringIntervalHandler.class.getName())
                             .orElseThrow();
                     assertThat(untimed.timeout()).isEqualTo(properties.getJobTimeout());
-                    assertThat(untimed.maxAttempts()).isEqualTo(properties.getDefaultMaxAttempts());
+                    assertThat(untimed.maxAttempts()).isNull();
+                });
+    }
+
+    @Test
+    void nonPositiveMaxAttemptsFailsStartupInsteadOfBecomingTheDefault() {
+        // Regression for github issue #104: @Job(maxRetries = 0) — the
+        // natural "disable retries" spelling — was silently replaced by the
+        // engine default of five attempts. Misconfiguration now fails
+        // startup loudly instead of degrading quietly.
+        memoryContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
+                .withBean(ZeroAttemptsHandler.class)
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasMessageContaining("invalid maxAttempts 0");
+                });
+        memoryContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
+                .withBean(NegativeAttemptsHandler.class)
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure()).hasMessageContaining("invalid maxAttempts -3");
                 });
     }
 
@@ -686,9 +718,21 @@ class ThreadmillAutoConfigurationTest {
         public void run(NoPayload payload, JobExecutionContext ctx) {}
     }
 
-    @Job(timeout = "PT30M", maxRetries = 7)
+    @Job(timeout = "PT30M", maxAttempts = 7)
     @Recurring(interval = "PT5S")
     static final class TimedRecurringHandler implements JobHandler<NoPayload> {
+        @Override
+        public void run(NoPayload payload, JobExecutionContext ctx) {}
+    }
+
+    @Job(maxAttempts = 0)
+    static final class ZeroAttemptsHandler implements JobHandler<NoPayload> {
+        @Override
+        public void run(NoPayload payload, JobExecutionContext ctx) {}
+    }
+
+    @Job(maxAttempts = -3)
+    static final class NegativeAttemptsHandler implements JobHandler<NoPayload> {
         @Override
         public void run(NoPayload payload, JobExecutionContext ctx) {}
     }

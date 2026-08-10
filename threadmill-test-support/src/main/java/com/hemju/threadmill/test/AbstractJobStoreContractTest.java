@@ -44,6 +44,7 @@ import com.hemju.threadmill.core.engine.WorkflowInterceptor;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
+import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
@@ -1760,6 +1761,74 @@ public abstract class AbstractJobStoreContractTest {
         var plain = store.findCronTask("untimed").orElseThrow();
         assertThat(plain.timeout()).isNull();
         assertThat(plain.maxAttempts()).isNull();
+    }
+
+    @Test
+    @DisplayName("cron-task schedule state round-trips its timing fingerprint; absent round-trips as null")
+    void cronTaskStateTimingFingerprintRoundTrips() {
+        // Issue #105 hardening: Scheduler.upsertCron decides
+        // preserve-vs-recompute for restart-missed firings from the state
+        // row's own fingerprint. A store that silently drops the field turns
+        // every restart back into a schedule reset.
+        var task = new CronTask(
+                "fingerprinted",
+                new CronTask.Trigger.Interval(Duration.ofHours(6)),
+                "com.example.Handler",
+                new JobArgument("com.example.Payload", "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
+        store.upsertCronTask(task);
+        String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
+        Instant next = Instant.now().plusSeconds(60);
+        store.upsertCronTaskState(CronTaskScheduleState.initial("fingerprinted", next, fingerprint));
+        assertThat(store.findCronTaskState("fingerprinted").orElseThrow().timingFingerprint())
+                .isEqualTo(fingerprint);
+
+        // A fingerprint-less write (legacy rows) round-trips as null — the
+        // safe "recompute on the next registration" signal.
+        store.upsertCronTaskState(CronTaskScheduleState.initial("fingerprinted", next));
+        assertThat(store.findCronTaskState("fingerprinted").orElseThrow().timingFingerprint())
+                .isNull();
+    }
+
+    @Test
+    @DisplayName("cron-task trigger and zone round-trip to equal values")
+    void cronTaskTriggerRoundTripsToEqualValues() {
+        // Schedule-change detection compares a freshly-registered definition
+        // against what came back from the store, so triggers must round-trip
+        // to VALUE equality on every backend — not merely to equivalent
+        // firing behavior.
+        var cronTask = new CronTask(
+                "roundtrip-cron",
+                new CronTask.Trigger.CronExpr(CronExpression.parse("15 3 * * 1-5")),
+                "com.example.Handler",
+                new JobArgument("com.example.Payload", "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("Europe/Vienna"),
+                true);
+        store.upsertCronTask(cronTask);
+        var loadedCron = store.findCronTask("roundtrip-cron").orElseThrow();
+        assertThat(loadedCron.trigger()).isEqualTo(cronTask.trigger());
+        assertThat(loadedCron.zone()).isEqualTo(ZoneId.of("Europe/Vienna"));
+
+        var intervalTask = new CronTask(
+                "roundtrip-interval",
+                new CronTask.Trigger.Interval(Duration.ofMinutes(90)),
+                "com.example.Handler",
+                new JobArgument("com.example.Payload", "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
+        store.upsertCronTask(intervalTask);
+        assertThat(store.findCronTask("roundtrip-interval").orElseThrow().trigger())
+                .isEqualTo(intervalTask.trigger());
     }
 
     @Test
