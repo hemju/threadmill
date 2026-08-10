@@ -20,6 +20,7 @@ import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.RetryInterceptor;
+import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.schedule.RecurringMaterializer;
@@ -28,8 +29,10 @@ import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.JobStore.NudgeOutcome;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
+import com.hemju.threadmill.dashboard.api.DashboardPayloads.UpdateRecurringRequest;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 import com.hemju.threadmill.test.ForwardingJobStore;
 
@@ -129,6 +132,61 @@ class DashboardApiServiceTest {
         var state = store.findCronTaskState("report").orElseThrow();
         assertThat(state.inFlightJobId()).isEqualTo(state.lastRunJobId());
         assertThat(state.inFlightJobId()).isNotNull();
+    }
+
+    @Test
+    void manualTriggerStampsTheManualOriginMarker() {
+        // Issue #108 observability: schedule-, nudge-, and operator-triggered
+        // instances must be distinguishable. The dashboard's force lane
+        // stamps `manual`.
+        var store = new InMemoryJobStore();
+        var service = new DashboardApiService(store, new LocalWakeBus());
+        store.upsertCronTask(new CronTask(
+                "report",
+                new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
+                "com.example.ReportHandler",
+                new JobArgument("com.hemju.threadmill.core.handler.NoPayload", "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true));
+
+        service.triggerRecurring("report");
+
+        var instances = store.findByHandlerSignature("com.example.ReportHandler", 10);
+        assertThat(instances).hasSize(1);
+        assertThat(instances.get(0).metadata().get(JobExecutionContext.CRON_ORIGIN_META))
+                .contains(JobExecutionContext.CRON_ORIGIN_MANUAL);
+    }
+
+    @Test
+    void updateRecurringEnabledFlipClearsAPendingNudge() {
+        // Disabling wins over a nudge: an operator pausing a task expects it
+        // to stay quiet, not to fire recorded-but-unserved demand — and
+        // re-enabling must not fire demand from before the pause either.
+        var store = new InMemoryJobStore();
+        var service = new DashboardApiService(store, new LocalWakeBus());
+        var task = new CronTask(
+                "report",
+                new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
+                "com.example.ReportHandler",
+                new JobArgument("com.hemju.threadmill.core.handler.NoPayload", "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
+        store.upsertCronTask(task);
+        store.upsertCronTaskState(CronTaskScheduleState.initial(
+                "report", Instant.now().plus(Duration.ofMinutes(5)), CronTaskScheduleState.timingFingerprintOf(task)));
+        assertThat(store.requestCronNudge("report", Instant.now())).isEqualTo(NudgeOutcome.ACCEPTED);
+
+        service.updateRecurring(
+                "report", new UpdateRecurringRequest(null, null, null, null, null, null, null, null, false));
+
+        assertThat(store.findCronTaskState("report").orElseThrow().nudgeRequestedAt())
+                .isNull();
     }
 
     @Test

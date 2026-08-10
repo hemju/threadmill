@@ -105,6 +105,31 @@ public final class TransactionJoinedJobScheduler extends JobScheduler {
         return result;
     }
 
+    /**
+     * Nudge as part of the caller's SQL transaction: like every store write in
+     * this mode, the nudge commits with the work row and is discarded on
+     * rollback — there is no crash window between the two at all.
+     *
+     * <p>The in-JVM nudge write coalescer is deliberately bypassed here:
+     * coalescing across open transactions would bind one caller's nudge to
+     * another caller's commit or rollback. The trade-off is documented in the
+     * operations guide — a joined nudge holds the task's schedule-state row
+     * lock until the caller commits, so concurrent transactions nudging the
+     * same task serialize on that row. Hot-path producers should prefer
+     * {@code after_commit} nudging.
+     */
+    @Override
+    public void nudgeRecurring(String taskName) {
+        Objects.requireNonNull(taskName, "taskName");
+        switch (store.requestCronNudge(taskName, Instant.now())) {
+            case ACCEPTED -> {}
+            case UNKNOWN_TASK -> throw new IllegalArgumentException("Unknown recurring task '" + taskName + "'");
+            case DISABLED ->
+                throw new IllegalStateException(
+                        "Recurring task '" + taskName + "' is disabled; an explicit pause wins over a nudge");
+        }
+    }
+
     private void wakeAfterCommitOrNow(String queue) {
         if (!TransactionSynchronizationManager.isActualTransactionActive()) {
             wakeBus.wake(queue);

@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+- **On-demand materialization for recurring tasks ("nudge", issue #108).**
+  `Scheduler.nudgeRecurring(taskName)` (Spring: `JobScheduler.nudgeRecurring`)
+  requests that a registered recurring task materialize an instance as soon
+  as possible, turning frequent pollers into wake-driven pumps with a slow
+  backstop schedule. The nudge goes through the normal machinery — same
+  pile-up guard, same missed-run policy — with four guarantees: at least one
+  run starts after every accepted nudge (a nudge during an in-flight run
+  produces exactly one follow-up after it completes, because the in-flight
+  run may have read its inputs before the nudge's triggering write
+  committed); a burst of nudges coalesces to at most the current run plus one
+  follow-up; the nudge is a durable store write consumed by the maintenance
+  tick, so there is no transient signal to lose (worst-case latency one
+  `maintenancePollInterval`, default 1 s); and a nudged run never moves the
+  schedule — a cron task's next fire stays the regular wall-clock match and
+  an interval trigger's phase is preserved. Nudging an unknown task throws;
+  nudging a disabled task throws — an explicit pause wins — and an
+  enabled-flip clears any pending nudge. Under Spring the nudge follows
+  `threadmill.spring.enqueue-mode`: `after_commit` (default) validates at
+  call time, writes on commit, and discards on rollback; `join_transaction`
+  makes the nudge part of the caller's SQL transaction (note: this holds the
+  task's schedule-state row lock until commit — hot-path producers should
+  prefer `after_commit`, where an in-JVM per-task coalescer also bounds the
+  store write rate under bursts). Storage: additive Postgres migration
+  `V5__cron_state_nudge.sql` adds `threadmill_cron_task_state.nudge_requested_at`;
+  Redis stores a field in the schedule-state hash. New `JobStore` SPI
+  operations `requestCronNudge` / `clearCronNudge` (store implementors must
+  add both). `CronTaskScheduleState` gained a read-only `nudgeRequestedAt`
+  component.
+- Recurring instances now carry `threadmill.cron.origin` metadata
+  (`schedule` / `nudge` / `manual`) so schedule-fired, nudged, and
+  dashboard-force-triggered instances are distinguishable in the dashboard
+  and in handler code (`JobExecutionContext.cronOrigin()`).
+
 ## 0.1.4
 
 - **Breaking (Spring):** renamed `@Job(maxRetries)` to `@Job(maxAttempts)`

@@ -1843,6 +1843,9 @@ public final class RedisJobStore implements JobStore {
         // atomic script: a crash or failover between two separate commands would
         // leave the state hash wiped, and the materializer reads a null nextRunAt
         // and silently dormants the recurring task until the next re-registration.
+        // The nudge cell is deliberately carried across the overwrite: a blanket
+        // state upsert must never clobber a nudge accepted concurrently — only
+        // requestCronNudge / clearCronNudge write that field.
         var argv = new ArrayList<String>(fields.size() * 2);
         fields.forEach((k, v) -> {
             argv.add(k);
@@ -1850,9 +1853,13 @@ public final class RedisJobStore implements JobStore {
         });
         try {
             evalScript("""
+                    local nudge = redis.call('HGET', KEYS[1], 'nudge_requested_at')
                     redis.call('DEL', KEYS[1])
                     if #ARGV > 0 then
                         redis.call('HSET', KEYS[1], unpack(ARGV))
+                    end
+                    if nudge then
+                        redis.call('HSET', KEYS[1], 'nudge_requested_at', nudge)
                     end
                     return 1
                     """, ScriptOutputType.INTEGER, new String[] {key}, argv.toArray(String[]::new));
@@ -1876,7 +1883,64 @@ public final class RedisJobStore implements JobStore {
                 hash.containsKey("last_run_job_id") ? UUID.fromString(hash.get("last_run_job_id")) : null,
                 hash.containsKey("next_run_at") ? Instant.ofEpochMilli(Long.parseLong(hash.get("next_run_at"))) : null,
                 hash.containsKey("in_flight_job_id") ? UUID.fromString(hash.get("in_flight_job_id")) : null,
-                hash.get("timing_fingerprint")));
+                hash.get("timing_fingerprint"),
+                hash.containsKey("nudge_requested_at")
+                        ? Instant.ofEpochMilli(Long.parseLong(hash.get("nudge_requested_at")))
+                        : null));
+    }
+
+    @Override
+    public NudgeOutcome requestCronNudge(String taskName, Instant requestedAt) {
+        Names.requireName("cronTask", taskName);
+        Objects.requireNonNull(requestedAt, "requestedAt");
+        // One atomic script over the task hash and the state hash (same
+        // cluster slot): the existence + enabled check and the nudge write
+        // cannot race a concurrent deleteCronTask, so a nudge can never
+        // resurrect schedule state for a removed task. Always-string return
+        // -> ScriptOutputType.VALUE per the Lua return-value conventions.
+        try {
+            String outcome = evalScript(
+                    """
+                    if redis.call('EXISTS', KEYS[1]) == 0 then
+                        return 'UNKNOWN'
+                    end
+                    if redis.call('HGET', KEYS[1], 'enabled') ~= 'true' then
+                        return 'DISABLED'
+                    end
+                    redis.call('HSET', KEYS[2], 'nudge_requested_at', ARGV[1])
+                    return 'ACCEPTED'
+                    """,
+                    ScriptOutputType.VALUE,
+                    new String[] {
+                        RedisKeys.userKey("cron_task", taskName), RedisKeys.userKey("cron_task_state", taskName)
+                    },
+                    Long.toString(requestedAt.toEpochMilli()));
+            return switch (outcome) {
+                case "ACCEPTED" -> NudgeOutcome.ACCEPTED;
+                case "DISABLED" -> NudgeOutcome.DISABLED;
+                default -> NudgeOutcome.UNKNOWN_TASK;
+            };
+        } catch (RuntimeException e) {
+            throw translateCapacity(e);
+        }
+    }
+
+    @Override
+    public void clearCronNudge(String taskName, Instant observed) {
+        Names.requireName("cronTask", taskName);
+        Objects.requireNonNull(observed, "observed");
+        // Compare-and-clear in one script: a nudge accepted after the caller's
+        // read carries a different timestamp and survives this clear.
+        evalScript(
+                """
+                if redis.call('HGET', KEYS[1], 'nudge_requested_at') == ARGV[1] then
+                    redis.call('HDEL', KEYS[1], 'nudge_requested_at')
+                end
+                return 1
+                """,
+                ScriptOutputType.INTEGER,
+                new String[] {RedisKeys.userKey("cron_task_state", taskName)},
+                Long.toString(observed.toEpochMilli()));
     }
 
     private CronTask readCronTask(String name, Map<String, String> hash) {

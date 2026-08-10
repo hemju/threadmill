@@ -780,12 +780,74 @@ public final class InMemoryJobStore implements JobStore {
     @Override
     public void upsertCronTaskState(CronTaskScheduleState state) {
         Objects.requireNonNull(state, "state");
-        cronTaskStates.put(state.taskName(), state);
+        // A blanket state upsert never writes the nudge cell: preserve the
+        // stored value so a nudge accepted concurrently is not clobbered.
+        cronTaskStates.compute(
+                state.taskName(),
+                (name, prev) -> new CronTaskScheduleState(
+                        state.taskName(),
+                        state.lastRunAt(),
+                        state.lastRunJobId(),
+                        state.nextRunAt(),
+                        state.inFlightJobId(),
+                        state.timingFingerprint(),
+                        prev == null ? null : prev.nudgeRequestedAt()));
     }
 
     @Override
     public Optional<CronTaskScheduleState> findCronTaskState(String name) {
         return Optional.ofNullable(cronTaskStates.get(name));
+    }
+
+    @Override
+    public NudgeOutcome requestCronNudge(String taskName, Instant requestedAt) {
+        Names.requireName("cronTask", taskName);
+        Objects.requireNonNull(requestedAt, "requestedAt");
+        CronTask task = cronTasks.get(taskName);
+        if (task == null) return NudgeOutcome.UNKNOWN_TASK;
+        if (!task.enabled()) return NudgeOutcome.DISABLED;
+        cronTaskStates.compute(
+                taskName,
+                (name, prev) -> prev == null
+                        ? new CronTaskScheduleState(taskName, null, null, null, null, null, requestedAt)
+                        : new CronTaskScheduleState(
+                                prev.taskName(),
+                                prev.lastRunAt(),
+                                prev.lastRunJobId(),
+                                prev.nextRunAt(),
+                                prev.inFlightJobId(),
+                                prev.timingFingerprint(),
+                                requestedAt));
+        // A nudge racing task removal must not resurrect schedule state:
+        // deleteCronTask removes the task before the state, so re-check and
+        // undo the write if the task vanished mid-flight. Only our own write
+        // is undone — a concurrent re-registration's fresh state survives.
+        if (!cronTasks.containsKey(taskName)) {
+            cronTaskStates.computeIfPresent(
+                    taskName,
+                    (name, prev) ->
+                            requestedAt.equals(prev.nudgeRequestedAt()) && !cronTasks.containsKey(name) ? null : prev);
+            return NudgeOutcome.UNKNOWN_TASK;
+        }
+        return NudgeOutcome.ACCEPTED;
+    }
+
+    @Override
+    public void clearCronNudge(String taskName, Instant observed) {
+        Names.requireName("cronTask", taskName);
+        Objects.requireNonNull(observed, "observed");
+        cronTaskStates.computeIfPresent(
+                taskName,
+                (name, prev) -> observed.equals(prev.nudgeRequestedAt())
+                        ? new CronTaskScheduleState(
+                                prev.taskName(),
+                                prev.lastRunAt(),
+                                prev.lastRunJobId(),
+                                prev.nextRunAt(),
+                                prev.inFlightJobId(),
+                                prev.timingFingerprint(),
+                                null)
+                        : prev);
     }
 
     // ---------------------------------------------------------------- helpers

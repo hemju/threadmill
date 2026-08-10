@@ -350,6 +350,18 @@ class StoreOutageTest {
         }
 
         @Override
+        public NudgeOutcome requestCronNudge(String taskName, Instant requestedAt) {
+            check();
+            return delegate.requestCronNudge(taskName, requestedAt);
+        }
+
+        @Override
+        public void clearCronNudge(String taskName, Instant observed) {
+            check();
+            delegate.clearCronNudge(taskName, observed);
+        }
+
+        @Override
         public List<Job> findAwaitingByParent(JobId parentId, int max) {
             check();
             return delegate.findAwaitingByParent(parentId, max);

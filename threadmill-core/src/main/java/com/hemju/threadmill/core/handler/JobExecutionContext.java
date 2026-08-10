@@ -34,6 +34,24 @@ public interface JobExecutionContext {
      */
     String CRON_FIRE_TIME_META = "threadmill.cron.fireTime";
 
+    /**
+     * Metadata key distinguishing what triggered a recurring instance:
+     * {@link #CRON_ORIGIN_SCHEDULE} for a regular schedule fire,
+     * {@link #CRON_ORIGIN_NUDGE} for an on-demand nudge
+     * ({@code Scheduler.nudgeRecurring}), and {@link #CRON_ORIGIN_MANUAL}
+     * for the dashboard's operator force-trigger.
+     */
+    String CRON_ORIGIN_META = "threadmill.cron.origin";
+
+    /** {@link #CRON_ORIGIN_META} value for a regular schedule fire. */
+    String CRON_ORIGIN_SCHEDULE = "schedule";
+
+    /** {@link #CRON_ORIGIN_META} value for an on-demand nudge. */
+    String CRON_ORIGIN_NUDGE = "nudge";
+
+    /** {@link #CRON_ORIGIN_META} value for the dashboard's operator force-trigger. */
+    String CRON_ORIGIN_MANUAL = "manual";
+
     /** The id of the job being executed. */
     JobId jobId();
 
@@ -98,5 +116,14 @@ public interface JobExecutionContext {
      */
     default Optional<Instant> cronFireTime() {
         return metadata().get(CRON_FIRE_TIME_META).map(Instant::parse);
+    }
+
+    /**
+     * What triggered this recurring instance: {@link #CRON_ORIGIN_SCHEDULE},
+     * {@link #CRON_ORIGIN_NUDGE}, or {@link #CRON_ORIGIN_MANUAL}. Present only
+     * for jobs materialized from a recurring definition.
+     */
+    default Optional<String> cronOrigin() {
+        return metadata().get(CRON_ORIGIN_META);
     }
 }

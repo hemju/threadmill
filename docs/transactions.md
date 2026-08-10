@@ -172,6 +172,61 @@ normal store-owned transaction when no Spring transaction is active.
 definitions are configuration, not work. Registering them on rollback would be
 surprising.
 
+## Nudging a recurring task (wake-driven pollers)
+
+`nudgeRecurring(taskName)` requests that a registered recurring task
+materialize an instance as soon as possible. It exists for the outbox-pump
+shape: instead of running a poller task every few seconds just to bound the
+latency between "work row written" and "work row processed", producers nudge
+the task when there is work and the recurring schedule becomes a slow
+self-healing backstop (every few minutes). Job-row churn becomes proportional
+to actual work instead of wall-clock time.
+
+The guarantees, in producer terms:
+
+- **Run-after-wake.** After every accepted nudge, at least one instance
+  *starts* after it. A nudge that arrives while an instance is already running
+  produces one follow-up run after it completes — the in-flight run may have
+  read the work table before your write committed, so it never counts as
+  satisfying your nudge.
+- **Coalescing.** A burst of nudges collapses to at most the current run plus
+  one follow-up. Nudge freely; there is no 1:1 nudge-to-run mapping to worry
+  about.
+- **Durability over signaling.** The nudge is a durable store write consumed
+  by the maintenance master's recurring tick — there is no transient signal
+  that can be dropped. Worst-case materialization latency is one
+  `maintenancePollInterval` (default 1 s).
+- **Schedule non-interference.** A nudged run never moves the schedule: a cron
+  task's next fire stays the regular wall-clock match, and an interval
+  trigger's phase is preserved (an every-6h task that last fired at 06:00 and
+  is nudged at 07:00 still fires next at 12:00).
+
+Nudging an unknown task throws `IllegalArgumentException`; nudging a disabled
+task throws `IllegalStateException` — an explicit pause wins. Disabling or
+re-enabling a task clears any pending nudge (consistent with
+re-enable-does-not-catch-up).
+
+Transactionally, the nudge follows `threadmill.spring.enqueue-mode`:
+
+- **`after_commit`** (default): validation fails fast at call time; the nudge
+  write fires in `afterCommit` and a rollback discards it — so you can nudge
+  in the same `@Transactional` method that writes the work row. The residual
+  crash window between the commit and the deferred write is covered by the
+  backstop schedule (one schedule period of extra latency, never a lost run).
+- **`join_transaction`**: the nudge write is part of the caller's SQL
+  transaction — committed with the work row, discarded on rollback, no crash
+  window at all. **Caveat for hot tasks:** the write locks the task's
+  schedule-state row until the caller commits, so concurrent transactions
+  nudging the same task serialize on that row. High-rate producers should
+  prefer `after_commit` nudging, where each nudge is a microseconds-held
+  autocommit write and an in-JVM per-task coalescer additionally bounds the
+  write rate to about one store round trip regardless of producer rate.
+- **`immediate`**: a direct write, like any other immediate-mode operation.
+
+The crash window between a producer's commit and an `after_commit` nudge does
+not need closing — the backstop schedule bounds the worst-case latency in that
+rare case by design.
+
 ## Connection-pool sharing
 
 Spring users typically have one shared `DataSource` / HikariCP. Threadmill

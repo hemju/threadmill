@@ -1868,7 +1868,7 @@ public final class PostgresJobStore implements JobStore {
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(
                         "SELECT task_name, last_run_at, last_run_job_id, next_run_at, in_flight_job_id, "
-                                + "timing_fingerprint "
+                                + "timing_fingerprint, nudge_requested_at "
                                 + "FROM threadmill_cron_task_state WHERE task_name = ?")) {
             ps.setString(1, name);
             try (ResultSet rs = ps.executeQuery()) {
@@ -1879,10 +1879,85 @@ public final class PostgresJobStore implements JobStore {
                         (UUID) rs.getObject(3),
                         rs.getTimestamp(4) == null ? null : rs.getTimestamp(4).toInstant(),
                         (UUID) rs.getObject(5),
-                        rs.getString(6)));
+                        rs.getString(6),
+                        rs.getTimestamp(7) == null ? null : rs.getTimestamp(7).toInstant()));
             }
         } catch (SQLException e) {
             throw new JdbcException("findCronTaskState failed", e);
+        }
+    }
+
+    @Override
+    public NudgeOutcome requestCronNudge(String taskName, Instant requestedAt) {
+        Objects.requireNonNull(taskName, "taskName");
+        Objects.requireNonNull(requestedAt, "requestedAt");
+        // Routed through the transaction boundary so a Spring join_transaction
+        // caller's nudge commits (or rolls back) with the work row it belongs
+        // to.
+        try {
+            return writeTransaction(conn -> {
+                // Hot path: one guarded single-row UPDATE. The join enforces
+                // existence + enabled in the same statement; the column is
+                // deliberately unindexed so this write stays HOT-eligible.
+                try (PreparedStatement ps =
+                        conn.prepareStatement("UPDATE threadmill_cron_task_state s SET nudge_requested_at = ? "
+                                + "FROM threadmill_cron_tasks t "
+                                + "WHERE s.task_name = t.name AND t.name = ? AND t.enabled")) {
+                    ps.setTimestamp(1, Timestamp.from(requestedAt));
+                    ps.setString(2, taskName);
+                    if (ps.executeUpdate() > 0) return NudgeOutcome.ACCEPTED;
+                }
+                // Slow path: distinguish unknown vs disabled vs a task
+                // registered so recently its state row does not exist yet.
+                Boolean enabled = null;
+                try (PreparedStatement ps =
+                        conn.prepareStatement("SELECT enabled FROM threadmill_cron_tasks WHERE name = ?")) {
+                    ps.setString(1, taskName);
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (rs.next()) enabled = rs.getBoolean(1);
+                    }
+                }
+                if (enabled == null) return NudgeOutcome.UNKNOWN_TASK;
+                if (!enabled) return NudgeOutcome.DISABLED;
+                // Task exists and is enabled but has no state row (the window
+                // between upsertCron's two writes). Create a nudge-only row;
+                // the FK to threadmill_cron_tasks makes a concurrent deletion
+                // fail this insert instead of resurrecting schedule state.
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "INSERT INTO threadmill_cron_task_state (task_name, nudge_requested_at) VALUES (?, ?) "
+                                + "ON CONFLICT (task_name) DO UPDATE SET "
+                                + "nudge_requested_at = EXCLUDED.nudge_requested_at")) {
+                    ps.setString(1, taskName);
+                    ps.setTimestamp(2, Timestamp.from(requestedAt));
+                    ps.executeUpdate();
+                    return NudgeOutcome.ACCEPTED;
+                } catch (SQLException e) {
+                    if (DeadlockRetry.hasSqlState(e, "23503")) return NudgeOutcome.UNKNOWN_TASK;
+                    throw e;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("requestCronNudge failed", e);
+        }
+    }
+
+    @Override
+    public void clearCronNudge(String taskName, Instant observed) {
+        Objects.requireNonNull(taskName, "taskName");
+        Objects.requireNonNull(observed, "observed");
+        try {
+            writeTransaction(conn -> {
+                try (PreparedStatement ps =
+                        conn.prepareStatement("UPDATE threadmill_cron_task_state SET nudge_requested_at = NULL "
+                                + "WHERE task_name = ? AND nudge_requested_at = ?")) {
+                    ps.setString(1, taskName);
+                    ps.setTimestamp(2, Timestamp.from(observed));
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("clearCronNudge failed", e);
         }
     }
 

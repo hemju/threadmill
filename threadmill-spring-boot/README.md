@@ -131,6 +131,15 @@ mode is requested.
 `enqueueRecurring(...)` stays immediate because cron-task definitions are
 configuration, not work.
 
+`nudgeRecurring(taskName)` — the on-demand "materialize this recurring task
+now" request for wake-driven pollers — follows the configured enqueue mode:
+`after_commit` validates at call time and writes the nudge on commit
+(discarded on rollback), `join_transaction` makes it part of the caller's SQL
+transaction, and `immediate` writes directly. See the
+[transactions deep-dive](../docs/transactions.md#nudging-a-recurring-task-wake-driven-pollers)
+for the guarantees (run-after-wake, coalescing, schedule non-interference)
+and the hot-task caveat in `join_transaction` mode.
+
 See [`docs/transactions.md`](../docs/transactions.md) for the full
 deep-dive (atomic boundaries per backend, handler-is-not-in-our-transaction,
 at-least-once + idempotency, outbox pattern).

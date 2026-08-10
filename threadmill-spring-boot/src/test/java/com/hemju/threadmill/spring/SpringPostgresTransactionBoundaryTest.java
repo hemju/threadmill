@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -27,7 +29,10 @@ import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.core.schedule.CronTask;
+import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.store.postgres.MigrationRunner;
 import com.hemju.threadmill.store.postgres.PostgresJobStore;
@@ -144,6 +149,41 @@ class SpringPostgresTransactionBoundaryTest {
         EnqueueResult second = scheduler.enqueueIfAbsent(
                 GreetHandler.class, new GreetPayload("retry"), "tenant:greet", Duration.ofMinutes(5));
         assertThat(second).isInstanceOf(EnqueueResult.Created.class);
+    }
+
+    @Test
+    void nudgeJoinsTheCallerTransactionAndRollsBackWithIt() {
+        // Issue #108 requirement 5: nudged inside a Spring transaction, the
+        // nudge takes effect on commit and is discarded on rollback — so a
+        // producer can nudge in the same transaction that writes the work row.
+        var task = new CronTask(
+                "outbox-pump",
+                new CronTask.Trigger.Interval(Duration.ofHours(6)),
+                GreetHandler.class.getName(),
+                new JobArgument(GreetPayload.class.getName(), "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
+        store.upsertCronTask(task);
+        store.upsertCronTaskState(CronTaskScheduleState.initial(
+                "outbox-pump",
+                Instant.now().plus(Duration.ofHours(6)),
+                CronTaskScheduleState.timingFingerprintOf(task)));
+
+        transactions.executeWithoutResult(status -> {
+            scheduler.nudgeRecurring("outbox-pump");
+            status.setRollbackOnly();
+        });
+        assertThat(store.findCronTaskState("outbox-pump").orElseThrow().nudgeRequestedAt())
+                .as("a rolled-back transaction leaves no nudge behind")
+                .isNull();
+
+        transactions.executeWithoutResult(status -> scheduler.nudgeRecurring("outbox-pump"));
+        assertThat(store.findCronTaskState("outbox-pump").orElseThrow().nudgeRequestedAt())
+                .as("a committed transaction lands the nudge")
+                .isNotNull();
     }
 
     @Test

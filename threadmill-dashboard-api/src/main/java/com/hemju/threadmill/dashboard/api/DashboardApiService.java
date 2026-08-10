@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 
 import com.hemju.threadmill.core.Job;
@@ -23,6 +24,7 @@ import com.hemju.threadmill.core.JobStateMachine;
 import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.RetryInterceptor;
+import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
@@ -293,7 +295,8 @@ public final class DashboardApiService {
                 .spec(new JobSpec(task.handlerType(), List.of(task.payloadArgument())))
                 .queue(task.queue())
                 .priority(task.priority())
-                .cronTaskName(task.name());
+                .cronTaskName(task.name())
+                .metadata(JobExecutionContext.CRON_ORIGIN_META, JobExecutionContext.CRON_ORIGIN_MANUAL);
         if (task.timeout() != null) {
             builder.metadata(
                     JobRunner.META_TIMEOUT_SECONDS, Long.toString(task.timeout().toSeconds()));
@@ -346,7 +349,15 @@ public final class DashboardApiService {
                 request.enabled() == null ? existing.enabled() : request.enabled());
         withTaskMutex(name, () -> {
             store.upsertCronTask(task);
-            store.upsertCronTaskState(stateAfterRecurringUpdate(task));
+            var prior = store.findCronTaskState(name);
+            store.upsertCronTaskState(stateAfterRecurringUpdate(task, prior));
+            // An enabled-flip clears a pending nudge: disabling wins over a
+            // nudge, and re-enabling must not fire stale demand from before
+            // the pause (consistent with re-enable-does-not-catch-up).
+            if (existing.enabled() != task.enabled()) {
+                prior.map(CronTaskScheduleState::nudgeRequestedAt)
+                        .ifPresent(nudge -> store.clearCronNudge(name, nudge));
+            }
         });
         invalidateSnapshotCache();
         return new ActionResponse("updated", name);
@@ -358,14 +369,14 @@ public final class DashboardApiService {
         return new ActionResponse("deleted", name);
     }
 
-    private CronTaskScheduleState stateAfterRecurringUpdate(CronTask task) {
+    private static CronTaskScheduleState stateAfterRecurringUpdate(
+            CronTask task, Optional<CronTaskScheduleState> existing) {
         // Dashboard edits are explicit operator actions on the definition, so
         // — unlike an unchanged startup re-registration in Scheduler.upsertCron
         // — every update deliberately recomputes the next run from now, even
         // when only non-timing fields changed. An operator editing a task
         // expects it to schedule forward from the edit, never to fire a
         // pre-edit overdue time.
-        var existing = store.findCronTaskState(task.name());
         Instant next = task.enabled() ? task.trigger().nextAfter(Instant.now(), task.zone()) : null;
         String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
         if (existing.isEmpty()) return CronTaskScheduleState.initial(task.name(), next, fingerprint);

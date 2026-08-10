@@ -23,6 +23,7 @@ import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskId;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
+import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
@@ -58,6 +59,13 @@ public class JobScheduler {
     protected final ProcessingNodeConfig config;
     protected final LocalWakeBus wakeBus;
 
+    /**
+     * Core scheduler backing {@link #nudgeRecurring(String)}: recurring-task
+     * nudges reuse the core validation, error mapping, and the per-task
+     * in-JVM write coalescer instead of reimplementing them here.
+     */
+    private final Scheduler coreScheduler;
+
     public JobScheduler(
             JobStore store, JobSerializer serializer, ThreadmillJobRegistry registry, ProcessingNodeConfig config) {
         this(store, serializer, registry, config, new LocalWakeBus());
@@ -74,6 +82,7 @@ public class JobScheduler {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.config = Objects.requireNonNull(config, "config");
         this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
+        this.coreScheduler = new Scheduler(store, serializer, wakeBus);
     }
 
     public <P extends JobPayload> JobId enqueue(Class<? extends JobHandler<P>> handler, P payload) {
@@ -187,6 +196,32 @@ public class JobScheduler {
         store.upsertCronTaskState(CronTaskScheduleState.initial(
                 name, expression.nextAfter(Instant.now(), zone), CronTaskScheduleState.timingFingerprintOf(task)));
         return new CronTaskId(name);
+    }
+
+    /**
+     * Request that the registered recurring task {@code taskName} materialize
+     * an instance as soon as possible (a "nudge") — see
+     * {@link Scheduler#nudgeRecurring(String)} for the full contract
+     * (run-after-wake, coalescing, durability, schedule non-interference).
+     *
+     * <p>On this scheduler the nudge write is immediate. The transaction-mode
+     * subclasses refine that: {@link TransactionAwareJobScheduler} defers the
+     * write to {@code afterCommit} (a rollback discards it), and
+     * {@link TransactionJoinedJobScheduler} makes it part of the caller's SQL
+     * transaction — so producers can nudge in the same transaction that
+     * writes the work row.
+     *
+     * @throws IllegalArgumentException if no recurring task with that name exists
+     * @throws IllegalStateException    if the task is disabled
+     */
+    public void nudgeRecurring(String taskName) {
+        coreScheduler.nudgeRecurring(taskName);
+    }
+
+    /** {@link #nudgeRecurring(String)} by the id returned from {@link #enqueueRecurring}. */
+    public void nudgeRecurring(CronTaskId taskId) {
+        Objects.requireNonNull(taskId, "taskId");
+        nudgeRecurring(taskId.name());
     }
 
     /**

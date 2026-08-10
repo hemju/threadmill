@@ -28,6 +28,16 @@ import java.util.UUID;
  *                          decide preserve-vs-recompute from this record alone —
  *                          a crash between the separate task and state writes can
  *                          never pair a new trigger with old timing undetectably
+ * @param nudgeRequestedAt  when an on-demand materialization ("nudge") was most
+ *                          recently requested and not yet satisfied, or
+ *                          {@code null}. <strong>Read-only through this
+ *                          record:</strong> {@code JobStore.upsertCronTaskState}
+ *                          deliberately never writes this field — a blanket state
+ *                          upsert (re-registration, materializer bookkeeping,
+ *                          dashboard edit) must not clobber a concurrently
+ *                          accepted nudge. The only writers are
+ *                          {@code JobStore.requestCronNudge} and the
+ *                          compare-and-clear {@code JobStore.clearCronNudge}
  */
 public record CronTaskScheduleState(
         String taskName,
@@ -35,10 +45,26 @@ public record CronTaskScheduleState(
         UUID lastRunJobId,
         Instant nextRunAt,
         UUID inFlightJobId,
-        String timingFingerprint) {
+        String timingFingerprint,
+        Instant nudgeRequestedAt) {
 
     public CronTaskScheduleState {
         Objects.requireNonNull(taskName, "taskName");
+    }
+
+    /**
+     * Convenience constructor without the read-only {@code nudgeRequestedAt}
+     * component — the natural shape for every writer, since
+     * {@code upsertCronTaskState} never persists that field anyway.
+     */
+    public CronTaskScheduleState(
+            String taskName,
+            Instant lastRunAt,
+            UUID lastRunJobId,
+            Instant nextRunAt,
+            UUID inFlightJobId,
+            String timingFingerprint) {
+        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, timingFingerprint, null);
     }
 
     /**
@@ -51,7 +77,7 @@ public record CronTaskScheduleState(
      */
     public CronTaskScheduleState(
             String taskName, Instant lastRunAt, UUID lastRunJobId, Instant nextRunAt, UUID inFlightJobId) {
-        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, null);
+        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, null, null);
     }
 
     public static CronTaskScheduleState initial(String taskName, Instant nextRunAt, String timingFingerprint) {

@@ -113,7 +113,9 @@ public final class RecurringMaterializer {
         var stateOpt = store.findCronTaskState(task.name());
         if (stateOpt.isEmpty()) return; // not yet initialised
         var state = stateOpt.get();
-        if (state.nextRunAt() == null || state.nextRunAt().isAfter(now)) return;
+        Instant nudge = state.nudgeRequestedAt();
+        boolean due = state.nextRunAt() != null && !state.nextRunAt().isAfter(now);
+        if (!due && nudge == null) return;
 
         // Pile-up guard: a non-terminal in-flight instance blocks the next
         // materialization. FAILED is deliberately treated as non-blocking
@@ -131,6 +133,23 @@ public final class RecurringMaterializer {
                 // Still running — leave the next_run_at where it is so we revisit on the next tick.
                 return;
             }
+        }
+
+        if (!due) {
+            // Nudge-only materialization: one instance through the normal
+            // machinery, with the schedule left untouched — nextRunAt stays
+            // exactly where it was, so a cron task's next fire remains the
+            // regular wall-clock match and an interval trigger's phase is
+            // preserved. The instance carries no nominal fire time (it
+            // represents no schedule tick), only the nudge origin marker.
+            JobId id = materializeNudge(task);
+            store.upsertCronTaskState(new CronTaskScheduleState(
+                    task.name(), now, id.asUuid(), state.nextRunAt(), id.asUuid(), state.timingFingerprint()));
+            // Clear AFTER materializing (a crash between the two costs one
+            // extra run, never a lost one), and only the observed value — a
+            // nudge accepted since our read survives for a follow-up run.
+            store.clearCronNudge(task.name(), nudge);
+            return;
         }
 
         String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
@@ -171,6 +190,13 @@ public final class RecurringMaterializer {
             store.upsertCronTaskState(
                     new CronTaskScheduleState(task.name(), now, id.asUuid(), next, id.asUuid(), fingerprint));
         }
+        if (nudge != null) {
+            // The scheduled instance(s) just materialized were enqueued after
+            // the observed nudge committed, so their execution reads whatever
+            // the nudger wrote — the nudge coalesces into them instead of
+            // producing an extra run. Compare-and-clear: a newer nudge survives.
+            store.clearCronNudge(task.name(), nudge);
+        }
     }
 
     /**
@@ -199,13 +225,29 @@ public final class RecurringMaterializer {
     }
 
     private JobId materialize(CronTask task, Instant when) {
+        return materialize(task, when, JobExecutionContext.CRON_ORIGIN_SCHEDULE);
+    }
+
+    /**
+     * A nudge-materialized instance: same machinery as a schedule fire, but
+     * with no nominal fire time (a nudge represents no schedule tick) and the
+     * {@code nudge} origin marker for dashboards and metrics.
+     */
+    private JobId materializeNudge(CronTask task) {
+        return materialize(task, null, JobExecutionContext.CRON_ORIGIN_NUDGE);
+    }
+
+    private JobId materialize(CronTask task, Instant nominalFire, String origin) {
         var builder = Job.builder()
                 .spec(new JobSpec(task.handlerType(), List.of(task.payloadArgument())))
                 .queue(task.queue())
                 .priority(task.priority())
                 .cronTaskName(task.name())
-                .metadata(JobExecutionContext.CRON_FIRE_TIME_META, when.toString())
+                .metadata(JobExecutionContext.CRON_ORIGIN_META, origin)
                 .initialState(JobState.ENQUEUED);
+        if (nominalFire != null) {
+            builder.metadata(JobExecutionContext.CRON_FIRE_TIME_META, nominalFire.toString());
+        }
         if (task.timeout() != null) {
             builder.metadata(
                     JobRunner.META_TIMEOUT_SECONDS, Long.toString(task.timeout().toSeconds()));

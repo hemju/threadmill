@@ -24,6 +24,7 @@ import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.JobStore.NudgeOutcome;
 
 /**
  * The small, public scheduling API: {@code enqueue}, {@code scheduleAt},
@@ -45,6 +46,7 @@ public final class Scheduler {
     private final JobStore store;
     private final JobSerializer serializer;
     private final LocalWakeBus wakeBus;
+    private final NudgeCoalescer nudgeCoalescer = new NudgeCoalescer();
     private final String cronMutexHolder = UUID.randomUUID().toString();
 
     public Scheduler(JobStore store, JobSerializer serializer) {
@@ -270,6 +272,48 @@ public final class Scheduler {
     }
 
     /**
+     * Request that the registered recurring task {@code taskName} materialize
+     * an instance as soon as possible (a "nudge").
+     *
+     * <p>The nudge goes through the normal recurring machinery — the same
+     * pile-up guard and the same missed-run policy — it is not a bypass lane.
+     * The guarantees:
+     * <ul>
+     *   <li><strong>Run-after-wake.</strong> After every accepted nudge, at
+     *       least one instance is materialized after the nudge. A nudge that
+     *       arrives while an instance is in flight produces one follow-up
+     *       after that instance terminates — the in-flight run may have read
+     *       its inputs before the nudge's triggering write committed, so it
+     *       never counts as satisfying the nudge.</li>
+     *   <li><strong>Coalescing.</strong> A burst of nudges collapses to at
+     *       most the current run plus one follow-up.</li>
+     *   <li><strong>Durability.</strong> The nudge is a store write consumed
+     *       by the maintenance master's recurring tick; there is no transient
+     *       signal to lose. Worst-case latency is one
+     *       {@code maintenancePollInterval}.</li>
+     *   <li><strong>Schedule non-interference.</strong> A nudged instance
+     *       never moves {@code nextRunAt}: a cron task's next fire stays the
+     *       regular wall-clock match, and an interval trigger's phase is
+     *       preserved.</li>
+     * </ul>
+     *
+     * @throws IllegalArgumentException if no recurring task with that name exists
+     * @throws IllegalStateException    if the task is disabled — an explicit
+     *                                  pause wins over a nudge
+     */
+    public void nudgeRecurring(String taskName) {
+        Objects.requireNonNull(taskName, "taskName");
+        NudgeOutcome outcome = nudgeCoalescer.nudge(taskName, () -> store.requestCronNudge(taskName, Instant.now()));
+        switch (outcome) {
+            case ACCEPTED -> {}
+            case UNKNOWN_TASK -> throw new IllegalArgumentException("Unknown recurring task '" + taskName + "'");
+            case DISABLED ->
+                throw new IllegalStateException(
+                        "Recurring task '" + taskName + "' is disabled; an explicit pause wins over a nudge");
+        }
+    }
+
+    /**
      * Reconcile a namespace-owned recurring-task set with the currently desired
      * definitions. Tasks previously recorded as owned by {@code namespace} but
      * missing from {@code desiredTasks} are deleted with their schedule state.
@@ -477,6 +521,19 @@ public final class Scheduler {
             var existingState = store.findCronTaskState(task.name());
             store.upsertCronTask(task);
             boolean reEnabled = existingTask.isPresent() && !existingTask.get().enabled() && task.enabled();
+            // An enabled-flip in either direction clears a pending nudge:
+            // disabling wins over a nudge, and re-enabling must not fire
+            // stale demand from before the pause (consistent with
+            // re-enable-does-not-catch-up). Best-effort compare-and-clear —
+            // a nudge accepted after our state read survives, which for the
+            // enable direction is legitimate new demand.
+            boolean enabledFlipped =
+                    existingTask.isPresent() && existingTask.get().enabled() != task.enabled();
+            if (enabledFlipped
+                    && existingState.isPresent()
+                    && existingState.get().nudgeRequestedAt() != null) {
+                store.clearCronNudge(task.name(), existingState.get().nudgeRequestedAt());
+            }
             if (existingState.isPresent()) {
                 var s = existingState.get();
                 boolean timingUnchanged =
