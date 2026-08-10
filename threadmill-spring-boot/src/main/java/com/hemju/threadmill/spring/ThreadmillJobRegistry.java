@@ -83,7 +83,7 @@ public class ThreadmillJobRegistry {
                     beanType,
                     annotation.queue(),
                     annotation.priority(),
-                    annotation.maxRetries() > 0 ? annotation.maxRetries() : properties.getDefaultMaxAttempts(),
+                    maxAttemptsFor(beanType, annotation),
                     annotation.timeout().isBlank() ? properties.getJobTimeout() : Duration.parse(annotation.timeout()),
                     recurringSpecFor(beanType, recurring));
             recordRegistration(handlerIndex, payloadIndex, registration);
@@ -205,6 +205,23 @@ public class ThreadmillJobRegistry {
         return Map.copyOf(out);
     }
 
+    /**
+     * Resolve {@code @Job(maxAttempts)} to the registration value: {@code null}
+     * for the {@code -1} sentinel (leave the retry budget to the
+     * {@code RetryInterceptor}), the value itself when {@code >= 1}. Anything
+     * else fails startup — the historical behaviour of silently substituting
+     * the engine default turned an explicit "don't retry" misspelling
+     * ({@code 0}) into five attempts.
+     */
+    private static Integer maxAttemptsFor(Class<?> beanType, Job annotation) {
+        int declared = annotation.maxAttempts();
+        if (declared == -1) return null;
+        if (declared >= 1) return declared;
+        throw new IllegalStateException("@Job on " + beanType.getName() + " has invalid maxAttempts " + declared
+                + ": use a value >= 1 (total attempts including the first; 1 = single attempt, no retries)"
+                + " or -1 for the RetryInterceptor defaults");
+    }
+
     private static RecurringSpec recurringSpecFor(Class<?> beanType, Recurring annotation) {
         if (annotation == null) return null;
         boolean hasInterval = !annotation.interval().isBlank();
@@ -292,14 +309,27 @@ public class ThreadmillJobRegistry {
         return false;
     }
 
+    /**
+     * A discovered handler registration. {@code maxAttempts} is the explicit
+     * {@code @Job(maxAttempts)} value, or {@code null} when the handler left
+     * the retry budget to the {@code RetryInterceptor} — enqueue and recurring
+     * paths only stamp per-job retry metadata for explicit values, so
+     * per-exception-type retry policies stay reachable.
+     */
     public record Registration(
             Class<? extends JobPayload> payloadType,
             Class<?> handlerType,
             String queue,
             int priority,
-            int maxRetries,
+            Integer maxAttempts,
             Duration timeout,
             RecurringSpec recurring) {
+
+        public Registration {
+            if (maxAttempts != null && maxAttempts < 1) {
+                throw new IllegalArgumentException("maxAttempts must be at least one when set");
+            }
+        }
 
         /** Whether this handler is registered as a recurring task. */
         public boolean isRecurring() {

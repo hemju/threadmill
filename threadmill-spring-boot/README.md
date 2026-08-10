@@ -33,7 +33,7 @@ dependencies {
 
 ```java
 @Component
-@Job(queue = "email", timeout = "PT2M", maxRetries = 5)
+@Job(queue = "email", timeout = "PT2M", maxAttempts = 5)
 final class SendEmailHandler implements JobHandler<SendEmail> {
     @Override public void run(SendEmail payload, JobExecutionContext ctx) { … }
 }
@@ -216,7 +216,12 @@ Applied to a `JobHandler<P>` Spring bean. Required attributes:
 - `queue` — queue name. Default `"default"`.
 - `priority` — within-queue priority, higher wins. Default `0`.
 - `timeout` — ISO-8601 duration. Falls back to `threadmill.jobTimeout`.
-- `maxRetries` — falls back to `threadmill.defaultMaxAttempts`.
+- `maxAttempts` — total execution attempts including the first; `1` means a
+  single attempt with no retries. `-1` (the default) leaves the retry budget
+  to the `RetryInterceptor`: per-exception-type policies apply, then
+  `threadmill.defaultMaxAttempts`. Any other value below 1 fails startup.
+  (Named `maxRetries` before v0.1.4 — the value always counted total
+  attempts, so existing numbers keep their meaning under the new name.)
 
 `ThreadmillJobRegistry` discovers every `@Job` bean at context
 start. Two handlers for the same payload type fail startup with both names

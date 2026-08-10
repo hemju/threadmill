@@ -342,7 +342,7 @@ hops without value.
 class WelcomeApp { … }
 
 @Component
-@Job(queue = "email", timeout = "PT30S", maxRetries = 5)
+@Job(queue = "email", timeout = "PT30S", maxAttempts = 5)
 class SendEmailHandler implements JobHandler<SendEmail> {
     private final EmailGateway gateway;
     private final OutboxRepository outbox;

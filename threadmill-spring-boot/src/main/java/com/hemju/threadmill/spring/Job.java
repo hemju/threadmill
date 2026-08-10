@@ -25,7 +25,20 @@ public @interface Job {
 
     String queue() default "default";
 
-    int maxRetries() default -1;
+    /**
+     * Total number of execution attempts, including the first one — the same
+     * unit as {@code threadmill.retry.maxAttempts} metadata and
+     * {@code CronTask.maxAttempts}. {@code 1} means a single attempt with no
+     * retries. {@code -1} (the default) leaves the retry budget to the
+     * {@code RetryInterceptor}: per-exception-type policies apply, then
+     * {@code threadmill.default-max-attempts}. Any other value below 1 fails
+     * startup — misconfiguration is never silently replaced by a default.
+     *
+     * <p>This field was named {@code maxRetries} before v0.1.4, but its value
+     * always fed max <em>attempts</em>; the rename keeps every configured
+     * number meaning exactly what it meant before.
+     */
+    int maxAttempts() default -1;
 
     String timeout() default "";
 

@@ -117,11 +117,14 @@ first:
 
 1. **Per-job metadata override** — `threadmill.retry.maxAttempts` (integer)
    and/or `threadmill.retry.initialBackoffSeconds` (long); either key alone
-   activates the override. Spring's `@Job(maxRetries = 5)` maps to it, on the
-   enqueue path and (like the timeout) on every materialized instance of a
-   `@Recurring` handler; core users set it per recurring definition via the
+   activates the override. An explicit Spring `@Job(maxAttempts = 5)` maps to
+   it, on the enqueue path and (like the timeout) on every materialized
+   instance of a `@Recurring` handler; a handler without an explicit value
+   stamps nothing, so the per-exception-type and global tiers below stay
+   reachable. Core users set it per recurring definition via the
    `maxAttempts` parameter of `Scheduler.defineCronTask` / `defineIntervalTask`
-   / `defineRecurring`.
+   / `defineRecurring`. The value counts total attempts including the first —
+   `maxAttempts = 1` is one attempt, no retries.
 2. **Per-exception-type policy** — registered via
    `RetryInterceptor.policyFor(Class, RetryPolicy)`; the most specific class
    match in the exception's hierarchy wins.

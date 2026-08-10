@@ -33,7 +33,7 @@ import org.springframework.stereotype.Component;
 public record SendEmail(String to, String subject) implements JobPayload {}
 
 @Component
-@Job(queue = "email", timeout = "PT2M", maxRetries = 5)
+@Job(queue = "email", timeout = "PT2M", maxAttempts = 5)
 final class SendEmailHandler implements JobHandler<SendEmail> {
     @Override
     public void run(SendEmail payload, JobExecutionContext ctx) {

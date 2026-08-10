@@ -110,6 +110,23 @@ class RetryInterceptorTest {
     }
 
     @Test
+    void singleAttemptBudgetMakesTheFirstFailureTerminalWithoutReschedule() {
+        // Regression for github issue #104: the retry budget counts total
+        // attempts (increment at claim), so a budget of 1 is one attempt and
+        // zero retries — the first failure must be final even though the
+        // engine default would allow more.
+        var interceptor = new RetryInterceptor(store, 3, Duration.ofMillis(100));
+        Job failed = failedAfterFirstAttempt(RetryInterceptor.META_MAX_ATTEMPTS, "1");
+
+        interceptor.onProcessingFailed(
+                failed, null, new RuntimeException("boom"), JobInterceptor.FailureCause.EXCEPTION);
+
+        Job terminal = store.findById(failed.id()).orElseThrow();
+        assertThat(terminal.currentState()).isEqualTo(JobState.FAILED);
+        assertThat(terminal.scheduledFor()).isEmpty();
+    }
+
+    @Test
     void firstRetryDelayEqualsInitialBackoff() {
         var interceptor = new RetryInterceptor(store, 3, Duration.ofSeconds(10));
         Job failed = failedAfterFirstAttempt(null, null);

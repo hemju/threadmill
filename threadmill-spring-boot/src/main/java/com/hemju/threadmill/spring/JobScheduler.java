@@ -246,7 +246,13 @@ public class JobScheduler {
             builder.initialState(JobState.SCHEDULED).scheduledFor(scheduledFor);
         }
         Job job = builder.build();
-        job.metadata().put(RetryInterceptor.META_MAX_ATTEMPTS, Integer.toString(registration.maxRetries()));
+        // Stamp retry metadata only for an explicit @Job(maxAttempts): per-job
+        // metadata outranks per-exception-type retry policies, so stamping the
+        // resolved default here would permanently shadow those policies for
+        // every Spring-enqueued job.
+        if (registration.maxAttempts() != null) {
+            job.metadata().put(RetryInterceptor.META_MAX_ATTEMPTS, Integer.toString(registration.maxAttempts()));
+        }
         job.metadata()
                 .put(
                         JobRunner.META_TIMEOUT_SECONDS,
