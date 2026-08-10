@@ -336,6 +336,201 @@ class SchedulingTest {
     }
 
     @Test
+    void restartReRegistrationPreservesOverdueNextRunSoCatchUpRecoversMissedFires() {
+        // Regression for github issue #105: startup re-registration used to
+        // recompute next_run_at unconditionally, so firings missed while the
+        // application was down were wiped before CATCH_UP could observe them —
+        // the exact scenario the policy exists for.
+        scheduler.defineIntervalTask(
+                "restart-catchup",
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP);
+        var existing = store.findCronTaskState("restart-catchup").orElseThrow();
+        Instant missed = Instant.now().minusMillis(350);
+        store.upsertCronTaskState(new CronTaskScheduleState(existing.taskName(), null, null, missed, null));
+
+        // Simulated restart: the application re-registers the identical task.
+        scheduler.defineIntervalTask(
+                "restart-catchup",
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP);
+
+        assertThat(store.findCronTaskState("restart-catchup").orElseThrow().nextRunAt())
+                .as("unchanged re-registration must not wipe the overdue next run")
+                .isEqualTo(missed);
+
+        new RecurringMaterializer(store).tick(Instant.now());
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 100))
+                .hasSizeGreaterThanOrEqualTo(3);
+    }
+
+    @Test
+    void restartReRegistrationWithDropCollapsesMissedFiresIntoASingleRun() {
+        // The DROP counterpart of the github issue #105 restart scenario: an
+        // overdue next run survives re-registration, and the materializer's
+        // DROP semantics collapse the whole missed backlog into one instance.
+        scheduler.defineIntervalTask(
+                "restart-drop",
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+        var existing = store.findCronTaskState("restart-drop").orElseThrow();
+        Instant missed = Instant.now().minus(Duration.ofSeconds(60));
+        store.upsertCronTaskState(new CronTaskScheduleState(existing.taskName(), null, null, missed, null));
+
+        scheduler.defineIntervalTask(
+                "restart-drop",
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+
+        Instant tickTime = Instant.now();
+        new RecurringMaterializer(store).tick(tickTime);
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 100))
+                .hasSize(1);
+        // The whole 60s backlog is dropped: the next run is computed forward
+        // from the tick, not from the overdue timestamp.
+        assertThat(store.findCronTaskState("restart-drop").orElseThrow().nextRunAt())
+                .isAfter(tickTime);
+    }
+
+    @Test
+    void reRegistrationWithAChangedTriggerRecomputesNextRunFromNow() {
+        // The original intent of the upsertCron recompute, kept for real
+        // edits: a freshly edited schedule must not fire stale times.
+        scheduler.defineIntervalTask(
+                "edited",
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP);
+        var existing = store.findCronTaskState("edited").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, Instant.now().minus(Duration.ofSeconds(60)), null));
+
+        scheduler.defineIntervalTask(
+                "edited",
+                Duration.ofSeconds(30),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP);
+
+        assertThat(store.findCronTaskState("edited").orElseThrow().nextRunAt()).isAfter(Instant.now());
+        new RecurringMaterializer(store).tick(Instant.now());
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 100))
+                .isEmpty();
+    }
+
+    @Test
+    void reRegistrationWithAChangedZoneRecomputesNextRun() {
+        scheduler.defineCronTask(
+                "zoned",
+                "0 3 * * *",
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP,
+                ZoneId.of("UTC"));
+        var existing = store.findCronTaskState("zoned").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, Instant.now().minus(Duration.ofHours(2)), null));
+
+        scheduler.defineCronTask(
+                "zoned",
+                "0 3 * * *",
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP,
+                ZoneId.of("America/New_York"));
+
+        assertThat(store.findCronTaskState("zoned").orElseThrow().nextRunAt()).isAfter(Instant.now());
+    }
+
+    @Test
+    void unchangedReRegistrationPreservesTheIntervalPhase() {
+        // An interval trigger recomputed from "now" at every restart shifts
+        // its whole schedule (an every-6h task restarted at hour 3 slides by
+        // three hours). An unchanged re-registration keeps the phase.
+        scheduler.defineIntervalTask("phased", Duration.ofHours(6), new HelloPayload("tick"), RecorderHandler.class);
+        Instant firstNext = store.findCronTaskState("phased").orElseThrow().nextRunAt();
+
+        try {
+            Thread.sleep(5);
+        } catch (InterruptedException ignored) {
+            Thread.currentThread().interrupt();
+        }
+        scheduler.defineIntervalTask("phased", Duration.ofHours(6), new HelloPayload("tick"), RecorderHandler.class);
+
+        assertThat(store.findCronTaskState("phased").orElseThrow().nextRunAt()).isEqualTo(firstNext);
+    }
+
+    @Test
+    void reEnablingATaskRestartsTimingInsteadOfCatchingUpTheDisabledPeriod() {
+        // A disabled task is an explicit "don't run", not downtime: flipping
+        // it back on must not fire the disabled period's missed runs.
+        scheduler.defineIntervalTask(
+                "re-enabled",
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP);
+        var existing = store.findCronTaskState("re-enabled").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, Instant.now().minus(Duration.ofSeconds(60)), null));
+        var task = store.findCronTask("re-enabled").orElseThrow();
+        store.upsertCronTask(new CronTask(
+                task.name(),
+                task.trigger(),
+                task.handlerType(),
+                task.payloadArgument(),
+                task.queue(),
+                task.priority(),
+                task.timeout(),
+                task.maxAttempts(),
+                task.missedRunPolicy(),
+                task.zone(),
+                false));
+
+        scheduler.defineIntervalTask(
+                "re-enabled",
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP);
+
+        assertThat(store.findCronTaskState("re-enabled").orElseThrow().nextRunAt())
+                .isAfter(Instant.now());
+        new RecurringMaterializer(store).tick(Instant.now());
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 100))
+                .isEmpty();
+    }
+
+    @Test
     void failedInFlightInstanceDoesNotBlockTheNextMaterialization() {
         scheduler.defineIntervalTask(
                 "failing-window", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);

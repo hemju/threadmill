@@ -55,6 +55,22 @@ class CronExpressionTest {
     }
 
     @Test
+    void equalityIsValueBasedOnTheSourceExpression() {
+        // Schedule-change detection in Scheduler.upsertCron compares the
+        // stored (deserialized) trigger against the re-registered one — a
+        // reference-identity equals would flag every restart as an edit and
+        // reintroduce github issue #105.
+        assertThat(CronExpression.parse("0 3 * * *")).isEqualTo(CronExpression.parse("0 3 * * *"));
+        assertThat(CronExpression.parse("0 3 * * *").hashCode())
+                .isEqualTo(CronExpression.parse("0 3 * * *").hashCode());
+        assertThat(CronExpression.parse("0 3 * * *")).isNotEqualTo(CronExpression.parse("0 4 * * *"));
+        // A rewritten spelling of the same schedule deliberately counts as
+        // an edit: equality follows the serialized source, not the parsed
+        // field sets.
+        assertThat(CronExpression.parse("* * * * *")).isNotEqualTo(CronExpression.parse("*/1 * * * *"));
+    }
+
+    @Test
     void serializesAsTheBareSourceExpression() throws Exception {
         // Dashboard JSON renders CronExpression through the host's
         // ObjectMapper; a bean with no visible properties breaks /overview

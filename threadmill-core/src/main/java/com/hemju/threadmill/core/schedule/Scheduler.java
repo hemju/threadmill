@@ -301,8 +301,11 @@ public final class Scheduler {
      * adapter that validates annotation-level recurring specs at startup and
      * does not want the {@code Scheduler} to re-parse a string. Restart
      * semantics match {@link #defineCronTask}: existing schedule state
-     * (last-run, in-flight) is preserved; only the next-run timestamp is
-     * recomputed from {@code now} against the new trigger.
+     * (last-run, next-run, in-flight) is preserved while the trigger and zone
+     * are unchanged — an overdue next-run survives a restart so the task's
+     * {@code MissedRunPolicy} decides what happens to missed firings — and the
+     * next-run is recomputed from {@code now} only when the timing actually
+     * changed.
      */
     public void defineRecurring(
             String name,
@@ -438,10 +441,18 @@ public final class Scheduler {
 
     private void upsertCron(CronTask task) {
         // Identity vs schedule-state: re-registering a task replaces only the
-        // definition. The state is initialised on first registration; on
-        // re-registration we preserve in-flight job tracking but recompute
-        // the next-run from the new trigger relative to now (so a freshly
-        // edited cron does not fire stale times).
+        // definition. The state is initialised on first registration. When the
+        // re-registered definition keeps the same timing (trigger + zone, no
+        // disabled→enabled flip), the existing schedule state stays
+        // authoritative — including an overdue nextRunAt, so firings missed
+        // while the application was down remain observable and the
+        // materializer applies the task's MissedRunPolicy (github issue #105:
+        // the unconditional recompute wiped restart-missed firings before
+        // CATCH_UP could ever see them). Only a real timing edit recomputes
+        // the next-run from now, so a freshly edited cron does not fire stale
+        // times. Storm safety for preserved overdue state lives in the
+        // materializer: DROP collapses the backlog to one run, CATCH_UP is
+        // capped per tick.
         //
         // The read-modify-write of the schedule state is guarded by the same
         // store mutex the materializer takes per task: without it, a
@@ -452,16 +463,22 @@ public final class Scheduler {
         String mutex = RecurringMaterializer.taskMutexName(task.name());
         acquireCronMutex(mutex);
         try {
+            var existingTask = store.findCronTask(task.name());
             var existingState = store.findCronTaskState(task.name());
-            var now = Instant.now();
-            Instant next = task.trigger().nextAfter(now, task.zone());
             store.upsertCronTask(task);
-            if (existingState.isEmpty()) {
-                store.upsertCronTaskState(CronTaskScheduleState.initial(task.name(), next));
-            } else {
+            if (existingState.isPresent()) {
                 var s = existingState.get();
+                boolean timingUnchanged =
+                        s.nextRunAt() != null && existingTask.isPresent() && keepsTiming(existingTask.get(), task);
+                if (timingUnchanged) {
+                    return;
+                }
+                Instant next = task.trigger().nextAfter(Instant.now(), task.zone());
                 store.upsertCronTaskState(new CronTaskScheduleState(
                         task.name(), s.lastRunAt(), s.lastRunJobId(), next, s.inFlightJobId()));
+            } else {
+                Instant next = task.trigger().nextAfter(Instant.now(), task.zone());
+                store.upsertCronTaskState(CronTaskScheduleState.initial(task.name(), next));
             }
         } finally {
             try {
@@ -470,6 +487,17 @@ public final class Scheduler {
                 // the lease expires on its own
             }
         }
+    }
+
+    /**
+     * Whether a re-registration keeps the previous definition's timing, so
+     * the stored schedule state (including an overdue next-run) remains
+     * valid. A disabled→enabled flip restarts timing from now: the pause was
+     * an explicit "don't run", not downtime whose firings deserve recovery.
+     */
+    private static boolean keepsTiming(CronTask before, CronTask after) {
+        if (!before.enabled() && after.enabled()) return false;
+        return before.trigger().equals(after.trigger()) && before.zone().equals(after.zone());
     }
 
     private void withCronMutex(String name, Runnable action) {

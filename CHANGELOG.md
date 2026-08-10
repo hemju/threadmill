@@ -1,5 +1,34 @@
 # Changelog
 
+## Unreleased
+
+- **Breaking (Spring):** renamed `@Job(maxRetries)` to `@Job(maxAttempts)`
+  (issue #104). The value always counted total attempts — `maxRetries = 1`
+  meant one attempt and zero retries — so every existing number keeps its
+  runtime meaning under the honest name; only the attribute name changes.
+  Non-positive values other than the `-1` sentinel now fail startup with a
+  descriptive error instead of being silently replaced by the engine default:
+  the natural "disable retries" spelling `0` used to run up to five attempts.
+- Per-job retry metadata is now stamped only for an explicit
+  `@Job(maxAttempts)` (issue #104). Previously the resolved default was
+  stamped on every Spring-enqueued job, so per-job metadata permanently
+  shadowed per-exception-type `RetryInterceptor` policies. Jobs without an
+  explicit budget now fall through to the policy chain, and `@Recurring`
+  handlers without an explicit budget register their `CronTask` with a null
+  retry budget, so later `threadmill.default-max-attempts` changes are
+  honored by already-registered tasks.
+- Fixed startup re-registration wiping an overdue recurring `next_run_at`
+  (issue #105). `Scheduler.upsertCron` now preserves the schedule state —
+  including an overdue next-run and an interval trigger's phase — while the
+  re-registered trigger and zone are unchanged, so the task's
+  `MissedRunPolicy` decides what happens to restart-missed firings:
+  `CATCH_UP` materialises every missed fire (capped per tick) and `DROP`
+  collapses the backlog into one make-up run shortly after startup. A real
+  edit — changed trigger, changed zone, or re-enabling a disabled task —
+  still recomputes the next-run from now so an edited cron never fires stale
+  times. `CronExpression` gained source-based value equality to support the
+  unchanged-schedule comparison.
+
 ## 0.1.3
 
 - Fixed Spring lifecycle ordering so `ProcessingNode` starts before remote-wake
