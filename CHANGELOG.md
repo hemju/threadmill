@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.4
 
 - **Breaking (Spring):** renamed `@Job(maxRetries)` to `@Job(maxAttempts)`
   (issue #104). The value always counted total attempts — `maxRetries = 1`
