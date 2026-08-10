@@ -28,9 +28,10 @@ The full clean-install DDL is the checked-in migration SQL:
 
 [`V1__baseline.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V1__baseline.sql)
 plus the additive migrations that followed it (currently
-[`V2__cron_task_overrides.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V2__cron_task_overrides.sql)
+[`V2__cron_task_overrides.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V2__cron_task_overrides.sql),
+[`V3__integrity_constraints.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V3__integrity_constraints.sql),
 and
-[`V3__integrity_constraints.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V3__integrity_constraints.sql)).
+[`V4__cron_state_timing_fingerprint.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V4__cron_state_timing_fingerprint.sql)).
 
 For applications that want to apply SQL from their own deployment system,
 `MigrationRunner` can emit the same statements:

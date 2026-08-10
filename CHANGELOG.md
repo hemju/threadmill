@@ -9,6 +9,12 @@
   Non-positive values other than the `-1` sentinel now fail startup with a
   descriptive error instead of being silently replaced by the engine default:
   the natural "disable retries" spelling `0` used to run up to five attempts.
+  The rename also reaches `ThreadmillJobRegistry.Registration`: its component
+  changes from `int maxRetries` to a nullable `Integer maxAttempts`
+  (constructor, accessor, and binary signature change; `null` means "no
+  explicit budget"). Code that constructs registrations directly or reads
+  them via `ThreadmillRecurringRegistrar.recurring()` must follow the new
+  shape.
 - Per-job retry metadata is now stamped only for an explicit
   `@Job(maxAttempts)` (issue #104). Previously the resolved default was
   stamped on every Spring-enqueued job, so per-job metadata permanently
@@ -20,14 +26,35 @@
 - Fixed startup re-registration wiping an overdue recurring `next_run_at`
   (issue #105). `Scheduler.upsertCron` now preserves the schedule state —
   including an overdue next-run and an interval trigger's phase — while the
-  re-registered trigger and zone are unchanged, so the task's
-  `MissedRunPolicy` decides what happens to restart-missed firings:
-  `CATCH_UP` materialises every missed fire (capped per tick) and `DROP`
-  collapses the backlog into one make-up run shortly after startup. A real
-  edit — changed trigger, changed zone, or re-enabling a disabled task —
-  still recomputes the next-run from now so an edited cron never fires stale
+  re-registered schedule is unchanged, so the task's `MissedRunPolicy`
+  decides what happens to restart-missed firings: `CATCH_UP` materialises
+  every missed fire (capped per tick) and `DROP` collapses the backlog into
+  one make-up run shortly after startup. A real edit — changed trigger,
+  changed zone on a cron trigger, or re-enabling a disabled task — still
+  recomputes the next-run from now so an edited cron never fires stale
   times. `CronExpression` gained source-based value equality to support the
   unchanged-schedule comparison.
+- `CronTaskScheduleState` now carries a `timingFingerprint` recording which
+  trigger timing its `next_run_at` was computed from, written atomically with
+  the state row (additive Postgres migration
+  `V4__cron_state_timing_fingerprint.sql`; a Redis hash field; legacy rows
+  read as null and simply recompute once). The unchanged-schedule decision
+  reads this fingerprint rather than comparing stored task definitions, so a
+  crash between the separate task-definition and state writes can never pair
+  a new trigger with old timing undetectably — the retry detects the
+  mismatch and recomputes. The fingerprint deliberately excludes the zone
+  for interval triggers (`CronTask` documents the zone as ignored there), so
+  nodes with different system-default zones do not treat the same interval
+  as a schedule edit.
+- `DROP` missed-run recovery is now phase-exact and nominally stamped: the
+  single make-up instance represents the most recent nominal fire (its
+  `cronFireTime()` carries that nominal time, not the recovery wall-clock),
+  and the next run advances from the nominal fire — an every-6h task that
+  was due at 06:00 and recovered at 07:00 next fires at 12:00, not 13:00.
+  Behavioral note: with overdue state now surviving restarts, an existing
+  `DROP` task whose boundary passed during downtime fires once shortly after
+  startup instead of silently skipping to the next boundary — the same
+  behavior it always had across a live materializer stall.
 
 ## 0.1.3
 

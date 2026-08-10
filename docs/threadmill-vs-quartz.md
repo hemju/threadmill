@@ -111,9 +111,11 @@ Threadmill has no misfires by design. Every `CronTask` carries a
 
 The policy applies to application restarts too: re-registering an unchanged
 task at startup preserves an overdue next-run, so downtime spanning a firing
-is recovered per the policy (one make-up run under `DROP`, every missed fire
-under `CATCH_UP`). Only a real schedule edit — a different trigger or zone —
-recomputes the next-run from now.
+is recovered per the policy — one make-up run under `DROP` (carrying the most
+recent nominal fire time, with the following run phase-aligned to the
+original schedule), every missed fire under `CATCH_UP`. Only a real schedule
+edit — a different trigger, a different zone on a cron trigger, or
+re-enabling a disabled task — recomputes the next-run from now.
 
 The policy is per-task, not scheduler-wide, and the choice is made at
 registration time. Tests `SchedulingTest.dropPolicyDoesNotCauseACatchUpStorm`,

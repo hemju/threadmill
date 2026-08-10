@@ -26,8 +26,12 @@ import com.hemju.threadmill.core.store.JobStore;
  *
  * <p>The "is a run due?" question is decided by reading
  * {@link CronTaskScheduleState#nextRunAt()}, never by ad-hoc timestamp
- * arithmetic. Re-registering the task can change that field — that's how
- * the catch-up-storm hazard is averted.
+ * arithmetic. An overdue value survives restarts (re-registration preserves
+ * it while the schedule is unchanged), and the missed-run policy applied
+ * here is what bounds the backlog: {@code DROP} collapses it into the single
+ * most recent fire, {@code CATCH_UP} materializes every fire capped per tick
+ * with carry-over. That cap — not re-registration — is the catch-up-storm
+ * defense.
  *
  * <p>If a previously-materialised instance is still un-terminal, no new
  * instance is created until that one finishes. This guard prevents
@@ -129,6 +133,7 @@ public final class RecurringMaterializer {
             }
         }
 
+        String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
         if (task.missedRunPolicy() == CronTask.MissedRunPolicy.CATCH_UP) {
             // Materialize every fire from nextRunAt up to and including now,
             // capped per tick so an unbounded backlog cannot occupy the
@@ -146,13 +151,51 @@ public final class RecurringMaterializer {
                 LOG.debug("CATCH_UP for task {} hit the per-tick cap; continuing on the next tick", task.name());
             }
             store.upsertCronTaskState(new CronTaskScheduleState(
-                    task.name(), now, last == null ? null : last.asUuid(), fire, last == null ? null : last.asUuid()));
+                    task.name(),
+                    now,
+                    last == null ? null : last.asUuid(),
+                    fire,
+                    last == null ? null : last.asUuid(),
+                    fingerprint));
         } else {
-            // DROP: skip everything missed, only enqueue the single most-recent fire.
-            JobId id = materialize(task, now);
-            Instant next = task.trigger().nextAfter(now, task.zone());
-            store.upsertCronTaskState(new CronTaskScheduleState(task.name(), now, id.asUuid(), next, id.asUuid()));
+            // DROP: collapse everything missed into the single most recent
+            // NOMINAL fire. Materializing at the nominal time (not `now`)
+            // keeps CRON_FIRE_TIME_META meaningful as "which firing this
+            // instance represents", and advancing nextRunAt from the nominal
+            // fire keeps an interval trigger's phase fixed — an every-6h task
+            // that was due at 06:00 and recovered at 07:00 still fires next
+            // at 12:00, not 13:00.
+            Instant fire = latestFireAtOrBefore(task, state.nextRunAt(), now);
+            JobId id = materialize(task, fire);
+            Instant next = task.trigger().nextAfter(fire, task.zone());
+            store.upsertCronTaskState(
+                    new CronTaskScheduleState(task.name(), now, id.asUuid(), next, id.asUuid(), fingerprint));
         }
+    }
+
+    /**
+     * The most recent nominal fire time at or before {@code now}, starting
+     * from the (overdue) {@code overdueFire}. Intervals are computed
+     * arithmetically so a tiny interval with a huge backlog cannot spin the
+     * maintenance thread; cron triggers step fire-by-fire, which is bounded
+     * by one iteration per missed firing (cron granularity is one minute).
+     */
+    private static Instant latestFireAtOrBefore(CronTask task, Instant overdueFire, Instant now) {
+        return switch (task.trigger()) {
+            case CronTask.Trigger.Interval interval -> {
+                long missed = Duration.between(overdueFire, now).dividedBy(interval.interval());
+                yield overdueFire.plus(interval.interval().multipliedBy(missed));
+            }
+            case CronTask.Trigger.CronExpr cron -> {
+                Instant fire = overdueFire;
+                Instant next = task.trigger().nextAfter(fire, task.zone());
+                while (!next.isAfter(now)) {
+                    fire = next;
+                    next = task.trigger().nextAfter(fire, task.zone());
+                }
+                yield fire;
+            }
+        };
     }
 
     private JobId materialize(CronTask task, Instant when) {

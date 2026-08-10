@@ -173,7 +173,7 @@ public class JobScheduler {
         var expression = CronExpression.parse(cron);
         ZoneId zone = ZoneId.systemDefault();
         JobArgument arg = serializer.serializePayload(payload);
-        store.upsertCronTask(new CronTask(
+        var task = new CronTask(
                 name,
                 new CronTask.Trigger.CronExpr(expression),
                 registration.handlerType().getName(),
@@ -182,8 +182,10 @@ public class JobScheduler {
                 registration.priority(),
                 CronTask.MissedRunPolicy.DROP,
                 zone,
-                true));
-        store.upsertCronTaskState(CronTaskScheduleState.initial(name, expression.nextAfter(Instant.now(), zone)));
+                true);
+        store.upsertCronTask(task);
+        store.upsertCronTaskState(CronTaskScheduleState.initial(
+                name, expression.nextAfter(Instant.now(), zone), CronTaskScheduleState.timingFingerprintOf(task)));
         return new CronTaskId(name);
     }
 

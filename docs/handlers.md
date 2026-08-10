@@ -70,7 +70,10 @@ structure the engine serializes. It exposes:
 - **`cronFireTime()`** — for recurring instances, the nominal schedule tick
   this instance represents. Under the `CATCH_UP` missed-run policy each missed
   interval's instance carries its own fire time, so an idempotent handler can
-  derive a per-interval idempotency key from it.
+  derive a per-interval idempotency key from it. Under `DROP`, the single
+  recovery instance for a missed backlog carries the most recent nominal
+  fire time — never the recovery wall-clock — so the key stays meaningful
+  there too.
 - **`metadata()`** — mutable per-job metadata.
 
 See [Long-running jobs](long-running-jobs.md) for check-in patterns and the

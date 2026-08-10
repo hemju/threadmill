@@ -9,6 +9,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
 
 import org.junit.jupiter.api.AfterEach;
@@ -34,6 +35,7 @@ import com.hemju.threadmill.core.schedule.RecurringMaterializer;
 import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
+import com.hemju.threadmill.test.ForwardingJobStore;
 
 /**
  * End-to-end tests for the scheduling API, recurring tasks (interval +
@@ -351,7 +353,8 @@ class SchedulingTest {
                 CronTask.MissedRunPolicy.CATCH_UP);
         var existing = store.findCronTaskState("restart-catchup").orElseThrow();
         Instant missed = Instant.now().minusMillis(350);
-        store.upsertCronTaskState(new CronTaskScheduleState(existing.taskName(), null, null, missed, null));
+        store.upsertCronTaskState(
+                new CronTaskScheduleState(existing.taskName(), null, null, missed, null, existing.timingFingerprint()));
 
         // Simulated restart: the application re-registers the identical task.
         scheduler.defineIntervalTask(
@@ -376,10 +379,13 @@ class SchedulingTest {
     void restartReRegistrationWithDropCollapsesMissedFiresIntoASingleRun() {
         // The DROP counterpart of the github issue #105 restart scenario: an
         // overdue next run survives re-registration, and the materializer's
-        // DROP semantics collapse the whole missed backlog into one instance.
+        // DROP semantics collapse the whole missed backlog into one instance
+        // for the single most recent NOMINAL fire — phase-aligned, so the
+        // schedule never drifts, and stamped with the nominal fire time.
+        Duration interval = Duration.ofMillis(100);
         scheduler.defineIntervalTask(
                 "restart-drop",
-                Duration.ofMillis(100),
+                interval,
                 new HelloPayload("tick"),
                 RecorderHandler.class,
                 "default",
@@ -387,11 +393,12 @@ class SchedulingTest {
                 CronTask.MissedRunPolicy.DROP);
         var existing = store.findCronTaskState("restart-drop").orElseThrow();
         Instant missed = Instant.now().minus(Duration.ofSeconds(60));
-        store.upsertCronTaskState(new CronTaskScheduleState(existing.taskName(), null, null, missed, null));
+        store.upsertCronTaskState(
+                new CronTaskScheduleState(existing.taskName(), null, null, missed, null, existing.timingFingerprint()));
 
         scheduler.defineIntervalTask(
                 "restart-drop",
-                Duration.ofMillis(100),
+                interval,
                 new HelloPayload("tick"),
                 RecorderHandler.class,
                 "default",
@@ -400,12 +407,19 @@ class SchedulingTest {
 
         Instant tickTime = Instant.now();
         new RecurringMaterializer(store).tick(tickTime);
-        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 100))
-                .hasSize(1);
-        // The whole 60s backlog is dropped: the next run is computed forward
-        // from the tick, not from the overdue timestamp.
+
+        // Exactly one make-up instance, representing the most recent nominal
+        // fire on the original 100ms grid anchored at `missed`.
+        long missedCount = Duration.between(missed, tickTime).dividedBy(interval);
+        Instant nominalFire = missed.plus(interval.multipliedBy(missedCount));
+        List<Job> instances = store.findByHandlerSignature(RecorderHandler.class.getName(), 100);
+        assertThat(instances).hasSize(1);
+        assertThat(instances.get(0).metadata().get(JobExecutionContext.CRON_FIRE_TIME_META))
+                .contains(nominalFire.toString());
+        // The next run advances from the nominal fire, not from the tick:
+        // interval phase is preserved exactly.
         assertThat(store.findCronTaskState("restart-drop").orElseThrow().nextRunAt())
-                .isAfter(tickTime);
+                .isEqualTo(nominalFire.plus(interval));
     }
 
     @Test
@@ -422,11 +436,16 @@ class SchedulingTest {
                 CronTask.MissedRunPolicy.CATCH_UP);
         var existing = store.findCronTaskState("edited").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minus(Duration.ofSeconds(60)), null));
+                existing.taskName(),
+                null,
+                null,
+                Instant.now().minus(Duration.ofSeconds(60)),
+                null,
+                existing.timingFingerprint()));
 
         scheduler.defineIntervalTask(
                 "edited",
-                Duration.ofSeconds(30),
+                Duration.ofHours(1),
                 new HelloPayload("tick"),
                 RecorderHandler.class,
                 "default",
@@ -452,7 +471,12 @@ class SchedulingTest {
                 ZoneId.of("UTC"));
         var existing = store.findCronTaskState("zoned").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minus(Duration.ofHours(2)), null));
+                existing.taskName(),
+                null,
+                null,
+                Instant.now().minus(Duration.ofHours(2)),
+                null,
+                existing.timingFingerprint()));
 
         scheduler.defineCronTask(
                 "zoned",
@@ -465,6 +489,104 @@ class SchedulingTest {
                 ZoneId.of("America/New_York"));
 
         assertThat(store.findCronTaskState("zoned").orElseThrow().nextRunAt()).isAfter(Instant.now());
+    }
+
+    @Test
+    void differentSystemZonesDoNotResetAnIntervalSchedule() {
+        // An interval trigger ignores its zone (CronTask contract), so two
+        // nodes with different system-default zones re-registering the same
+        // interval must not treat it as a schedule edit — the timing
+        // fingerprint deliberately excludes the zone for intervals.
+        scheduler.defineIntervalTask(
+                "cross-zone", Duration.ofHours(6), new HelloPayload("tick"), RecorderHandler.class);
+        var existing = store.findCronTaskState("cross-zone").orElseThrow();
+        Instant missed = Instant.now().minusSeconds(60);
+        store.upsertCronTaskState(
+                new CronTaskScheduleState(existing.taskName(), null, null, missed, null, existing.timingFingerprint()));
+        // Simulate the earlier registration having happened on a node with a
+        // different system-default zone.
+        var task = store.findCronTask("cross-zone").orElseThrow();
+        store.upsertCronTask(new CronTask(
+                task.name(),
+                task.trigger(),
+                task.handlerType(),
+                task.payloadArgument(),
+                task.queue(),
+                task.priority(),
+                task.timeout(),
+                task.maxAttempts(),
+                task.missedRunPolicy(),
+                ZoneId.of("Pacific/Auckland"),
+                task.enabled()));
+
+        scheduler.defineIntervalTask(
+                "cross-zone", Duration.ofHours(6), new HelloPayload("tick"), RecorderHandler.class);
+
+        assertThat(store.findCronTaskState("cross-zone").orElseThrow().nextRunAt())
+                .isEqualTo(missed);
+    }
+
+    @Test
+    void stateWriteFailureDuringTriggerEditCannotPairNewTriggerWithOldTiming() {
+        // Review finding on github issue #105: the task definition and its
+        // schedule state are two separate store writes. If the definition
+        // write lands and the state write fails, a retry that compared the
+        // stored trigger against the re-registered one would see them equal
+        // and preserve the stale timing forever — firing the new definition
+        // at the old trigger's overdue time. The timing fingerprint travels
+        // atomically with nextRunAt in the state record, so the retry
+        // detects the mismatch and recomputes.
+        scheduler.defineIntervalTask(
+                "crash-window",
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP);
+        var existing = store.findCronTaskState("crash-window").orElseThrow();
+        Instant staleOverdue = Instant.now().minusSeconds(60);
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, staleOverdue, null, existing.timingFingerprint()));
+
+        var failing = new AtomicBoolean(true);
+        var flaky = new ForwardingJobStore(store) {
+            @Override
+            public void upsertCronTaskState(CronTaskScheduleState state) {
+                if (failing.get()) {
+                    throw new IllegalStateException("simulated outage after the definition write");
+                }
+                super.upsertCronTaskState(state);
+            }
+        };
+        var flakyScheduler = new Scheduler(flaky, serializer);
+        assertThatThrownBy(() -> flakyScheduler.defineIntervalTask(
+                        "crash-window",
+                        Duration.ofHours(6),
+                        new HelloPayload("tick"),
+                        RecorderHandler.class,
+                        "default",
+                        0,
+                        CronTask.MissedRunPolicy.CATCH_UP))
+                .hasMessageContaining("simulated outage");
+
+        // The definition write landed: the store now pairs the NEW trigger
+        // with the OLD state. The registration retry must recompute.
+        failing.set(false);
+        flakyScheduler.defineIntervalTask(
+                "crash-window",
+                Duration.ofHours(6),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP);
+
+        assertThat(store.findCronTaskState("crash-window").orElseThrow().nextRunAt())
+                .isAfter(Instant.now());
+        new RecurringMaterializer(store).tick(Instant.now());
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 100))
+                .isEmpty();
     }
 
     @Test
@@ -499,7 +621,12 @@ class SchedulingTest {
                 CronTask.MissedRunPolicy.CATCH_UP);
         var existing = store.findCronTaskState("re-enabled").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minus(Duration.ofSeconds(60)), null));
+                existing.taskName(),
+                null,
+                null,
+                Instant.now().minus(Duration.ofSeconds(60)),
+                null,
+                existing.timingFingerprint()));
         var task = store.findCronTask("re-enabled").orElseThrow();
         store.upsertCronTask(new CronTask(
                 task.name(),
