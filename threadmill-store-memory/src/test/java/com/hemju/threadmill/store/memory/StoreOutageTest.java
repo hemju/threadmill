@@ -356,9 +356,9 @@ class StoreOutageTest {
         }
 
         @Override
-        public void clearCronNudge(String taskName, Instant observed) {
+        public void clearCronNudge(String taskName, long observedRevision) {
             check();
-            delegate.clearCronNudge(taskName, observed);
+            delegate.clearCronNudge(taskName, observedRevision);
         }
 
         @Override

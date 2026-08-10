@@ -334,29 +334,51 @@ public final class DashboardApiService {
 
     public ActionResponse updateRecurring(String name, UpdateRecurringRequest request) {
         Objects.requireNonNull(request, "request");
-        CronTask existing = store.findCronTask(name).orElseThrow(() -> notFound("recurring task not found"));
-        CronTask task = new CronTask(
-                name,
-                trigger(request.triggerKind(), request.triggerValue(), existing.trigger()),
-                request.handlerType() == null ? existing.handlerType() : request.handlerType(),
-                request.payloadArgument() == null ? existing.payloadArgument() : request.payloadArgument(),
-                request.queue() == null ? existing.queue() : request.queue(),
-                request.priority() == null ? existing.priority() : request.priority(),
-                existing.timeout(),
-                existing.maxAttempts(),
-                request.missedRunPolicy() == null ? existing.missedRunPolicy() : request.missedRunPolicy(),
-                request.zone() == null ? existing.zone() : parseZone(request.zone()),
-                request.enabled() == null ? existing.enabled() : request.enabled());
+        // Fail fast for unknown names, but decide everything else — the
+        // effective definition, whether the enabled bit flips, and any nudge
+        // clear — from a read taken INSIDE the task mutex: a snapshot from
+        // before the mutex could see a concurrent enable as "still disabled"
+        // and wrongly clear a legitimate post-enable nudge.
+        store.findCronTask(name).orElseThrow(() -> notFound("recurring task not found"));
         withTaskMutex(name, () -> {
-            store.upsertCronTask(task);
+            CronTask existing = store.findCronTask(name).orElseThrow(() -> notFound("recurring task not found"));
+            CronTask task = new CronTask(
+                    name,
+                    trigger(request.triggerKind(), request.triggerValue(), existing.trigger()),
+                    request.handlerType() == null ? existing.handlerType() : request.handlerType(),
+                    request.payloadArgument() == null ? existing.payloadArgument() : request.payloadArgument(),
+                    request.queue() == null ? existing.queue() : request.queue(),
+                    request.priority() == null ? existing.priority() : request.priority(),
+                    existing.timeout(),
+                    existing.maxAttempts(),
+                    request.missedRunPolicy() == null ? existing.missedRunPolicy() : request.missedRunPolicy(),
+                    request.zone() == null ? existing.zone() : parseZone(request.zone()),
+                    request.enabled() == null ? existing.enabled() : request.enabled());
             var prior = store.findCronTaskState(name);
+            boolean pendingNudge = prior.isPresent()
+                    && prior.get().nudgeRequestedAt() != null
+                    && prior.get().nudgeRevision() != null;
+            if (!existing.enabled() && task.enabled()) {
+                // Re-enable: clear stale pre-pause demand and write the
+                // recomputed state while the task is still disabled, then
+                // enable last — a crash mid-sequence leaves the task
+                // disabled, so a retry repeats the flip instead of leaving
+                // stale demand executable.
+                if (pendingNudge) {
+                    store.clearCronNudge(name, prior.get().nudgeRevision());
+                }
+                store.upsertCronTaskState(stateAfterRecurringUpdate(task, prior));
+                store.upsertCronTask(task);
+                return;
+            }
+            store.upsertCronTask(task);
             store.upsertCronTaskState(stateAfterRecurringUpdate(task, prior));
-            // An enabled-flip clears a pending nudge: disabling wins over a
-            // nudge, and re-enabling must not fire stale demand from before
-            // the pause (consistent with re-enable-does-not-catch-up).
-            if (existing.enabled() != task.enabled()) {
-                prior.map(CronTaskScheduleState::nudgeRequestedAt)
-                        .ifPresent(nudge -> store.clearCronNudge(name, nudge));
+            // Disabling clears a pending nudge — an explicit pause wins. The
+            // disabled definition is persisted first, so a crash before the
+            // clear leaves the nudge on a disabled task, which the
+            // materializer refuses to run and the re-enable path clears.
+            if (existing.enabled() && !task.enabled() && pendingNudge) {
+                store.clearCronNudge(name, prior.get().nudgeRevision());
             }
         });
         invalidateSnapshotCache();
@@ -474,7 +496,22 @@ public final class DashboardApiService {
                 job.scheduledFor().orElse(null),
                 job.ownerNodeId().map(Object::toString).orElse(null),
                 job.ownerHeartbeatAt().orElse(null),
-                redacted);
+                redacted,
+                cronOrigin(job));
+    }
+
+    /**
+     * The trigger origin of a recurring instance, exposed even on redacted
+     * reads: only the three engine-stamped values pass through, so arbitrary
+     * (potentially sensitive) metadata can never leak via this field.
+     */
+    private static String cronOrigin(Job job) {
+        return job.metadata()
+                .get(JobExecutionContext.CRON_ORIGIN_META)
+                .filter(origin -> JobExecutionContext.CRON_ORIGIN_SCHEDULE.equals(origin)
+                        || JobExecutionContext.CRON_ORIGIN_NUDGE.equals(origin)
+                        || JobExecutionContext.CRON_ORIGIN_MANUAL.equals(origin))
+                .orElse(null);
     }
 
     private static List<JobStateEntry> redactedStateHistory(Job job) {

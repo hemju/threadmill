@@ -286,7 +286,10 @@ public final class Scheduler {
      *       its inputs before the nudge's triggering write committed, so it
      *       never counts as satisfying the nudge.</li>
      *   <li><strong>Coalescing.</strong> A burst of nudges collapses to at
-     *       most the current run plus one follow-up.</li>
+     *       most the current run plus one follow-up. This is a failure-free
+     *       bound: consistent with the at-least-once model, a crash between
+     *       the follow-up's insert and the request's clear can produce an
+     *       extra run — failures only ever add runs, never lose one.</li>
      *   <li><strong>Durability.</strong> The nudge is a store write consumed
      *       by the maintenance master's recurring tick; there is no transient
      *       signal to lose. Worst-case latency is one
@@ -519,25 +522,50 @@ public final class Scheduler {
             String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
             var existingTask = store.findCronTask(task.name());
             var existingState = store.findCronTaskState(task.name());
-            store.upsertCronTask(task);
             boolean reEnabled = existingTask.isPresent() && !existingTask.get().enabled() && task.enabled();
-            // An enabled-flip in either direction clears a pending nudge:
-            // disabling wins over a nudge, and re-enabling must not fire
-            // stale demand from before the pause (consistent with
-            // re-enable-does-not-catch-up). Best-effort compare-and-clear —
-            // a nudge accepted after our state read survives, which for the
-            // enable direction is legitimate new demand.
-            boolean enabledFlipped =
-                    existingTask.isPresent() && existingTask.get().enabled() != task.enabled();
-            if (enabledFlipped
+            if (reEnabled) {
+                // Re-enable ordering is crash-safe by construction: clear any
+                // pending nudge and recompute the schedule state WHILE THE
+                // TASK IS STILL DISABLED, and flip enabled last. A crash
+                // anywhere before the final task write leaves the task
+                // disabled, so the retry re-detects the flip and repeats —
+                // stale pre-pause demand can never become executable
+                // (consistent with re-enable-does-not-catch-up). A nudge
+                // accepted after our state read survives the compare-and-
+                // clear, but it can only have been accepted once the task
+                // was already enabled, which makes it legitimate new demand.
+                if (existingState.isPresent()
+                        && existingState.get().nudgeRequestedAt() != null
+                        && existingState.get().nudgeRevision() != null) {
+                    store.clearCronNudge(task.name(), existingState.get().nudgeRevision());
+                }
+                Instant next = task.trigger().nextAfter(Instant.now(), task.zone());
+                if (existingState.isPresent()) {
+                    var s = existingState.get();
+                    store.upsertCronTaskState(new CronTaskScheduleState(
+                            task.name(), s.lastRunAt(), s.lastRunJobId(), next, s.inFlightJobId(), fingerprint));
+                } else {
+                    store.upsertCronTaskState(CronTaskScheduleState.initial(task.name(), next, fingerprint));
+                }
+                store.upsertCronTask(task);
+                return;
+            }
+            store.upsertCronTask(task);
+            // Disabling clears a pending nudge — an explicit pause wins. The
+            // task is persisted disabled FIRST, so a crash before the clear
+            // leaves a pending nudge on a disabled task, which the
+            // materializer's enabled recheck refuses to run and the
+            // re-enable path above clears before the task can fire again.
+            boolean disabling = existingTask.isPresent() && existingTask.get().enabled() && !task.enabled();
+            if (disabling
                     && existingState.isPresent()
-                    && existingState.get().nudgeRequestedAt() != null) {
-                store.clearCronNudge(task.name(), existingState.get().nudgeRequestedAt());
+                    && existingState.get().nudgeRequestedAt() != null
+                    && existingState.get().nudgeRevision() != null) {
+                store.clearCronNudge(task.name(), existingState.get().nudgeRevision());
             }
             if (existingState.isPresent()) {
                 var s = existingState.get();
-                boolean timingUnchanged =
-                        s.nextRunAt() != null && fingerprint.equals(s.timingFingerprint()) && !reEnabled;
+                boolean timingUnchanged = s.nextRunAt() != null && fingerprint.equals(s.timingFingerprint());
                 if (timingUnchanged) {
                     return;
                 }

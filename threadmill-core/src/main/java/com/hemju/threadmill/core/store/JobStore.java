@@ -448,30 +448,35 @@ public interface JobStore {
      * Record an on-demand materialization request (a "nudge") for the named
      * recurring task by stamping
      * {@link CronTaskScheduleState#nudgeRequestedAt()} with
-     * {@code requestedAt}. A single cell per task: a burst of nudges
-     * overwrites one value and therefore coalesces to at most one follow-up
-     * materialization. The write is durable — it is consumed by the
-     * maintenance master's recurring tick, so acceptance from any node
-     * reaches the materializing node without any transient signal.
+     * {@code requestedAt} and advancing the store-generated
+     * {@link CronTaskScheduleState#nudgeRevision()}. A single cell per task:
+     * a burst of nudges overwrites one value and therefore coalesces to at
+     * most one follow-up materialization. The write is durable — it is
+     * consumed by the maintenance master's recurring tick, so acceptance
+     * from any node reaches the materializing node without any transient
+     * signal.
      *
      * <p>Guarded: {@link NudgeOutcome#UNKNOWN_TASK} when no such task exists
      * (a nudge racing task removal must not resurrect schedule state) and
      * {@link NudgeOutcome#DISABLED} when the task is disabled — an explicit
-     * pause wins over a nudge.
+     * pause wins over a nudge. The existence/enabled check and the write are
+     * atomic with respect to concurrent task lifecycle operations.
      */
     NudgeOutcome requestCronNudge(String taskName, Instant requestedAt);
 
     /**
      * Clear a pending nudge, but only if its current
-     * {@link CronTaskScheduleState#nudgeRequestedAt()} still equals
-     * {@code observed} (compare-and-clear). A nudge accepted between the
-     * caller's read and this clear has a newer timestamp and survives, so the
-     * materializer's next tick produces the follow-up run it promises —
-     * that is what makes the run-after-wake guarantee hold without a
-     * producer-side mutex. Clearing an already-cleared or never-set nudge is
-     * a no-op.
+     * {@link CronTaskScheduleState#nudgeRevision()} still equals
+     * {@code observedRevision} (compare-and-clear). The revision — never the
+     * wall-clock timestamp, whose finite store precision can collide — is the
+     * CAS identity: a nudge accepted between the caller's read and this clear
+     * carries a strictly greater revision and survives, so the materializer's
+     * next tick produces the follow-up run it promises. That is what makes
+     * the run-after-wake guarantee hold without a producer-side mutex. The
+     * revision itself is never reset, so cleared values can never be reused.
+     * Clearing an already-cleared or never-set nudge is a no-op.
      */
-    void clearCronNudge(String taskName, Instant observed);
+    void clearCronNudge(String taskName, long observedRevision);
 
     /** Result of {@link #requestCronNudge}. */
     enum NudgeOutcome {

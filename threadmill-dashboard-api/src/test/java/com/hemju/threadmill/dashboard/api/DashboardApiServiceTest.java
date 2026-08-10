@@ -190,6 +190,33 @@ class DashboardApiServiceTest {
     }
 
     @Test
+    void redactedJobSummariesStillCarryTheCronOrigin() {
+        // Read-level dashboard users see redacted summaries; the origin is a
+        // closed three-value set carrying no payload data, so it stays
+        // visible — otherwise nudged and scheduled runs would be
+        // indistinguishable exactly where operators look for them.
+        var store = new InMemoryJobStore();
+        var service = new DashboardApiService(store, new LocalWakeBus());
+        store.upsertCronTask(new CronTask(
+                "report",
+                new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
+                "com.example.ReportHandler",
+                new JobArgument("com.hemju.threadmill.core.handler.NoPayload", "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true));
+
+        service.triggerRecurring("report");
+
+        var jobs = service.jobs(JobSearch.all()).jobs();
+        assertThat(jobs).hasSize(1);
+        assertThat(jobs.get(0).detailsRedacted()).isTrue();
+        assertThat(jobs.get(0).cronOrigin()).isEqualTo(JobExecutionContext.CRON_ORIGIN_MANUAL);
+    }
+
+    @Test
     void manualTriggerCarriesTheTaskTimeoutAsPerJobTimeoutMetadata() {
         // Companion to github issue #84: a manually triggered instance of a
         // recurring task must run under the task's timeout and retry budget,

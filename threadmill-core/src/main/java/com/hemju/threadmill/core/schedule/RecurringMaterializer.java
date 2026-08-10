@@ -36,6 +36,14 @@ import com.hemju.threadmill.core.store.JobStore;
  * <p>If a previously-materialised instance is still un-terminal, no new
  * instance is created until that one finishes. This guard prevents
  * pile-up under long-running recurring work.
+ *
+ * <p><strong>Nudge failure semantics.</strong> Consuming a nudge is three
+ * independent durable operations (job insert, state upsert, revision
+ * compare-and-clear), so the "at most the current run plus one follow-up"
+ * coalescing bound is a failure-free bound: a crash or outage between the
+ * insert and the clear leaves the nudge pending, and recovery materializes
+ * again. Consistent with Threadmill's at-least-once model, failures can only
+ * produce extra runs — never lose one.
  */
 public final class RecurringMaterializer {
 
@@ -109,13 +117,24 @@ public final class RecurringMaterializer {
         }
     }
 
-    private void tickOneLocked(CronTask task, Instant now) {
-        var stateOpt = store.findCronTaskState(task.name());
+    private void tickOneLocked(CronTask listed, Instant now) {
+        var stateOpt = store.findCronTaskState(listed.name());
         if (stateOpt.isEmpty()) return; // not yet initialised
         var state = stateOpt.get();
-        Instant nudge = state.nudgeRequestedAt();
+        Long nudge = state.nudgeRequestedAt() == null ? null : state.nudgeRevision();
         boolean due = state.nextRunAt() != null && !state.nextRunAt().isAfter(now);
         if (!due && nudge == null) return;
+
+        // About to act — reload the definition now that we hold the task
+        // mutex. The listed object was snapshotted by tick() BEFORE the
+        // mutex: a re-registration, edit, or disable can commit in between,
+        // and materializing from the stale object would insert the old
+        // handler/payload (and, for a nudge, consume a request that was made
+        // against the new definition). The reload is deliberately done only
+        // when a materialization is imminent, so idle ticks stay at one
+        // state read per task.
+        CronTask task = store.findCronTask(listed.name()).orElse(null);
+        if (task == null || !task.enabled()) return;
 
         // Pile-up guard: a non-terminal in-flight instance blocks the next
         // materialization. FAILED is deliberately treated as non-blocking
@@ -146,8 +165,10 @@ public final class RecurringMaterializer {
             store.upsertCronTaskState(new CronTaskScheduleState(
                     task.name(), now, id.asUuid(), state.nextRunAt(), id.asUuid(), state.timingFingerprint()));
             // Clear AFTER materializing (a crash between the two costs one
-            // extra run, never a lost one), and only the observed value — a
-            // nudge accepted since our read survives for a follow-up run.
+            // extra run, never a lost one — see the failure-semantics note in
+            // the class Javadoc), and only the observed revision — a nudge
+            // accepted since our read carries a greater revision and survives
+            // for a follow-up run.
             store.clearCronNudge(task.name(), nudge);
             return;
         }
@@ -194,7 +215,8 @@ public final class RecurringMaterializer {
             // The scheduled instance(s) just materialized were enqueued after
             // the observed nudge committed, so their execution reads whatever
             // the nudger wrote — the nudge coalesces into them instead of
-            // producing an extra run. Compare-and-clear: a newer nudge survives.
+            // producing an extra run. Compare-and-clear on the revision: a
+            // newer nudge survives.
             store.clearCronNudge(task.name(), nudge);
         }
     }

@@ -1868,11 +1868,13 @@ public final class PostgresJobStore implements JobStore {
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(
                         "SELECT task_name, last_run_at, last_run_job_id, next_run_at, in_flight_job_id, "
-                                + "timing_fingerprint, nudge_requested_at "
+                                + "timing_fingerprint, nudge_requested_at, nudge_revision "
                                 + "FROM threadmill_cron_task_state WHERE task_name = ?")) {
             ps.setString(1, name);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return Optional.empty();
+                long revision = rs.getLong(8);
+                boolean revisionNull = rs.wasNull();
                 return Optional.of(new CronTaskScheduleState(
                         rs.getString(1),
                         rs.getTimestamp(2) == null ? null : rs.getTimestamp(2).toInstant(),
@@ -1880,7 +1882,8 @@ public final class PostgresJobStore implements JobStore {
                         rs.getTimestamp(4) == null ? null : rs.getTimestamp(4).toInstant(),
                         (UUID) rs.getObject(5),
                         rs.getString(6),
-                        rs.getTimestamp(7) == null ? null : rs.getTimestamp(7).toInstant()));
+                        rs.getTimestamp(7) == null ? null : rs.getTimestamp(7).toInstant(),
+                        revisionNull ? null : revision));
             }
         } catch (SQLException e) {
             throw new JdbcException("findCronTaskState failed", e);
@@ -1896,45 +1899,42 @@ public final class PostgresJobStore implements JobStore {
         // to.
         try {
             return writeTransaction(conn -> {
-                // Hot path: one guarded single-row UPDATE. The join enforces
-                // existence + enabled in the same statement; the column is
-                // deliberately unindexed so this write stays HOT-eligible.
-                try (PreparedStatement ps =
-                        conn.prepareStatement("UPDATE threadmill_cron_task_state s SET nudge_requested_at = ? "
-                                + "FROM threadmill_cron_tasks t "
-                                + "WHERE s.task_name = t.name AND t.name = ? AND t.enabled")) {
-                    ps.setTimestamp(1, Timestamp.from(requestedAt));
-                    ps.setString(2, taskName);
-                    if (ps.executeUpdate() > 0) return NudgeOutcome.ACCEPTED;
-                }
-                // Slow path: distinguish unknown vs disabled vs a task
-                // registered so recently its state row does not exist yet.
-                Boolean enabled = null;
-                try (PreparedStatement ps =
-                        conn.prepareStatement("SELECT enabled FROM threadmill_cron_tasks WHERE name = ?")) {
-                    ps.setString(1, taskName);
-                    try (ResultSet rs = ps.executeQuery()) {
-                        if (rs.next()) enabled = rs.getBoolean(1);
+                // One error-free conditional statement covering both the
+                // existing-row hot path (the ON CONFLICT arm is a plain
+                // UPDATE — the nudge columns are deliberately unindexed so it
+                // stays HOT-eligible) and the no-state-row-yet window between
+                // upsertCron's two writes. Sourcing the INSERT from the task
+                // row itself enforces existence + enabled in the same
+                // statement, so no FK violation is possible — critical under
+                // join_transaction, where a caught SQLException would already
+                // have poisoned the caller's host transaction. The revision
+                // advances on every acceptance and never resets, giving
+                // compare-and-clear a collision-free identity.
+                for (int attempt = 0; attempt < 3; attempt++) {
+                    try (PreparedStatement ps = conn.prepareStatement(
+                            "INSERT INTO threadmill_cron_task_state (task_name, nudge_requested_at, nudge_revision) "
+                                    + "SELECT t.name, ?, 1 FROM threadmill_cron_tasks t WHERE t.name = ? AND t.enabled "
+                                    + "ON CONFLICT (task_name) DO UPDATE SET "
+                                    + "nudge_requested_at = EXCLUDED.nudge_requested_at, "
+                                    + "nudge_revision = COALESCE(threadmill_cron_task_state.nudge_revision, 0) + 1")) {
+                        ps.setTimestamp(1, Timestamp.from(requestedAt));
+                        ps.setString(2, taskName);
+                        if (ps.executeUpdate() > 0) return NudgeOutcome.ACCEPTED;
+                    }
+                    // Zero rows: the task was missing or disabled at write
+                    // time. Report from a follow-up read — and if a racing
+                    // lifecycle change re-enabled the task in between, retry
+                    // the conditional write instead of misreporting.
+                    try (PreparedStatement ps =
+                            conn.prepareStatement("SELECT enabled FROM threadmill_cron_tasks WHERE name = ?")) {
+                        ps.setString(1, taskName);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            if (!rs.next()) return NudgeOutcome.UNKNOWN_TASK;
+                            if (!rs.getBoolean(1)) return NudgeOutcome.DISABLED;
+                        }
                     }
                 }
-                if (enabled == null) return NudgeOutcome.UNKNOWN_TASK;
-                if (!enabled) return NudgeOutcome.DISABLED;
-                // Task exists and is enabled but has no state row (the window
-                // between upsertCron's two writes). Create a nudge-only row;
-                // the FK to threadmill_cron_tasks makes a concurrent deletion
-                // fail this insert instead of resurrecting schedule state.
-                try (PreparedStatement ps = conn.prepareStatement(
-                        "INSERT INTO threadmill_cron_task_state (task_name, nudge_requested_at) VALUES (?, ?) "
-                                + "ON CONFLICT (task_name) DO UPDATE SET "
-                                + "nudge_requested_at = EXCLUDED.nudge_requested_at")) {
-                    ps.setString(1, taskName);
-                    ps.setTimestamp(2, Timestamp.from(requestedAt));
-                    ps.executeUpdate();
-                    return NudgeOutcome.ACCEPTED;
-                } catch (SQLException e) {
-                    if (DeadlockRetry.hasSqlState(e, "23503")) return NudgeOutcome.UNKNOWN_TASK;
-                    throw e;
-                }
+                throw new SQLException("requestCronNudge for task '" + taskName + "' kept racing enable/disable flips");
             });
         } catch (SQLException e) {
             throw new JdbcException("requestCronNudge failed", e);
@@ -1942,16 +1942,18 @@ public final class PostgresJobStore implements JobStore {
     }
 
     @Override
-    public void clearCronNudge(String taskName, Instant observed) {
+    public void clearCronNudge(String taskName, long observedRevision) {
         Objects.requireNonNull(taskName, "taskName");
-        Objects.requireNonNull(observed, "observed");
         try {
             writeTransaction(conn -> {
+                // Clears the pending flag only; the revision column is never
+                // reset, so cleared identities cannot be reused by a later
+                // acceptance.
                 try (PreparedStatement ps =
                         conn.prepareStatement("UPDATE threadmill_cron_task_state SET nudge_requested_at = NULL "
-                                + "WHERE task_name = ? AND nudge_requested_at = ?")) {
+                                + "WHERE task_name = ? AND nudge_revision = ? AND nudge_requested_at IS NOT NULL")) {
                     ps.setString(1, taskName);
-                    ps.setTimestamp(2, Timestamp.from(observed));
+                    ps.setLong(2, observedRevision);
                     ps.executeUpdate();
                     return null;
                 }

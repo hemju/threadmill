@@ -167,4 +167,50 @@ class ThreadmillMetricsTest {
         // The 1s TTL coalesces: constructor (1) + at most one throttled refresh.
         assertThat(countsCalls.get()).isLessThanOrEqualTo(2);
     }
+
+    @Test
+    void recurringRunsCounterTagsTheTriggerOriginWithBoundedCardinality() {
+        // Issue #108 observability: schedule-fired, nudged, and operator
+        // force-triggered instances must be distinguishable in metrics.
+        var registry = new SimpleMeterRegistry();
+        var metrics = new ThreadmillMetrics(registry, new InMemoryJobStore());
+        var interceptor = metrics.asInterceptor();
+
+        interceptor.onProcessingStarting(jobWithOrigin(JobExecutionContext.CRON_ORIGIN_SCHEDULE), null);
+        interceptor.onProcessingStarting(jobWithOrigin(JobExecutionContext.CRON_ORIGIN_NUDGE), null);
+        interceptor.onProcessingStarting(jobWithOrigin(JobExecutionContext.CRON_ORIGIN_NUDGE), null);
+        interceptor.onProcessingStarting(jobWithOrigin(JobExecutionContext.CRON_ORIGIN_MANUAL), null);
+        // Arbitrary metadata values are clamped so user-controlled strings
+        // can never explode the tag cardinality.
+        interceptor.onProcessingStarting(jobWithOrigin("attacker-controlled"), null);
+        // Non-recurring jobs record nothing.
+        interceptor.onProcessingStarting(
+                Job.builder()
+                        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                        .build(),
+                null);
+
+        assertThat(recurringRuns(registry, JobExecutionContext.CRON_ORIGIN_NUDGE))
+                .isEqualTo(2.0);
+        assertThat(recurringRuns(registry, JobExecutionContext.CRON_ORIGIN_SCHEDULE))
+                .isEqualTo(1.0);
+        assertThat(recurringRuns(registry, JobExecutionContext.CRON_ORIGIN_MANUAL))
+                .isEqualTo(1.0);
+        assertThat(recurringRuns(registry, "other")).isEqualTo(1.0);
+        assertThat(registry.find("threadmill.jobs.recurring.runs").counters()).hasSize(4);
+    }
+
+    private static Job jobWithOrigin(String origin) {
+        return Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                .metadata(JobExecutionContext.CRON_ORIGIN_META, origin)
+                .build();
+    }
+
+    private static double recurringRuns(SimpleMeterRegistry registry, String origin) {
+        return registry.get("threadmill.jobs.recurring.runs")
+                .tag("origin", origin)
+                .counter()
+                .count();
+    }
 }

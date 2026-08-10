@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 import org.junit.jupiter.api.Test;
 
@@ -67,6 +68,57 @@ class NudgeCoalescerTest {
         assertThat(writes.get())
                 .as("one in-flight write plus exactly one follow-up for the burst")
                 .isEqualTo(2);
+    }
+
+    @Test
+    void theFirstCallerIsNotRetainedToDriveFollowUpGenerations() throws Exception {
+        // Under sustained arrivals, follow-up generations run on the
+        // coalescer's own virtual thread. A caller must return as soon as
+        // its own covering write completes — never be held hostage driving
+        // other producers' writes.
+        var coalescer = new NudgeCoalescer();
+        var writes = new AtomicInteger();
+        var gen1Entered = new CountDownLatch(1);
+        var gen1Release = new CountDownLatch(1);
+        var gen2Entered = new CountDownLatch(1);
+        var gen2Release = new CountDownLatch(1);
+        Supplier<NudgeOutcome> write = () -> {
+            int n = writes.incrementAndGet();
+            try {
+                if (n == 1) {
+                    gen1Entered.countDown();
+                    gen1Release.await();
+                } else if (n == 2) {
+                    gen2Entered.countDown();
+                    gen2Release.await();
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            return NudgeOutcome.ACCEPTED;
+        };
+
+        Thread first = Thread.ofVirtual().start(() -> coalescer.nudge("task", write));
+        assertThat(gen1Entered.await(5, TimeUnit.SECONDS)).isTrue();
+        Thread second = Thread.ofVirtual().start(() -> coalescer.nudge("task", write));
+        Thread.sleep(Duration.ofMillis(200));
+        gen1Release.countDown();
+
+        // The first caller returns while the second generation's write is
+        // still blocked — the old behavior kept it driving that write.
+        assertThat(first.join(Duration.ofSeconds(5)))
+                .as("the first caller must not be retained past its own write")
+                .isTrue();
+        assertThat(gen2Entered.await(5, TimeUnit.SECONDS)).isTrue();
+
+        // A third caller arriving mid-generation-2 joins generation 3 and
+        // completes normally once the traffic drains.
+        Thread third = Thread.ofVirtual().start(() -> coalescer.nudge("task", write));
+        Thread.sleep(Duration.ofMillis(200));
+        gen2Release.countDown();
+        assertThat(second.join(Duration.ofSeconds(5))).isTrue();
+        assertThat(third.join(Duration.ofSeconds(5))).isTrue();
+        assertThat(writes.get()).isEqualTo(3);
     }
 
     @Test

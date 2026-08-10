@@ -39,6 +39,15 @@ public final class DashboardPayloads {
 
     public record JobListResponse(List<JobSummary> jobs, int limit, int offset) {}
 
+    /**
+     * @param cronOrigin for recurring instances, what triggered this one —
+     *                   {@code schedule}, {@code nudge}, or {@code manual};
+     *                   {@code null} otherwise. Deliberately not subject to
+     *                   detail redaction: the value set is closed (arbitrary
+     *                   metadata can never leak through it) and carries no
+     *                   payload data, so read-level dashboard users can
+     *                   distinguish nudged from scheduled runs
+     */
     public record JobSummary(
             String id,
             JobState state,
@@ -52,7 +61,8 @@ public final class DashboardPayloads {
             Instant scheduledFor,
             String ownerNodeId,
             Instant ownerHeartbeatAt,
-            boolean detailsRedacted) {}
+            boolean detailsRedacted,
+            String cronOrigin) {}
 
     public record JobDetail(
             JobSummary summary,

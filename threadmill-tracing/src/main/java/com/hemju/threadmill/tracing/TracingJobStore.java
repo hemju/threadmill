@@ -350,8 +350,8 @@ public final class TracingJobStore implements JobStore {
     }
 
     @Override
-    public void clearCronNudge(String taskName, Instant observed) {
-        traceVoid("threadmill.store.clear_cron_nudge", span -> delegate.clearCronNudge(taskName, observed));
+    public void clearCronNudge(String taskName, long observedRevision) {
+        traceVoid("threadmill.store.clear_cron_nudge", span -> delegate.clearCronNudge(taskName, observedRevision));
     }
 
     private <T> T trace(String name, SpanWork<T> work) {

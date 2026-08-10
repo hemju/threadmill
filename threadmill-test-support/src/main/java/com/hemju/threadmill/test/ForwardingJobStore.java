@@ -276,8 +276,8 @@ public class ForwardingJobStore implements JobStore {
     }
 
     @Override
-    public void clearCronNudge(String taskName, Instant observed) {
-        delegate.clearCronNudge(taskName, observed);
+    public void clearCronNudge(String taskName, long observedRevision) {
+        delegate.clearCronNudge(taskName, observedRevision);
     }
 
     @Override

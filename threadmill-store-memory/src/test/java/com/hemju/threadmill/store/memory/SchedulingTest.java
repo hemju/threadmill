@@ -1080,6 +1080,112 @@ class SchedulingTest {
                 .isEmpty();
     }
 
+    @Test
+    void materializerReloadsTheDefinitionUnderTheTaskMutexBeforeActing() {
+        // tick() snapshots the task list BEFORE tickOne takes the per-task
+        // mutex, so an edit can commit in between. Simulate exactly that
+        // interleaving deterministically: the listing returns the stale
+        // pre-edit definition while point reads return the committed truth.
+        // The materializer must insert the fresh handler, not the stale one.
+        scheduler.defineIntervalTask("edited", Duration.ofHours(6), new HelloPayload("tick"), RecorderHandler.class);
+        CronTask stale = store.findCronTask("edited").orElseThrow();
+        scheduler.nudgeRecurring("edited");
+        store.upsertCronTask(new CronTask(
+                stale.name(),
+                stale.trigger(),
+                AdHocHandler.class.getName(),
+                stale.payloadArgument(),
+                stale.queue(),
+                stale.priority(),
+                stale.timeout(),
+                stale.maxAttempts(),
+                stale.missedRunPolicy(),
+                stale.zone(),
+                true));
+
+        var staleListing = new ForwardingJobStore(store) {
+            @Override
+            public List<CronTask> listCronTasks() {
+                return List.of(stale);
+            }
+        };
+        new RecurringMaterializer(staleListing).tick(Instant.now());
+
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .as("the stale pre-edit definition must not be materialized")
+                .isEmpty();
+        assertThat(store.findByHandlerSignature(AdHocHandler.class.getName(), 10))
+                .hasSize(1);
+        assertThat(store.findCronTaskState("edited").orElseThrow().nudgeRequestedAt())
+                .isNull();
+    }
+
+    @Test
+    void materializerRechecksEnabledUnderTheTaskMutexBeforeActing() {
+        // The same list-then-mutex window, for the enabled bit: a disable
+        // committing between the listing and the mutex must suppress the
+        // materialization even though the listed snapshot says enabled.
+        scheduler.defineIntervalTask(
+                "raced-disable", Duration.ofHours(6), new HelloPayload("tick"), RecorderHandler.class);
+        CronTask enabledSnapshot = store.findCronTask("raced-disable").orElseThrow();
+        scheduler.nudgeRecurring("raced-disable");
+        store.upsertCronTask(disabledCopyOf(enabledSnapshot));
+
+        var staleListing = new ForwardingJobStore(store) {
+            @Override
+            public List<CronTask> listCronTasks() {
+                return List.of(enabledSnapshot);
+            }
+        };
+        new RecurringMaterializer(staleListing).tick(Instant.now());
+
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .isEmpty();
+    }
+
+    @Test
+    void aFailedNudgeClearProducesAnExtraRunNeverALostOne() {
+        // The coalescing bound is failure-free by design: job insert, state
+        // upsert, and revision clear are independent durable writes. A clear
+        // that fails leaves the nudge pending, and recovery materializes
+        // again — an extra run, never a lost one.
+        scheduler.defineIntervalTask(
+                "flaky-clear", Duration.ofHours(6), new HelloPayload("tick"), RecorderHandler.class);
+        scheduler.nudgeRecurring("flaky-clear");
+        var failOnce = new AtomicBoolean(true);
+        var flakyClear = new ForwardingJobStore(store) {
+            @Override
+            public void clearCronNudge(String taskName, long observedRevision) {
+                if (failOnce.compareAndSet(true, false)) {
+                    throw new IllegalStateException("store outage during clear");
+                }
+                super.clearCronNudge(taskName, observedRevision);
+            }
+        };
+        var materializer = new RecurringMaterializer(flakyClear);
+        materializer.tick(Instant.now());
+
+        List<Job> first = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
+        assertThat(first).hasSize(1);
+        assertThat(store.findCronTaskState("flaky-clear").orElseThrow().nudgeRequestedAt())
+                .as("the failed clear leaves the nudge pending")
+                .isNotNull();
+
+        // Once the instance terminates, the still-pending nudge produces the
+        // extra run and the retried clear succeeds.
+        Job instance = first.get(0);
+        long v = instance.version();
+        instance.transitionTo(JobState.PROCESSING, Instant.now(), "test", null);
+        instance.transitionTo(JobState.SUCCEEDED, Instant.now(), "test", null);
+        store.saveAtomic(instance, v);
+        materializer.tick(Instant.now());
+
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .hasSize(2);
+        assertThat(store.findCronTaskState("flaky-clear").orElseThrow().nudgeRequestedAt())
+                .isNull();
+    }
+
     private static CronTask disabledCopyOf(CronTask task) {
         return new CronTask(
                 task.name(),

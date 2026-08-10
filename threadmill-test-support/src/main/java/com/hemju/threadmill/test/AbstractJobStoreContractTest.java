@@ -1812,14 +1812,17 @@ public abstract class AbstractJobStoreContractTest {
 
         Instant requested = Instant.now().truncatedTo(ChronoUnit.MILLIS);
         assertThat(store.requestCronNudge("nudged", requested)).isEqualTo(NudgeOutcome.ACCEPTED);
-        assertThat(store.findCronTaskState("nudged").orElseThrow().nudgeRequestedAt())
-                .isEqualTo(requested);
+        var afterAccept = store.findCronTaskState("nudged").orElseThrow();
+        assertThat(afterAccept.nudgeRequestedAt()).isEqualTo(requested);
+        assertThat(afterAccept.nudgeRevision()).isNotNull();
 
-        // The blanket upsert rewrites every schedule field — but not the nudge.
+        // The blanket upsert rewrites every schedule field — but not the
+        // nudge cells (timestamp AND revision).
         store.upsertCronTaskState(new CronTaskScheduleState(
                 "nudged", Instant.now(), null, next, null, CronTaskScheduleState.timingFingerprintOf(task)));
-        assertThat(store.findCronTaskState("nudged").orElseThrow().nudgeRequestedAt())
-                .isEqualTo(requested);
+        var afterUpsert = store.findCronTaskState("nudged").orElseThrow();
+        assertThat(afterUpsert.nudgeRequestedAt()).isEqualTo(requested);
+        assertThat(afterUpsert.nudgeRevision()).isEqualTo(afterAccept.nudgeRevision());
     }
 
     @Test
@@ -1851,11 +1854,11 @@ public abstract class AbstractJobStoreContractTest {
     }
 
     @Test
-    @DisplayName("clearCronNudge is compare-and-clear: only the observed value is cleared")
+    @DisplayName("clearCronNudge is compare-and-clear on the revision: only the observed acceptance is cleared")
     void clearCronNudgeOnlyClearsTheObservedValue() {
         // Run-after-wake hinges on this: a nudge accepted between the
-        // materializer's read and its clear carries a newer timestamp and
-        // must survive to produce the follow-up run.
+        // materializer's read and its clear carries a strictly greater
+        // revision and must survive to produce the follow-up run.
         var task = nudgeContractTask("cas-cleared", true);
         store.upsertCronTask(task);
         store.upsertCronTaskState(
@@ -1864,21 +1867,56 @@ public abstract class AbstractJobStoreContractTest {
         Instant first = Instant.parse("2026-08-10T10:00:00.111Z");
         Instant second = Instant.parse("2026-08-10T10:00:00.222Z");
         assertThat(store.requestCronNudge("cas-cleared", first)).isEqualTo(NudgeOutcome.ACCEPTED);
+        long firstRevision =
+                store.findCronTaskState("cas-cleared").orElseThrow().nudgeRevision();
         assertThat(store.requestCronNudge("cas-cleared", second)).isEqualTo(NudgeOutcome.ACCEPTED);
+        long secondRevision =
+                store.findCronTaskState("cas-cleared").orElseThrow().nudgeRevision();
+        assertThat(secondRevision).isGreaterThan(firstRevision);
 
         // Clearing the stale observation is a no-op; the newer nudge survives.
-        store.clearCronNudge("cas-cleared", first);
+        store.clearCronNudge("cas-cleared", firstRevision);
         assertThat(store.findCronTaskState("cas-cleared").orElseThrow().nudgeRequestedAt())
                 .isEqualTo(second);
 
-        store.clearCronNudge("cas-cleared", second);
+        store.clearCronNudge("cas-cleared", secondRevision);
         assertThat(store.findCronTaskState("cas-cleared").orElseThrow().nudgeRequestedAt())
                 .isNull();
 
         // Clearing an already-cleared nudge is a no-op, not an error.
-        store.clearCronNudge("cas-cleared", second);
+        store.clearCronNudge("cas-cleared", secondRevision);
         assertThat(store.findCronTaskState("cas-cleared").orElseThrow().nudgeRequestedAt())
                 .isNull();
+    }
+
+    @Test
+    @DisplayName("acceptances with identical timestamps stay distinguishable — the revision is the CAS identity")
+    void nudgeAcceptancesWithIdenticalTimestampsAreDistinguishable() {
+        // Wall-clock timestamps collide within store precision (Redis keeps
+        // epoch millis; two producers can nudge in the same millisecond). If
+        // the timestamp were the compare-and-clear identity, clearing the
+        // first observation would erase the second acceptance — losing its
+        // follow-up run. The store-generated revision must advance even when
+        // the timestamp does not change at all.
+        var task = nudgeContractTask("same-instant", true);
+        store.upsertCronTask(task);
+        store.upsertCronTaskState(
+                CronTaskScheduleState.initial("same-instant", Instant.now().plusSeconds(60)));
+
+        Instant instant = Instant.parse("2026-08-10T10:00:00.500Z");
+        assertThat(store.requestCronNudge("same-instant", instant)).isEqualTo(NudgeOutcome.ACCEPTED);
+        long observed = store.findCronTaskState("same-instant").orElseThrow().nudgeRevision();
+
+        // The materializer would materialize here — and a second nudge with
+        // the SAME timestamp is accepted before the clear runs.
+        assertThat(store.requestCronNudge("same-instant", instant)).isEqualTo(NudgeOutcome.ACCEPTED);
+
+        store.clearCronNudge("same-instant", observed);
+        var after = store.findCronTaskState("same-instant").orElseThrow();
+        assertThat(after.nudgeRequestedAt())
+                .as("the second same-instant acceptance must survive the first observation's clear")
+                .isEqualTo(instant);
+        assertThat(after.nudgeRevision()).isGreaterThan(observed);
     }
 
     private static CronTask nudgeContractTask(String name, boolean enabled) {

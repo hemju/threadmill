@@ -38,6 +38,17 @@ import java.util.UUID;
  *                          accepted nudge. The only writers are
  *                          {@code JobStore.requestCronNudge} and the
  *                          compare-and-clear {@code JobStore.clearCronNudge}
+ * @param nudgeRevision     store-generated revision of the most recent nudge
+ *                          acceptance: strictly monotonic per task, incremented
+ *                          on every accept and never reset — including by a
+ *                          clear — so no two acceptances ever share a value.
+ *                          This, not the wall-clock {@code nudgeRequestedAt},
+ *                          is the compare-and-clear identity: timestamps can
+ *                          collide within store precision, and a collision
+ *                          would let a clear erase a newer nudge accepted
+ *                          after materialization. Read-only like the
+ *                          timestamp; {@code null} when no nudge was ever
+ *                          accepted
  */
 public record CronTaskScheduleState(
         String taskName,
@@ -46,16 +57,17 @@ public record CronTaskScheduleState(
         Instant nextRunAt,
         UUID inFlightJobId,
         String timingFingerprint,
-        Instant nudgeRequestedAt) {
+        Instant nudgeRequestedAt,
+        Long nudgeRevision) {
 
     public CronTaskScheduleState {
         Objects.requireNonNull(taskName, "taskName");
     }
 
     /**
-     * Convenience constructor without the read-only {@code nudgeRequestedAt}
-     * component — the natural shape for every writer, since
-     * {@code upsertCronTaskState} never persists that field anyway.
+     * Convenience constructor without the read-only nudge components — the
+     * natural shape for every writer, since {@code upsertCronTaskState} never
+     * persists those fields anyway.
      */
     public CronTaskScheduleState(
             String taskName,
@@ -64,7 +76,7 @@ public record CronTaskScheduleState(
             Instant nextRunAt,
             UUID inFlightJobId,
             String timingFingerprint) {
-        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, timingFingerprint, null);
+        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, timingFingerprint, null, null);
     }
 
     /**
@@ -77,7 +89,7 @@ public record CronTaskScheduleState(
      */
     public CronTaskScheduleState(
             String taskName, Instant lastRunAt, UUID lastRunJobId, Instant nextRunAt, UUID inFlightJobId) {
-        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, null, null);
+        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, null, null, null);
     }
 
     public static CronTaskScheduleState initial(String taskName, Instant nextRunAt, String timingFingerprint) {

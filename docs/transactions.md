@@ -191,7 +191,10 @@ The guarantees, in producer terms:
   satisfying your nudge.
 - **Coalescing.** A burst of nudges collapses to at most the current run plus
   one follow-up. Nudge freely; there is no 1:1 nudge-to-run mapping to worry
-  about.
+  about. (This bound is failure-free: consistent with at-least-once, a crash
+  in the narrow window between the follow-up's insert and the request's
+  clear can produce an extra run — failures only ever add runs, never lose
+  one.)
 - **Durability over signaling.** The nudge is a durable store write consumed
   by the maintenance master's recurring tick — there is no transient signal
   that can be dropped. Worst-case materialization latency is one

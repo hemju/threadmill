@@ -24,16 +24,35 @@
   makes the nudge part of the caller's SQL transaction (note: this holds the
   task's schedule-state row lock until commit — hot-path producers should
   prefer `after_commit`, where an in-JVM per-task coalescer also bounds the
-  store write rate under bursts). Storage: additive Postgres migration
-  `V5__cron_state_nudge.sql` adds `threadmill_cron_task_state.nudge_requested_at`;
-  Redis stores a field in the schedule-state hash. New `JobStore` SPI
-  operations `requestCronNudge` / `clearCronNudge` (store implementors must
-  add both). `CronTaskScheduleState` gained a read-only `nudgeRequestedAt`
-  component.
+  store write rate under bursts; the coalescer never retains a caller beyond
+  its own covering write — follow-up generations run on a dedicated virtual
+  thread). The coalescing bound is failure-free: consistent with
+  at-least-once, a crash between the follow-up's insert and the request's
+  clear can produce an extra run, never lose one. Storage: additive Postgres
+  migration `V5__cron_state_nudge.sql` adds
+  `threadmill_cron_task_state.nudge_requested_at` plus a store-generated,
+  never-reset `nudge_revision` — the revision, not the collision-prone
+  wall-clock timestamp, is the compare-and-clear identity; Redis stores both
+  as schedule-state hash fields. `CronTaskScheduleState` gained read-only
+  `nudgeRequestedAt` / `nudgeRevision` components.
+- **Breaking (SPI):** `JobStore` gained two abstract operations,
+  `requestCronNudge(name, requestedAt)` → `ACCEPTED | UNKNOWN_TASK |
+  DISABLED` and `clearCronNudge(name, observedRevision)`. Third-party store
+  implementations must add both before recompiling (old binaries throw
+  `AbstractMethodError` when nudged). Implementation contract: acceptance
+  must atomically check task existence + enabled and advance a monotonic,
+  never-reset revision; the clear must compare-and-clear on that revision
+  and must not touch it; `upsertCronTaskState` must preserve both nudge
+  fields; a nudge must never resurrect state for a deleted task. The
+  contract test suite (`AbstractJobStoreContractTest`) pins all of this.
 - Recurring instances now carry `threadmill.cron.origin` metadata
-  (`schedule` / `nudge` / `manual`) so schedule-fired, nudged, and
-  dashboard-force-triggered instances are distinguishable in the dashboard
-  and in handler code (`JobExecutionContext.cronOrigin()`).
+  (`schedule` / `nudge` / `manual`), surfaced in three places: handler code
+  (`JobExecutionContext.cronOrigin()`), the dashboard API (`JobSummary.cronOrigin`,
+  deliberately visible on redacted read-level views — the value set is
+  closed, so no metadata can leak through it), and Micrometer
+  (`threadmill.jobs.recurring.runs{origin=schedule|nudge|manual|other}`,
+  cardinality-clamped). The shipped React UI does not render the new field
+  yet; API consumers get it immediately.
 
 ## 0.1.4
 
