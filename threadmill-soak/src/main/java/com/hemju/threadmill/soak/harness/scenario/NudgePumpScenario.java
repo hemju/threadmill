@@ -53,6 +53,13 @@ public final class NudgePumpScenario implements SoakScenario {
     /** One outbox row + nudge per this many background jobs. */
     private static final int NUDGE_EVERY = 2;
 
+    /**
+     * How long the producer waits for its final nudge to produce a run before
+     * giving up and letting the invariant judge. Generous against the default
+     * one-second maintenance tick, and well inside {@link #drainBudget()}.
+     */
+    private static final Duration TAIL_RUN_WAIT = Duration.ofSeconds(30);
+
     private final AtomicBoolean registrationStarted = new AtomicBoolean();
     private final CountDownLatch registered = new CountDownLatch(1);
     private final AtomicLong nudgeSeq = new AtomicLong();
@@ -111,9 +118,24 @@ public final class NudgePumpScenario implements SoakScenario {
             }
             n++;
         }
-        // A final nudge after the producer loop: the drain phase must serve
-        // it, which is exactly the run-after-wake guarantee at the tail.
+        // A final nudge after the producer loop, then hold the tail open
+        // until a pump run actually starts. The harness's drain phase waits
+        // for active jobs, and a not-yet-materialized nudge is not a job — so
+        // without this wait the nodes can stop milliseconds after the final
+        // nudge, before the maintenance tick could serve it, and the
+        // run-after-wake completeness check would fail on a healthy engine.
+        // The wait keeps its teeth: if no run starts within the window, the
+        // invariant still fails, which is the correct outcome for a real bug.
+        long runsBefore = SoakOutbox.runsStarted();
         appendWorkAndNudge(gen, ctx);
+        awaitFollowUpRun(runsBefore);
+    }
+
+    private void awaitFollowUpRun(long runsBefore) throws InterruptedException {
+        Instant deadline = Instant.now().plus(TAIL_RUN_WAIT);
+        while (SoakOutbox.runsStarted() <= runsBefore && Instant.now().isBefore(deadline)) {
+            Thread.sleep(50);
+        }
     }
 
     private void appendWorkAndNudge(LoadGenerator gen, SoakRunContext ctx) {

@@ -27,6 +27,7 @@ public final class SoakOutbox {
 
     private static final ConcurrentLinkedQueue<Long> ROWS = new ConcurrentLinkedQueue<>();
     private static final AtomicLong NEXT_SEQ = new AtomicLong();
+    private static final AtomicLong RUNS_STARTED = new AtomicLong();
 
     private SoakOutbox() {}
 
@@ -34,6 +35,26 @@ public final class SoakOutbox {
     public static void reset() {
         ROWS.clear();
         NEXT_SEQ.set(0);
+        RUNS_STARTED.set(0);
+    }
+
+    /**
+     * Count one pump execution, recorded at the start of the handler body.
+     *
+     * <p>This is how the scenario holds the tail of a run open: the harness's
+     * generic drain phase waits for active <em>jobs</em>, and a nudge that has
+     * not yet been materialized is not a job — so without this the nodes can
+     * stop within milliseconds of the final nudge, long before the ≤1s
+     * maintenance tick could serve it, and the run-after-wake completeness
+     * check would fail on a healthy engine.
+     */
+    public static void runStarted() {
+        RUNS_STARTED.incrementAndGet();
+    }
+
+    /** Pump executions started so far this run. */
+    public static long runsStarted() {
+        return RUNS_STARTED.get();
     }
 
     /**

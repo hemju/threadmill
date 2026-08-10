@@ -173,6 +173,7 @@ public final class SoakPayloads {
         @Override
         public void run(JobExecutionContext ctx) throws InterruptedException {
             SoakExecutionTrace.started(ctx);
+            SoakOutbox.runStarted();
             try {
                 // A real pump reads its work table here. Drain first, then do
                 // the (simulated) work, so the drained set is attributable to
