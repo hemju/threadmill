@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.4
 
 - **Breaking (Spring):** renamed `@Job(maxRetries)` to `@Job(maxAttempts)`
   (issue #104). The value always counted total attempts — `maxRetries = 1`
@@ -55,6 +55,12 @@
   `DROP` task whose boundary passed during downtime fires once shortly after
   startup instead of silently skipping to the next boundary — the same
   behavior it always had across a live materializer stall.
+- Patched OSV-flagged dependencies for the release: PostgreSQL JDBC 42.7.12,
+  Netty 4.1.136.Final, Micrometer 1.15.12, a test-classpath constraint on
+  `tools.jackson.core:jackson-databind` 3.1.5 (Spring Boot 4.0.7's BOM still
+  pins 3.1.4), and refreshed dashboard build dependencies (`nanoid`,
+  `postcss`). `npm audit` and the OSV scan report zero known vulnerabilities
+  for the release lockfiles.
 
 ## 0.1.3
 

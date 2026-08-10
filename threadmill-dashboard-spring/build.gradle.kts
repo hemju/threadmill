@@ -4,6 +4,13 @@ plugins {
 }
 
 dependencies {
+    constraints {
+        // Spring Boot 4.0.7's BOM resolves tools.jackson.core:jackson-databind
+        // 3.1.4 (GHSA-5gvw-p9qm-jgwh) onto the test classpath; constrain the
+        // patched release until a Boot patch carries it. Remove when the
+        // springBoot pin advances past 4.0.7.
+        testImplementation(libs.jackson3.databind)
+    }
     api(project(":threadmill-core"))
     api(project(":threadmill-dashboard-api"))
     api(libs.spring.boot.autoconfigure)
