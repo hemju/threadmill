@@ -13,6 +13,8 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.function.Supplier;
 
+import com.fasterxml.jackson.databind.JsonNode;
+
 /**
  * Library of named invariant checks.
  *
@@ -558,6 +560,175 @@ public final class InvariantChecks {
                         }
                     }
                 });
+    }
+
+    /**
+     * Issue #108's load-bearing guarantee: after every accepted nudge, at
+     * least one run of the nudged recurring task <em>starts</em> after it.
+     *
+     * <p>Judged on handler-emitted {@code exec_started} brackets carrying a
+     * {@code cronOrigin}, never on the materialization or the interceptor
+     * events — a run counts once its handler is actually executing, and a
+     * schedule-origin run started after the nudge satisfies it just as a
+     * nudge-origin one does (the materializer deliberately coalesces a
+     * pending nudge into a due scheduled fire).
+     *
+     * <p>State is O(1) per task: satisfaction is monotone in time, so a run
+     * starting at T discharges every nudge accepted before T. Only the
+     * oldest still-unserved nudge instant and the newest accepted one are
+     * kept. A nudge left unserved for {@link #NUDGE_STALE_AFTER} is reported
+     * as a definite violation (with the maintenance tick at one second, that
+     * is orders of magnitude of slack — it survives master handover under
+     * node churn); anything still pending at end of run is a completeness
+     * violation.
+     */
+    public static SoakInvariant nudgeRunAfterWake() {
+        return new Def(
+                "nudgeRunAfterWake",
+                "every accepted nudge is followed by a recurring run that starts after it",
+                () -> new StreamingInvariantCheck("nudgeRunAfterWake") {
+                    private Instant oldestUnserved;
+                    private Instant newestNudge;
+
+                    @Override
+                    protected void observe(TraceEvent e) {
+                        Instant at = timestampOf(e);
+                        if (at == null) return;
+                        switch (e.event()) {
+                            case "nudge_accepted" -> {
+                                if (oldestUnserved == null) oldestUnserved = at;
+                                newestNudge = at;
+                            }
+                            case "exec_started" -> {
+                                if (e.text("cronOrigin").isEmpty() || oldestUnserved == null) break;
+                                if (newestNudge != null && newestNudge.isBefore(at)) {
+                                    // Every outstanding nudge predates this
+                                    // run's start: all discharged.
+                                    oldestUnserved = null;
+                                    newestNudge = null;
+                                } else if (oldestUnserved.isBefore(at)) {
+                                    // Some nudge accepted after this run
+                                    // started is still outstanding; the
+                                    // earliest it could be is now.
+                                    oldestUnserved = at;
+                                }
+                            }
+                            default -> {
+                                // any event carries a clock reading for the staleness check
+                            }
+                        }
+                        if (oldestUnserved != null
+                                && Duration.between(oldestUnserved, at).compareTo(NUDGE_STALE_AFTER) > 0) {
+                            recordViolation(
+                                    "nudge accepted at " + oldestUnserved + " had no recurring run start within "
+                                            + NUDGE_STALE_AFTER + " (still unserved at " + at + ")",
+                                    List.of(e.rawLine()));
+                            // Restart the clock so one stuck nudge cannot
+                            // flood the recorded-violation cap.
+                            oldestUnserved = at;
+                        }
+                    }
+
+                    @Override
+                    protected void onFinish() {
+                        if (oldestUnserved != null) {
+                            recordViolation(
+                                    "run ended with a nudge accepted at " + oldestUnserved
+                                            + " never followed by a recurring run",
+                                    List.of());
+                        }
+                    }
+                });
+    }
+
+    /**
+     * The end-to-end statement of "a nudge is never silently swallowed": an
+     * outbox row appended before a pump run started must be drained by the
+     * time that run finishes.
+     *
+     * <p>Sound by the emission order the harness guarantees — a
+     * {@code work_recorded} event is written only after the row is visible
+     * to a drain, so "recorded before the run's {@code exec_started}" implies
+     * "visible when that run drained". The reverse race (a row drained
+     * before its own record event reaches the trace) is handled explicitly:
+     * such sequence numbers are remembered as already-drained rather than
+     * re-added as pending.
+     *
+     * <p>State is bounded by undrained rows plus open pump brackets. A
+     * violated row is dropped after being reported, so one lost row cannot
+     * re-violate on every later run.
+     */
+    public static SoakInvariant outboxDrainedByLaterRun() {
+        return new Def(
+                "outboxDrainedByLaterRun",
+                "an outbox row appended before a pump run started is drained by the time that run finishes",
+                () -> new StreamingInvariantCheck("outboxDrainedByLaterRun") {
+                    private final Map<Long, Instant> pendingRows = new LinkedHashMap<>();
+                    private final Set<Long> drainedBeforeRecorded = new HashSet<>();
+                    private final Map<String, Instant> openPumpRuns = new HashMap<>();
+
+                    @Override
+                    protected void observe(TraceEvent e) {
+                        Instant at = timestampOf(e);
+                        switch (e.event()) {
+                            case "work_recorded" -> {
+                                long seq = e.json().path("seq").asLong(-1);
+                                if (seq < 0 || at == null) break;
+                                // Trace lines can transpose across threads;
+                                // a row already drained is not pending.
+                                if (!drainedBeforeRecorded.remove(seq)) pendingRows.put(seq, at);
+                            }
+                            case "work_drained" -> {
+                                for (JsonNode seqNode : e.json().path("seqs")) {
+                                    long seq = seqNode.asLong(-1);
+                                    if (seq < 0) continue;
+                                    if (pendingRows.remove(seq) == null) drainedBeforeRecorded.add(seq);
+                                }
+                            }
+                            case "exec_started" -> {
+                                if (e.text("cronOrigin").isEmpty() || at == null) break;
+                                openPumpRuns.put(e.text("jobId"), at);
+                            }
+                            case "exec_finished" -> {
+                                Instant startedAt = openPumpRuns.remove(e.text("jobId"));
+                                if (startedAt == null) break;
+                                var lost = new ArrayList<Long>();
+                                for (var row : pendingRows.entrySet()) {
+                                    if (row.getValue().isBefore(startedAt)) lost.add(row.getKey());
+                                }
+                                for (Long seq : lost) {
+                                    Instant recordedAt = pendingRows.remove(seq);
+                                    recordViolation(
+                                            "outbox row " + seq + " appended at " + recordedAt
+                                                    + " was still undrained when the pump run started at "
+                                                    + startedAt + " finished",
+                                            List.of(e.rawLine()));
+                                }
+                            }
+                            default -> {
+                                // other events carry no outbox bookkeeping
+                            }
+                        }
+                    }
+                });
+    }
+
+    /**
+     * How long a nudge may go unserved before {@link #nudgeRunAfterWake}
+     * calls it a definite violation. Deliberately generous: the maintenance
+     * tick defaults to one second, so this only fires on systematic
+     * breakage, never on a slow master handover.
+     */
+    private static final Duration NUDGE_STALE_AFTER = Duration.ofMinutes(5);
+
+    private static Instant timestampOf(TraceEvent e) {
+        String raw = e.text("timestamp");
+        if (raw.isEmpty()) return null;
+        try {
+            return Instant.parse(raw);
+        } catch (RuntimeException malformed) {
+            return null;
+        }
     }
 
     // ---------------------------------------------------------------- internals

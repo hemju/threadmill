@@ -2,10 +2,13 @@ package com.hemju.threadmill.soak.harness.scenario;
 
 import java.util.concurrent.ThreadLocalRandom;
 
+import com.hemju.threadmill.core.handler.JobAction;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.core.handler.NoPayload;
 import com.hemju.threadmill.soak.harness.SoakExecutionTrace;
+import com.hemju.threadmill.soak.harness.SoakOutbox;
 
 /**
  * Shared job payloads + handlers used by the scenarios. Each handler is
@@ -152,6 +155,30 @@ public final class SoakPayloads {
                 // engine reclaims us — that's the path this scenario tests.
                 ctx.checkIn();
                 Thread.sleep(p.stallMillis);
+            } finally {
+                SoakExecutionTrace.finished(ctx);
+            }
+        }
+    }
+
+    /**
+     * The wake-driven poller under test: drains every visible outbox row.
+     * Every invocation is identical, so it is a {@link JobAction} over
+     * {@link NoPayload} — the canonical shape for a recurring sweep.
+     * Idempotent by construction: draining an already-empty outbox is a
+     * no-op, so an at-least-once re-run is harmless.
+     */
+    public static final class OutboxPumpHandler implements JobAction {
+
+        @Override
+        public void run(JobExecutionContext ctx) throws InterruptedException {
+            SoakExecutionTrace.started(ctx);
+            try {
+                // A real pump reads its work table here. Drain first, then do
+                // the (simulated) work, so the drained set is attributable to
+                // this bracket even if the node is churned mid-run.
+                int drained = SoakOutbox.drainAll().size();
+                if (drained > 0) Thread.sleep(Math.min(50L, drained));
             } finally {
                 SoakExecutionTrace.finished(ctx);
             }

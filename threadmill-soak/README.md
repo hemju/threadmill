@@ -144,6 +144,7 @@ result.
 | `pause-resume` | 10 project queues; randomly-chosen queue paused mid-run for 5 s. |
 | `bulk-enqueue` | Producer uses `enqueueAll` exclusively in 50-job batches. |
 | `crash-recover` | Closes one `ProcessingNode` mid-run; orphan reclaim picks up its work. |
+| `nudge-pump` | Wake-driven outbox pump: producers append work rows and nudge a recurring task whose own schedule is a slow 10-minute backstop, plus background load. Checks run-after-wake and that no appended row survives a later pump run. |
 
 ### Output directory layout
 
@@ -205,6 +206,7 @@ a human reading the files by hand. `summary.md` is the table-of-contents;
 | Queue pause didn't take effect | `pause-resume` |
 | Bulk-enqueue path slower than per-job | `bulk-enqueue` |
 | Node crash didn't trigger orphan reclaim | `crash-recover` |
+| Nudged recurring task ran late, not at all, or work rows sat unprocessed | `nudge-pump` |
 
 ---
 
