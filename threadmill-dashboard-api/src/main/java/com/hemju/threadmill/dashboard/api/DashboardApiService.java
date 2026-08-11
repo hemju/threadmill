@@ -339,12 +339,20 @@ public final class DashboardApiService {
         // clear — from a read taken INSIDE the task mutex: a snapshot from
         // before the mutex could see a concurrent enable as "still disabled"
         // and wrongly clear a legitimate post-enable nudge.
-        store.findCronTask(name).orElseThrow(() -> notFound("recurring task not found"));
+        CronTask preMutex = store.findCronTask(name).orElseThrow(() -> notFound("recurring task not found"));
+        // Operator input is parsed BEFORE taking the mutex: a malformed zone
+        // or trigger must answer 400, and validating inside the mutex would
+        // let mutex contention turn it into a 409 (and make a request that can
+        // only fail still contend for the lock).
+        CronTask.Trigger requestedTrigger = request.triggerKind() == null && request.triggerValue() == null
+                ? null
+                : trigger(request.triggerKind(), request.triggerValue(), preMutex.trigger());
+        ZoneId requestedZone = request.zone() == null ? null : parseZone(request.zone());
         withTaskMutex(name, () -> {
             CronTask existing = store.findCronTask(name).orElseThrow(() -> notFound("recurring task not found"));
             CronTask task = new CronTask(
                     name,
-                    trigger(request.triggerKind(), request.triggerValue(), existing.trigger()),
+                    requestedTrigger == null ? existing.trigger() : requestedTrigger,
                     request.handlerType() == null ? existing.handlerType() : request.handlerType(),
                     request.payloadArgument() == null ? existing.payloadArgument() : request.payloadArgument(),
                     request.queue() == null ? existing.queue() : request.queue(),
@@ -352,7 +360,7 @@ public final class DashboardApiService {
                     existing.timeout(),
                     existing.maxAttempts(),
                     request.missedRunPolicy() == null ? existing.missedRunPolicy() : request.missedRunPolicy(),
-                    request.zone() == null ? existing.zone() : parseZone(request.zone()),
+                    requestedZone == null ? existing.zone() : requestedZone,
                     request.enabled() == null ? existing.enabled() : request.enabled());
             var prior = store.findCronTaskState(name);
             boolean pendingNudge = prior.isPresent()

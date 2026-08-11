@@ -182,9 +182,15 @@ public final class ThreadmillMetrics {
             @Override
             public void onProcessingStarting(Job job, JobExecutionContext ctx) {
                 inFlightStart.put(job.id().toString(), Instant.now());
-                job.metadata()
-                        .get(JobExecutionContext.CRON_ORIGIN_META)
-                        .ifPresent(ThreadmillMetrics.this::recordRecurringRun);
+                // This hook fires once per attempt, but the meter counts
+                // recurring *instances* — operators read the nudge-to-schedule
+                // ratio off it, and a retry-storming task would inflate both
+                // origins and make that reading meaningless.
+                if (job.attempts() <= 1) {
+                    job.metadata()
+                            .get(JobExecutionContext.CRON_ORIGIN_META)
+                            .ifPresent(ThreadmillMetrics.this::recordRecurringRun);
+                }
             }
 
             @Override

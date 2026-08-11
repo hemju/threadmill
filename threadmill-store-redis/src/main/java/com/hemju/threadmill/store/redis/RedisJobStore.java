@@ -1796,6 +1796,12 @@ public final class RedisJobStore implements JobStore {
     public void deleteCronTask(String name) {
         Names.requireName("cronTask", name);
         RedisClusterCommands<String, String> r = sync();
+        // Task hash first, state second, and that order is load-bearing: the
+        // atomic nudge-accept script keys off the task hash existing, so a
+        // nudge either loses the race (EXISTS == 0 -> UNKNOWN_TASK) or wins it
+        // and has its state write removed by the DEL below. Swapping these two
+        // lines would let an accepted nudge resurrect schedule state for a
+        // deleted task.
         r.del(RedisKeys.userKey("cron_task", name));
         r.del(RedisKeys.userKey("cron_task_state", name));
         r.srem(CRON_TASKS_INDEX, name);

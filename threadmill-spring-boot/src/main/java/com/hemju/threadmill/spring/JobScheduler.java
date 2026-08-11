@@ -204,12 +204,19 @@ public class JobScheduler {
      * {@link Scheduler#nudgeRecurring(String)} for the full contract
      * (run-after-wake, coalescing, durability, schedule non-interference).
      *
-     * <p>On this scheduler the nudge write is immediate. The transaction-mode
-     * subclasses refine that: {@link TransactionAwareJobScheduler} defers the
-     * write to {@code afterCommit} (a rollback discards it), and
-     * {@link TransactionJoinedJobScheduler} makes it part of the caller's SQL
-     * transaction — so producers can nudge in the same transaction that
-     * writes the work row.
+     * <p>On this scheduler the nudge write is immediate. Both transaction-mode
+     * subclasses — {@link TransactionAwareJobScheduler} and, deliberately,
+     * {@link TransactionJoinedJobScheduler} — instead validate on the calling
+     * thread and defer the write to {@code afterCommit}, so a rollback
+     * discards it. Nudges never join the caller's SQL transaction even in
+     * {@code join_transaction} mode: coalescing is one store cell per task, so
+     * a joined nudge would hold that row's lock for the whole business
+     * transaction and serialize every producer of the task. See
+     * {@link DeferredNudge}.
+     *
+     * <p>Prefer {@link #nudgeRecurring(Class)} for {@code @Recurring}
+     * handlers; this overload is for tasks registered imperatively through the
+     * core {@link Scheduler}, where the caller chooses the name.
      *
      * @throws IllegalArgumentException if no recurring task with that name exists
      * @throws IllegalStateException    if the task is disabled

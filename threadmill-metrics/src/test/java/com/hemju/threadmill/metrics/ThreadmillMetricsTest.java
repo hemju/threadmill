@@ -200,6 +200,32 @@ class ThreadmillMetricsTest {
         assertThat(registry.find("threadmill.jobs.recurring.runs").counters()).hasSize(4);
     }
 
+    @Test
+    void recurringRunsCounterCountsInstancesNotRetryAttempts() {
+        // The hook fires per attempt, but operators read the
+        // nudge-versus-schedule ratio off this meter — a retry-storming task
+        // would inflate both origins and make that reading meaningless.
+        var registry = new SimpleMeterRegistry();
+        var interceptor = new ThreadmillMetrics(registry, new InMemoryJobStore()).asInterceptor();
+
+        interceptor.onProcessingStarting(nudgedJobOnAttempt(1), null);
+        for (int attempt = 2; attempt <= 5; attempt++) {
+            interceptor.onProcessingStarting(nudgedJobOnAttempt(attempt), null);
+        }
+
+        assertThat(recurringRuns(registry, JobExecutionContext.CRON_ORIGIN_NUDGE))
+                .as("one instance that was retried four times is still one instance")
+                .isEqualTo(1.0);
+    }
+
+    private static Job nudgedJobOnAttempt(int attempt) {
+        return Job.builder()
+                .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+                .metadata(JobExecutionContext.CRON_ORIGIN_META, JobExecutionContext.CRON_ORIGIN_NUDGE)
+                .attempts(attempt)
+                .build();
+    }
+
     private static Job jobWithOrigin(String origin) {
         return Job.builder()
                 .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))

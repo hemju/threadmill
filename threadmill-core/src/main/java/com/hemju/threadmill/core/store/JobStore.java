@@ -473,8 +473,11 @@ public interface JobStore {
      * carries a strictly greater revision and survives, so the materializer's
      * next tick produces the follow-up run it promises. That is what makes
      * the run-after-wake guarantee hold without a producer-side mutex. The
-     * revision itself is never reset, so cleared values can never be reused.
-     * Clearing an already-cleared or never-set nudge is a no-op.
+     * revision is never reset for the lifetime of the task's schedule state,
+     * so a cleared value cannot be reused while the task exists (deleting the
+     * task drops the state row with it, so a task re-registered under the
+     * same name legitimately starts over at one). Clearing an
+     * already-cleared or never-set nudge is a no-op.
      */
     void clearCronNudge(String taskName, long observedRevision);
 

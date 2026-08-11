@@ -122,7 +122,7 @@ public final class TransactionJoinedJobScheduler extends JobScheduler {
      */
     @Override
     public void nudgeRecurring(String taskName) {
-        DeferredNudge.onCommit(taskName, store, () -> super.nudgeRecurring(taskName), LOG);
+        DeferredNudge.onCommit(taskName, store, name -> super.nudgeRecurring(name), LOG);
     }
 
     private void wakeAfterCommitOrNow(String queue) {

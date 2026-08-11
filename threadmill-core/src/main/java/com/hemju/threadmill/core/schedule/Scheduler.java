@@ -276,7 +276,11 @@ public final class Scheduler {
      * an instance as soon as possible (a "nudge").
      *
      * <p>The nudge goes through the normal recurring machinery — the same
-     * pile-up guard and the same missed-run policy — it is not a bypass lane.
+     * pile-up guard, the same materializer, the same queue and per-instance
+     * overrides — it is not a bypass lane. The missed-run policy is the one
+     * thing it does not consult: a nudge represents no missed firing, so the
+     * policy applies only when a nudge coalesces into a scheduled fire that
+     * is already due.
      * The guarantees:
      * <ul>
      *   <li><strong>Run-after-wake.</strong> After every accepted nudge, at

@@ -41,7 +41,10 @@ import java.util.UUID;
  * @param nudgeRevision     store-generated revision of the most recent nudge
  *                          acceptance: strictly monotonic per task, incremented
  *                          on every accept and never reset — including by a
- *                          clear — so no two acceptances ever share a value.
+ *                          clear — so no two acceptances share a value for as
+ *                          long as the task's schedule state exists (deleting
+ *                          the task drops the state row, so a same-named task
+ *                          registered later starts over at one).
  *                          This, not the wall-clock {@code nudgeRequestedAt},
  *                          is the compare-and-clear identity: timestamps can
  *                          collide within store precision, and a collision

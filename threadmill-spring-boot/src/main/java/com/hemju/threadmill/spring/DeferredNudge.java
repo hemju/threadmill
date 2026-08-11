@@ -1,6 +1,9 @@
 package com.hemju.threadmill.spring;
 
+import java.util.LinkedHashSet;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.Consumer;
 
 import org.slf4j.Logger;
 import org.springframework.transaction.support.TransactionSynchronization;
@@ -27,8 +30,31 @@ import com.hemju.threadmill.core.store.JobStore;
  * scaling cliff for a guarantee the design does not need is the wrong trade,
  * so the nudge is deferred to {@code afterCommit} everywhere. Rollback
  * semantics are unchanged either way — {@code afterCommit} does not fire on
- * rollback — and the lock is held for microseconds instead of the caller's
- * transaction.
+ * rollback.
+ *
+ * <p>Note that the store's nudge write must additionally refuse to join the
+ * caller's connection even when invoked from {@code afterCommit}: Spring has
+ * committed by then but has not yet unbound its resources, so a joining
+ * boundary would run the write in a fresh transaction nobody commits. The
+ * PostgreSQL store owns that transaction explicitly for this reason.
+ *
+ * <p><strong>Deduplicated per transaction.</strong> The documented usage is
+ * "nudge once per work item and let the engine collapse them", so a batch
+ * importer writing 500 rows calls this 500 times in one transaction. Each
+ * distinct task is validated once and written once: the in-JVM coalescer only
+ * collapses <em>concurrent</em> callers, and 500 sequential calls on the
+ * commit thread would otherwise be 500 store round trips for byte-identical
+ * writes.
+ *
+ * <p>That per-transaction batch is held by the registered synchronisation
+ * itself and found by scanning the current synchronisation list —
+ * deliberately not by {@code bindResource}. Spring's {@code suspend()} does
+ * not unbind custom resources, so a resource-held batch would leak into a
+ * {@code REQUIRES_NEW} inner transaction: the inner would skip registering
+ * its own callback, and an inner commit under an outer rollback would drop
+ * the nudge entirely. Synchronisation lists <em>are</em> suspended and
+ * restored, so scoping to them is correct for nested and independent
+ * transactions alike.
  */
 final class DeferredNudge {
 
@@ -38,13 +64,12 @@ final class DeferredNudge {
      * Validate immediately and record the nudge after the caller's
      * transaction commits; with no active synchronisation, nudge now.
      *
-     * @param nudgeNow the immediate nudge to run (after commit, or straight
-     *                 away outside a transaction)
+     * @param nudgeNow performs the immediate nudge for a given task name
      */
-    static void onCommit(String taskName, JobStore store, Runnable nudgeNow, Logger log) {
+    static void onCommit(String taskName, JobStore store, Consumer<String> nudgeNow, Logger log) {
         Objects.requireNonNull(taskName, "taskName");
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            nudgeNow.run();
+            nudgeNow.accept(taskName);
             return;
         }
         // Fail fast while the caller can still react: the deferred write
@@ -56,15 +81,45 @@ final class DeferredNudge {
             throw new IllegalStateException(
                     "Recurring task '" + taskName + "' is disabled; an explicit pause wins over a nudge");
         }
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
+        batchForCurrentTransaction(nudgeNow, log).add(taskName);
+    }
+
+    private static NudgeBatch batchForCurrentTransaction(Consumer<String> nudgeNow, Logger log) {
+        for (TransactionSynchronization existing : TransactionSynchronizationManager.getSynchronizations()) {
+            if (existing instanceof NudgeBatch batch) return batch;
+        }
+        NudgeBatch batch = new NudgeBatch(nudgeNow, log);
+        TransactionSynchronizationManager.registerSynchronization(batch);
+        return batch;
+    }
+
+    /** One transaction's set of tasks to nudge, flushed once on commit. */
+    private static final class NudgeBatch implements TransactionSynchronization {
+
+        // Insertion-ordered so the writes fire in the order the caller asked
+        // for them, which keeps logs and traces readable.
+        private final Set<String> taskNames = new LinkedHashSet<>();
+        private final Consumer<String> nudgeNow;
+        private final Logger log;
+
+        NudgeBatch(Consumer<String> nudgeNow, Logger log) {
+            this.nudgeNow = nudgeNow;
+            this.log = log;
+        }
+
+        void add(String taskName) {
+            taskNames.add(taskName);
+        }
+
+        @Override
+        public void afterCommit() {
+            for (String taskName : taskNames) {
                 // Spring runs after-commit callbacks in a bare loop with no
                 // per-item isolation: a throw here would silently skip every
                 // later-registered synchronisation. A lost nudge degrades to
                 // backstop-schedule latency by design, but say so loudly.
                 try {
-                    nudgeNow.run();
+                    nudgeNow.accept(taskName);
                 } catch (RuntimeException e) {
                     log.error(
                             "Threadmill after-commit nudge for recurring task '{}' was NOT recorded; "
@@ -73,6 +128,6 @@ final class DeferredNudge {
                             e);
                 }
             }
-        });
+        }
     }
 }

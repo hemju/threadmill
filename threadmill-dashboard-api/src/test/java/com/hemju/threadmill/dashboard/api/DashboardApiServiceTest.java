@@ -217,6 +217,36 @@ class DashboardApiServiceTest {
     }
 
     @Test
+    void updateRecurringWithoutAnEnabledFlipLeavesAPendingNudgeIntact() {
+        // The clear belongs to the enabled-flip branches only. An ordinary
+        // edit — a priority change here — must not discard demand a producer
+        // already recorded; that would silently lose the follow-up run.
+        var store = new InMemoryJobStore();
+        var service = new DashboardApiService(store, new LocalWakeBus());
+        var task = new CronTask(
+                "report",
+                new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
+                "com.example.ReportHandler",
+                new JobArgument("com.hemju.threadmill.core.handler.NoPayload", "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
+        store.upsertCronTask(task);
+        store.upsertCronTaskState(CronTaskScheduleState.initial(
+                "report", Instant.now().plus(Duration.ofMinutes(5)), CronTaskScheduleState.timingFingerprintOf(task)));
+        assertThat(store.requestCronNudge("report", Instant.now())).isEqualTo(NudgeOutcome.ACCEPTED);
+
+        service.updateRecurring(
+                "report", new UpdateRecurringRequest(null, null, null, null, null, 7, null, null, null));
+
+        assertThat(store.findCronTaskState("report").orElseThrow().nudgeRequestedAt())
+                .as("a non-flip edit must not clear a pending nudge")
+                .isNotNull();
+    }
+
+    @Test
     void manualTriggerCarriesTheTaskTimeoutAsPerJobTimeoutMetadata() {
         // Companion to github issue #84: a manually triggered instance of a
         // recurring task must run under the task's timeout and retry budget,

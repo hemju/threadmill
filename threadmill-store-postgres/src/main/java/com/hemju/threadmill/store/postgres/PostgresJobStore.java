@@ -84,6 +84,10 @@ public final class PostgresJobStore implements JobStore {
 
     private final DataSource dataSource;
     private final PostgresTransactionBoundary transactionBoundary;
+
+    /** Boundary for writes that must never join an external transaction; see {@link #ownedTransaction}. */
+    private final PostgresTransactionBoundary owningBoundary;
+
     private final JobSerializer serializer;
     private final JobStoreCapabilities capabilities;
     private final String serverVersion;
@@ -104,6 +108,7 @@ public final class PostgresJobStore implements JobStore {
             PostgresTransactionBoundary transactionBoundary) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.transactionBoundary = Objects.requireNonNull(transactionBoundary, "transactionBoundary");
+        this.owningBoundary = PostgresTransactionBoundary.owning(this.dataSource);
         this.serializer = Objects.requireNonNull(serializer, "serializer");
         this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
         var identity = requirePostgresEighteen(this.dataSource);
@@ -1892,22 +1897,16 @@ public final class PostgresJobStore implements JobStore {
 
     @Override
     public NudgeOutcome requestCronNudge(String taskName, Instant requestedAt) {
-        Objects.requireNonNull(taskName, "taskName");
+        Names.requireName("cronTask", taskName);
         Objects.requireNonNull(requestedAt, "requestedAt");
-        // Routed through the transaction boundary so a Spring join_transaction
-        // caller's nudge commits (or rolls back) with the work row it belongs
-        // to.
         try {
-            return writeTransaction(conn -> {
-                // One error-free conditional statement covering both the
-                // existing-row hot path (the ON CONFLICT arm is a plain
-                // UPDATE — the nudge columns are deliberately unindexed so it
-                // stays HOT-eligible) and the no-state-row-yet window between
-                // upsertCron's two writes. Sourcing the INSERT from the task
-                // row itself enforces existence + enabled in the same
-                // statement, so no FK violation is possible — critical under
-                // join_transaction, where a caught SQLException would already
-                // have poisoned the caller's host transaction. The revision
+            return ownedTransaction(conn -> {
+                // One conditional statement covering both the existing-row hot
+                // path (the ON CONFLICT arm is a plain UPDATE — the nudge
+                // columns are deliberately unindexed so it stays HOT-eligible)
+                // and the no-state-row-yet window between upsertCron's two
+                // writes. Sourcing the INSERT from the task row enforces
+                // existence + enabled in the same statement. The revision
                 // advances on every acceptance and never resets, giving
                 // compare-and-clear a collision-free identity.
                 for (int attempt = 0; attempt < 3; attempt++) {
@@ -1920,6 +1919,17 @@ public final class PostgresJobStore implements JobStore {
                         ps.setTimestamp(1, Timestamp.from(requestedAt));
                         ps.setString(2, taskName);
                         if (ps.executeUpdate() > 0) return NudgeOutcome.ACCEPTED;
+                    } catch (SQLException e) {
+                        // The parent row existed in this statement's snapshot
+                        // but the referential-integrity check runs at end of
+                        // statement against the latest snapshot, so a
+                        // concurrent deleteCronTask can still raise 23503.
+                        // That is the same answer as "no such task" — and it
+                        // is safe to translate here only because this is
+                        // Threadmill's own transaction (see ownedTransaction):
+                        // rolling it back costs nothing.
+                        if (DeadlockRetry.hasSqlState(e, "23503")) return NudgeOutcome.UNKNOWN_TASK;
+                        throw e;
                     }
                     // Zero rows: the task was missing or disabled at write
                     // time. Report from a follow-up read — and if a racing
@@ -1934,7 +1944,11 @@ public final class PostgresJobStore implements JobStore {
                         }
                     }
                 }
-                throw new SQLException("requestCronNudge for task '" + taskName + "' kept racing enable/disable flips");
+                // Three consecutive enable/disable flips raced us. Report the
+                // last truth we observed rather than throwing: a nudge is a
+                // latency hint, and the caller can do nothing useful with an
+                // exception here.
+                return NudgeOutcome.DISABLED;
             });
         } catch (SQLException e) {
             throw new JdbcException("requestCronNudge failed", e);
@@ -1943,9 +1957,9 @@ public final class PostgresJobStore implements JobStore {
 
     @Override
     public void clearCronNudge(String taskName, long observedRevision) {
-        Objects.requireNonNull(taskName, "taskName");
+        Names.requireName("cronTask", taskName);
         try {
-            writeTransaction(conn -> {
+            ownedTransaction(conn -> {
                 // Clears the pending flag only; the revision column is never
                 // reset, so cleared identities cannot be reused by a later
                 // acceptance.
@@ -1961,6 +1975,26 @@ public final class PostgresJobStore implements JobStore {
         } catch (SQLException e) {
             throw new JdbcException("clearCronNudge failed", e);
         }
+    }
+
+    /**
+     * Run one write in a transaction Threadmill owns, never the caller's.
+     *
+     * <p>The nudge operations are the only cron writes that must refuse to
+     * join an external transaction, and the reason is subtle enough to be
+     * worth stating: the Spring layer defers nudges to {@code afterCommit},
+     * and at that point Spring has committed the caller's transaction but has
+     * not yet unbound its resources — so a joining boundary would hand back
+     * the caller's connection, execute the nudge in a fresh transaction on it,
+     * and leave nobody to commit that transaction. On a pool that returns
+     * connections with {@code autoCommit=false} (Hikari with JPA defaults) the
+     * write is then rolled back on release, losing the nudge silently; on
+     * others it leaks into whatever transaction uses that connection next.
+     * Owning the transaction also makes rolling back on a concurrent
+     * task-deletion conflict harmless, and lets {@link DeadlockRetry} retry.
+     */
+    private <T> T ownedTransaction(PostgresConnectionWork<T> work) throws SQLException {
+        return DeadlockRetry.run(() -> owningBoundary.inTransaction(work));
     }
 
     private CronTask readCronTask(ResultSet rs) throws SQLException {

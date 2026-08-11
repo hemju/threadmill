@@ -117,7 +117,29 @@ final class NudgeCoalescer {
             // this caller's own future is complete, and holding it hostage
             // to drive other producers' writes would retain it indefinitely
             // under sustained arrivals.
-            Thread.ofVirtual().name("threadmill-nudge-coalescer").start(() -> drive(taskName, slot, write));
+            try {
+                Thread.ofVirtual().name("threadmill-nudge-coalescer").start(() -> drive(taskName, slot, write));
+            } catch (Throwable cannotStart) {
+                // The promoted generation is already installed as inFlight, so
+                // if nobody drives it every current and future caller for this
+                // task parks forever on an uninterruptible join. Fail the
+                // generation and retire the slot instead, so the next nudge
+                // starts clean.
+                abandon(taskName, slot, promoted, cannotStart);
+            }
         }
+    }
+
+    private void abandon(String taskName, Slot slot, CompletableFuture<NudgeOutcome> promoted, Throwable cause) {
+        CompletableFuture<NudgeOutcome> alsoWaiting;
+        synchronized (slot) {
+            alsoWaiting = slot.next;
+            slot.next = null;
+            slot.inFlight = null;
+            slot.retired = true;
+            slots.remove(taskName, slot);
+        }
+        promoted.completeExceptionally(cause);
+        if (alsoWaiting != null) alsoWaiting.completeExceptionally(cause);
     }
 }
