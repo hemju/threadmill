@@ -296,20 +296,6 @@ final class InvariantViolationTest {
     }
 
     @Test
-    void nudgeRunAfterWakeFiresWhenTheNudgeGoesUnservedTooLong(@TempDir Path tempDir) throws Exception {
-        // Definite (mid-run) detection, so a systematically stuck nudge
-        // fail-fasts instead of costing the whole endurance window.
-        Path traceFile = tempDir.resolve("trace.jsonl");
-        Instant t0 = Instant.parse("2026-08-10T12:00:00Z");
-        appendRawEvent(traceFile, t0, "nudge_accepted", Map.of("task", "pump", "nudgeSeq", 1));
-        appendRawEvent(traceFile, t0.plusSeconds(600), "enqueued", Map.of("jobId", "other", "queue", "default"));
-
-        InvariantResult result = verify(traceFile, InvariantChecks.nudgeRunAfterWake());
-        assertThat(result.passed()).isFalse();
-        assertThat(result.violations()).anyMatch(v -> v.contains("had no recurring run start within"));
-    }
-
-    @Test
     void nudgeRunAfterWakeAcceptsARunThatStartsAfterTheNudge(@TempDir Path tempDir) throws Exception {
         // Green path, including the coalescing rule: a schedule-origin run
         // that starts after the nudge discharges it just like a nudge-origin
@@ -325,6 +311,50 @@ final class InvariantViolationTest {
 
         assertThat(verify(traceFile, InvariantChecks.nudgeRunAfterWake()).passed())
                 .isTrue();
+    }
+
+    @Test
+    void nudgeRunAfterWakeExcusesTimeTheHarnessProcessWasFrozen(@TempDir Path tempDir) throws Exception {
+        // Reproduces the aborted first 6h endurance run: the laptop's battery
+        // died 1s after a nudge was accepted, both backend JVMs froze for
+        // 5h54m, and on resume the staleness clock charged the whole outage
+        // to the engine. Frozen wall-clock is not engine latency — the run
+        // is judged on the service that follows the resume.
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        Instant t0 = Instant.parse("2026-08-10T23:27:38Z");
+        appendRawEvent(traceFile, t0, "nudge_accepted", Map.of("task", "pump", "nudgeSeq", 1));
+        appendRawEvent(traceFile, t0.plusSeconds(1), "succeeded", Map.of("jobId", "bg-1", "queue", "default"));
+        // … host suspended here for nearly six hours …
+        Instant resume = t0.plusSeconds(1 + 354 * 60);
+        appendRawEvent(traceFile, resume, "succeeded", Map.of("jobId", "bg-2", "queue", "default"));
+        appendRawEvent(
+                traceFile, resume.plusSeconds(1), "exec_started", Map.of("jobId", "pump-1", "cronOrigin", "nudge"));
+        appendRawEvent(traceFile, resume.plusSeconds(2), "exec_finished", Map.of("jobId", "pump-1"));
+
+        assertThat(verify(traceFile, InvariantChecks.nudgeRunAfterWake()).passed())
+                .isTrue();
+    }
+
+    @Test
+    void nudgeRunAfterWakeStillFiresWhenTheEngineStallsWhileTheProcessKeepsRunning(@TempDir Path tempDir)
+            throws Exception {
+        // The freeze excuse must not become a blanket amnesty: here the
+        // process is demonstrably alive throughout (steady background
+        // events), so the unserved nudge is a real stall.
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        Instant t0 = Instant.parse("2026-08-10T12:00:00Z");
+        appendRawEvent(traceFile, t0, "nudge_accepted", Map.of("task", "pump", "nudgeSeq", 1));
+        for (int second = 10; second <= 600; second += 10) {
+            appendRawEvent(
+                    traceFile,
+                    t0.plusSeconds(second),
+                    "succeeded",
+                    Map.of("jobId", "bg-" + second, "queue", "default"));
+        }
+
+        InvariantResult result = verify(traceFile, InvariantChecks.nudgeRunAfterWake());
+        assertThat(result.passed()).isFalse();
+        assertThat(result.violations()).anyMatch(v -> v.contains("had no recurring run start within"));
     }
 
     @Test

@@ -589,11 +589,29 @@ public final class InvariantChecks {
                 () -> new StreamingInvariantCheck("nudgeRunAfterWake") {
                     private Instant oldestUnserved;
                     private Instant newestNudge;
+                    private Instant lastEventAt;
 
                     @Override
                     protected void observe(TraceEvent e) {
                         Instant at = timestampOf(e);
                         if (at == null) return;
+                        // A stretch of wall-clock with no trace events at all
+                        // means the harness process was not running — the host
+                        // suspended (a closed lid, a drained battery). The
+                        // producer emits continuously at the configured rate,
+                        // so silence this long cannot happen while the JVM is
+                        // alive. Charging frozen time to the engine turned a
+                        // healthy 6h run into a bogus failure once already, so
+                        // the frozen interval is excused by shifting the
+                        // outstanding nudge's clock forward rather than
+                        // clearing it: service is still required after resume.
+                        if (lastEventAt != null && oldestUnserved != null) {
+                            Duration silence = Duration.between(lastEventAt, at);
+                            if (silence.compareTo(PROCESS_FROZEN_GAP) > 0) {
+                                oldestUnserved = oldestUnserved.plus(silence);
+                            }
+                        }
+                        lastEventAt = at;
                         switch (e.event()) {
                             case "nudge_accepted" -> {
                                 if (oldestUnserved == null) oldestUnserved = at;
@@ -720,6 +738,14 @@ public final class InvariantChecks {
      * breakage, never on a slow master handover.
      */
     private static final Duration NUDGE_STALE_AFTER = Duration.ofMinutes(5);
+
+    /**
+     * Trace silence longer than this means the harness process was frozen,
+     * not that the engine was slow: at any configured rate the producer emits
+     * continuously, so a live JVM never goes a full minute without an event.
+     * Time inside such a gap is not charged to the engine.
+     */
+    private static final Duration PROCESS_FROZEN_GAP = Duration.ofSeconds(60);
 
     private static Instant timestampOf(TraceEvent e) {
         String raw = e.text("timestamp");
