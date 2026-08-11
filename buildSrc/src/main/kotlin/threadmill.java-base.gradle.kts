@@ -2,7 +2,7 @@ plugins { `java-library` }
 
 group = "com.hemju.threadmill"
 
-version = "0.1.4"
+version = "0.2.0"
 
 java {
     toolchain { languageVersion.set(JavaLanguageVersion.of(25)) }

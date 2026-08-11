@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0
 
 - **On-demand materialization for recurring tasks ("nudge", issue #108).**
   `Scheduler.nudgeRecurring(taskName)` (Spring: `JobScheduler.nudgeRecurring`)
