@@ -13,6 +13,12 @@
   definition wins: Threadmill preserves run bookkeeping and pending nudge
   demand, recomputes timing forward from the tick, and does not fire or
   `CATCH_UP` the obsolete trigger's overdue backlog.
+- Added fixed process-separated nudge simulations for Postgres and Redis
+  (issue #114). They hard-kill a maintenance leader after an accepted nudge
+  and prove the standby serves it, then hard-kill a producer after its durable
+  work write but before its nudge and prove the regular recurring backstop
+  drains the row. Cross-process JSON-lines traces record process ids,
+  leadership, trigger origins, and the verified event ordering.
 - Recurring tasks can declare claim-time exclusivity (issue #110). A
   `CronTask` gains an `exclusive` flag, surfaced as
   `@Recurring(exclusive = true)` and as an `exclusive` parameter on

@@ -24,6 +24,7 @@ dependencies {
 // Per-backend simulation tasks. The base `simulate` runs all three sequentially.
 val simulationMainClass = "com.hemju.threadmill.simulation.SimulationMain"
 val workerChurnMainClass = "com.hemju.threadmill.simulation.workerchurn.WorkerChurnSimulatorMain"
+val nudgeSimulationMainClass = "com.hemju.threadmill.simulation.nudge.NudgeSimulationMain"
 
 tasks.register<JavaExec>("simulateMemory") {
     group = "verification"
@@ -70,4 +71,28 @@ tasks.register<JavaExec>("simulateWorkerChurnRedis") {
     classpath = sourceSets["main"].runtimeClasspath
     mainClass.set(workerChurnMainClass)
     args = listOf("--backend", "redis")
+}
+
+tasks.register<JavaExec>("simulateNudgePostgres") {
+    group = "verification"
+    description =
+        "Run the process-separated leader-kill and producer-kill nudge simulation against PostgreSQL."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set(nudgeSimulationMainClass)
+    args = listOf("--backend", "postgres")
+}
+
+tasks.register<JavaExec>("simulateNudgeRedis") {
+    group = "verification"
+    description =
+        "Run the process-separated leader-kill and producer-kill nudge simulation against Redis."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set(nudgeSimulationMainClass)
+    args = listOf("--backend", "redis")
+}
+
+tasks.register("simulateNudge") {
+    group = "verification"
+    description = "Run the process-separated nudge simulation against PostgreSQL and Redis."
+    dependsOn("simulateNudgePostgres", "simulateNudgeRedis")
 }

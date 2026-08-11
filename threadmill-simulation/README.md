@@ -145,6 +145,40 @@ attempts, and periodic store snapshots. It is a production-behaviour trace
 generator, not a replacement for the contract tests. The task exits non-zero
 when the queue does not drain within `--drain-timeout`.
 
+## Process-Separated Nudge Simulation
+
+This fixed simulation starts real Postgres and Redis datastores with
+Testcontainers, then runs the maintenance leader, standby, and producers in
+separate JVMs. Run both backends:
+
+```bash
+./gradlew :threadmill-simulation:simulateNudge
+```
+
+Or select one:
+
+```bash
+./gradlew :threadmill-simulation:simulateNudgePostgres
+./gradlew :threadmill-simulation:simulateNudgeRedis
+```
+
+The leader registers an exclusive eight-second recurring outbox pump. The
+supervisor then verifies two crash windows:
+
+- A producer commits durable work and an accepted nudge. The supervisor
+  hard-kills the maintenance leader before its next materializer tick; the
+  standby must acquire the expired maintenance lease and run the pump with
+  `origin=nudge`.
+- A second producer commits durable work, stops immediately before the nudge,
+  and is hard-killed. No nudge may appear for that row; the regular recurring
+  fire must run with `origin=schedule` and drain it.
+
+The verifier reads a cross-process JSON-lines trace and proves the event
+ordering, distinct process ids, standby ownership, trigger origins, and final
+drain. Artifacts live under
+`build/simulation/nudge-cross-node-<timestamp>-<backend>/`, including
+`trace.jsonl` and one output log per child JVM.
+
 ## Why a separate module
 
 `threadmill-soak` is about sustained load and operational performance
