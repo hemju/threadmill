@@ -19,6 +19,13 @@
   work write but before its nudge and prove the regular recurring backstop
   drains the row. Cross-process JSON-lines traces record process ids,
   leadership, trigger origins, and the verified event ordering.
+- Recorded the issue #113 decision not to add per-task lifecycle generations
+  to the `JobStore` SPI. Issue #114 proves hard-kill handoff and backstop
+  recovery, while the remaining revision-reuse ABA additionally requires an
+  old materializer to resume after outliving its mutex lease and a same-name
+  delete/re-registration. A persistent generation would not replace the
+  existing lifecycle orderings and does not justify its cross-backend storage,
+  retention, migration, and SPI cost without evidence that sequence occurs.
 - Recurring tasks can declare claim-time exclusivity (issue #110). A
   `CronTask` gains an `exclusive` flag, surfaced as
   `@Recurring(exclusive = true)` and as an `exclusive` parameter on

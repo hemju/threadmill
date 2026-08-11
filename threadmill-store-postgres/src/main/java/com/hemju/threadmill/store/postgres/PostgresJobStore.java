@@ -1892,8 +1892,9 @@ public final class PostgresJobStore implements JobStore {
                 // and the no-state-row-yet window between upsertCron's two
                 // writes. Sourcing the INSERT from the task row enforces
                 // existence + enabled in the same statement. The revision
-                // advances on every acceptance and never resets, giving
-                // compare-and-clear a collision-free identity.
+                // advances on every acceptance and never resets while the
+                // schedule-state row exists, giving compare-and-clear a
+                // collision-free identity within one task lifecycle.
                 for (int attempt = 0; attempt < 3; attempt++) {
                     try (PreparedStatement ps = conn.prepareStatement(
                             "INSERT INTO threadmill_cron_task_state (task_name, nudge_requested_at, nudge_revision) "
