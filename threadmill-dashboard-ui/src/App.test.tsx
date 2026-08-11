@@ -48,7 +48,8 @@ const responses: Record<string, unknown> = {
         scheduledFor: null,
         ownerNodeId: null,
         ownerHeartbeatAt: null,
-        detailsRedacted: true
+        detailsRedacted: true,
+        cronOrigin: "nudge"
       }
     ],
     limit: 50,
@@ -111,6 +112,9 @@ it("renders dashboard data and redaction state", async () => {
   await waitFor(() => expect(screen.getByText("com.example.ImportHandler")).toBeInTheDocument());
   expect(screen.getByText("Ada")).toBeInTheDocument();
   expect(screen.getByText("redacted")).toBeInTheDocument();
+  // Issue #108 requirement 8: a nudged run must be distinguishable from a
+  // scheduled one in the console, including on redacted read-level views.
+  expect(screen.getByText("nudge")).toBeInTheDocument();
   expect(screen.getByLabelText("Requeue")).toBeDisabled();
   expect(screen.getByText("All").closest("button")).toBeDisabled();
 });

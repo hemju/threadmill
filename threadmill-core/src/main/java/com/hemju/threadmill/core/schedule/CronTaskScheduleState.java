@@ -28,6 +28,30 @@ import java.util.UUID;
  *                          decide preserve-vs-recompute from this record alone —
  *                          a crash between the separate task and state writes can
  *                          never pair a new trigger with old timing undetectably
+ * @param nudgeRequestedAt  when an on-demand materialization ("nudge") was most
+ *                          recently requested and not yet satisfied, or
+ *                          {@code null}. <strong>Read-only through this
+ *                          record:</strong> {@code JobStore.upsertCronTaskState}
+ *                          deliberately never writes this field — a blanket state
+ *                          upsert (re-registration, materializer bookkeeping,
+ *                          dashboard edit) must not clobber a concurrently
+ *                          accepted nudge. The only writers are
+ *                          {@code JobStore.requestCronNudge} and the
+ *                          compare-and-clear {@code JobStore.clearCronNudge}
+ * @param nudgeRevision     store-generated revision of the most recent nudge
+ *                          acceptance: strictly monotonic per task, incremented
+ *                          on every accept and never reset — including by a
+ *                          clear — so no two acceptances share a value for as
+ *                          long as the task's schedule state exists (deleting
+ *                          the task drops the state row, so a same-named task
+ *                          registered later starts over at one).
+ *                          This, not the wall-clock {@code nudgeRequestedAt},
+ *                          is the compare-and-clear identity: timestamps can
+ *                          collide within store precision, and a collision
+ *                          would let a clear erase a newer nudge accepted
+ *                          after materialization. Read-only like the
+ *                          timestamp; {@code null} when no nudge was ever
+ *                          accepted
  */
 public record CronTaskScheduleState(
         String taskName,
@@ -35,10 +59,27 @@ public record CronTaskScheduleState(
         UUID lastRunJobId,
         Instant nextRunAt,
         UUID inFlightJobId,
-        String timingFingerprint) {
+        String timingFingerprint,
+        Instant nudgeRequestedAt,
+        Long nudgeRevision) {
 
     public CronTaskScheduleState {
         Objects.requireNonNull(taskName, "taskName");
+    }
+
+    /**
+     * Convenience constructor without the read-only nudge components — the
+     * natural shape for every writer, since {@code upsertCronTaskState} never
+     * persists those fields anyway.
+     */
+    public CronTaskScheduleState(
+            String taskName,
+            Instant lastRunAt,
+            UUID lastRunJobId,
+            Instant nextRunAt,
+            UUID inFlightJobId,
+            String timingFingerprint) {
+        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, timingFingerprint, null, null);
     }
 
     /**
@@ -51,7 +92,7 @@ public record CronTaskScheduleState(
      */
     public CronTaskScheduleState(
             String taskName, Instant lastRunAt, UUID lastRunJobId, Instant nextRunAt, UUID inFlightJobId) {
-        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, null);
+        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, null, null, null);
     }
 
     public static CronTaskScheduleState initial(String taskName, Instant nextRunAt, String timingFingerprint) {

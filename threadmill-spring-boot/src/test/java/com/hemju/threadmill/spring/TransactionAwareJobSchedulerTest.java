@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
@@ -21,7 +23,10 @@ import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.core.schedule.CronTask;
+import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 import com.hemju.threadmill.test.ForwardingJobStore;
 
@@ -222,6 +227,85 @@ class TransactionAwareJobSchedulerTest {
         } finally {
             TransactionSynchronizationManager.clear();
         }
+    }
+
+    // -------- recurring nudge (issue #108) --------
+
+    @Test
+    void nudgeOutsideTransactionIsImmediate() {
+        registerRecurringTask("pump", true);
+        enqueuer.nudgeRecurring("pump");
+        assertThat(store.findCronTaskState("pump").orElseThrow().nudgeRequestedAt())
+                .isNotNull();
+    }
+
+    @Test
+    void nudgeInsideTransactionTakesEffectOnlyAfterCommit() {
+        registerRecurringTask("pump", true);
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            enqueuer.nudgeRecurring("pump");
+            assertThat(store.findCronTaskState("pump").orElseThrow().nudgeRequestedAt())
+                    .as("the nudge write must not land before commit")
+                    .isNull();
+            triggerAfterCommit();
+            assertThat(store.findCronTaskState("pump").orElseThrow().nudgeRequestedAt())
+                    .isNotNull();
+        } finally {
+            TransactionSynchronizationManager.clear();
+        }
+    }
+
+    @Test
+    void nudgeInsideRolledBackTransactionIsDiscarded() {
+        registerRecurringTask("pump", true);
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            enqueuer.nudgeRecurring("pump");
+            // No afterCommit triggered — simulating rollback.
+            TransactionSynchronizationManager.clear();
+            assertThat(store.findCronTaskState("pump").orElseThrow().nudgeRequestedAt())
+                    .isNull();
+        } finally {
+            if (TransactionSynchronizationManager.isSynchronizationActive()) {
+                TransactionSynchronizationManager.clear();
+            }
+        }
+    }
+
+    @Test
+    void nudgeValidationFailsFastInsideTheTransactionNotAtCommit() {
+        registerRecurringTask("paused-pump", false);
+        TransactionSynchronizationManager.initSynchronization();
+        try {
+            assertThatThrownBy(() -> enqueuer.nudgeRecurring("unknown-pump"))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("unknown-pump");
+            assertThatThrownBy(() -> enqueuer.nudgeRecurring("paused-pump"))
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("disabled");
+            assertThat(TransactionSynchronizationManager.getSynchronizations())
+                    .as("rejected nudges must not leave a deferred write behind")
+                    .isEmpty();
+        } finally {
+            TransactionSynchronizationManager.clear();
+        }
+    }
+
+    private void registerRecurringTask(String name, boolean enabled) {
+        var task = new CronTask(
+                name,
+                new CronTask.Trigger.Interval(Duration.ofHours(6)),
+                GreetHandler.class.getName(),
+                new JobArgument(GreetPayload.class.getName(), "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                enabled);
+        store.upsertCronTask(task);
+        store.upsertCronTaskState(CronTaskScheduleState.initial(
+                name, Instant.now().plus(Duration.ofHours(6)), CronTaskScheduleState.timingFingerprintOf(task)));
     }
 
     private static void triggerAfterCommit() {

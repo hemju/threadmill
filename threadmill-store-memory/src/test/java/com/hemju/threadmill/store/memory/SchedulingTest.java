@@ -853,6 +853,354 @@ class SchedulingTest {
                 .isEqualTo(1);
     }
 
+    // -------- on-demand nudge (issue #108) --------
+
+    @Test
+    void nudgeMaterializesPromptlyWithoutTouchingTheSchedule() {
+        scheduler.defineIntervalTask(
+                "nudged-idle",
+                Duration.ofHours(6),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+        Instant scheduledNext =
+                store.findCronTaskState("nudged-idle").orElseThrow().nextRunAt();
+
+        scheduler.nudgeRecurring("nudged-idle");
+        new RecurringMaterializer(store).tick(Instant.now());
+
+        List<Job> instances = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
+        assertThat(instances).hasSize(1);
+        Job instance = instances.get(0);
+        assertThat(instance.currentState()).isEqualTo(JobState.ENQUEUED);
+        assertThat(instance.metadata().get(JobExecutionContext.CRON_ORIGIN_META))
+                .contains(JobExecutionContext.CRON_ORIGIN_NUDGE);
+        assertThat(instance.metadata().get(JobExecutionContext.CRON_FIRE_TIME_META))
+                .as("a nudge represents no schedule tick, so it carries no nominal fire time")
+                .isEmpty();
+
+        var after = store.findCronTaskState("nudged-idle").orElseThrow();
+        assertThat(after.nextRunAt())
+                .as("a nudge never moves the schedule — the interval phase is preserved")
+                .isEqualTo(scheduledNext);
+        assertThat(after.nudgeRequestedAt()).isNull();
+        assertThat(after.inFlightJobId())
+                .as("the nudged instance takes the pile-up guard like any other instance")
+                .isEqualTo(instance.id().asUuid());
+    }
+
+    @Test
+    void nudgeDuringAnInFlightRunProducesExactlyOneFollowUpAfterCompletion() {
+        scheduler.defineIntervalTask(
+                "nudged-inflight",
+                Duration.ofHours(6),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+        scheduler.nudgeRecurring("nudged-inflight");
+        var materializer = new RecurringMaterializer(store);
+        materializer.tick(Instant.now());
+        List<Job> first = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
+        assertThat(first).hasSize(1);
+
+        // A burst of nudges lands while that instance is in flight. The
+        // in-flight run may have read its inputs before these nudges'
+        // triggering writes committed, so it must NOT satisfy them — but the
+        // whole burst collapses into a single follow-up.
+        scheduler.nudgeRecurring("nudged-inflight");
+        scheduler.nudgeRecurring("nudged-inflight");
+        scheduler.nudgeRecurring("nudged-inflight");
+        materializer.tick(Instant.now());
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .as("the pile-up guard defers the follow-up while the run is in flight")
+                .hasSize(1);
+
+        Job instance = first.get(0);
+        long v = instance.version();
+        instance.transitionTo(JobState.PROCESSING, Instant.now(), "test", null);
+        instance.transitionTo(JobState.SUCCEEDED, Instant.now(), "test", null);
+        store.saveAtomic(instance, v);
+
+        materializer.tick(Instant.now());
+        List<Job> after = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
+        assertThat(after).as("exactly one follow-up for the whole burst").hasSize(2);
+        Job followUp = after.stream()
+                .filter(j -> !j.id().equals(instance.id()))
+                .findFirst()
+                .orElseThrow();
+        assertThat(followUp.metadata().get(JobExecutionContext.CRON_ORIGIN_META))
+                .contains(JobExecutionContext.CRON_ORIGIN_NUDGE);
+
+        // Once the follow-up terminates, no further instance appears: the
+        // burst was fully coalesced.
+        long v2 = followUp.version();
+        followUp.transitionTo(JobState.PROCESSING, Instant.now(), "test", null);
+        followUp.transitionTo(JobState.SUCCEEDED, Instant.now(), "test", null);
+        store.saveAtomic(followUp, v2);
+        materializer.tick(Instant.now());
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .hasSize(2);
+    }
+
+    @Test
+    void nudgeCoalescesIntoADueScheduledFire() {
+        scheduler.defineIntervalTask(
+                "nudged-due",
+                Duration.ofSeconds(30),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+        scheduler.nudgeRecurring("nudged-due");
+        // Backdate the schedule so the same tick has a due fire AND a pending
+        // nudge. The blanket state upsert must leave the nudge cell intact.
+        var existing = store.findCronTaskState("nudged-due").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null, existing.timingFingerprint()));
+        assertThat(store.findCronTaskState("nudged-due").orElseThrow().nudgeRequestedAt())
+                .isNotNull();
+
+        new RecurringMaterializer(store).tick(Instant.now());
+
+        // One instance total: the scheduled fire was enqueued after the nudge
+        // committed, so it satisfies the nudge instead of doubling it.
+        List<Job> instances = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
+        assertThat(instances).hasSize(1);
+        assertThat(instances.get(0).metadata().get(JobExecutionContext.CRON_ORIGIN_META))
+                .contains(JobExecutionContext.CRON_ORIGIN_SCHEDULE);
+        assertThat(store.findCronTaskState("nudged-due").orElseThrow().nudgeRequestedAt())
+                .isNull();
+    }
+
+    @Test
+    void nudgeInstanceTakesThePileUpGuardSoAScheduledFireWaits() {
+        // "Through the normal machinery" cuts both ways: while a nudged
+        // instance runs, a scheduled fire coming due is deferred by the same
+        // pile-up guard that protects scheduled instances from each other.
+        scheduler.defineIntervalTask(
+                "nudged-guard",
+                Duration.ofSeconds(30),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+        scheduler.nudgeRecurring("nudged-guard");
+        var materializer = new RecurringMaterializer(store);
+        materializer.tick(Instant.now());
+        List<Job> first = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
+        assertThat(first).hasSize(1);
+
+        var state = store.findCronTaskState("nudged-guard").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                state.taskName(),
+                state.lastRunAt(),
+                state.lastRunJobId(),
+                Instant.now().minusSeconds(1),
+                state.inFlightJobId(),
+                state.timingFingerprint()));
+        materializer.tick(Instant.now());
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .as("the due scheduled fire waits behind the running nudged instance")
+                .hasSize(1);
+
+        Job instance = first.get(0);
+        long v = instance.version();
+        instance.transitionTo(JobState.PROCESSING, Instant.now(), "test", null);
+        instance.transitionTo(JobState.SUCCEEDED, Instant.now(), "test", null);
+        store.saveAtomic(instance, v);
+        materializer.tick(Instant.now());
+        List<Job> after = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
+        assertThat(after).hasSize(2);
+    }
+
+    @Test
+    void nudgeUnknownTaskFailsLoudly() {
+        assertThatThrownBy(() -> scheduler.nudgeRecurring("never-registered"))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("never-registered");
+    }
+
+    @Test
+    void nudgeDisabledTaskFailsLoudlyAndDoesNotRun() {
+        scheduler.defineIntervalTask(
+                "nudged-disabled",
+                Duration.ofHours(6),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+        store.upsertCronTask(
+                disabledCopyOf(store.findCronTask("nudged-disabled").orElseThrow()));
+
+        assertThatThrownBy(() -> scheduler.nudgeRecurring("nudged-disabled"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("disabled");
+        new RecurringMaterializer(store).tick(Instant.now());
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .isEmpty();
+    }
+
+    @Test
+    void reEnablingATaskClearsAPendingNudgeFromBeforeThePause() {
+        // Consistent with re-enable-does-not-catch-up (#106): demand recorded
+        // before an explicit pause is stale by the time an operator re-enables
+        // the task, so the flip clears it instead of firing a surprise run.
+        scheduler.defineIntervalTask(
+                "nudged-reenabled",
+                Duration.ofHours(6),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+        scheduler.nudgeRecurring("nudged-reenabled");
+        store.upsertCronTask(
+                disabledCopyOf(store.findCronTask("nudged-reenabled").orElseThrow()));
+
+        scheduler.defineIntervalTask(
+                "nudged-reenabled",
+                Duration.ofHours(6),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+
+        assertThat(store.findCronTaskState("nudged-reenabled").orElseThrow().nudgeRequestedAt())
+                .isNull();
+        new RecurringMaterializer(store).tick(Instant.now());
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .isEmpty();
+    }
+
+    @Test
+    void materializerReloadsTheDefinitionUnderTheTaskMutexBeforeActing() {
+        // tick() snapshots the task list BEFORE tickOne takes the per-task
+        // mutex, so an edit can commit in between. Simulate exactly that
+        // interleaving deterministically: the listing returns the stale
+        // pre-edit definition while point reads return the committed truth.
+        // The materializer must insert the fresh handler, not the stale one.
+        scheduler.defineIntervalTask("edited", Duration.ofHours(6), new HelloPayload("tick"), RecorderHandler.class);
+        CronTask stale = store.findCronTask("edited").orElseThrow();
+        scheduler.nudgeRecurring("edited");
+        store.upsertCronTask(new CronTask(
+                stale.name(),
+                stale.trigger(),
+                AdHocHandler.class.getName(),
+                stale.payloadArgument(),
+                stale.queue(),
+                stale.priority(),
+                stale.timeout(),
+                stale.maxAttempts(),
+                stale.missedRunPolicy(),
+                stale.zone(),
+                true));
+
+        var staleListing = new ForwardingJobStore(store) {
+            @Override
+            public List<CronTask> listCronTasks() {
+                return List.of(stale);
+            }
+        };
+        new RecurringMaterializer(staleListing).tick(Instant.now());
+
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .as("the stale pre-edit definition must not be materialized")
+                .isEmpty();
+        assertThat(store.findByHandlerSignature(AdHocHandler.class.getName(), 10))
+                .hasSize(1);
+        assertThat(store.findCronTaskState("edited").orElseThrow().nudgeRequestedAt())
+                .isNull();
+    }
+
+    @Test
+    void materializerRechecksEnabledUnderTheTaskMutexBeforeActing() {
+        // The same list-then-mutex window, for the enabled bit: a disable
+        // committing between the listing and the mutex must suppress the
+        // materialization even though the listed snapshot says enabled.
+        scheduler.defineIntervalTask(
+                "raced-disable", Duration.ofHours(6), new HelloPayload("tick"), RecorderHandler.class);
+        CronTask enabledSnapshot = store.findCronTask("raced-disable").orElseThrow();
+        scheduler.nudgeRecurring("raced-disable");
+        store.upsertCronTask(disabledCopyOf(enabledSnapshot));
+
+        var staleListing = new ForwardingJobStore(store) {
+            @Override
+            public List<CronTask> listCronTasks() {
+                return List.of(enabledSnapshot);
+            }
+        };
+        new RecurringMaterializer(staleListing).tick(Instant.now());
+
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .isEmpty();
+    }
+
+    @Test
+    void aFailedNudgeClearProducesAnExtraRunNeverALostOne() {
+        // The coalescing bound is failure-free by design: job insert, state
+        // upsert, and revision clear are independent durable writes. A clear
+        // that fails leaves the nudge pending, and recovery materializes
+        // again — an extra run, never a lost one.
+        scheduler.defineIntervalTask(
+                "flaky-clear", Duration.ofHours(6), new HelloPayload("tick"), RecorderHandler.class);
+        scheduler.nudgeRecurring("flaky-clear");
+        var failOnce = new AtomicBoolean(true);
+        var flakyClear = new ForwardingJobStore(store) {
+            @Override
+            public void clearCronNudge(String taskName, long observedRevision) {
+                if (failOnce.compareAndSet(true, false)) {
+                    throw new IllegalStateException("store outage during clear");
+                }
+                super.clearCronNudge(taskName, observedRevision);
+            }
+        };
+        var materializer = new RecurringMaterializer(flakyClear);
+        materializer.tick(Instant.now());
+
+        List<Job> first = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
+        assertThat(first).hasSize(1);
+        assertThat(store.findCronTaskState("flaky-clear").orElseThrow().nudgeRequestedAt())
+                .as("the failed clear leaves the nudge pending")
+                .isNotNull();
+
+        // Once the instance terminates, the still-pending nudge produces the
+        // extra run and the retried clear succeeds.
+        Job instance = first.get(0);
+        long v = instance.version();
+        instance.transitionTo(JobState.PROCESSING, Instant.now(), "test", null);
+        instance.transitionTo(JobState.SUCCEEDED, Instant.now(), "test", null);
+        store.saveAtomic(instance, v);
+        materializer.tick(Instant.now());
+
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .hasSize(2);
+        assertThat(store.findCronTaskState("flaky-clear").orElseThrow().nudgeRequestedAt())
+                .isNull();
+    }
+
+    private static CronTask disabledCopyOf(CronTask task) {
+        return new CronTask(
+                task.name(),
+                task.trigger(),
+                task.handlerType(),
+                task.payloadArgument(),
+                task.queue(),
+                task.priority(),
+                task.timeout(),
+                task.maxAttempts(),
+                task.missedRunPolicy(),
+                task.zone(),
+                false);
+    }
+
     @Test
     void queueRoutingIsRespected() {
         scheduler.enqueue(new HelloPayload("d"), RecorderHandler.class, "default", 0);

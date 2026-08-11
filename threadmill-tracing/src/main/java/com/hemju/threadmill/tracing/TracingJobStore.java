@@ -344,6 +344,16 @@ public final class TracingJobStore implements JobStore {
         return trace("threadmill.store.find_cron_task_state", span -> delegate.findCronTaskState(name));
     }
 
+    @Override
+    public NudgeOutcome requestCronNudge(String taskName, Instant requestedAt) {
+        return trace("threadmill.store.request_cron_nudge", span -> delegate.requestCronNudge(taskName, requestedAt));
+    }
+
+    @Override
+    public void clearCronNudge(String taskName, long observedRevision) {
+        traceVoid("threadmill.store.clear_cron_nudge", span -> delegate.clearCronNudge(taskName, observedRevision));
+    }
+
     private <T> T trace(String name, SpanWork<T> work) {
         Span span = tracer.spanBuilder(name)
                 .setSpanKind(SpanKind.INTERNAL)

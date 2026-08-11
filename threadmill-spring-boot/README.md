@@ -131,6 +131,18 @@ mode is requested.
 `enqueueRecurring(...)` stays immediate because cron-task definitions are
 configuration, not work.
 
+`nudgeRecurring(OutboxPump.class)` — the on-demand "materialize this recurring
+task now" request for wake-driven pollers — is **after-commit in every enqueue
+mode**, `join_transaction` included: validation fails fast at call time, the
+write lands on commit, and a rollback discards it. It is the one write that
+deliberately does not join the caller's transaction, because coalescing is one
+store cell per task and a joined nudge would hold that row's lock for the whole
+business transaction, serializing every producer of that task. Address the task
+by its handler class (its durable name defaults to the fully-qualified class
+name, so the string overload breaks on renames). See the
+[transactions deep-dive](../docs/transactions.md#nudging-a-recurring-task-wake-driven-pollers)
+for the full contract.
+
 See [`docs/transactions.md`](../docs/transactions.md) for the full
 deep-dive (atomic boundaries per backend, handler-is-not-in-our-transaction,
 at-least-once + idempotency, outbox pattern).

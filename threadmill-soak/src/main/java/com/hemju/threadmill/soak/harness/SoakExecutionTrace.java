@@ -1,6 +1,7 @@
 package com.hemju.threadmill.soak.harness;
 
 import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 
 import com.hemju.threadmill.core.handler.JobExecutionContext;
@@ -55,12 +56,27 @@ public final class SoakExecutionTrace {
         emit("exec_finished", ctx);
     }
 
+    /**
+     * Emit a scenario-defined event through the run's trace writer; a no-op
+     * when no sink is installed. Lets scenario-owned helpers (the outbox)
+     * contribute events from inside handler code without threading the
+     * writer through the reflective handler boundary.
+     */
+    public static void emit(String event, Map<String, Object> fields) {
+        SoakTraceWriter w = writer;
+        if (w == null) return;
+        w.emit(event, fields);
+    }
+
     private static void emit(String event, JobExecutionContext ctx) {
         SoakTraceWriter w = writer;
         if (w == null || ctx == null) return;
         var fields = new LinkedHashMap<String, Object>();
         fields.put("jobId", ctx.jobId().toString());
         fields.put("attempt", ctx.attempt());
+        // Recurring instances carry their trigger origin so the nudge
+        // invariants can tell a pump run from ordinary background work.
+        ctx.metadata().get(JobExecutionContext.CRON_ORIGIN_META).ifPresent(origin -> fields.put("cronOrigin", origin));
         w.emit(event, fields);
     }
 }

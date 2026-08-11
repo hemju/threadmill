@@ -1,5 +1,74 @@
 # Changelog
 
+## Unreleased
+
+- **On-demand materialization for recurring tasks ("nudge", issue #108).**
+  `Scheduler.nudgeRecurring(taskName)` (Spring: `JobScheduler.nudgeRecurring`)
+  requests that a registered recurring task materialize an instance as soon
+  as possible, turning frequent pollers into wake-driven pumps with a slow
+  backstop schedule. The nudge goes through the normal machinery — same
+  pile-up guard, same missed-run policy — with four guarantees: at least one
+  run starts after every accepted nudge (a nudge during an in-flight run
+  produces exactly one follow-up after it completes, because the in-flight
+  run may have read its inputs before the nudge's triggering write
+  committed); a burst of nudges coalesces to at most the current run plus one
+  follow-up; the nudge is a durable store write consumed by the maintenance
+  tick, so there is no transient signal to lose (worst-case latency one
+  `maintenancePollInterval`, default 1 s); and a nudged run never moves the
+  schedule — a cron task's next fire stays the regular wall-clock match and
+  an interval trigger's phase is preserved. Nudging an unknown task throws;
+  nudging a disabled task throws — an explicit pause wins — and an
+  enabled-flip clears any pending nudge. The coalescing bound is
+  failure-free: consistent with at-least-once, a crash between the follow-up's
+  insert and the request's clear can produce an extra run, never lose one.
+  Storage: additive Postgres
+  migration `V5__cron_state_nudge.sql` adds
+  `threadmill_cron_task_state.nudge_requested_at` plus a store-generated,
+  never-reset `nudge_revision` — the revision, not the collision-prone
+  wall-clock timestamp, is the compare-and-clear identity; Redis stores both
+  as schedule-state hash fields. `CronTaskScheduleState` gained read-only
+  `nudgeRequestedAt` / `nudgeRevision` components.
+- **Spring nudges are after-commit in every enqueue mode**, including
+  `join_transaction`. Validation fails fast at call time, the write lands on
+  commit, and a rollback discards it — identical semantics in all three
+  modes. This is the one write that deliberately does not join the caller's
+  transaction: coalescing is one store cell per task, so a joined nudge would
+  hold that row's write lock for the whole business transaction and serialize
+  every concurrent producer of that task (silently — correct at low rate,
+  collapsing under load), and all it would buy is closing a crash window the
+  design explicitly does not need closed. An in-JVM per-task coalescer
+  additionally bounds the store write rate under bursts, and never retains a
+  caller beyond its own covering write (follow-up generations run on a
+  dedicated virtual thread).
+- **Spring: nudge by handler class**, `jobScheduler.nudgeRecurring(OutboxPump.class)`.
+  A `@Recurring` task's durable identity defaults to the handler's
+  fully-qualified class name, so the string overload forced callers to
+  hard-code it and broke on a rename or package move; the class overload
+  resolves the registered name through the handler registry and matches the
+  rest of this API, where the handler class is always the first argument.
+  Nudging a registered handler that is not `@Recurring` fails loudly. The
+  string overload remains for tasks registered imperatively through the core
+  `Scheduler`, where the caller chooses the name.
+- **Breaking (SPI):** `JobStore` gained two abstract operations,
+  `requestCronNudge(name, requestedAt)` → `ACCEPTED | UNKNOWN_TASK |
+  DISABLED` and `clearCronNudge(name, observedRevision)`. Third-party store
+  implementations must add both before recompiling (old binaries throw
+  `AbstractMethodError` when nudged). Implementation contract: acceptance
+  must atomically check task existence + enabled and advance a monotonic,
+  never-reset revision; the clear must compare-and-clear on that revision
+  and must not touch it; `upsertCronTaskState` must preserve both nudge
+  fields; a nudge must never resurrect state for a deleted task. The
+  contract test suite (`AbstractJobStoreContractTest`) pins all of this.
+- Recurring instances now carry `threadmill.cron.origin` metadata
+  (`schedule` / `nudge` / `manual`), surfaced in three places: handler code
+  (`JobExecutionContext.cronOrigin()`), the dashboard API (`JobSummary.cronOrigin`,
+  deliberately visible on redacted read-level views — the value set is
+  closed, so no metadata can leak through it), and Micrometer
+  (`threadmill.jobs.recurring.runs{origin=schedule|nudge|manual|other}`,
+  cardinality-clamped). The operations console renders it as a badge beside
+  the handler, so a nudged run is distinguishable from a scheduled one at a
+  glance.
+
 ## 0.1.4
 
 - **Breaking (Spring):** renamed `@Job(maxRetries)` to `@Job(maxAttempts)`

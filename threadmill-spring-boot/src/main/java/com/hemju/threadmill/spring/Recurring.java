@@ -32,6 +32,16 @@ public @interface Recurring {
     /**
      * Recurring interval as an ISO-8601 duration string (for example {@code "PT10S"}).
      * Mutually exclusive with {@link #cron()}.
+     *
+     * <p><strong>Building a wake-driven poller?</strong> If producers call
+     * {@code JobScheduler.nudgeRecurring(YourHandler.class)} when they create
+     * work, this interval stops being "how often the task runs" and becomes a
+     * self-healing backstop: nudges drive the task within a second, and the
+     * schedule only covers the rare case of a nudge lost to a crash between
+     * the producer's commit and the nudge write. Choose it by asking how
+     * stale the work may get in that rare case — minutes to an hour is
+     * normal. A seconds-level interval recreates exactly the row churn
+     * nudging exists to remove. See {@code docs/wake-driven-pollers.md}.
      */
     String interval() default "";
 

@@ -1796,6 +1796,12 @@ public final class RedisJobStore implements JobStore {
     public void deleteCronTask(String name) {
         Names.requireName("cronTask", name);
         RedisClusterCommands<String, String> r = sync();
+        // Task hash first, state second, and that order is load-bearing: the
+        // atomic nudge-accept script keys off the task hash existing, so a
+        // nudge either loses the race (EXISTS == 0 -> UNKNOWN_TASK) or wins it
+        // and has its state write removed by the DEL below. Swapping these two
+        // lines would let an accepted nudge resurrect schedule state for a
+        // deleted task.
         r.del(RedisKeys.userKey("cron_task", name));
         r.del(RedisKeys.userKey("cron_task_state", name));
         r.srem(CRON_TASKS_INDEX, name);
@@ -1843,6 +1849,9 @@ public final class RedisJobStore implements JobStore {
         // atomic script: a crash or failover between two separate commands would
         // leave the state hash wiped, and the materializer reads a null nextRunAt
         // and silently dormants the recurring task until the next re-registration.
+        // The nudge cells are deliberately carried across the overwrite: a blanket
+        // state upsert must never clobber a nudge accepted concurrently — only
+        // requestCronNudge / clearCronNudge write those fields.
         var argv = new ArrayList<String>(fields.size() * 2);
         fields.forEach((k, v) -> {
             argv.add(k);
@@ -1850,9 +1859,17 @@ public final class RedisJobStore implements JobStore {
         });
         try {
             evalScript("""
+                    local nudge = redis.call('HGET', KEYS[1], 'nudge_requested_at')
+                    local revision = redis.call('HGET', KEYS[1], 'nudge_revision')
                     redis.call('DEL', KEYS[1])
                     if #ARGV > 0 then
                         redis.call('HSET', KEYS[1], unpack(ARGV))
+                    end
+                    if nudge then
+                        redis.call('HSET', KEYS[1], 'nudge_requested_at', nudge)
+                    end
+                    if revision then
+                        redis.call('HSET', KEYS[1], 'nudge_revision', revision)
                     end
                     return 1
                     """, ScriptOutputType.INTEGER, new String[] {key}, argv.toArray(String[]::new));
@@ -1876,7 +1893,69 @@ public final class RedisJobStore implements JobStore {
                 hash.containsKey("last_run_job_id") ? UUID.fromString(hash.get("last_run_job_id")) : null,
                 hash.containsKey("next_run_at") ? Instant.ofEpochMilli(Long.parseLong(hash.get("next_run_at"))) : null,
                 hash.containsKey("in_flight_job_id") ? UUID.fromString(hash.get("in_flight_job_id")) : null,
-                hash.get("timing_fingerprint")));
+                hash.get("timing_fingerprint"),
+                hash.containsKey("nudge_requested_at")
+                        ? Instant.ofEpochMilli(Long.parseLong(hash.get("nudge_requested_at")))
+                        : null,
+                hash.containsKey("nudge_revision") ? Long.valueOf(hash.get("nudge_revision")) : null));
+    }
+
+    @Override
+    public NudgeOutcome requestCronNudge(String taskName, Instant requestedAt) {
+        Names.requireName("cronTask", taskName);
+        Objects.requireNonNull(requestedAt, "requestedAt");
+        // One atomic script over the task hash and the state hash (same
+        // cluster slot): the existence + enabled check and the nudge write
+        // cannot race a concurrent deleteCronTask, so a nudge can never
+        // resurrect schedule state for a removed task. HINCRBY generates the
+        // strictly monotonic, never-reset revision that compare-and-clear
+        // uses as its collision-free identity. Always-string return
+        // -> ScriptOutputType.VALUE per the Lua return-value conventions.
+        try {
+            String outcome = evalScript(
+                    """
+                    if redis.call('EXISTS', KEYS[1]) == 0 then
+                        return 'UNKNOWN'
+                    end
+                    if redis.call('HGET', KEYS[1], 'enabled') ~= 'true' then
+                        return 'DISABLED'
+                    end
+                    redis.call('HINCRBY', KEYS[2], 'nudge_revision', 1)
+                    redis.call('HSET', KEYS[2], 'nudge_requested_at', ARGV[1])
+                    return 'ACCEPTED'
+                    """,
+                    ScriptOutputType.VALUE,
+                    new String[] {
+                        RedisKeys.userKey("cron_task", taskName), RedisKeys.userKey("cron_task_state", taskName)
+                    },
+                    Long.toString(requestedAt.toEpochMilli()));
+            return switch (outcome) {
+                case "ACCEPTED" -> NudgeOutcome.ACCEPTED;
+                case "DISABLED" -> NudgeOutcome.DISABLED;
+                default -> NudgeOutcome.UNKNOWN_TASK;
+            };
+        } catch (RuntimeException e) {
+            throw translateCapacity(e);
+        }
+    }
+
+    @Override
+    public void clearCronNudge(String taskName, long observedRevision) {
+        Names.requireName("cronTask", taskName);
+        // Compare-and-clear in one script, on the REVISION: a nudge accepted
+        // after the caller's read carries a strictly greater revision and
+        // survives this clear. Only the pending flag is removed — the
+        // revision field stays, so cleared identities are never reused.
+        evalScript(
+                """
+                if redis.call('HGET', KEYS[1], 'nudge_revision') == ARGV[1] then
+                    redis.call('HDEL', KEYS[1], 'nudge_requested_at')
+                end
+                return 1
+                """,
+                ScriptOutputType.INTEGER,
+                new String[] {RedisKeys.userKey("cron_task_state", taskName)},
+                Long.toString(observedRevision));
     }
 
     private CronTask readCronTask(String name, Map<String, String> hash) {

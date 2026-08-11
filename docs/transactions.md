@@ -172,6 +172,96 @@ normal store-owned transaction when no Spring transaction is active.
 definitions are configuration, not work. Registering them on rollback would be
 surprising.
 
+## Nudging a recurring task (wake-driven pollers)
+
+`nudgeRecurring(taskName)` requests that a registered recurring task
+materialize an instance as soon as possible. It exists for the outbox-pump
+shape: instead of running a poller task every few seconds just to bound the
+latency between "work row written" and "work row processed", producers nudge
+the task when there is work and the recurring schedule becomes a slow
+self-healing backstop (every few minutes). Job-row churn becomes proportional
+to actual work instead of wall-clock time.
+
+> This section covers the **transactional** contract. For the pattern itself —
+> handler shape, how to choose the backstop interval, and what coalescing
+> means for your code — see [Wake-driven pollers](wake-driven-pollers.md).
+
+The guarantees, in producer terms:
+
+- **Run-after-wake.** After every accepted nudge, at least one instance
+  *starts* after it. A nudge that arrives while an instance is already running
+  produces one follow-up run after it completes — the in-flight run may have
+  read the work table before your write committed, so it never counts as
+  satisfying your nudge.
+- **Coalescing.** A burst of nudges collapses to at most the current run plus
+  one follow-up. Nudge freely; there is no 1:1 nudge-to-run mapping to worry
+  about. (This bound is failure-free: consistent with at-least-once, a crash
+  in the narrow window between the follow-up's insert and the request's
+  clear can produce an extra run — failures only ever add runs, never lose
+  one.)
+- **Durability over signaling.** The nudge is a durable store write consumed
+  by the maintenance master's recurring tick — there is no transient signal
+  that can be dropped. Worst-case materialization latency is one
+  `maintenancePollInterval` (default 1 s).
+- **Schedule non-interference.** A nudged run never moves the schedule: a cron
+  task's next fire stays the regular wall-clock match, and an interval
+  trigger's phase is preserved (an every-6h task that last fired at 06:00 and
+  is nudged at 07:00 still fires next at 12:00).
+
+Nudging an unknown task throws `IllegalArgumentException`; nudging a disabled
+task throws `IllegalStateException` — an explicit pause wins. Disabling or
+re-enabling a task clears any pending nudge (consistent with
+re-enable-does-not-catch-up).
+
+Under Spring, address the task by its handler class rather than its name:
+
+```java
+@Job(queue = "system")
+@Recurring(interval = "PT10M")                 // the self-healing backstop
+class OutboxPump implements JobAction {
+    public void run(JobExecutionContext ctx) { /* drain the work table */ }
+}
+
+@Service
+class OrderService {
+    private final JobScheduler jobs;
+
+    @Transactional
+    public void placeOrder(Order order) {
+        outboxRepo.save(row(order));
+        jobs.nudgeRecurring(OutboxPump.class);  // refactor-safe
+    }
+}
+```
+
+A `@Recurring` task's durable identity defaults to the handler's
+fully-qualified class name, so the string overload would make callers
+hard-code `"com.acme.jobs.OutboxPump"` and break on a rename or package move.
+The class overload resolves the registered name through the handler registry.
+Use the string form for tasks registered imperatively through the core
+`Scheduler`, where the name is chosen by the caller and is the identity.
+
+**Nudges are after-commit in every enqueue mode**, including
+`join_transaction`. Validation (unknown or disabled task) fails fast on the
+calling thread, the write itself fires in `afterCommit`, and a rollback
+discards it — so you can nudge in the same `@Transactional` method that
+writes the work row, in any mode, with the same semantics.
+
+This is the one write that deliberately does *not* join the caller's
+transaction, and the reason is scaling. Coalescing is by design one store
+cell per task, so a joined nudge would hold that row's write lock for the
+whole business transaction: every concurrent producer of that task would
+serialize behind it, capping throughput at one transaction at a time per task
+and creating lock-ordering deadlocks that did not exist before. It would fail
+silently — correct at low rate, collapsing under load. What joining buys is
+closing the crash window between the caller's commit and the nudge write, and
+that window is an explicit non-goal: the backstop schedule bounds the
+worst-case latency, and a lost nudge costs one schedule period, never a run.
+
+On the hot path the write is a microseconds-held autocommit update, and an
+in-JVM per-task coalescer additionally bounds the store write rate to about
+one round trip regardless of producer rate.
+
 ## Connection-pool sharing
 
 Spring users typically have one shared `DataSource` / HikariCP. Threadmill

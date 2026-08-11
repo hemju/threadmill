@@ -430,9 +430,64 @@ public interface JobStore {
     /** List task names currently owned by {@code namespace}. */
     Set<String> listCronTaskNamesOwnedBy(String namespace);
 
-    /** Insert or update the schedule-state for a cron task. */
+    /**
+     * Insert or update the schedule-state for a cron task.
+     *
+     * <p>Deliberately never writes
+     * {@link CronTaskScheduleState#nudgeRequestedAt()}: a blanket state upsert
+     * must not clobber a nudge accepted concurrently by another node. An
+     * existing pending nudge survives this call unchanged; the only writers of
+     * that field are {@link #requestCronNudge} and {@link #clearCronNudge}.
+     */
     void upsertCronTaskState(CronTaskScheduleState state);
 
     /** Read a cron task's current schedule-state. */
     Optional<CronTaskScheduleState> findCronTaskState(String name);
+
+    /**
+     * Record an on-demand materialization request (a "nudge") for the named
+     * recurring task by stamping
+     * {@link CronTaskScheduleState#nudgeRequestedAt()} with
+     * {@code requestedAt} and advancing the store-generated
+     * {@link CronTaskScheduleState#nudgeRevision()}. A single cell per task:
+     * a burst of nudges overwrites one value and therefore coalesces to at
+     * most one follow-up materialization. The write is durable — it is
+     * consumed by the maintenance master's recurring tick, so acceptance
+     * from any node reaches the materializing node without any transient
+     * signal.
+     *
+     * <p>Guarded: {@link NudgeOutcome#UNKNOWN_TASK} when no such task exists
+     * (a nudge racing task removal must not resurrect schedule state) and
+     * {@link NudgeOutcome#DISABLED} when the task is disabled — an explicit
+     * pause wins over a nudge. The existence/enabled check and the write are
+     * atomic with respect to concurrent task lifecycle operations.
+     */
+    NudgeOutcome requestCronNudge(String taskName, Instant requestedAt);
+
+    /**
+     * Clear a pending nudge, but only if its current
+     * {@link CronTaskScheduleState#nudgeRevision()} still equals
+     * {@code observedRevision} (compare-and-clear). The revision — never the
+     * wall-clock timestamp, whose finite store precision can collide — is the
+     * CAS identity: a nudge accepted between the caller's read and this clear
+     * carries a strictly greater revision and survives, so the materializer's
+     * next tick produces the follow-up run it promises. That is what makes
+     * the run-after-wake guarantee hold without a producer-side mutex. The
+     * revision is never reset for the lifetime of the task's schedule state,
+     * so a cleared value cannot be reused while the task exists (deleting the
+     * task drops the state row with it, so a task re-registered under the
+     * same name legitimately starts over at one). Clearing an
+     * already-cleared or never-set nudge is a no-op.
+     */
+    void clearCronNudge(String taskName, long observedRevision);
+
+    /** Result of {@link #requestCronNudge}. */
+    enum NudgeOutcome {
+        /** The nudge was recorded (or refreshed an already-pending one). */
+        ACCEPTED,
+        /** No recurring task with that name exists. */
+        UNKNOWN_TASK,
+        /** The task exists but is disabled; the nudge was not recorded. */
+        DISABLED
+    }
 }

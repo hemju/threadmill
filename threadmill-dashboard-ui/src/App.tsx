@@ -200,7 +200,14 @@ export default function App() {
       {
         header: "Handler",
         accessorKey: "handlerType",
-        cell: ({ row }) => <span className="block max-w-[26rem] truncate font-mono text-xs">{row.original.handlerType}</span>
+        cell: ({ row }) => (
+          <div className="flex max-w-[26rem] items-center gap-2">
+            <span className="truncate font-mono text-xs">{row.original.handlerType}</span>
+            {/* Recurring instances say what triggered them, so a nudged run
+                is distinguishable from a scheduled one at a glance. */}
+            {row.original.cronOrigin ? <Badge title={`recurring: ${row.original.cronOrigin}`}>{row.original.cronOrigin}</Badge> : null}
+          </div>
+        )
       },
       { header: "Attempts", accessorKey: "attempts", cell: ({ row }) => <span className="font-mono">{row.original.attempts}</span> },
       {
