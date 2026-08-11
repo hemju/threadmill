@@ -209,26 +209,54 @@ task throws `IllegalStateException` — an explicit pause wins. Disabling or
 re-enabling a task clears any pending nudge (consistent with
 re-enable-does-not-catch-up).
 
-Transactionally, the nudge follows `threadmill.spring.enqueue-mode`:
+Under Spring, address the task by its handler class rather than its name:
 
-- **`after_commit`** (default): validation fails fast at call time; the nudge
-  write fires in `afterCommit` and a rollback discards it — so you can nudge
-  in the same `@Transactional` method that writes the work row. The residual
-  crash window between the commit and the deferred write is covered by the
-  backstop schedule (one schedule period of extra latency, never a lost run).
-- **`join_transaction`**: the nudge write is part of the caller's SQL
-  transaction — committed with the work row, discarded on rollback, no crash
-  window at all. **Caveat for hot tasks:** the write locks the task's
-  schedule-state row until the caller commits, so concurrent transactions
-  nudging the same task serialize on that row. High-rate producers should
-  prefer `after_commit` nudging, where each nudge is a microseconds-held
-  autocommit write and an in-JVM per-task coalescer additionally bounds the
-  write rate to about one store round trip regardless of producer rate.
-- **`immediate`**: a direct write, like any other immediate-mode operation.
+```java
+@Job(queue = "system")
+@Recurring(interval = "PT10M")                 // the self-healing backstop
+class OutboxPump implements JobAction {
+    public void run(JobExecutionContext ctx) { /* drain the work table */ }
+}
 
-The crash window between a producer's commit and an `after_commit` nudge does
-not need closing — the backstop schedule bounds the worst-case latency in that
-rare case by design.
+@Service
+class OrderService {
+    private final JobScheduler jobs;
+
+    @Transactional
+    public void placeOrder(Order order) {
+        outboxRepo.save(row(order));
+        jobs.nudgeRecurring(OutboxPump.class);  // refactor-safe
+    }
+}
+```
+
+A `@Recurring` task's durable identity defaults to the handler's
+fully-qualified class name, so the string overload would make callers
+hard-code `"com.acme.jobs.OutboxPump"` and break on a rename or package move.
+The class overload resolves the registered name through the handler registry.
+Use the string form for tasks registered imperatively through the core
+`Scheduler`, where the name is chosen by the caller and is the identity.
+
+**Nudges are after-commit in every enqueue mode**, including
+`join_transaction`. Validation (unknown or disabled task) fails fast on the
+calling thread, the write itself fires in `afterCommit`, and a rollback
+discards it — so you can nudge in the same `@Transactional` method that
+writes the work row, in any mode, with the same semantics.
+
+This is the one write that deliberately does *not* join the caller's
+transaction, and the reason is scaling. Coalescing is by design one store
+cell per task, so a joined nudge would hold that row's write lock for the
+whole business transaction: every concurrent producer of that task would
+serialize behind it, capping throughput at one transaction at a time per task
+and creating lock-ordering deadlocks that did not exist before. It would fail
+silently — correct at low rate, collapsing under load. What joining buys is
+closing the crash window between the caller's commit and the nudge write, and
+that window is an explicit non-goal: the backstop schedule bounds the
+worst-case latency, and a lost nudge costs one schedule period, never a run.
+
+On the hot path the write is a microseconds-held autocommit update, and an
+in-JVM per-task coalescer additionally bounds the store write rate to about
+one round trip regardless of producer rate.
 
 ## Connection-pool sharing
 

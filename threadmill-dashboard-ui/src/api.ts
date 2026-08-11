@@ -52,6 +52,13 @@ export interface JobSummary {
   ownerNodeId: string | null;
   ownerHeartbeatAt: string | null;
   detailsRedacted: boolean;
+  /**
+   * For recurring instances, what triggered this one: a regular schedule
+   * fire, an on-demand nudge, or an operator force-trigger. Null for
+   * ordinary jobs. Visible even on redacted reads — the value set is closed,
+   * so it carries no payload data.
+   */
+  cronOrigin: "schedule" | "nudge" | "manual" | null;
 }
 
 export interface JobList {

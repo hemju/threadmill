@@ -18,23 +18,37 @@
   schedule — a cron task's next fire stays the regular wall-clock match and
   an interval trigger's phase is preserved. Nudging an unknown task throws;
   nudging a disabled task throws — an explicit pause wins — and an
-  enabled-flip clears any pending nudge. Under Spring the nudge follows
-  `threadmill.spring.enqueue-mode`: `after_commit` (default) validates at
-  call time, writes on commit, and discards on rollback; `join_transaction`
-  makes the nudge part of the caller's SQL transaction (note: this holds the
-  task's schedule-state row lock until commit — hot-path producers should
-  prefer `after_commit`, where an in-JVM per-task coalescer also bounds the
-  store write rate under bursts; the coalescer never retains a caller beyond
-  its own covering write — follow-up generations run on a dedicated virtual
-  thread). The coalescing bound is failure-free: consistent with
-  at-least-once, a crash between the follow-up's insert and the request's
-  clear can produce an extra run, never lose one. Storage: additive Postgres
+  enabled-flip clears any pending nudge. The coalescing bound is
+  failure-free: consistent with at-least-once, a crash between the follow-up's
+  insert and the request's clear can produce an extra run, never lose one.
+  Storage: additive Postgres
   migration `V5__cron_state_nudge.sql` adds
   `threadmill_cron_task_state.nudge_requested_at` plus a store-generated,
   never-reset `nudge_revision` — the revision, not the collision-prone
   wall-clock timestamp, is the compare-and-clear identity; Redis stores both
   as schedule-state hash fields. `CronTaskScheduleState` gained read-only
   `nudgeRequestedAt` / `nudgeRevision` components.
+- **Spring nudges are after-commit in every enqueue mode**, including
+  `join_transaction`. Validation fails fast at call time, the write lands on
+  commit, and a rollback discards it — identical semantics in all three
+  modes. This is the one write that deliberately does not join the caller's
+  transaction: coalescing is one store cell per task, so a joined nudge would
+  hold that row's write lock for the whole business transaction and serialize
+  every concurrent producer of that task (silently — correct at low rate,
+  collapsing under load), and all it would buy is closing a crash window the
+  design explicitly does not need closed. An in-JVM per-task coalescer
+  additionally bounds the store write rate under bursts, and never retains a
+  caller beyond its own covering write (follow-up generations run on a
+  dedicated virtual thread).
+- **Spring: nudge by handler class**, `jobScheduler.nudgeRecurring(OutboxPump.class)`.
+  A `@Recurring` task's durable identity defaults to the handler's
+  fully-qualified class name, so the string overload forced callers to
+  hard-code it and broke on a rename or package move; the class overload
+  resolves the registered name through the handler registry and matches the
+  rest of this API, where the handler class is always the first argument.
+  Nudging a registered handler that is not `@Recurring` fails loudly. The
+  string overload remains for tasks registered imperatively through the core
+  `Scheduler`, where the caller chooses the name.
 - **Breaking (SPI):** `JobStore` gained two abstract operations,
   `requestCronNudge(name, requestedAt)` → `ACCEPTED | UNKNOWN_TASK |
   DISABLED` and `clearCronNudge(name, observedRevision)`. Third-party store
@@ -51,8 +65,9 @@
   deliberately visible on redacted read-level views — the value set is
   closed, so no metadata can leak through it), and Micrometer
   (`threadmill.jobs.recurring.runs{origin=schedule|nudge|manual|other}`,
-  cardinality-clamped). The shipped React UI does not render the new field
-  yet; API consumers get it immediately.
+  cardinality-clamped). The operations console renders it as a badge beside
+  the handler, so a nudged run is distinguishable from a scheduled one at a
+  glance.
 
 ## 0.1.4
 

@@ -6,6 +6,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -27,6 +29,8 @@ import com.hemju.threadmill.core.store.JobStore;
  * until commit so workers never race an uncommitted row.
  */
 public final class TransactionJoinedJobScheduler extends JobScheduler {
+
+    private static final Logger LOG = LoggerFactory.getLogger(TransactionJoinedJobScheduler.class);
 
     public TransactionJoinedJobScheduler(
             JobStore store,
@@ -106,28 +110,19 @@ public final class TransactionJoinedJobScheduler extends JobScheduler {
     }
 
     /**
-     * Nudge as part of the caller's SQL transaction: like every store write in
-     * this mode, the nudge commits with the work row and is discarded on
-     * rollback — there is no crash window between the two at all.
+     * Nudges are after-commit even in this mode — the one write that
+     * deliberately does <em>not</em> join the caller's transaction.
      *
-     * <p>The in-JVM nudge write coalescer is deliberately bypassed here:
-     * coalescing across open transactions would bind one caller's nudge to
-     * another caller's commit or rollback. The trade-off is documented in the
-     * operations guide — a joined nudge holds the task's schedule-state row
-     * lock until the caller commits, so concurrent transactions nudging the
-     * same task serialize on that row. Hot-path producers should prefer
-     * {@code after_commit} nudging.
+     * <p>Joining would hold the task's single schedule-state row lock for the
+     * whole business transaction, serializing every concurrent producer of
+     * that task behind it. See {@link DeferredNudge} for why that trade is
+     * wrong: the only thing joining buys is closing a crash window the design
+     * explicitly does not need to close, and rollback semantics are identical
+     * either way.
      */
     @Override
     public void nudgeRecurring(String taskName) {
-        Objects.requireNonNull(taskName, "taskName");
-        switch (store.requestCronNudge(taskName, Instant.now())) {
-            case ACCEPTED -> {}
-            case UNKNOWN_TASK -> throw new IllegalArgumentException("Unknown recurring task '" + taskName + "'");
-            case DISABLED ->
-                throw new IllegalStateException(
-                        "Recurring task '" + taskName + "' is disabled; an explicit pause wins over a nudge");
-        }
+        DeferredNudge.onCommit(taskName, store, () -> super.nudgeRecurring(taskName), LOG);
     }
 
     private void wakeAfterCommitOrNow(String queue) {

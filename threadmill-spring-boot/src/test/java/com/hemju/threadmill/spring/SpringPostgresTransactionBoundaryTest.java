@@ -1,6 +1,7 @@
 package com.hemju.threadmill.spring;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
@@ -152,10 +153,18 @@ class SpringPostgresTransactionBoundaryTest {
     }
 
     @Test
-    void nudgeJoinsTheCallerTransactionAndRollsBackWithIt() {
+    void nudgeTakesEffectOnCommitAndRollsBackWithoutLockingTheTaskRow() {
         // Issue #108 requirement 5: nudged inside a Spring transaction, the
         // nudge takes effect on commit and is discarded on rollback — so a
         // producer can nudge in the same transaction that writes the work row.
+        //
+        // In this mode the nudge is deliberately the one write that does NOT
+        // join the caller's transaction: joining would hold the task's single
+        // schedule-state row lock for the whole business transaction and
+        // serialize every concurrent producer of that task. The assertions
+        // below pin both halves — nothing visible before commit (so a
+        // rollback really discards it), and the row is not locked while the
+        // caller's transaction is still open.
         var task = new CronTask(
                 "outbox-pump",
                 new CronTask.Trigger.Interval(Duration.ofHours(6)),
@@ -180,10 +189,39 @@ class SpringPostgresTransactionBoundaryTest {
                 .as("a rolled-back transaction leaves no nudge behind")
                 .isNull();
 
-        transactions.executeWithoutResult(status -> scheduler.nudgeRecurring("outbox-pump"));
+        transactions.executeWithoutResult(status -> {
+            scheduler.nudgeRecurring("outbox-pump");
+            // Still inside the caller's transaction: the nudge has not been
+            // written yet, and — the point of deferring it — the task's row
+            // is not locked, so another producer can write it right now
+            // instead of blocking until this transaction commits.
+            assertThat(store.findCronTaskState("outbox-pump").orElseThrow().nudgeRequestedAt())
+                    .as("the nudge write is deferred to after commit")
+                    .isNull();
+            assertThatCode(() -> lockTaskRowFromAnotherConnection("outbox-pump"))
+                    .as("a concurrent producer must not block on the nudging transaction")
+                    .doesNotThrowAnyException();
+        });
         assertThat(store.findCronTaskState("outbox-pump").orElseThrow().nudgeRequestedAt())
                 .as("a committed transaction lands the nudge")
                 .isNotNull();
+    }
+
+    /**
+     * Take the task's schedule-state row lock on an independent connection
+     * with {@code NOWAIT}, so a lock still held by the caller's transaction
+     * surfaces as an exception instead of hanging the test.
+     */
+    private static void lockTaskRowFromAnotherConnection(String taskName) throws Exception {
+        try (var conn = dataSource.getConnection()) {
+            conn.setAutoCommit(false);
+            try (var ps = conn.prepareStatement(
+                    "SELECT 1 FROM threadmill_cron_task_state WHERE task_name = ? FOR UPDATE NOWAIT")) {
+                ps.setString(1, taskName);
+                ps.executeQuery();
+            }
+            conn.rollback();
+        }
     }
 
     @Test

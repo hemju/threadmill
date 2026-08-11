@@ -225,6 +225,31 @@ public class JobScheduler {
     }
 
     /**
+     * {@link #nudgeRecurring(String)} for a {@code @Recurring} handler,
+     * addressed by its class rather than its durable task name.
+     *
+     * <p>Prefer this over the string overload in Spring applications. A
+     * {@code @Recurring} task's default identity is the handler's
+     * fully-qualified class name, so the string form makes callers hard-code
+     * {@code "com.acme.jobs.OutboxPump"} — which a rename or package move
+     * breaks at runtime. Resolving through the registry keeps the call
+     * refactor-safe and matches the rest of this API, where the handler class
+     * is always the first argument.
+     *
+     * @throws IllegalStateException if the class is not a registered
+     *         {@code @Job} handler, or is registered but not {@code @Recurring}
+     */
+    public void nudgeRecurring(Class<? extends JobHandler<?>> recurringHandler) {
+        Objects.requireNonNull(recurringHandler, "recurringHandler");
+        var registration = registry.registrationFor(recurringHandler);
+        if (!registration.isRecurring()) {
+            throw new IllegalStateException("Handler " + recurringHandler.getName()
+                    + " is registered but is not @Recurring, so there is no recurring task to nudge");
+        }
+        nudgeRecurring(registration.recurring().name());
+    }
+
+    /**
      * Resolve the registration by handler class and verify the supplied
      * {@code payload} matches the handler's declared payload type. Generics
      * make a mismatch impossible at compile time, but runtime callers

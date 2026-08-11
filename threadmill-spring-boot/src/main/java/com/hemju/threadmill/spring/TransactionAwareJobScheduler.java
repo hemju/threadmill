@@ -18,7 +18,6 @@ import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
-import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.store.JobStore;
 
@@ -158,38 +157,7 @@ public final class TransactionAwareJobScheduler extends JobScheduler {
      */
     @Override
     public void nudgeRecurring(String taskName) {
-        Objects.requireNonNull(taskName, "taskName");
-        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            super.nudgeRecurring(taskName);
-            return;
-        }
-        // Fail fast now, while the caller can still react: the deferred write
-        // re-validates in the store, but an afterCommit throw is contained
-        // (see below) rather than surfaced to anyone.
-        CronTask task = store.findCronTask(taskName)
-                .orElseThrow(() -> new IllegalArgumentException("Unknown recurring task '" + taskName + "'"));
-        if (!task.enabled()) {
-            throw new IllegalStateException(
-                    "Recurring task '" + taskName + "' is disabled; an explicit pause wins over a nudge");
-        }
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                // Same containment as the deferred enqueues: a throw here
-                // would silently skip later-registered synchronizations.
-                // A lost nudge degrades to backstop-schedule latency by
-                // design, but it is still worth a loud log line.
-                try {
-                    TransactionAwareJobScheduler.super.nudgeRecurring(taskName);
-                } catch (RuntimeException e) {
-                    LOG.error(
-                            "Threadmill after-commit nudge for recurring task '{}' was NOT recorded; "
-                                    + "the task's backstop schedule bounds the recovery latency",
-                            taskName,
-                            e);
-                }
-            }
-        });
+        DeferredNudge.onCommit(taskName, store, () -> super.nudgeRecurring(taskName), LOG);
     }
 
     @Override
