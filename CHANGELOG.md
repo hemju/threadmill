@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Fixed Postgres self-owned writes being silently rolled back when the host
+  `DataSource` hands out connections with `autoCommit=false` (issue #111).
+  Queue pauses, execution and node heartbeats, maintenance leases, retention,
+  mutexes, recurring definitions/state, and the expired-dedup fallback now use
+  explicit Threadmill-owned transactions, restoring the connection's prior
+  auto-commit mode after commit or rollback.
 - Recurring tasks can declare claim-time exclusivity (issue #110). A
   `CronTask` gains an `exclusive` flag, surfaced as
   `@Recurring(exclusive = true)` and as an `exclusive` parameter on

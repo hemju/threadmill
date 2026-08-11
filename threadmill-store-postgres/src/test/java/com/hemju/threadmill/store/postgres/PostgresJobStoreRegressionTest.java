@@ -3,6 +3,7 @@ package com.hemju.threadmill.store.postgres;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.io.PrintWriter;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -22,6 +23,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 import javax.sql.DataSource;
 
@@ -915,6 +917,29 @@ class PostgresJobStoreRegressionTest {
     }
 
     @Test
+    void selfOwnedWritesCommitWhenConnectionsDefaultToNonAutoCommit() {
+        var writer = new PostgresJobStore(new NonAutoCommitDataSource(dataSource));
+        var observer = store();
+
+        writer.pauseQueue("low-priority", "maintenance");
+        assertThat(observer.listPausedQueues()).contains("low-priority");
+
+        var task = sampleCronTask("non-auto-commit-task");
+        writer.upsertCronTask(task);
+        assertThat(observer.findCronTask(task.name())).contains(task);
+
+        var nodeId = NodeId.newId();
+        var heartbeat = Instant.parse("2026-08-11T12:00:00Z");
+        writer.recordNodeHeartbeat(nodeId, heartbeat);
+        assertThat(observer.readNodeHeartbeat(nodeId)).contains(heartbeat);
+
+        assertThat(writer.tryAcquireMutex("non-auto-commit-mutex", "writer", Duration.ofMinutes(1)))
+                .isTrue();
+        assertThat(observer.tryAcquireMutex("non-auto-commit-mutex", "observer", Duration.ofMinutes(1)))
+                .isFalse();
+    }
+
+    @Test
     void mutexLeaseIsExclusiveReentrantAndExpires() throws InterruptedException {
         JobStore store = store();
         assertThat(store.tryAcquireMutex("billing-close", "node-a", Duration.ofMillis(75)))
@@ -954,6 +979,64 @@ class PostgresJobStoreRegressionTest {
                 .initialState(JobState.AWAITING)
                 .createdAt(Instant.now().plusMillis(index))
                 .build();
+    }
+
+    /** A pool-alike whose connections arrive with {@code autoCommit=false}. */
+    private static final class NonAutoCommitDataSource implements DataSource {
+        private final DataSource delegate;
+
+        private NonAutoCommitDataSource(DataSource delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public Connection getConnection() throws SQLException {
+            var connection = delegate.getConnection();
+            connection.setAutoCommit(false);
+            return connection;
+        }
+
+        @Override
+        public Connection getConnection(String username, String password) throws SQLException {
+            var connection = delegate.getConnection(username, password);
+            connection.setAutoCommit(false);
+            return connection;
+        }
+
+        @Override
+        public PrintWriter getLogWriter() throws SQLException {
+            return delegate.getLogWriter();
+        }
+
+        @Override
+        public void setLogWriter(PrintWriter out) throws SQLException {
+            delegate.setLogWriter(out);
+        }
+
+        @Override
+        public void setLoginTimeout(int seconds) throws SQLException {
+            delegate.setLoginTimeout(seconds);
+        }
+
+        @Override
+        public int getLoginTimeout() throws SQLException {
+            return delegate.getLoginTimeout();
+        }
+
+        @Override
+        public Logger getParentLogger() {
+            return Logger.getLogger("test");
+        }
+
+        @Override
+        public <T> T unwrap(Class<T> iface) throws SQLException {
+            return delegate.unwrap(iface);
+        }
+
+        @Override
+        public boolean isWrapperFor(Class<?> iface) throws SQLException {
+            return delegate.isWrapperFor(iface);
+        }
     }
 
     private static void dropSchemaObjects() throws SQLException {

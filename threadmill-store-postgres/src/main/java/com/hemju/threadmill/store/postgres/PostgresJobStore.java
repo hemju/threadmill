@@ -66,7 +66,8 @@ import com.hemju.threadmill.core.store.NodeHeartbeat;
  *       contending workers never collide and never wait.</li>
  *   <li>Every write is wrapped in {@link DeadlockRetry} — deadlocks on a
  *       busy queue table are normal and the right response is bounded retry
- *       with jittered backoff.</li>
+ *       with jittered backoff. Self-owned writes use an explicit transaction,
+ *       independent of the {@link DataSource}'s default auto-commit mode.</li>
  *   <li>Per-state counts come from {@code threadmill_job_counts}, maintained
  *       row-by-row by a trigger; a naive {@code COUNT(*)} would contend
  *       with the claim path.</li>
@@ -85,7 +86,7 @@ public final class PostgresJobStore implements JobStore {
     private final DataSource dataSource;
     private final PostgresTransactionBoundary transactionBoundary;
 
-    /** Boundary for writes that must never join an external transaction; see {@link #ownedTransaction}. */
+    /** Boundary for self-owned writes that must never join an external transaction. */
     private final PostgresTransactionBoundary owningBoundary;
 
     private final JobSerializer serializer;
@@ -1084,12 +1085,11 @@ public final class PostgresJobStore implements JobStore {
     public void pauseQueue(String queue, String reason) {
         Names.requireName("queue", queue);
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_queue_pauses "
-                                + "(queue, paused_at, paused_by) VALUES (?, ?, ?) "
-                                + "ON CONFLICT (queue) DO UPDATE SET paused_at = EXCLUDED.paused_at, "
-                                + "paused_by = EXCLUDED.paused_by")) {
+            ownedTransaction(conn -> {
+                try (PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_queue_pauses "
+                        + "(queue, paused_at, paused_by) VALUES (?, ?, ?) "
+                        + "ON CONFLICT (queue) DO UPDATE SET paused_at = EXCLUDED.paused_at, "
+                        + "paused_by = EXCLUDED.paused_by")) {
                     ps.setString(1, queue);
                     ps.setTimestamp(2, Timestamp.from(Instant.now()));
                     ps.setString(3, reason);
@@ -1106,10 +1106,9 @@ public final class PostgresJobStore implements JobStore {
     public void resumeQueue(String queue) {
         Names.requireName("queue", queue);
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps =
-                                conn.prepareStatement("DELETE FROM threadmill_queue_pauses WHERE queue = ?")) {
+            ownedTransaction(conn -> {
+                try (PreparedStatement ps =
+                        conn.prepareStatement("DELETE FROM threadmill_queue_pauses WHERE queue = ?")) {
                     ps.setString(1, queue);
                     ps.executeUpdate();
                     return null;
@@ -1157,11 +1156,9 @@ public final class PostgresJobStore implements JobStore {
     @Override
     public void touchOwnerHeartbeat(NodeId nodeId, Instant now) {
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps =
-                                conn.prepareStatement("UPDATE threadmill_jobs SET owner_heartbeat_at = ? "
-                                        + "WHERE state = 'PROCESSING' AND owner_node_id = ?")) {
+            ownedTransaction(conn -> {
+                try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET owner_heartbeat_at = ? "
+                        + "WHERE state = 'PROCESSING' AND owner_node_id = ?")) {
                     ps.setTimestamp(1, Timestamp.from(now));
                     ps.setObject(2, nodeId.asUuid());
                     ps.executeUpdate();
@@ -1180,16 +1177,15 @@ public final class PostgresJobStore implements JobStore {
         JobSnapshot snapshot = withVersion(job, job.version());
         String body = serializer.serializeJob(snapshot, capabilities);
         try {
-            return DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        // The version guard rejects a zombie flush from a previous
-                        // attempt: a claim bumps version while a check-in does not,
-                        // so an attempt-N flush whose job was orphan-reclaimed,
-                        // retried, and re-claimed (as attempt N+1) by the same node
-                        // no longer matches the live row's version and is dropped.
-                        PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
-                                + "owner_heartbeat_at = ?, last_checkin_at = ?, body = ? "
-                                + "WHERE id = ? AND state = 'PROCESSING' AND owner_node_id = ? AND version = ?")) {
+            return ownedTransaction(conn -> {
+                // The version guard rejects a zombie flush from a previous
+                // attempt: a claim bumps version while a check-in does not,
+                // so an attempt-N flush whose job was orphan-reclaimed,
+                // retried, and re-claimed (as attempt N+1) by the same node
+                // no longer matches the live row's version and is dropped.
+                try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
+                        + "owner_heartbeat_at = ?, last_checkin_at = ?, body = ? "
+                        + "WHERE id = ? AND state = 'PROCESSING' AND owner_node_id = ? AND version = ?")) {
                     Instant heartbeat =
                             snapshot.lastCheckinAt() == null ? snapshot.ownerHeartbeatAt() : snapshot.lastCheckinAt();
                     setNullableTimestamp(ps, 1, heartbeat);
@@ -1209,11 +1205,10 @@ public final class PostgresJobStore implements JobStore {
     @Override
     public void recordNodeHeartbeat(NodeId nodeId, Instant now) {
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps = conn.prepareStatement(
-                                "INSERT INTO threadmill_nodes (id, last_heartbeat_at) VALUES (?, ?) "
-                                        + "ON CONFLICT (id) DO UPDATE SET last_heartbeat_at = EXCLUDED.last_heartbeat_at")) {
+            ownedTransaction(conn -> {
+                try (PreparedStatement ps =
+                        conn.prepareStatement("INSERT INTO threadmill_nodes (id, last_heartbeat_at) VALUES (?, ?) "
+                                + "ON CONFLICT (id) DO UPDATE SET last_heartbeat_at = EXCLUDED.last_heartbeat_at")) {
                     ps.setObject(1, nodeId.asUuid());
                     ps.setTimestamp(2, Timestamp.from(now));
                     ps.executeUpdate();
@@ -1245,15 +1240,14 @@ public final class PostgresJobStore implements JobStore {
         Objects.requireNonNull(nodeId, "nodeId");
         Mutexes.requirePositive(leaseDuration);
         try {
-            return DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps =
-                                conn.prepareStatement("INSERT INTO threadmill_leases (name, holder, expires_at) "
-                                        + "VALUES (?, ?, clock_timestamp() + (? * interval '1 millisecond')) "
-                                        + "ON CONFLICT (name) DO UPDATE "
-                                        + "SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at "
-                                        + "WHERE threadmill_leases.holder = EXCLUDED.holder "
-                                        + "OR threadmill_leases.expires_at <= clock_timestamp()")) {
+            return ownedTransaction(conn -> {
+                try (PreparedStatement ps =
+                        conn.prepareStatement("INSERT INTO threadmill_leases (name, holder, expires_at) "
+                                + "VALUES (?, ?, clock_timestamp() + (? * interval '1 millisecond')) "
+                                + "ON CONFLICT (name) DO UPDATE "
+                                + "SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at "
+                                + "WHERE threadmill_leases.holder = EXCLUDED.holder "
+                                + "OR threadmill_leases.expires_at <= clock_timestamp()")) {
                     ps.setString(1, MAINTENANCE_LEASE);
                     ps.setObject(2, nodeId.asUuid());
                     ps.setLong(3, leaseDuration.toMillis());
@@ -1269,10 +1263,9 @@ public final class PostgresJobStore implements JobStore {
     public void releaseMaintenanceLease(NodeId nodeId) {
         Objects.requireNonNull(nodeId, "nodeId");
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps =
-                                conn.prepareStatement("DELETE FROM threadmill_leases WHERE name = ? AND holder = ?")) {
+            ownedTransaction(conn -> {
+                try (PreparedStatement ps =
+                        conn.prepareStatement("DELETE FROM threadmill_leases WHERE name = ? AND holder = ?")) {
                     ps.setString(1, MAINTENANCE_LEASE);
                     ps.setObject(2, nodeId.asUuid());
                     ps.executeUpdate();
@@ -1458,10 +1451,9 @@ public final class PostgresJobStore implements JobStore {
     public long deleteNodeHeartbeatsOlderThan(Instant cutoff) {
         Objects.requireNonNull(cutoff, "cutoff");
         try {
-            return DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps =
-                                conn.prepareStatement("DELETE FROM threadmill_nodes WHERE last_heartbeat_at <= ?")) {
+            return ownedTransaction(conn -> {
+                try (PreparedStatement ps =
+                        conn.prepareStatement("DELETE FROM threadmill_nodes WHERE last_heartbeat_at <= ?")) {
                     ps.setTimestamp(1, Timestamp.from(cutoff));
                     return (long) ps.executeUpdate();
                 }
@@ -1476,14 +1468,13 @@ public final class PostgresJobStore implements JobStore {
         Objects.requireNonNull(now, "now");
         if (max <= 0) return 0L;
         try {
-            return DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps =
-                                conn.prepareStatement("DELETE FROM threadmill_dedup_keys d WHERE d.ctid IN ("
-                                        + "SELECT d2.ctid FROM threadmill_dedup_keys d2 "
-                                        + "LEFT JOIN threadmill_jobs j ON j.id = d2.job_id "
-                                        + "WHERE d2.expires_at <= ? AND (j.id IS NULL OR j.state IN ('SUCCEEDED','FAILED','DELETED','QUARANTINED')) "
-                                        + "LIMIT ?)")) {
+            return ownedTransaction(conn -> {
+                try (PreparedStatement ps =
+                        conn.prepareStatement("DELETE FROM threadmill_dedup_keys d WHERE d.ctid IN ("
+                                + "SELECT d2.ctid FROM threadmill_dedup_keys d2 "
+                                + "LEFT JOIN threadmill_jobs j ON j.id = d2.job_id "
+                                + "WHERE d2.expires_at <= ? AND (j.id IS NULL OR j.state IN ('SUCCEEDED','FAILED','DELETED','QUARANTINED')) "
+                                + "LIMIT ?)")) {
                     ps.setTimestamp(1, Timestamp.from(now));
                     ps.setInt(2, max);
                     return (long) ps.executeUpdate();
@@ -1508,19 +1499,18 @@ public final class PostgresJobStore implements JobStore {
     @Override
     public long deleteFinishedOlderThan(Instant cutoff, JobState state, int max) {
         try {
-            return DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        // Skip a terminal job that still has an unexpired dedup
-                        // row: the FK is ON DELETE CASCADE, so deleting it here
-                        // would drop a live dedup key and silently cap the dedup
-                        // TTL at the retention age. Keep the job until its dedup
-                        // expires; the next sweep then removes both.
-                        PreparedStatement ps = conn.prepareStatement(
-                                "DELETE FROM threadmill_jobs WHERE id IN (" + "SELECT j.id FROM threadmill_jobs j "
-                                        + "WHERE j.state = ? AND j.current_state_at <= ? "
-                                        + "AND NOT EXISTS (SELECT 1 FROM threadmill_dedup_keys d "
-                                        + "WHERE d.job_id = j.id AND d.expires_at > clock_timestamp()) "
-                                        + "LIMIT ?)")) {
+            return ownedTransaction(conn -> {
+                // Skip a terminal job that still has an unexpired dedup
+                // row: the FK is ON DELETE CASCADE, so deleting it here
+                // would drop a live dedup key and silently cap the dedup
+                // TTL at the retention age. Keep the job until its dedup
+                // expires; the next sweep then removes both.
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "DELETE FROM threadmill_jobs WHERE id IN (" + "SELECT j.id FROM threadmill_jobs j "
+                                + "WHERE j.state = ? AND j.current_state_at <= ? "
+                                + "AND NOT EXISTS (SELECT 1 FROM threadmill_dedup_keys d "
+                                + "WHERE d.job_id = j.id AND d.expires_at > clock_timestamp()) "
+                                + "LIMIT ?)")) {
                     ps.setString(1, state.name());
                     ps.setTimestamp(2, Timestamp.from(cutoff));
                     ps.setInt(3, Math.max(0, max));
@@ -1562,18 +1552,17 @@ public final class PostgresJobStore implements JobStore {
         Objects.requireNonNull(holder, "holder");
         Mutexes.requirePositive(leaseDuration);
         try {
-            return DeadlockRetry.run(() -> {
+            return ownedTransaction(conn -> {
                 // Lease expiry uses server-side time (clock_timestamp()) for
                 // both write and compare, like the maintenance lease: a node
                 // whose clock runs ahead must not be able to steal a mutex
                 // whose lease is unexpired by server time.
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_mutexes "
-                                + "(name, holder, expires_at) "
-                                + "VALUES (?, ?, clock_timestamp() + (? * interval '1 millisecond')) "
-                                + "ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at "
-                                + "WHERE threadmill_mutexes.expires_at <= clock_timestamp() "
-                                + "OR threadmill_mutexes.holder = EXCLUDED.holder")) {
+                try (PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_mutexes "
+                        + "(name, holder, expires_at) "
+                        + "VALUES (?, ?, clock_timestamp() + (? * interval '1 millisecond')) "
+                        + "ON CONFLICT (name) DO UPDATE SET holder = EXCLUDED.holder, expires_at = EXCLUDED.expires_at "
+                        + "WHERE threadmill_mutexes.expires_at <= clock_timestamp() "
+                        + "OR threadmill_mutexes.holder = EXCLUDED.holder")) {
                     ps.setString(1, name);
                     ps.setString(2, holder);
                     ps.setLong(3, leaseDuration.toMillis());
@@ -1666,10 +1655,9 @@ public final class PostgresJobStore implements JobStore {
     public void releaseMutex(String name, String holder) {
         Names.requireName("mutex", name);
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps =
-                                conn.prepareStatement("DELETE FROM threadmill_mutexes WHERE name = ? AND holder = ?")) {
+            ownedTransaction(conn -> {
+                try (PreparedStatement ps =
+                        conn.prepareStatement("DELETE FROM threadmill_mutexes WHERE name = ? AND holder = ?")) {
                     ps.setString(1, name);
                     ps.setString(2, holder);
                     ps.executeUpdate();
@@ -1701,24 +1689,23 @@ public final class PostgresJobStore implements JobStore {
             throw new IllegalStateException("Unknown trigger kind: " + trigger);
         }
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps = conn.prepareStatement(
-                                "INSERT INTO threadmill_cron_tasks (name, trigger_kind, trigger_value, handler_signature, "
-                                        + "payload_type_tag, payload_serialized, queue, priority, timeout_seconds, "
-                                        + "max_attempts, exclusive, missed_run_policy, time_zone, enabled) "
-                                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                                        + "ON CONFLICT (name) DO UPDATE SET "
-                                        + "trigger_kind = EXCLUDED.trigger_kind, trigger_value = EXCLUDED.trigger_value, "
-                                        + "handler_signature = EXCLUDED.handler_signature, "
-                                        + "payload_type_tag = EXCLUDED.payload_type_tag, "
-                                        + "payload_serialized = EXCLUDED.payload_serialized, "
-                                        + "queue = EXCLUDED.queue, priority = EXCLUDED.priority, "
-                                        + "timeout_seconds = EXCLUDED.timeout_seconds, "
-                                        + "max_attempts = EXCLUDED.max_attempts, "
-                                        + "exclusive = EXCLUDED.exclusive, "
-                                        + "missed_run_policy = EXCLUDED.missed_run_policy, "
-                                        + "time_zone = EXCLUDED.time_zone, enabled = EXCLUDED.enabled")) {
+            ownedTransaction(conn -> {
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "INSERT INTO threadmill_cron_tasks (name, trigger_kind, trigger_value, handler_signature, "
+                                + "payload_type_tag, payload_serialized, queue, priority, timeout_seconds, "
+                                + "max_attempts, exclusive, missed_run_policy, time_zone, enabled) "
+                                + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                                + "ON CONFLICT (name) DO UPDATE SET "
+                                + "trigger_kind = EXCLUDED.trigger_kind, trigger_value = EXCLUDED.trigger_value, "
+                                + "handler_signature = EXCLUDED.handler_signature, "
+                                + "payload_type_tag = EXCLUDED.payload_type_tag, "
+                                + "payload_serialized = EXCLUDED.payload_serialized, "
+                                + "queue = EXCLUDED.queue, priority = EXCLUDED.priority, "
+                                + "timeout_seconds = EXCLUDED.timeout_seconds, "
+                                + "max_attempts = EXCLUDED.max_attempts, "
+                                + "exclusive = EXCLUDED.exclusive, "
+                                + "missed_run_policy = EXCLUDED.missed_run_policy, "
+                                + "time_zone = EXCLUDED.time_zone, enabled = EXCLUDED.enabled")) {
                     ps.setString(1, task.name());
                     ps.setString(2, kind);
                     ps.setString(3, value);
@@ -1788,10 +1775,8 @@ public final class PostgresJobStore implements JobStore {
     @Override
     public void deleteCronTask(String name) {
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps =
-                                conn.prepareStatement("DELETE FROM threadmill_cron_tasks WHERE name = ?")) {
+            ownedTransaction(conn -> {
+                try (PreparedStatement ps = conn.prepareStatement("DELETE FROM threadmill_cron_tasks WHERE name = ?")) {
                     ps.setString(1, name);
                     ps.executeUpdate();
                     return null;
@@ -1807,11 +1792,10 @@ public final class PostgresJobStore implements JobStore {
         Names.requireName("cronTaskNamespace", namespace);
         Names.requireName("cronTask", taskName);
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps = conn.prepareStatement(
-                                "INSERT INTO threadmill_cron_task_ownership (namespace, task_name) VALUES (?, ?) "
-                                        + "ON CONFLICT (namespace, task_name) DO NOTHING")) {
+            ownedTransaction(conn -> {
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "INSERT INTO threadmill_cron_task_ownership (namespace, task_name) VALUES (?, ?) "
+                                + "ON CONFLICT (namespace, task_name) DO NOTHING")) {
                     ps.setString(1, namespace);
                     ps.setString(2, taskName);
                     ps.executeUpdate();
@@ -1846,15 +1830,14 @@ public final class PostgresJobStore implements JobStore {
     public void upsertCronTaskState(CronTaskScheduleState state) {
         Objects.requireNonNull(state, "state");
         try {
-            DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection();
-                        PreparedStatement ps = conn.prepareStatement(
-                                "INSERT INTO threadmill_cron_task_state (task_name, last_run_at, last_run_job_id, "
-                                        + "next_run_at, in_flight_job_id, timing_fingerprint) VALUES (?, ?, ?, ?, ?, ?) "
-                                        + "ON CONFLICT (task_name) DO UPDATE SET "
-                                        + "last_run_at = EXCLUDED.last_run_at, last_run_job_id = EXCLUDED.last_run_job_id, "
-                                        + "next_run_at = EXCLUDED.next_run_at, in_flight_job_id = EXCLUDED.in_flight_job_id, "
-                                        + "timing_fingerprint = EXCLUDED.timing_fingerprint")) {
+            ownedTransaction(conn -> {
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "INSERT INTO threadmill_cron_task_state (task_name, last_run_at, last_run_job_id, "
+                                + "next_run_at, in_flight_job_id, timing_fingerprint) VALUES (?, ?, ?, ?, ?, ?) "
+                                + "ON CONFLICT (task_name) DO UPDATE SET "
+                                + "last_run_at = EXCLUDED.last_run_at, last_run_job_id = EXCLUDED.last_run_job_id, "
+                                + "next_run_at = EXCLUDED.next_run_at, in_flight_job_id = EXCLUDED.in_flight_job_id, "
+                                + "timing_fingerprint = EXCLUDED.timing_fingerprint")) {
                     ps.setString(1, state.taskName());
                     setNullableTimestamp(ps, 2, state.lastRunAt());
                     setNullableUuid(ps, 3, state.lastRunJobId());
@@ -1980,11 +1963,15 @@ public final class PostgresJobStore implements JobStore {
     }
 
     /**
-     * Run one write in a transaction Threadmill owns, never the caller's.
+     * Run one self-owned write in a transaction Threadmill commits, never the caller's.
      *
-     * <p>The nudge operations are the only cron writes that must refuse to
-     * join an external transaction, and the reason is subtle enough to be
-     * worth stating: the Spring layer defers nudges to {@code afterCommit},
+     * <p>Operations routed here already own their connection rather than joining
+     * an external transaction. The explicit boundary is required even for a
+     * single statement because a host pool may hand out connections with
+     * {@code autoCommit=false}; closing such a connection does not commit it.
+     *
+     * <p>The nudge operations have an additional reason they must refuse to join:
+     * the Spring layer defers nudges to {@code afterCommit},
      * and at that point Spring has committed the caller's transaction but has
      * not yet unbound its resources — so a joining boundary would hand back
      * the caller's connection, execute the nudge in a fresh transaction on it,
@@ -2080,9 +2067,7 @@ public final class PostgresJobStore implements JobStore {
     }
 
     private Optional<JobId> findActiveDedup(String queue, String dedupKey, Instant now) throws SQLException {
-        try (Connection conn = dataSource.getConnection()) {
-            return findActiveDedup(conn, queue, dedupKey, now);
-        }
+        return ownedTransaction(conn -> findActiveDedup(conn, queue, dedupKey, now));
     }
 
     private JobSnapshot snapshotForInsert(Connection conn, Job job, long version) throws SQLException {
