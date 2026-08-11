@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+- Recurring tasks can declare claim-time exclusivity (issue #110). A
+  `CronTask` gains an `exclusive` flag, surfaced as
+  `@Recurring(exclusive = true)` and as an `exclusive` parameter on
+  `Scheduler.defineRecurring`. Every materialized instance — scheduled,
+  caught-up, or manually triggered from the dashboard — is claimed under the
+  derived key `recurring:<name>` in `ConcurrencyMode.EXCLUSIVE`, so the store
+  refuses to admit a second instance while one is processing. This replaces
+  the per-handler advisory lock a singleton sweep usually grows. It does not
+  close the lease-expiry reclaim window: reclaim releases the concurrency slot
+  as part of the terminal failure save, so handlers stay idempotent by
+  contract. Postgres adds the additive migration
+  `V6__cron_task_exclusive.sql`; Redis stores the flag as a cron-task hash
+  field with the existing overwrite-on-re-upsert semantics.
+- The recurring pile-up guard no longer opens a window between a failed
+  instance and its retry (issue #110). `FAILED` is not terminal — a retry may
+  follow — but the guard treated every `FAILED` as finished, so a materializer
+  tick landing between the failure save and `RetryInterceptor`'s reschedule
+  save could create a fresh instance beside a retrying one. A `FAILED`
+  instance now blocks while its retry budget is not provably spent *and* the
+  failure is younger than a five-second handoff grace. A retry-exhausted
+  instance still never blocks, and the age bound keeps an instance that is
+  terminal under a per-exception-type policy — which the guard cannot read —
+  from blocking its task until the stranded-failure recovery scan reaches it.
+- `DashboardPayloads.CronTaskView` gains an `exclusive` component.
+- Documented the three overlap windows and the reclaim window's
+  unclosability, with fencing guidance for effects that must not happen twice
+  (issue #110).
+
 ## 0.2.0
 
 - **On-demand materialization for recurring tasks ("nudge", issue #108).**

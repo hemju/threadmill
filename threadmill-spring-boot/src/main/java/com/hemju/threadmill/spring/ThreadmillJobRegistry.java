@@ -255,7 +255,11 @@ public class ThreadmillJobRegistry {
                         + annotation.interval()
                         + "'");
             }
-            return new RecurringSpec(name, new CronTask.Trigger.Interval(interval), annotation.missedRunPolicy());
+            return new RecurringSpec(
+                    name,
+                    new CronTask.Trigger.Interval(interval),
+                    annotation.missedRunPolicy(),
+                    annotation.exclusive());
         }
         CronExpression expression;
         try {
@@ -264,7 +268,8 @@ public class ThreadmillJobRegistry {
             throw new IllegalStateException(
                     "@Recurring on " + beanType.getName() + " has invalid cron '" + annotation.cron() + "'", e);
         }
-        return new RecurringSpec(name, new CronTask.Trigger.CronExpr(expression), annotation.missedRunPolicy());
+        return new RecurringSpec(
+                name, new CronTask.Trigger.CronExpr(expression), annotation.missedRunPolicy(), annotation.exclusive());
     }
 
     @SuppressWarnings("unchecked")
@@ -338,5 +343,6 @@ public class ThreadmillJobRegistry {
     }
 
     /** Parsed recurring spec for handlers annotated with {@code @Recurring}. */
-    public record RecurringSpec(String name, CronTask.Trigger trigger, CronTask.MissedRunPolicy missedRunPolicy) {}
+    public record RecurringSpec(
+            String name, CronTask.Trigger trigger, CronTask.MissedRunPolicy missedRunPolicy, boolean exclusive) {}
 }

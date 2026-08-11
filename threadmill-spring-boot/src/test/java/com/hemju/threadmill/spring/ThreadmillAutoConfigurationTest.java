@@ -301,6 +301,34 @@ class ThreadmillAutoConfigurationTest {
     }
 
     @Test
+    void exclusiveRecurringHandlerLandsOnTheRegisteredCronTask() {
+        // github issue #110 item 3: @Recurring(exclusive) must reach the
+        // durable CronTask, since that is what makes every materialized
+        // instance claim under the derived recurring: key. A handler that
+        // does not opt in must stay unkeyed.
+        memoryContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
+                .withBean(ExclusiveRecurringHandler.class)
+                .withBean(RecurringIntervalHandler.class)
+                .withPropertyValues("threadmill.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    JobStore store = context.getBean(JobStore.class);
+                    assertThat(store.findCronTask(ExclusiveRecurringHandler.class.getName())
+                                    .orElseThrow()
+                                    .exclusive())
+                            .isTrue();
+                    assertThat(store.findCronTask(RecurringIntervalHandler.class.getName())
+                                    .orElseThrow()
+                                    .exclusive())
+                            .isFalse();
+                });
+    }
+
+    @Test
     void nudgeRecurringResolvesTheTaskFromTheHandlerClass() {
         // Issue #108 ergonomics: a @Recurring task's default identity is the
         // handler's fully-qualified class name, so nudging by string forces
@@ -750,6 +778,13 @@ class ThreadmillAutoConfigurationTest {
     @Job
     @Recurring(interval = "PT5S", cron = "*/5 * * * *")
     static final class BothScheduleFieldsHandler implements JobHandler<NoPayload> {
+        @Override
+        public void run(NoPayload payload, JobExecutionContext ctx) {}
+    }
+
+    @Job
+    @Recurring(interval = "PT5S", exclusive = true)
+    static final class ExclusiveRecurringHandler implements JobHandler<NoPayload> {
         @Override
         public void run(NoPayload payload, JobExecutionContext ctx) {}
     }

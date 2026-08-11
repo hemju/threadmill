@@ -385,6 +385,48 @@ public final class Scheduler {
             Duration timeout,
             Integer maxAttempts,
             CronTask.MissedRunPolicy missedRunPolicy) {
+        defineRecurring(
+                name,
+                trigger,
+                payload,
+                handlerClassName,
+                queue,
+                priority,
+                timeout,
+                maxAttempts,
+                false,
+                missedRunPolicy);
+    }
+
+    /**
+     * Full recurring registration including claim-time exclusivity.
+     *
+     * <p>With {@code exclusive} set, every materialised instance — scheduled,
+     * caught-up, or manually triggered from the dashboard — claims under the
+     * derived key from {@link CronTask#concurrencyKeyFor(String)} in
+     * {@link com.hemju.threadmill.core.ConcurrencyMode#EXCLUSIVE}, so the store
+     * refuses to admit a second instance while one is processing. That is the
+     * declarative replacement for a hand-rolled advisory lock around a
+     * singleton sweep, and it is strictly stronger than the materializer's
+     * pile-up guard because it is enforced at claim time on every node.
+     *
+     * <p>It does <strong>not</strong> close the lease-expiry reclaim window:
+     * reclaim releases the concurrency slot as part of the terminal failure
+     * save, so a reclaimed instance can still overlap an original still
+     * running on a node that stopped heartbeating without dying. Handlers
+     * remain idempotent by contract.
+     */
+    public void defineRecurring(
+            String name,
+            CronTask.Trigger trigger,
+            JobPayload payload,
+            String handlerClassName,
+            String queue,
+            int priority,
+            Duration timeout,
+            Integer maxAttempts,
+            boolean exclusive,
+            CronTask.MissedRunPolicy missedRunPolicy) {
         Objects.requireNonNull(name, "name");
         Objects.requireNonNull(trigger, "trigger");
         Objects.requireNonNull(payload, "payload");
@@ -400,6 +442,7 @@ public final class Scheduler {
                 priority,
                 timeout,
                 maxAttempts,
+                exclusive,
                 missedRunPolicy,
                 ZoneId.systemDefault(),
                 true));

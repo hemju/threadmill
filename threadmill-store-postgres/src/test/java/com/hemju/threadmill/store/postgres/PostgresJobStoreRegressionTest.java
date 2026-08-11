@@ -469,14 +469,15 @@ class PostgresJobStoreRegressionTest {
                 .contains("V2__cron_task_overrides.sql")
                 .contains("V3__integrity_constraints.sql")
                 .contains("V4__cron_state_timing_fingerprint.sql")
-                .contains("V5__cron_state_nudge.sql");
+                .contains("V5__cron_state_nudge.sql")
+                .contains("V6__cron_task_exclusive.sql");
         try (Connection conn = dataSource.getConnection();
                 Statement st = conn.createStatement()) {
             st.execute(sql);
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
                 // One history row per shipped migration.
-                assertThat(rs.getInt(1)).isEqualTo(5);
+                assertThat(rs.getInt(1)).isEqualTo(6);
             }
         }
         new MigrationRunner(dataSource).validate();
@@ -508,7 +509,8 @@ class PostgresJobStoreRegressionTest {
                 .contains("V2__cron_task_overrides.sql")
                 .contains("V3__integrity_constraints.sql")
                 .contains("V4__cron_state_timing_fingerprint.sql")
-                .contains("V5__cron_state_nudge.sql");
+                .contains("V5__cron_state_nudge.sql")
+                .contains("V6__cron_task_exclusive.sql");
 
         try (Connection conn = dataSource.getConnection();
                 Statement st = conn.createStatement()) {
@@ -516,7 +518,7 @@ class PostgresJobStoreRegressionTest {
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
                 assertThat(rs.next()).isTrue();
                 // One history row per shipped migration.
-                assertThat(rs.getInt(1)).isEqualTo(5);
+                assertThat(rs.getInt(1)).isEqualTo(6);
             }
             try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_job_counts")) {
                 assertThat(rs.next()).isTrue();
@@ -696,7 +698,7 @@ class PostgresJobStoreRegressionTest {
                 ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
             assertThat(rs.next()).isTrue();
             // One history row per shipped migration.
-            assertThat(rs.getInt(1)).isEqualTo(5);
+            assertThat(rs.getInt(1)).isEqualTo(6);
         }
     }
 

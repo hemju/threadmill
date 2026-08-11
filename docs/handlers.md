@@ -140,3 +140,9 @@ first:
 
 Quarantined jobs never retry — a permanently broken job cannot cause a retry
 storm.
+
+A recurring task that must never run two instances at once declares
+`@Recurring(exclusive = true)` (or the `exclusive` flag on
+`Scheduler.defineRecurring`), which serializes its instances at claim time
+under a derived key instead of leaving you to hand-roll an advisory lock. See
+[Exclusive recurring tasks](concurrency.md#exclusive-recurring-tasks).

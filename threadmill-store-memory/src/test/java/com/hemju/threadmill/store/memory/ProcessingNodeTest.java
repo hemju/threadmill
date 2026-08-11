@@ -33,6 +33,7 @@ import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.serialization.SerializationException;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
+import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.test.ForwardingJobStore;
 
 /**
@@ -1373,6 +1374,61 @@ class ProcessingNodeTest {
                 .until(() -> store.findById(job.id()).orElseThrow().currentState() == JobState.SCHEDULED);
         Job after = store.findById(job.id()).orElseThrow();
         assertThat(after.attempts()).as("shutdown must not burn an attempt").isZero();
+    }
+
+    @Test
+    void shutdownRequeueIsNeverPublishedWhileTheHandlerIsStillRunning() throws Exception {
+        // Guard for github issue #110 item 1. The requeue of a
+        // shutdown-interrupted job is emitted by that job's own worker thread
+        // from JobRunner's catch block, so it cannot be published until
+        // handler.run has returned or thrown — a surviving node can never
+        // claim the job while user code is still executing on the old node.
+        // That ordering is currently implicit in where recordFailure is
+        // called; this test makes it explicit, so moving the requeue onto any
+        // other thread turns the build red instead of silently opening an
+        // overlap window.
+        var observer = new RequeueOrderingObserver(store);
+        Job job = enqueueHello(EngineTestHandlers.ShutdownLatchHandler.class, "default");
+        node = ProcessingNode.builder(observer)
+                .config(fastConfig.toBuilder()
+                        .jobTimeout(Duration.ofSeconds(30))
+                        .shutdownGracePeriod(Duration.ofMillis(200))
+                        .build())
+                .build();
+        node.start();
+        await().atMost(Duration.ofSeconds(5)).until(() -> EngineTestHandlers.ShutdownLatchHandler.INSIDE_RUN.get());
+
+        node.close();
+
+        await().atMost(Duration.ofSeconds(5))
+                .until(() -> store.findById(job.id()).orElseThrow().currentState() == JobState.SCHEDULED);
+        assertThat(observer.requeuedWhileHandlerRunning.get())
+                .as("the SCHEDULED requeue must not be written while handler.run is still executing")
+                .isFalse();
+        assertThat(observer.sawRequeue.get())
+                .as("the test must actually have observed the requeue write")
+                .isTrue();
+    }
+
+    /** Records whether a SCHEDULED requeue was ever written while the handler was inside run. */
+    private static final class RequeueOrderingObserver extends ForwardingJobStore {
+        private final AtomicBoolean requeuedWhileHandlerRunning = new AtomicBoolean(false);
+        private final AtomicBoolean sawRequeue = new AtomicBoolean(false);
+
+        private RequeueOrderingObserver(JobStore delegate) {
+            super(delegate);
+        }
+
+        @Override
+        public void saveAtomic(Job job, long expectedVersion) {
+            if (job.currentState() == JobState.SCHEDULED) {
+                sawRequeue.set(true);
+                if (EngineTestHandlers.ShutdownLatchHandler.INSIDE_RUN.get()) {
+                    requeuedWhileHandlerRunning.set(true);
+                }
+            }
+            super.saveAtomic(job, expectedVersion);
+        }
     }
 
     @Test
