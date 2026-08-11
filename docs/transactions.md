@@ -182,6 +182,10 @@ the task when there is work and the recurring schedule becomes a slow
 self-healing backstop (every few minutes). Job-row churn becomes proportional
 to actual work instead of wall-clock time.
 
+> This section covers the **transactional** contract. For the pattern itself —
+> handler shape, how to choose the backstop interval, and what coalescing
+> means for your code — see [Wake-driven pollers](wake-driven-pollers.md).
+
 The guarantees, in producer terms:
 
 - **Run-after-wake.** After every accepted nudge, at least one instance
