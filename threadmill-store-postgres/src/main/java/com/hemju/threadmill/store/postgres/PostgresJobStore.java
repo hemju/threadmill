@@ -84,6 +84,10 @@ public final class PostgresJobStore implements JobStore {
 
     private final DataSource dataSource;
     private final PostgresTransactionBoundary transactionBoundary;
+
+    /** Boundary for writes that must never join an external transaction; see {@link #ownedTransaction}. */
+    private final PostgresTransactionBoundary owningBoundary;
+
     private final JobSerializer serializer;
     private final JobStoreCapabilities capabilities;
     private final String serverVersion;
@@ -104,6 +108,7 @@ public final class PostgresJobStore implements JobStore {
             PostgresTransactionBoundary transactionBoundary) {
         this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
         this.transactionBoundary = Objects.requireNonNull(transactionBoundary, "transactionBoundary");
+        this.owningBoundary = PostgresTransactionBoundary.owning(this.dataSource);
         this.serializer = Objects.requireNonNull(serializer, "serializer");
         this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
         var identity = requirePostgresEighteen(this.dataSource);
@@ -1870,22 +1875,128 @@ public final class PostgresJobStore implements JobStore {
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(
                         "SELECT task_name, last_run_at, last_run_job_id, next_run_at, in_flight_job_id, "
-                                + "timing_fingerprint "
+                                + "timing_fingerprint, nudge_requested_at, nudge_revision "
                                 + "FROM threadmill_cron_task_state WHERE task_name = ?")) {
             ps.setString(1, name);
             try (ResultSet rs = ps.executeQuery()) {
                 if (!rs.next()) return Optional.empty();
+                long revision = rs.getLong(8);
+                boolean revisionNull = rs.wasNull();
                 return Optional.of(new CronTaskScheduleState(
                         rs.getString(1),
                         rs.getTimestamp(2) == null ? null : rs.getTimestamp(2).toInstant(),
                         (UUID) rs.getObject(3),
                         rs.getTimestamp(4) == null ? null : rs.getTimestamp(4).toInstant(),
                         (UUID) rs.getObject(5),
-                        rs.getString(6)));
+                        rs.getString(6),
+                        rs.getTimestamp(7) == null ? null : rs.getTimestamp(7).toInstant(),
+                        revisionNull ? null : revision));
             }
         } catch (SQLException e) {
             throw new JdbcException("findCronTaskState failed", e);
         }
+    }
+
+    @Override
+    public NudgeOutcome requestCronNudge(String taskName, Instant requestedAt) {
+        Names.requireName("cronTask", taskName);
+        Objects.requireNonNull(requestedAt, "requestedAt");
+        try {
+            return ownedTransaction(conn -> {
+                // One conditional statement covering both the existing-row hot
+                // path (the ON CONFLICT arm is a plain UPDATE — the nudge
+                // columns are deliberately unindexed so it stays HOT-eligible)
+                // and the no-state-row-yet window between upsertCron's two
+                // writes. Sourcing the INSERT from the task row enforces
+                // existence + enabled in the same statement. The revision
+                // advances on every acceptance and never resets, giving
+                // compare-and-clear a collision-free identity.
+                for (int attempt = 0; attempt < 3; attempt++) {
+                    try (PreparedStatement ps = conn.prepareStatement(
+                            "INSERT INTO threadmill_cron_task_state (task_name, nudge_requested_at, nudge_revision) "
+                                    + "SELECT t.name, ?, 1 FROM threadmill_cron_tasks t WHERE t.name = ? AND t.enabled "
+                                    + "ON CONFLICT (task_name) DO UPDATE SET "
+                                    + "nudge_requested_at = EXCLUDED.nudge_requested_at, "
+                                    + "nudge_revision = COALESCE(threadmill_cron_task_state.nudge_revision, 0) + 1")) {
+                        ps.setTimestamp(1, Timestamp.from(requestedAt));
+                        ps.setString(2, taskName);
+                        if (ps.executeUpdate() > 0) return NudgeOutcome.ACCEPTED;
+                    } catch (SQLException e) {
+                        // The parent row existed in this statement's snapshot
+                        // but the referential-integrity check runs at end of
+                        // statement against the latest snapshot, so a
+                        // concurrent deleteCronTask can still raise 23503.
+                        // That is the same answer as "no such task" — and it
+                        // is safe to translate here only because this is
+                        // Threadmill's own transaction (see ownedTransaction):
+                        // rolling it back costs nothing.
+                        if (DeadlockRetry.hasSqlState(e, "23503")) return NudgeOutcome.UNKNOWN_TASK;
+                        throw e;
+                    }
+                    // Zero rows: the task was missing or disabled at write
+                    // time. Report from a follow-up read — and if a racing
+                    // lifecycle change re-enabled the task in between, retry
+                    // the conditional write instead of misreporting.
+                    try (PreparedStatement ps =
+                            conn.prepareStatement("SELECT enabled FROM threadmill_cron_tasks WHERE name = ?")) {
+                        ps.setString(1, taskName);
+                        try (ResultSet rs = ps.executeQuery()) {
+                            if (!rs.next()) return NudgeOutcome.UNKNOWN_TASK;
+                            if (!rs.getBoolean(1)) return NudgeOutcome.DISABLED;
+                        }
+                    }
+                }
+                // Three consecutive enable/disable flips raced us. Report the
+                // last truth we observed rather than throwing: a nudge is a
+                // latency hint, and the caller can do nothing useful with an
+                // exception here.
+                return NudgeOutcome.DISABLED;
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("requestCronNudge failed", e);
+        }
+    }
+
+    @Override
+    public void clearCronNudge(String taskName, long observedRevision) {
+        Names.requireName("cronTask", taskName);
+        try {
+            ownedTransaction(conn -> {
+                // Clears the pending flag only; the revision column is never
+                // reset, so cleared identities cannot be reused by a later
+                // acceptance.
+                try (PreparedStatement ps =
+                        conn.prepareStatement("UPDATE threadmill_cron_task_state SET nudge_requested_at = NULL "
+                                + "WHERE task_name = ? AND nudge_revision = ? AND nudge_requested_at IS NOT NULL")) {
+                    ps.setString(1, taskName);
+                    ps.setLong(2, observedRevision);
+                    ps.executeUpdate();
+                    return null;
+                }
+            });
+        } catch (SQLException e) {
+            throw new JdbcException("clearCronNudge failed", e);
+        }
+    }
+
+    /**
+     * Run one write in a transaction Threadmill owns, never the caller's.
+     *
+     * <p>The nudge operations are the only cron writes that must refuse to
+     * join an external transaction, and the reason is subtle enough to be
+     * worth stating: the Spring layer defers nudges to {@code afterCommit},
+     * and at that point Spring has committed the caller's transaction but has
+     * not yet unbound its resources — so a joining boundary would hand back
+     * the caller's connection, execute the nudge in a fresh transaction on it,
+     * and leave nobody to commit that transaction. On a pool that returns
+     * connections with {@code autoCommit=false} (Hikari with JPA defaults) the
+     * write is then rolled back on release, losing the nudge silently; on
+     * others it leaks into whatever transaction uses that connection next.
+     * Owning the transaction also makes rolling back on a concurrent
+     * task-deletion conflict harmless, and lets {@link DeadlockRetry} retry.
+     */
+    private <T> T ownedTransaction(PostgresConnectionWork<T> work) throws SQLException {
+        return DeadlockRetry.run(() -> owningBoundary.inTransaction(work));
     }
 
     private CronTask readCronTask(ResultSet rs) throws SQLException {

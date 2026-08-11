@@ -275,6 +275,122 @@ final class InvariantViolationTest {
         assertThat(result.violations()).anyMatch(v -> v.contains("job-shared") && v.contains("job-excl"));
     }
 
+    // -------- issue #108 nudge invariants --------
+
+    @Test
+    void nudgeRunAfterWakeFiresWhenNoRunStartsAfterTheNudge(@TempDir Path tempDir) throws Exception {
+        // The exact silent-work-loss shape the guarantee exists to prevent:
+        // a run is already executing when the nudge lands, and nothing starts
+        // afterwards. Treating "already running" as satisfying the nudge is
+        // the bug — the in-flight run may have read its work table before the
+        // nudge's triggering write committed.
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        Instant t0 = Instant.parse("2026-08-10T12:00:00Z");
+        appendRawEvent(traceFile, t0, "exec_started", Map.of("jobId", "pump-1", "cronOrigin", "nudge"));
+        appendRawEvent(traceFile, t0.plusSeconds(1), "nudge_accepted", Map.of("task", "pump", "nudgeSeq", 1));
+        appendRawEvent(traceFile, t0.plusSeconds(2), "exec_finished", Map.of("jobId", "pump-1"));
+
+        InvariantResult result = verify(traceFile, InvariantChecks.nudgeRunAfterWake());
+        assertThat(result.passed()).isFalse();
+        assertThat(result.violations()).anyMatch(v -> v.contains("never followed by a recurring run"));
+    }
+
+    @Test
+    void nudgeRunAfterWakeAcceptsARunThatStartsAfterTheNudge(@TempDir Path tempDir) throws Exception {
+        // Green path, including the coalescing rule: a schedule-origin run
+        // that starts after the nudge discharges it just like a nudge-origin
+        // one, and a burst collapses into a single follow-up.
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        Instant t0 = Instant.parse("2026-08-10T12:00:00Z");
+        appendRawEvent(traceFile, t0, "nudge_accepted", Map.of("task", "pump", "nudgeSeq", 1));
+        appendRawEvent(traceFile, t0.plusMillis(10), "nudge_accepted", Map.of("task", "pump", "nudgeSeq", 2));
+        appendRawEvent(traceFile, t0.plusMillis(20), "nudge_accepted", Map.of("task", "pump", "nudgeSeq", 3));
+        appendRawEvent(
+                traceFile, t0.plusSeconds(1), "exec_started", Map.of("jobId", "pump-1", "cronOrigin", "schedule"));
+        appendRawEvent(traceFile, t0.plusSeconds(2), "exec_finished", Map.of("jobId", "pump-1"));
+
+        assertThat(verify(traceFile, InvariantChecks.nudgeRunAfterWake()).passed())
+                .isTrue();
+    }
+
+    @Test
+    void nudgeRunAfterWakeExcusesTimeTheHarnessProcessWasFrozen(@TempDir Path tempDir) throws Exception {
+        // Reproduces the aborted first 6h endurance run: the laptop's battery
+        // died 1s after a nudge was accepted, both backend JVMs froze for
+        // 5h54m, and on resume the staleness clock charged the whole outage
+        // to the engine. Frozen wall-clock is not engine latency — the run
+        // is judged on the service that follows the resume.
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        Instant t0 = Instant.parse("2026-08-10T23:27:38Z");
+        appendRawEvent(traceFile, t0, "nudge_accepted", Map.of("task", "pump", "nudgeSeq", 1));
+        appendRawEvent(traceFile, t0.plusSeconds(1), "succeeded", Map.of("jobId", "bg-1", "queue", "default"));
+        // … host suspended here for nearly six hours …
+        Instant resume = t0.plusSeconds(1 + 354 * 60);
+        appendRawEvent(traceFile, resume, "succeeded", Map.of("jobId", "bg-2", "queue", "default"));
+        appendRawEvent(
+                traceFile, resume.plusSeconds(1), "exec_started", Map.of("jobId", "pump-1", "cronOrigin", "nudge"));
+        appendRawEvent(traceFile, resume.plusSeconds(2), "exec_finished", Map.of("jobId", "pump-1"));
+
+        assertThat(verify(traceFile, InvariantChecks.nudgeRunAfterWake()).passed())
+                .isTrue();
+    }
+
+    @Test
+    void nudgeRunAfterWakeStillFiresWhenTheEngineStallsWhileTheProcessKeepsRunning(@TempDir Path tempDir)
+            throws Exception {
+        // The freeze excuse must not become a blanket amnesty: here the
+        // process is demonstrably alive throughout (steady background
+        // events), so the unserved nudge is a real stall.
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        Instant t0 = Instant.parse("2026-08-10T12:00:00Z");
+        appendRawEvent(traceFile, t0, "nudge_accepted", Map.of("task", "pump", "nudgeSeq", 1));
+        for (int second = 10; second <= 600; second += 10) {
+            appendRawEvent(
+                    traceFile,
+                    t0.plusSeconds(second),
+                    "succeeded",
+                    Map.of("jobId", "bg-" + second, "queue", "default"));
+        }
+
+        InvariantResult result = verify(traceFile, InvariantChecks.nudgeRunAfterWake());
+        assertThat(result.passed()).isFalse();
+        assertThat(result.violations()).anyMatch(v -> v.contains("had no recurring run start within"));
+    }
+
+    @Test
+    void outboxDrainedByLaterRunFiresWhenARowSurvivesAWholeRun(@TempDir Path tempDir) throws Exception {
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        Instant t0 = Instant.parse("2026-08-10T12:00:00Z");
+        appendRawEvent(traceFile, t0, "work_recorded", Map.of("seq", 7));
+        appendRawEvent(traceFile, t0.plusSeconds(1), "exec_started", Map.of("jobId", "pump-1", "cronOrigin", "nudge"));
+        // The run drains a different row and finishes; row 7 was appended
+        // before it started, so it must not still be waiting.
+        appendRawEvent(traceFile, t0.plusSeconds(2), "work_drained", Map.of("count", 1, "seqs", List.of(99)));
+        appendRawEvent(traceFile, t0.plusSeconds(3), "exec_finished", Map.of("jobId", "pump-1"));
+
+        InvariantResult result = verify(traceFile, InvariantChecks.outboxDrainedByLaterRun());
+        assertThat(result.passed()).isFalse();
+        assertThat(result.violations()).anyMatch(v -> v.contains("outbox row 7"));
+    }
+
+    @Test
+    void outboxDrainedByLaterRunToleratesRowsAppendedAfterTheRunStarted(@TempDir Path tempDir) throws Exception {
+        // A row appended while the pump is already executing may legitimately
+        // wait for the next run — only rows visible before the run started
+        // are its responsibility. Also covers the transposed-line case where
+        // a drain reaches the trace before the row's own record event.
+        Path traceFile = tempDir.resolve("trace.jsonl");
+        Instant t0 = Instant.parse("2026-08-10T12:00:00Z");
+        appendRawEvent(traceFile, t0, "exec_started", Map.of("jobId", "pump-1", "cronOrigin", "nudge"));
+        appendRawEvent(traceFile, t0.plusMillis(500), "work_drained", Map.of("count", 1, "seqs", List.of(5)));
+        appendRawEvent(traceFile, t0.plusMillis(600), "work_recorded", Map.of("seq", 5));
+        appendRawEvent(traceFile, t0.plusSeconds(1), "work_recorded", Map.of("seq", 6));
+        appendRawEvent(traceFile, t0.plusSeconds(2), "exec_finished", Map.of("jobId", "pump-1"));
+
+        assertThat(verify(traceFile, InvariantChecks.outboxDrainedByLaterRun()).passed())
+                .isTrue();
+    }
+
     /** Appends one trace line with a forged timestamp — for window-expiry tests. */
     private static void appendRawEvent(Path traceFile, Instant timestamp, String event, Map<String, Object> fields)
             throws IOException {
@@ -287,6 +403,7 @@ final class InvariantViolationTest {
                 traceFile,
                 mapper.writeValueAsString(ordered) + "\n",
                 StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE,
                 StandardOpenOption.APPEND);
     }
 

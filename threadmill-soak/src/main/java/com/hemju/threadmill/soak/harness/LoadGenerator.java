@@ -60,6 +60,14 @@ public final class LoadGenerator {
         return jobsPerSecond;
     }
 
+    /**
+     * The run's scheduler, for scenarios that drive scheduling APIs beyond
+     * enqueue — registering a recurring task, nudging it on demand.
+     */
+    public Scheduler scheduler() {
+        return scheduler;
+    }
+
     public AtomicLong enqueuedCount() {
         return enqueuedCount;
     }

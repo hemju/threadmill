@@ -1,6 +1,7 @@
 package com.hemju.threadmill.spring;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.time.ZoneId;
@@ -324,6 +325,41 @@ class ThreadmillAutoConfigurationTest {
                                     .orElseThrow()
                                     .exclusive())
                             .isFalse();
+                });
+    }
+
+    @Test
+    void nudgeRecurringResolvesTheTaskFromTheHandlerClass() {
+        // Issue #108 ergonomics: a @Recurring task's default identity is the
+        // handler's fully-qualified class name, so nudging by string forces
+        // callers to hard-code it and a rename breaks them at runtime. The
+        // class-based overload resolves it through the registry, matching the
+        // rest of this API where the handler class is the first argument.
+        memoryContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        ThreadmillRedisAutoConfiguration.class,
+                        ThreadmillPostgresAutoConfiguration.class,
+                        ThreadmillAutoConfiguration.class))
+                .withBean(RecurringIntervalHandler.class)
+                .withBean(FirstHandler.class)
+                .withPropertyValues("threadmill.enabled=false")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    JobStore store = context.getBean(JobStore.class);
+                    JobScheduler scheduler = context.getBean(JobScheduler.class);
+
+                    scheduler.nudgeRecurring(RecurringIntervalHandler.class);
+
+                    assertThat(store.findCronTaskState(RecurringIntervalHandler.class.getName())
+                                    .orElseThrow()
+                                    .nudgeRequestedAt())
+                            .isNotNull();
+
+                    // A registered handler that is not @Recurring has no task
+                    // to nudge — fail loudly rather than inventing one.
+                    assertThatThrownBy(() -> scheduler.nudgeRecurring(FirstHandler.class))
+                            .isInstanceOf(IllegalStateException.class)
+                            .hasMessageContaining("not @Recurring");
                 });
     }
 

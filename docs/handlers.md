@@ -73,7 +73,11 @@ structure the engine serializes. It exposes:
   derive a per-interval idempotency key from it. Under `DROP`, the single
   recovery instance for a missed backlog carries the most recent nominal
   fire time — never the recovery wall-clock — so the key stays meaningful
-  there too.
+  there too. Nudged instances (`nudgeRecurring`) carry no fire time: they
+  represent no schedule tick.
+- **`cronOrigin()`** — for recurring instances, what triggered this one:
+  `schedule` (a regular fire), `nudge` (`nudgeRecurring`), or `manual` (the
+  dashboard's force-trigger).
 - **`metadata()`** — mutable per-job metadata.
 
 See [Long-running jobs](long-running-jobs.md) for check-in patterns and the

@@ -26,6 +26,10 @@
 - [Long-running jobs](long-running-jobs.md) — `ctx.checkIn()`,
   `noProgressTimeout`, progress reporting.
 - [Deduplication](deduplication.md) — `enqueueIfAbsent`, dedup TTL semantics.
+- [Wake-driven pollers](wake-driven-pollers.md) — turning a frequent poller
+  into a nudged recurring task with a slow self-healing backstop: the
+  pattern, how to choose the backstop interval, and what coalescing means
+  for your handler.
 
 ## Reference
 

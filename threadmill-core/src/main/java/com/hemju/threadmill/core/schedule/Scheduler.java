@@ -24,6 +24,7 @@ import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.JobStore.NudgeOutcome;
 
 /**
  * The small, public scheduling API: {@code enqueue}, {@code scheduleAt},
@@ -45,6 +46,7 @@ public final class Scheduler {
     private final JobStore store;
     private final JobSerializer serializer;
     private final LocalWakeBus wakeBus;
+    private final NudgeCoalescer nudgeCoalescer = new NudgeCoalescer();
     private final String cronMutexHolder = UUID.randomUUID().toString();
 
     public Scheduler(JobStore store, JobSerializer serializer) {
@@ -267,6 +269,55 @@ public final class Scheduler {
 
     public void deleteCronTask(String name) {
         withCronMutex(name, () -> store.deleteCronTask(name));
+    }
+
+    /**
+     * Request that the registered recurring task {@code taskName} materialize
+     * an instance as soon as possible (a "nudge").
+     *
+     * <p>The nudge goes through the normal recurring machinery — the same
+     * pile-up guard, the same materializer, the same queue and per-instance
+     * overrides — it is not a bypass lane. The missed-run policy is the one
+     * thing it does not consult: a nudge represents no missed firing, so the
+     * policy applies only when a nudge coalesces into a scheduled fire that
+     * is already due.
+     * The guarantees:
+     * <ul>
+     *   <li><strong>Run-after-wake.</strong> After every accepted nudge, at
+     *       least one instance is materialized after the nudge. A nudge that
+     *       arrives while an instance is in flight produces one follow-up
+     *       after that instance terminates — the in-flight run may have read
+     *       its inputs before the nudge's triggering write committed, so it
+     *       never counts as satisfying the nudge.</li>
+     *   <li><strong>Coalescing.</strong> A burst of nudges collapses to at
+     *       most the current run plus one follow-up. This is a failure-free
+     *       bound: consistent with the at-least-once model, a crash between
+     *       the follow-up's insert and the request's clear can produce an
+     *       extra run — failures only ever add runs, never lose one.</li>
+     *   <li><strong>Durability.</strong> The nudge is a store write consumed
+     *       by the maintenance master's recurring tick; there is no transient
+     *       signal to lose. Worst-case latency is one
+     *       {@code maintenancePollInterval}.</li>
+     *   <li><strong>Schedule non-interference.</strong> A nudged instance
+     *       never moves {@code nextRunAt}: a cron task's next fire stays the
+     *       regular wall-clock match, and an interval trigger's phase is
+     *       preserved.</li>
+     * </ul>
+     *
+     * @throws IllegalArgumentException if no recurring task with that name exists
+     * @throws IllegalStateException    if the task is disabled — an explicit
+     *                                  pause wins over a nudge
+     */
+    public void nudgeRecurring(String taskName) {
+        Objects.requireNonNull(taskName, "taskName");
+        NudgeOutcome outcome = nudgeCoalescer.nudge(taskName, () -> store.requestCronNudge(taskName, Instant.now()));
+        switch (outcome) {
+            case ACCEPTED -> {}
+            case UNKNOWN_TASK -> throw new IllegalArgumentException("Unknown recurring task '" + taskName + "'");
+            case DISABLED ->
+                throw new IllegalStateException(
+                        "Recurring task '" + taskName + "' is disabled; an explicit pause wins over a nudge");
+        }
     }
 
     /**
@@ -518,12 +569,50 @@ public final class Scheduler {
             String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
             var existingTask = store.findCronTask(task.name());
             var existingState = store.findCronTaskState(task.name());
-            store.upsertCronTask(task);
             boolean reEnabled = existingTask.isPresent() && !existingTask.get().enabled() && task.enabled();
+            if (reEnabled) {
+                // Re-enable ordering is crash-safe by construction: clear any
+                // pending nudge and recompute the schedule state WHILE THE
+                // TASK IS STILL DISABLED, and flip enabled last. A crash
+                // anywhere before the final task write leaves the task
+                // disabled, so the retry re-detects the flip and repeats —
+                // stale pre-pause demand can never become executable
+                // (consistent with re-enable-does-not-catch-up). A nudge
+                // accepted after our state read survives the compare-and-
+                // clear, but it can only have been accepted once the task
+                // was already enabled, which makes it legitimate new demand.
+                if (existingState.isPresent()
+                        && existingState.get().nudgeRequestedAt() != null
+                        && existingState.get().nudgeRevision() != null) {
+                    store.clearCronNudge(task.name(), existingState.get().nudgeRevision());
+                }
+                Instant next = task.trigger().nextAfter(Instant.now(), task.zone());
+                if (existingState.isPresent()) {
+                    var s = existingState.get();
+                    store.upsertCronTaskState(new CronTaskScheduleState(
+                            task.name(), s.lastRunAt(), s.lastRunJobId(), next, s.inFlightJobId(), fingerprint));
+                } else {
+                    store.upsertCronTaskState(CronTaskScheduleState.initial(task.name(), next, fingerprint));
+                }
+                store.upsertCronTask(task);
+                return;
+            }
+            store.upsertCronTask(task);
+            // Disabling clears a pending nudge — an explicit pause wins. The
+            // task is persisted disabled FIRST, so a crash before the clear
+            // leaves a pending nudge on a disabled task, which the
+            // materializer's enabled recheck refuses to run and the
+            // re-enable path above clears before the task can fire again.
+            boolean disabling = existingTask.isPresent() && existingTask.get().enabled() && !task.enabled();
+            if (disabling
+                    && existingState.isPresent()
+                    && existingState.get().nudgeRequestedAt() != null
+                    && existingState.get().nudgeRevision() != null) {
+                store.clearCronNudge(task.name(), existingState.get().nudgeRevision());
+            }
             if (existingState.isPresent()) {
                 var s = existingState.get();
-                boolean timingUnchanged =
-                        s.nextRunAt() != null && fingerprint.equals(s.timingFingerprint()) && !reEnabled;
+                boolean timingUnchanged = s.nextRunAt() != null && fingerprint.equals(s.timingFingerprint());
                 if (timingUnchanged) {
                     return;
                 }

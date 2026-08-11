@@ -50,6 +50,7 @@ import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.JobStore.NudgeOutcome;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
 
 /**
@@ -1827,6 +1828,143 @@ public abstract class AbstractJobStoreContractTest {
         store.upsertCronTaskState(CronTaskScheduleState.initial("fingerprinted", next));
         assertThat(store.findCronTaskState("fingerprinted").orElseThrow().timingFingerprint())
                 .isNull();
+    }
+
+    @Test
+    @DisplayName("a nudge round-trips through the schedule state and a blanket state upsert preserves it")
+    void nudgeRoundTripsAndSurvivesBlanketStateUpserts() {
+        // Issue #108: the nudge cell is written only by requestCronNudge /
+        // clearCronNudge. Every other state writer (re-registration,
+        // materializer bookkeeping, dashboard edits) goes through
+        // upsertCronTaskState, which must leave a concurrently accepted nudge
+        // untouched — a store that clobbers it silently loses the follow-up
+        // run the nudge API promised.
+        var task = nudgeContractTask("nudged", true);
+        store.upsertCronTask(task);
+        Instant next = Instant.now().plus(Duration.ofHours(6));
+        store.upsertCronTaskState(
+                CronTaskScheduleState.initial("nudged", next, CronTaskScheduleState.timingFingerprintOf(task)));
+
+        Instant requested = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        assertThat(store.requestCronNudge("nudged", requested)).isEqualTo(NudgeOutcome.ACCEPTED);
+        var afterAccept = store.findCronTaskState("nudged").orElseThrow();
+        assertThat(afterAccept.nudgeRequestedAt()).isEqualTo(requested);
+        assertThat(afterAccept.nudgeRevision()).isNotNull();
+
+        // The blanket upsert rewrites every schedule field — but not the
+        // nudge cells (timestamp AND revision).
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                "nudged", Instant.now(), null, next, null, CronTaskScheduleState.timingFingerprintOf(task)));
+        var afterUpsert = store.findCronTaskState("nudged").orElseThrow();
+        assertThat(afterUpsert.nudgeRequestedAt()).isEqualTo(requested);
+        assertThat(afterUpsert.nudgeRevision()).isEqualTo(afterAccept.nudgeRevision());
+    }
+
+    @Test
+    @DisplayName("nudging an unknown task is rejected and never resurrects schedule state")
+    void nudgeOnUnknownTaskIsRejectedWithoutResurrectingState() {
+        assertThat(store.requestCronNudge("never-registered", Instant.now())).isEqualTo(NudgeOutcome.UNKNOWN_TASK);
+        assertThat(store.findCronTaskState("never-registered")).isEmpty();
+
+        // A nudge racing task removal must not bring the state back either.
+        var task = nudgeContractTask("removed", true);
+        store.upsertCronTask(task);
+        store.upsertCronTaskState(
+                CronTaskScheduleState.initial("removed", Instant.now().plusSeconds(60)));
+        store.deleteCronTask("removed");
+        assertThat(store.requestCronNudge("removed", Instant.now())).isEqualTo(NudgeOutcome.UNKNOWN_TASK);
+        assertThat(store.findCronTaskState("removed")).isEmpty();
+    }
+
+    @Test
+    @DisplayName("nudging a disabled task is rejected — an explicit pause wins")
+    void nudgeOnDisabledTaskIsRejected() {
+        var task = nudgeContractTask("paused", false);
+        store.upsertCronTask(task);
+        store.upsertCronTaskState(
+                CronTaskScheduleState.initial("paused", Instant.now().plusSeconds(60)));
+        assertThat(store.requestCronNudge("paused", Instant.now())).isEqualTo(NudgeOutcome.DISABLED);
+        assertThat(store.findCronTaskState("paused").orElseThrow().nudgeRequestedAt())
+                .isNull();
+    }
+
+    @Test
+    @DisplayName("clearCronNudge is compare-and-clear on the revision: only the observed acceptance is cleared")
+    void clearCronNudgeOnlyClearsTheObservedValue() {
+        // Run-after-wake hinges on this: a nudge accepted between the
+        // materializer's read and its clear carries a strictly greater
+        // revision and must survive to produce the follow-up run.
+        var task = nudgeContractTask("cas-cleared", true);
+        store.upsertCronTask(task);
+        store.upsertCronTaskState(
+                CronTaskScheduleState.initial("cas-cleared", Instant.now().plusSeconds(60)));
+
+        Instant first = Instant.parse("2026-08-10T10:00:00.111Z");
+        Instant second = Instant.parse("2026-08-10T10:00:00.222Z");
+        assertThat(store.requestCronNudge("cas-cleared", first)).isEqualTo(NudgeOutcome.ACCEPTED);
+        long firstRevision =
+                store.findCronTaskState("cas-cleared").orElseThrow().nudgeRevision();
+        assertThat(store.requestCronNudge("cas-cleared", second)).isEqualTo(NudgeOutcome.ACCEPTED);
+        long secondRevision =
+                store.findCronTaskState("cas-cleared").orElseThrow().nudgeRevision();
+        assertThat(secondRevision).isGreaterThan(firstRevision);
+
+        // Clearing the stale observation is a no-op; the newer nudge survives.
+        store.clearCronNudge("cas-cleared", firstRevision);
+        assertThat(store.findCronTaskState("cas-cleared").orElseThrow().nudgeRequestedAt())
+                .isEqualTo(second);
+
+        store.clearCronNudge("cas-cleared", secondRevision);
+        assertThat(store.findCronTaskState("cas-cleared").orElseThrow().nudgeRequestedAt())
+                .isNull();
+
+        // Clearing an already-cleared nudge is a no-op, not an error.
+        store.clearCronNudge("cas-cleared", secondRevision);
+        assertThat(store.findCronTaskState("cas-cleared").orElseThrow().nudgeRequestedAt())
+                .isNull();
+    }
+
+    @Test
+    @DisplayName("acceptances with identical timestamps stay distinguishable — the revision is the CAS identity")
+    void nudgeAcceptancesWithIdenticalTimestampsAreDistinguishable() {
+        // Wall-clock timestamps collide within store precision (Redis keeps
+        // epoch millis; two producers can nudge in the same millisecond). If
+        // the timestamp were the compare-and-clear identity, clearing the
+        // first observation would erase the second acceptance — losing its
+        // follow-up run. The store-generated revision must advance even when
+        // the timestamp does not change at all.
+        var task = nudgeContractTask("same-instant", true);
+        store.upsertCronTask(task);
+        store.upsertCronTaskState(
+                CronTaskScheduleState.initial("same-instant", Instant.now().plusSeconds(60)));
+
+        Instant instant = Instant.parse("2026-08-10T10:00:00.500Z");
+        assertThat(store.requestCronNudge("same-instant", instant)).isEqualTo(NudgeOutcome.ACCEPTED);
+        long observed = store.findCronTaskState("same-instant").orElseThrow().nudgeRevision();
+
+        // The materializer would materialize here — and a second nudge with
+        // the SAME timestamp is accepted before the clear runs.
+        assertThat(store.requestCronNudge("same-instant", instant)).isEqualTo(NudgeOutcome.ACCEPTED);
+
+        store.clearCronNudge("same-instant", observed);
+        var after = store.findCronTaskState("same-instant").orElseThrow();
+        assertThat(after.nudgeRequestedAt())
+                .as("the second same-instant acceptance must survive the first observation's clear")
+                .isEqualTo(instant);
+        assertThat(after.nudgeRevision()).isGreaterThan(observed);
+    }
+
+    private static CronTask nudgeContractTask(String name, boolean enabled) {
+        return new CronTask(
+                name,
+                new CronTask.Trigger.Interval(Duration.ofHours(6)),
+                "com.example.Handler",
+                new JobArgument("com.example.Payload", "{}"),
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                enabled);
     }
 
     @Test

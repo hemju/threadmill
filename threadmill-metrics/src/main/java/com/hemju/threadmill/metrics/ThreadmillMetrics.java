@@ -29,6 +29,11 @@ import com.hemju.threadmill.core.store.JobStore;
  *       from the incrementally-maintained counter, never a full scan).</li>
  *   <li>{@code threadmill.jobs.processed} (counter) — successful completions.</li>
  *   <li>{@code threadmill.jobs.failed} (counter) — failures by cause label.</li>
+ *   <li>{@code threadmill.jobs.recurring.runs{origin="schedule|nudge|manual|other"}}
+ *       (counter) — recurring-task instances started, by what triggered them:
+ *       a regular schedule fire, an on-demand nudge, or the dashboard's
+ *       operator force-trigger. Bounded cardinality: unrecognized origin
+ *       metadata is clamped to {@code other}.</li>
  *   <li>{@code threadmill.jobs.processing.time} (timer) — handler runtime
  *       from claim to terminal transition.</li>
  * </ul>
@@ -47,6 +52,7 @@ public final class ThreadmillMetrics {
     private final Counter processedCounter;
     private final Counter refreshErrors;
     private final Map<String, Counter> failedCounters = new ConcurrentHashMap<>();
+    private final Map<String, Counter> recurringRunCounters = new ConcurrentHashMap<>();
     private final Timer processingTime;
     private final Timer claimLatency;
     private final ConcurrentHashMap<String, Instant> inFlightStart = new ConcurrentHashMap<>();
@@ -150,12 +156,41 @@ public final class ThreadmillMetrics {
         claimLatency.record(duration);
     }
 
+    private void recordRecurringRun(String origin) {
+        // Clamp to the three known origins so arbitrary metadata can never
+        // explode the tag cardinality.
+        String tag =
+                switch (origin) {
+                    case JobExecutionContext.CRON_ORIGIN_SCHEDULE,
+                            JobExecutionContext.CRON_ORIGIN_NUDGE,
+                            JobExecutionContext.CRON_ORIGIN_MANUAL -> origin;
+                    default -> "other";
+                };
+        recurringRunCounters
+                .computeIfAbsent(
+                        tag,
+                        t -> Counter.builder("threadmill.jobs.recurring.runs")
+                                .tag("origin", t)
+                                .description("Recurring-task instances started, by trigger origin")
+                                .register(registry))
+                .increment();
+    }
+
     /** A JobInterceptor that drives the success / failure counters and the timer. */
     public JobInterceptor asInterceptor() {
         return new JobInterceptor() {
             @Override
             public void onProcessingStarting(Job job, JobExecutionContext ctx) {
                 inFlightStart.put(job.id().toString(), Instant.now());
+                // This hook fires once per attempt, but the meter counts
+                // recurring *instances* — operators read the nudge-to-schedule
+                // ratio off it, and a retry-storming task would inflate both
+                // origins and make that reading meaningless.
+                if (job.attempts() <= 1) {
+                    job.metadata()
+                            .get(JobExecutionContext.CRON_ORIGIN_META)
+                            .ifPresent(ThreadmillMetrics.this::recordRecurringRun);
+                }
             }
 
             @Override

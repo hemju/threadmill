@@ -23,6 +23,7 @@ import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskId;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
+import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
@@ -58,6 +59,13 @@ public class JobScheduler {
     protected final ProcessingNodeConfig config;
     protected final LocalWakeBus wakeBus;
 
+    /**
+     * Core scheduler backing {@link #nudgeRecurring(String)}: recurring-task
+     * nudges reuse the core validation, error mapping, and the per-task
+     * in-JVM write coalescer instead of reimplementing them here.
+     */
+    private final Scheduler coreScheduler;
+
     public JobScheduler(
             JobStore store, JobSerializer serializer, ThreadmillJobRegistry registry, ProcessingNodeConfig config) {
         this(store, serializer, registry, config, new LocalWakeBus());
@@ -74,6 +82,7 @@ public class JobScheduler {
         this.registry = Objects.requireNonNull(registry, "registry");
         this.config = Objects.requireNonNull(config, "config");
         this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
+        this.coreScheduler = new Scheduler(store, serializer, wakeBus);
     }
 
     public <P extends JobPayload> JobId enqueue(Class<? extends JobHandler<P>> handler, P payload) {
@@ -187,6 +196,64 @@ public class JobScheduler {
         store.upsertCronTaskState(CronTaskScheduleState.initial(
                 name, expression.nextAfter(Instant.now(), zone), CronTaskScheduleState.timingFingerprintOf(task)));
         return new CronTaskId(name);
+    }
+
+    /**
+     * Request that the registered recurring task {@code taskName} materialize
+     * an instance as soon as possible (a "nudge") — see
+     * {@link Scheduler#nudgeRecurring(String)} for the full contract
+     * (run-after-wake, coalescing, durability, schedule non-interference).
+     *
+     * <p>On this scheduler the nudge write is immediate. Both transaction-mode
+     * subclasses — {@link TransactionAwareJobScheduler} and, deliberately,
+     * {@link TransactionJoinedJobScheduler} — instead validate on the calling
+     * thread and defer the write to {@code afterCommit}, so a rollback
+     * discards it. Nudges never join the caller's SQL transaction even in
+     * {@code join_transaction} mode: coalescing is one store cell per task, so
+     * a joined nudge would hold that row's lock for the whole business
+     * transaction and serialize every producer of the task. See
+     * {@link DeferredNudge}.
+     *
+     * <p>Prefer {@link #nudgeRecurring(Class)} for {@code @Recurring}
+     * handlers; this overload is for tasks registered imperatively through the
+     * core {@link Scheduler}, where the caller chooses the name.
+     *
+     * @throws IllegalArgumentException if no recurring task with that name exists
+     * @throws IllegalStateException    if the task is disabled
+     */
+    public void nudgeRecurring(String taskName) {
+        coreScheduler.nudgeRecurring(taskName);
+    }
+
+    /** {@link #nudgeRecurring(String)} by the id returned from {@link #enqueueRecurring}. */
+    public void nudgeRecurring(CronTaskId taskId) {
+        Objects.requireNonNull(taskId, "taskId");
+        nudgeRecurring(taskId.name());
+    }
+
+    /**
+     * {@link #nudgeRecurring(String)} for a {@code @Recurring} handler,
+     * addressed by its class rather than its durable task name.
+     *
+     * <p>Prefer this over the string overload in Spring applications. A
+     * {@code @Recurring} task's default identity is the handler's
+     * fully-qualified class name, so the string form makes callers hard-code
+     * {@code "com.acme.jobs.OutboxPump"} — which a rename or package move
+     * breaks at runtime. Resolving through the registry keeps the call
+     * refactor-safe and matches the rest of this API, where the handler class
+     * is always the first argument.
+     *
+     * @throws IllegalStateException if the class is not a registered
+     *         {@code @Job} handler, or is registered but not {@code @Recurring}
+     */
+    public void nudgeRecurring(Class<? extends JobHandler<?>> recurringHandler) {
+        Objects.requireNonNull(recurringHandler, "recurringHandler");
+        var registration = registry.registrationFor(recurringHandler);
+        if (!registration.isRecurring()) {
+            throw new IllegalStateException("Handler " + recurringHandler.getName()
+                    + " is registered but is not @Recurring, so there is no recurring task to nudge");
+        }
+        nudgeRecurring(registration.recurring().name());
     }
 
     /**

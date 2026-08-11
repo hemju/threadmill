@@ -32,7 +32,9 @@ plus the additive migrations that followed it (currently
 [`V3__integrity_constraints.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V3__integrity_constraints.sql),
 [`V4__cron_state_timing_fingerprint.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V4__cron_state_timing_fingerprint.sql),
 and
-[`V5__cron_task_exclusive.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V5__cron_task_exclusive.sql)).
+[`V5__cron_state_nudge.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V5__cron_state_nudge.sql),
+and
+[`V6__cron_task_exclusive.sql`](../threadmill-store-postgres/src/main/resources/com/hemju/threadmill/store/postgres/migrations/V6__cron_task_exclusive.sql)).
 
 For applications that want to apply SQL from their own deployment system,
 `MigrationRunner` can emit the same statements:

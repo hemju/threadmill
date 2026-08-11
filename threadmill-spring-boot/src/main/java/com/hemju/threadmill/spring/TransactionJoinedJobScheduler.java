@@ -6,6 +6,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.transaction.support.TransactionSynchronization;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
 
@@ -27,6 +29,8 @@ import com.hemju.threadmill.core.store.JobStore;
  * until commit so workers never race an uncommitted row.
  */
 public final class TransactionJoinedJobScheduler extends JobScheduler {
+
+    private static final Logger LOG = LoggerFactory.getLogger(TransactionJoinedJobScheduler.class);
 
     public TransactionJoinedJobScheduler(
             JobStore store,
@@ -103,6 +107,22 @@ public final class TransactionJoinedJobScheduler extends JobScheduler {
             wakeAfterCommitOrNow(registration.queue());
         }
         return result;
+    }
+
+    /**
+     * Nudges are after-commit even in this mode — the one write that
+     * deliberately does <em>not</em> join the caller's transaction.
+     *
+     * <p>Joining would hold the task's single schedule-state row lock for the
+     * whole business transaction, serializing every concurrent producer of
+     * that task behind it. See {@link DeferredNudge} for why that trade is
+     * wrong: the only thing joining buys is closing a crash window the design
+     * explicitly does not need to close, and rollback semantics are identical
+     * either way.
+     */
+    @Override
+    public void nudgeRecurring(String taskName) {
+        DeferredNudge.onCommit(taskName, store, name -> super.nudgeRecurring(name), LOG);
     }
 
     private void wakeAfterCommitOrNow(String queue) {

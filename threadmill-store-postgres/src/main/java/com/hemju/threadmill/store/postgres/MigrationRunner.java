@@ -49,7 +49,8 @@ public final class MigrationRunner {
             "V2__cron_task_overrides.sql",
             "V3__integrity_constraints.sql",
             "V4__cron_state_timing_fingerprint.sql",
-            "V5__cron_task_exclusive.sql");
+            "V5__cron_state_nudge.sql",
+            "V6__cron_task_exclusive.sql");
     private static final long MIGRATION_LOCK_KEY = 0x5468726561646D6CL;
     private static final Logger LOG = LoggerFactory.getLogger(MigrationRunner.class);
     private static final Duration LOCK_ACQUIRE_TIMEOUT = Duration.ofMinutes(5);

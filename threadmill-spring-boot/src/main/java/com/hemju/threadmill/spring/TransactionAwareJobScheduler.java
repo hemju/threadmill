@@ -146,6 +146,20 @@ public final class TransactionAwareJobScheduler extends JobScheduler {
         return List.copyOf(ids);
     }
 
+    /**
+     * Nudge with after-commit semantics: validation (unknown / disabled task)
+     * fails fast on the calling thread, but the nudge write itself is deferred
+     * to {@code afterCommit} — a rollback discards it, so producers can nudge
+     * in the same transaction that writes the work row. The residual crash
+     * window between the commit and the deferred write is covered by the
+     * task's backstop schedule (worst case one schedule period of latency,
+     * never a lost run).
+     */
+    @Override
+    public void nudgeRecurring(String taskName) {
+        DeferredNudge.onCommit(taskName, store, name -> super.nudgeRecurring(name), LOG);
+    }
+
     @Override
     public <P extends JobPayload> EnqueueResult enqueueIfAbsent(
             Class<? extends JobHandler<P>> handler, P payload, String dedupKey, Duration ttl) {
