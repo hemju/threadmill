@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.Collectors;
@@ -16,9 +17,11 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNode;
@@ -658,35 +661,171 @@ class SchedulingTest {
     }
 
     @Test
-    void failedInFlightInstanceDoesNotBlockTheNextMaterialization() {
-        scheduler.defineIntervalTask(
-                "failing-window", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);
-        var existing = store.findCronTaskState("failing-window").orElseThrow();
+    void exclusiveRecurringInstancesAreSerializedByClaimTimeAdmission() {
+        // Regression for github issue #110 item 3. An exclusive task stamps
+        // every instance with the derived recurring: key in EXCLUSIVE mode, so
+        // the store — not the materializer's pile-up guard — is what stops a
+        // second instance from running. Two instances are forced into the
+        // queue simultaneously (the shape the guard cannot prevent: a manual
+        // trigger beside a scheduled instance); claim-time admission must
+        // release only one.
+        var task = new CronTask(
+                "nightly-sweep",
+                new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
+                RecorderHandler.class.getName(),
+                serializer.serializePayload(new HelloPayload("tick")),
+                "default",
+                0,
+                null,
+                null,
+                true,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.systemDefault(),
+                true);
+        scheduler.defineRecurring(
+                task.name(),
+                task.trigger(),
+                new HelloPayload("tick"),
+                task.handlerType(),
+                task.queue(),
+                task.priority(),
+                null,
+                null,
+                true,
+                task.missedRunPolicy());
+        var initial = store.findCronTaskState("nightly-sweep").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+                initial.taskName(), null, null, Instant.now().minusSeconds(1), null));
+
         var materializer = new RecurringMaterializer(store);
         materializer.tick(Instant.now());
-        var state = store.findCronTaskState("failing-window").orElseThrow();
-        Job instance = store.findById(JobId.of(state.inFlightJobId())).orElseThrow();
+        var state = store.findCronTaskState("nightly-sweep").orElseThrow();
+        Job first = store.findById(JobId.of(state.inFlightJobId())).orElseThrow();
 
-        // Fail the instance terminally (retry-exhausted): the pile-up guard
-        // deliberately treats FAILED as non-blocking so a permanently failed
-        // instance cannot deadlock the task forever.
-        long v = instance.version();
-        instance.transitionTo(JobState.PROCESSING, Instant.now(), "test", null);
-        instance.transitionTo(JobState.FAILED, Instant.now(), "test", "boom");
-        store.saveAtomic(instance, v);
+        assertThat(first.concurrencyKey()).contains(CronTask.concurrencyKeyFor("nightly-sweep"));
+        assertThat(first.concurrencyKey()).contains("recurring:nightly-sweep");
+        assertThat(first.concurrencyMode()).contains(ConcurrencyMode.EXCLUSIVE);
+
+        // A second instance for the same task, enqueued while the first is
+        // still pending — exactly what a dashboard manual trigger produces.
+        store.insert(Job.builder()
+                .spec(first.spec())
+                .queue("default")
+                .cronTaskName("nightly-sweep")
+                .concurrencyKey(CronTask.concurrencyKeyFor("nightly-sweep"))
+                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+                .build());
+
+        assertThat(store.claimReady(NodeId.newId(), "default", 10, Instant.now()))
+                .as("claim-time admission must let only one exclusive instance through")
+                .hasSize(1);
+    }
+
+    @Test
+    void nonExclusiveRecurringInstancesCarryNoConcurrencyKey() {
+        scheduler.defineIntervalTask("loose", Duration.ofMinutes(5), new HelloPayload("tick"), RecorderHandler.class);
+        var initial = store.findCronTaskState("loose").orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                initial.taskName(), null, null, Instant.now().minusSeconds(1), null));
+        new RecurringMaterializer(store).tick(Instant.now());
+
+        var state = store.findCronTaskState("loose").orElseThrow();
+        Job instance = store.findById(JobId.of(state.inFlightJobId())).orElseThrow();
+        assertThat(instance.concurrencyKey()).isEmpty();
+        assertThat(instance.concurrencyMode()).isEmpty();
+    }
+
+    @Test
+    void retryExhaustedFailedInstanceDoesNotBlockTheNextMaterialization() {
+        // A FAILED instance whose retry budget is provably spent is genuinely
+        // terminal — nothing is going to reschedule it — so it must never
+        // deadlock the task, and must not even delay the next run.
+        UUID priorInstance = failInstanceOfTaskWithBudget("exhausted", 1, Instant.now());
+
+        new RecurringMaterializer(store).tick(Instant.now());
+
+        assertThat(store.findCronTaskState("exhausted").orElseThrow().inFlightJobId())
+                .isNotEqualTo(priorInstance);
+    }
+
+    @Test
+    void failedInstanceAwaitingItsRetryBlocksTheNextMaterialization() {
+        // Regression for github issue #110 item 2. FAILED is terminal in the
+        // state machine but only terminal-PENDING while RetryInterceptor still
+        // owes the job a SCHEDULED save, and those are two separate store
+        // writes. The original guard treated every FAILED as non-blocking, so
+        // a tick landing inside that window materialized a fresh instance
+        // beside a retrying one. With budget left and the failure fresh, the
+        // guard must hold.
+        UUID priorInstance = failInstanceOfTaskWithBudget("retrying", 5, Instant.now());
+
+        new RecurringMaterializer(store).tick(Instant.now());
+
+        assertThat(store.findCronTaskState("retrying").orElseThrow().inFlightJobId())
+                .isEqualTo(priorInstance);
+    }
+
+    @Test
+    void failedInstanceStopsBlockingOnceTheRetryHandoffGraceElapses() {
+        // The budget test is only approximate: the effective ceiling depends
+        // on the exception, and per-exception-type policies live on the
+        // interceptor rather than on the job. A job that is terminal under a
+        // stricter policy therefore still looks budget-remaining here, so the
+        // age bound — not the budget test — is what guarantees it cannot block
+        // its task until recoverStrandedFailures happens to reach it.
+        UUID priorInstance =
+                failInstanceOfTaskWithBudget("stale-failure", 5, Instant.now().minus(Duration.ofMinutes(1)));
+
+        new RecurringMaterializer(store).tick(Instant.now());
+
+        assertThat(store.findCronTaskState("stale-failure").orElseThrow().inFlightJobId())
+                .isNotEqualTo(priorInstance);
+    }
+
+    /**
+     * Materialize one instance of a due interval task carrying {@code maxAttempts},
+     * claim it (so the store stamps the claim-time attempt increment the budget
+     * test reads), and fail it at {@code failedAt}. Returns the instance id, with
+     * the task left due again so the next tick exercises the pile-up guard.
+     */
+    private UUID failInstanceOfTaskWithBudget(String task, int maxAttempts, Instant failedAt) {
+        scheduler.defineIntervalTask(
+                task,
+                Duration.ofMillis(100),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                null,
+                maxAttempts,
+                CronTask.MissedRunPolicy.DROP);
+        var initial = store.findCronTaskState(task).orElseThrow();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                initial.taskName(), null, null, Instant.now().minusSeconds(1), null));
+        var materializer = new RecurringMaterializer(store);
+        materializer.tick(Instant.now());
+        var state = store.findCronTaskState(task).orElseThrow();
+
+        // Claim through the store so attempts carries the real claim-time
+        // increment rather than a hand-set value.
+        Job claimed = store.claimReady(NodeId.newId(), "default", 10, Instant.now()).stream()
+                .filter(j -> j.id().asUuid().equals(state.inFlightJobId()))
+                .findFirst()
+                .orElseThrow();
+        assertThat(claimed.attempts()).isEqualTo(1);
+        long version = claimed.version();
+        claimed.transitionTo(JobState.FAILED, failedAt, "test", "boom");
+        claimed.clearOwner();
+        store.saveAtomic(claimed, version);
 
         store.upsertCronTaskState(new CronTaskScheduleState(
-                "failing-window",
+                task,
                 state.lastRunAt(),
                 state.lastRunJobId(),
                 Instant.now().minusMillis(50),
-                state.inFlightJobId()));
-        materializer.tick(Instant.now());
-
-        var after = store.findCronTaskState("failing-window").orElseThrow();
-        assertThat(after.inFlightJobId()).isNotEqualTo(state.inFlightJobId());
+                state.inFlightJobId(),
+                state.timingFingerprint()));
+        return state.inFlightJobId();
     }
 
     @Test

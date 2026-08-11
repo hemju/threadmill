@@ -1764,6 +1764,41 @@ public abstract class AbstractJobStoreContractTest {
     }
 
     @Test
+    void cronTaskExclusiveRoundTripsAndClearsOnReUpsert() {
+        // Regression for github issue #110 item 3: the exclusive flag decides
+        // whether every materialised instance claims under the derived
+        // recurring: key, so a store that drops it silently reverts the task
+        // to overlapping execution. Re-registration has overwrite semantics —
+        // an exclusive task re-registered without the flag must come back
+        // non-exclusive, exactly like the timeout / maxAttempts overrides.
+        var exclusive = new CronTask(
+                "sweep",
+                new CronTask.Trigger.CronExpr(CronExpression.parse("* * * * *")),
+                "com.example.Handler",
+                new JobArgument("com.example.Payload", "{}"),
+                "default",
+                0,
+                null,
+                null,
+                true,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
+        store.upsertCronTask(exclusive);
+        assertThat(store.findCronTask("sweep").orElseThrow().exclusive()).isTrue();
+        assertThat(store.listCronTasks())
+                .filteredOn(t -> t.name().equals("sweep"))
+                .singleElement()
+                .satisfies(t -> assertThat(t.exclusive()).isTrue());
+
+        store.upsertCronTask(cronTask("sweep"));
+        assertThat(store.findCronTask("sweep").orElseThrow().exclusive()).isFalse();
+
+        store.upsertCronTask(cronTask("plain"));
+        assertThat(store.findCronTask("plain").orElseThrow().exclusive()).isFalse();
+    }
+
+    @Test
     @DisplayName("cron-task schedule state round-trips its timing fingerprint; absent round-trips as null")
     void cronTaskStateTimingFingerprintRoundTrips() {
         // Issue #105 hardening: Scheduler.upsertCron decides

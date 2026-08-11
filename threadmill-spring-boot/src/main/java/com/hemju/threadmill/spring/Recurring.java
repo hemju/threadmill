@@ -52,4 +52,22 @@ public @interface Recurring {
      * identity across handler renames or package moves.
      */
     String recurringName() default "";
+
+    /**
+     * Whether instances of this task run one at a time across the whole
+     * cluster. Every instance is claimed under a derived
+     * {@code recurring:<name>} concurrency key in
+     * {@code ConcurrencyMode.EXCLUSIVE}, so a second instance cannot be
+     * admitted while one is processing — the declarative replacement for a
+     * hand-rolled advisory lock in a singleton sweep.
+     *
+     * <p>This is enforced at claim time by the store, so it also covers a
+     * dashboard manual trigger racing a scheduled instance. It does
+     * <strong>not</strong> close the lease-expiry reclaim window: a node that
+     * stops heartbeating is indistinguishable from one that is paused and
+     * will resume, and reclaim releases the concurrency slot as part of the
+     * terminal failure save, so a reclaimed instance can still overlap a
+     * still-running original. Handlers remain idempotent by contract.
+     */
+    boolean exclusive() default false;
 }

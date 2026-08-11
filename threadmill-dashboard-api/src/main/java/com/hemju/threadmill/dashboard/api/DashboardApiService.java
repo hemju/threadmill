@@ -13,6 +13,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
+import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobReplacement;
@@ -193,6 +194,7 @@ public final class DashboardApiService {
                 includeSensitiveDetails ? task.payloadArgument() : null,
                 task.queue(),
                 task.priority(),
+                task.exclusive(),
                 task.missedRunPolicy().name(),
                 task.zone().toString(),
                 task.enabled(),
@@ -301,6 +303,14 @@ public final class DashboardApiService {
         if (task.maxAttempts() != null) {
             builder.metadata(RetryInterceptor.META_MAX_ATTEMPTS, Integer.toString(task.maxAttempts()));
         }
+        // A manually triggered instance of an exclusive task claims under the
+        // same derived key as its scheduled siblings, so the operator action
+        // serializes with them instead of overlapping. The pile-up guard below
+        // cannot do this on its own — it only decides what to materialize, not
+        // what may be admitted.
+        if (task.exclusive()) {
+            builder.concurrencyKey(CronTask.concurrencyKeyFor(task.name())).concurrencyMode(ConcurrencyMode.EXCLUSIVE);
+        }
         Job job = builder.build();
         withTaskMutex(name, () -> {
             store.insert(job);
@@ -341,6 +351,7 @@ public final class DashboardApiService {
                 request.priority() == null ? existing.priority() : request.priority(),
                 existing.timeout(),
                 existing.maxAttempts(),
+                existing.exclusive(),
                 request.missedRunPolicy() == null ? existing.missedRunPolicy() : request.missedRunPolicy(),
                 request.zone() == null ? existing.zone() : parseZone(request.zone()),
                 request.enabled() == null ? existing.enabled() : request.enabled());

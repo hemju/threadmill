@@ -203,6 +203,55 @@ State this loudly to yourself before writing a handler. Common patterns:
   short-circuit on the second attempt.
 - An "outbox" check — see the next question.
 
+## When exactly can two instances of the same job overlap?
+
+Three windows, and it is worth knowing which of them you can close.
+
+**Shutdown is not one of them.** When a node stops, it drains: the worker pool
+is closed to new work and in-flight handlers are given
+`threadmill.shutdown-grace-period` to finish before anything is interrupted.
+An interrupted job's requeue is written by that job's *own* worker thread,
+after `handler.run` has already returned or thrown — so a surviving node
+cannot claim the job while your code is still executing on the old one. The
+node also keeps its owner heartbeats fresh through the whole drain, so peers
+do not mass-reclaim jobs that are merely draining.
+
+**Retry handoff is closed for recurring tasks.** A failure and its reschedule
+are two separate store writes, and a recurring task's pile-up guard used to
+treat the intermediate `FAILED` as "finished", so a materializer tick landing
+between the two writes could create a fresh instance beside a retrying one.
+The guard now holds while a failed instance is still plausibly awaiting its
+retry, and an [exclusive recurring task](concurrency.md#exclusive-recurring-tasks)
+closes it outright, because the fresh instance cannot be admitted while the
+retrying one holds the key.
+
+**Lease-expiry reclaim cannot be closed — by Threadmill or by anything else.**
+A node that stops heartbeating is indistinguishable from one that is paused
+and about to resume: a long GC pause, a suspended VM, a partitioned network,
+a `SIGSTOP`. After `threadmill.heartbeat-timeout` the cluster must decide
+whether to give up the job or strand it forever, and it chooses to reclaim.
+If the original node was alive after all, its handler is still running when
+the replacement starts. Reclaim also releases the claim-time concurrency slot
+as part of the terminal failure save, so an `EXCLUSIVE` key does **not** cover
+this window.
+
+> Threadmill narrows the overlap surface. It does not remove the need for
+> idempotent handlers.
+
+**Fence at your own data.** For an effect that must not happen twice, the last
+line of defence belongs in the datastore you control, not in the scheduler:
+
+- A compare-and-set transition — `UPDATE … SET state = 'sent' WHERE id = ?
+  AND state = 'pending'` — and do the work only if one row changed.
+- A unique constraint on the natural key of the effect (one payment per
+  invoice per period), so the second writer fails loudly rather than
+  duplicating.
+- A claim column stamped with the job id plus a timestamp, so a second runner
+  can see it is not the current owner.
+
+These hold regardless of what the scheduler believes, which is exactly the
+property you want when the scheduler's belief is the thing that was wrong.
+
 ## Can I get exactly-once-successful side effects?
 
 Not from Threadmill alone. No library can without two-phase commit. The two

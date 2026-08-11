@@ -1701,8 +1701,8 @@ public final class PostgresJobStore implements JobStore {
                         PreparedStatement ps = conn.prepareStatement(
                                 "INSERT INTO threadmill_cron_tasks (name, trigger_kind, trigger_value, handler_signature, "
                                         + "payload_type_tag, payload_serialized, queue, priority, timeout_seconds, "
-                                        + "max_attempts, missed_run_policy, time_zone, enabled) "
-                                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                                        + "max_attempts, exclusive, missed_run_policy, time_zone, enabled) "
+                                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                                         + "ON CONFLICT (name) DO UPDATE SET "
                                         + "trigger_kind = EXCLUDED.trigger_kind, trigger_value = EXCLUDED.trigger_value, "
                                         + "handler_signature = EXCLUDED.handler_signature, "
@@ -1711,6 +1711,7 @@ public final class PostgresJobStore implements JobStore {
                                         + "queue = EXCLUDED.queue, priority = EXCLUDED.priority, "
                                         + "timeout_seconds = EXCLUDED.timeout_seconds, "
                                         + "max_attempts = EXCLUDED.max_attempts, "
+                                        + "exclusive = EXCLUDED.exclusive, "
                                         + "missed_run_policy = EXCLUDED.missed_run_policy, "
                                         + "time_zone = EXCLUDED.time_zone, enabled = EXCLUDED.enabled")) {
                     ps.setString(1, task.name());
@@ -1731,9 +1732,10 @@ public final class PostgresJobStore implements JobStore {
                     } else {
                         ps.setInt(10, task.maxAttempts());
                     }
-                    ps.setString(11, task.missedRunPolicy().name());
-                    ps.setString(12, task.zone().getId());
-                    ps.setBoolean(13, task.enabled());
+                    ps.setBoolean(11, task.exclusive());
+                    ps.setString(12, task.missedRunPolicy().name());
+                    ps.setString(13, task.zone().getId());
+                    ps.setBoolean(14, task.enabled());
                     ps.executeUpdate();
                     return null;
                 }
@@ -1748,7 +1750,7 @@ public final class PostgresJobStore implements JobStore {
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(
                         "SELECT name, trigger_kind, trigger_value, handler_signature, payload_type_tag, "
-                                + "payload_serialized, queue, priority, timeout_seconds, max_attempts, "
+                                + "payload_serialized, queue, priority, timeout_seconds, max_attempts, exclusive, "
                                 + "missed_run_policy, time_zone, enabled "
                                 + "FROM threadmill_cron_tasks WHERE name = ?")) {
             ps.setString(1, name);
@@ -1767,7 +1769,7 @@ public final class PostgresJobStore implements JobStore {
         try (Connection conn = dataSource.getConnection();
                 PreparedStatement ps = conn.prepareStatement(
                         "SELECT name, trigger_kind, trigger_value, handler_signature, payload_type_tag, "
-                                + "payload_serialized, queue, priority, timeout_seconds, max_attempts, "
+                                + "payload_serialized, queue, priority, timeout_seconds, max_attempts, exclusive, "
                                 + "missed_run_policy, time_zone, enabled "
                                 + "FROM threadmill_cron_tasks ORDER BY name");
                 ResultSet rs = ps.executeQuery()) {
@@ -1911,9 +1913,10 @@ public final class PostgresJobStore implements JobStore {
                 rs.getInt(8),
                 timeout,
                 maxAttempts,
-                CronTask.MissedRunPolicy.valueOf(rs.getString(11)),
-                ZoneId.of(rs.getString(12)),
-                rs.getBoolean(13));
+                rs.getBoolean(11),
+                CronTask.MissedRunPolicy.valueOf(rs.getString(12)),
+                ZoneId.of(rs.getString(13)),
+                rs.getBoolean(14));
     }
 
     // ---------------------------------------------------------------- helpers

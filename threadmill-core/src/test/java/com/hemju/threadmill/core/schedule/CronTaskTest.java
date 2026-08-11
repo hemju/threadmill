@@ -1,5 +1,6 @@
 package com.hemju.threadmill.core.schedule;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -8,9 +9,57 @@ import java.time.ZoneId;
 
 import org.junit.jupiter.api.Test;
 
+import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.spec.JobArgument;
 
 class CronTaskTest {
+
+    @Test
+    void derivedConcurrencyKeyIsNamespacedAndOnlyPresentWhenExclusive() {
+        assertThat(CronTask.concurrencyKeyFor("nightly-sweep")).isEqualTo("recurring:nightly-sweep");
+        assertThat(exclusiveTask("nightly-sweep", true).derivedConcurrencyKey()).isEqualTo("recurring:nightly-sweep");
+        assertThat(exclusiveTask("nightly-sweep", false).derivedConcurrencyKey())
+                .isNull();
+    }
+
+    @Test
+    void derivedConcurrencyKeyFitsTheKeyCapWithoutSplittingSurrogatePairs() {
+        // Task names may be up to Names.MAX_LENGTH characters of arbitrary
+        // non-control text; Job.concurrencyKey caps at 256 UTF-8 bytes, and a
+        // name of 4-byte code points blows straight through it. The truncation
+        // must stay under the cap, stay on a code-point boundary (a split
+        // surrogate pair is not valid UTF-16 and would corrupt the key), and
+        // stay distinct for names sharing a prefix.
+        String emoji = "🚀".repeat(120); // 120 astral code points, 480 UTF-8 bytes
+        String key = CronTask.concurrencyKeyFor(emoji);
+
+        assertThat(key.getBytes(UTF_8).length).isLessThanOrEqualTo(256);
+        assertThat(key).startsWith("recurring:");
+        // A truncation that split a surrogate pair would not survive a UTF-8
+        // round trip — the orphaned half decodes back as U+FFFD.
+        assertThat(new String(key.getBytes(UTF_8), UTF_8)).isEqualTo(key);
+        assertThat(key).isEqualTo(CronTask.concurrencyKeyFor(emoji));
+        assertThat(key).isNotEqualTo(CronTask.concurrencyKeyFor(emoji + "🚀"));
+
+        String longAscii = "a".repeat(Names.MAX_LENGTH);
+        assertThat(CronTask.concurrencyKeyFor(longAscii)).isEqualTo("recurring:" + longAscii);
+    }
+
+    private static CronTask exclusiveTask(String name, boolean exclusive) {
+        return new CronTask(
+                name,
+                new CronTask.Trigger.Interval(Duration.ofMinutes(1)),
+                "com.example.Handler",
+                new JobArgument("com.example.Payload", "{}"),
+                "default",
+                0,
+                null,
+                null,
+                exclusive,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
+    }
 
     @Test
     void subSecondTimeoutIsRejectedLoudly() {

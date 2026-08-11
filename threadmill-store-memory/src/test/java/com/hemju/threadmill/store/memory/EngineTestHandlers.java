@@ -1,6 +1,7 @@
 package com.hemju.threadmill.store.memory;
 
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.hemju.threadmill.core.handler.JobExecutionContext;
@@ -60,6 +61,27 @@ public final class EngineTestHandlers {
             } catch (InterruptedException e) {
                 INTERRUPTS.incrementAndGet();
                 throw e;
+            }
+        }
+    }
+
+    /**
+     * Blocks until interrupted while publishing, for the whole duration of
+     * {@code run}, that user code is executing. The flag is cleared in a
+     * {@code finally} so it goes false at the last instant inside {@code run}
+     * — anything observed after that point is engine bookkeeping, not the
+     * handler.
+     */
+    public static final class ShutdownLatchHandler implements JobHandler<HelloPayload> {
+        public static final AtomicBoolean INSIDE_RUN = new AtomicBoolean(false);
+
+        @Override
+        public void run(HelloPayload payload, JobExecutionContext ctx) throws Exception {
+            INSIDE_RUN.set(true);
+            try {
+                Thread.sleep(60_000);
+            } finally {
+                INSIDE_RUN.set(false);
             }
         }
     }

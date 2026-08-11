@@ -81,6 +81,7 @@ public class ThreadmillRecurringRegistrar {
                     registration.priority(),
                     registration.timeout(),
                     registration.maxAttempts(),
+                    recurring.exclusive(),
                     recurring.missedRunPolicy());
             logRegistered(task, null);
         }
@@ -115,6 +116,7 @@ public class ThreadmillRecurringRegistrar {
                 registration.priority(),
                 registration.timeout(),
                 registration.maxAttempts(),
+                recurring.exclusive(),
                 recurring.missedRunPolicy(),
                 ZoneId.systemDefault(),
                 true);

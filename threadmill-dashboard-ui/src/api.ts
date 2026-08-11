@@ -85,6 +85,7 @@ export interface RecurringTask {
     handlerType: string;
     enabled: boolean;
     priority: number;
+    exclusive: boolean;
     missedRunPolicy: string;
     triggerKind: string;
     triggerValue: string;

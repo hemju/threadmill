@@ -64,6 +64,42 @@ Branching workflows behave the same way: if the root has three successors, the
 key is released only after all three are terminal, even when one fails and the
 others succeed.
 
+## Exclusive recurring tasks
+
+A recurring task can declare that only one of its instances runs at a time
+across the whole cluster. Every materialized instance — scheduled, caught-up
+under `CATCH_UP`, or triggered by hand from the dashboard — is claimed under a
+derived key in `EXCLUSIVE` mode, so the store refuses to admit a second one
+while another is processing.
+
+```java
+@Job
+@Recurring(interval = "PT1M", exclusive = true)
+public class NightlySweep implements JobAction { … }
+```
+
+Outside Spring, use the `Scheduler.defineRecurring(…)` overload that takes the
+`exclusive` flag.
+
+The key is **derived, not user-supplied**: it is `recurring:<task name>`, in a
+namespace reserved for exactly this, so it can never collide with an
+application's own concurrency keys. Task names longer than the 256-UTF-8-byte
+key cap are truncated on a code-point boundary with a stable hash suffix.
+
+This replaces the advisory lock or status-claim column that a singleton sweep
+usually grows. It is stronger than the recurring pile-up guard, which only
+decides what to *materialize*: exclusivity is enforced at claim time by the
+store, on every node, so it also covers a dashboard manual trigger racing a
+scheduled instance, and the window between a failed instance and its retry.
+
+**It does not close the reclaim window.** Orphan reclaim releases the
+concurrency slot as part of the terminal failure save, so a reclaimed instance
+can still overlap an original that is still running on a node which stopped
+heartbeating without dying. See
+[the overlap windows](transactions.md#when-exactly-can-two-instances-of-the-same-job-overlap)
+for why that window is not closable and how to fence against it. Handlers stay
+idempotent by contract.
+
 ## Examples
 
 For project import/export workloads, put imports in `EXCLUSIVE` mode and

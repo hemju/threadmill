@@ -1748,6 +1748,7 @@ public final class RedisJobStore implements JobStore {
         if (task.maxAttempts() != null) {
             fields.put("max_attempts", Integer.toString(task.maxAttempts()));
         }
+        fields.put("exclusive", Boolean.toString(task.exclusive()));
         fields.put("missed_run_policy", task.missedRunPolicy().name());
         fields.put("time_zone", task.zone().getId());
         fields.put("enabled", Boolean.toString(task.enabled()));
@@ -1899,6 +1900,7 @@ public final class RedisJobStore implements JobStore {
                         ? Duration.ofSeconds(Long.parseLong(hash.get("timeout_seconds")))
                         : null,
                 hash.containsKey("max_attempts") ? Integer.valueOf(hash.get("max_attempts")) : null,
+                Boolean.parseBoolean(hash.get("exclusive")),
                 CronTask.MissedRunPolicy.valueOf(hash.get("missed_run_policy")),
                 ZoneId.of(hash.get("time_zone")),
                 Boolean.parseBoolean(hash.get("enabled")));

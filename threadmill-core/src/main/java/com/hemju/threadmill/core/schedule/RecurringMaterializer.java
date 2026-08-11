@@ -9,9 +9,11 @@ import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
@@ -43,6 +45,15 @@ public final class RecurringMaterializer {
 
     /** Per-tick cap on CATCH_UP materializations; the rest carries over. */
     private static final int MAX_CATCH_UP_PER_TICK = 100;
+
+    /**
+     * How long a FAILED instance may block the next materialization while
+     * {@link RetryInterceptor} is still expected to reschedule it. Sized well
+     * above the reschedule save's bounded retry (three attempts, 50ms apart)
+     * plus store latency, and small enough that a genuinely terminal instance
+     * the budget test could not rule out delays the next run negligibly.
+     */
+    private static final Duration FAILED_RETRY_HANDOFF_GRACE = Duration.ofSeconds(5);
 
     /** Lease for the per-task schedule-state mutex. */
     private static final Duration TASK_MUTEX_LEASE = Duration.ofSeconds(30);
@@ -115,19 +126,11 @@ public final class RecurringMaterializer {
         var state = stateOpt.get();
         if (state.nextRunAt() == null || state.nextRunAt().isAfter(now)) return;
 
-        // Pile-up guard: a non-terminal in-flight instance blocks the next
-        // materialization. FAILED is deliberately treated as non-blocking
-        // even though it is only terminal-pending: a retry-exhausted FAILED
-        // instance must never deadlock the task forever. The cost is a
-        // narrow window — FAILED observed between the failure save and
-        // RetryInterceptor's SCHEDULED save does not block, so a retrying
-        // instance can briefly overlap a fresh one; handlers are required
-        // to be idempotent anyway (at-least-once).
+        // Pile-up guard: an in-flight instance that is still going to run
+        // blocks the next materialization.
         if (state.inFlightJobId() != null) {
             Job inFlight = store.findById(JobId.of(state.inFlightJobId())).orElse(null);
-            if (inFlight != null
-                    && !inFlight.currentState().isTerminal()
-                    && inFlight.currentState() != JobState.FAILED) {
+            if (inFlight != null && blocksNextMaterialization(inFlight, now)) {
                 // Still running — leave the next_run_at where it is so we revisit on the next tick.
                 return;
             }
@@ -174,6 +177,63 @@ public final class RecurringMaterializer {
     }
 
     /**
+     * Whether an in-flight instance still stands between the task and its
+     * next materialization.
+     *
+     * <p>Anything else non-terminal blocks outright, and a genuinely terminal
+     * state never does. FAILED is the interesting case, and the reason
+     * {@link JobState#isTerminal()} deliberately excludes it: a retry may
+     * still follow, so the state alone does not say whether the instance is
+     * finished. Treating every FAILED as non-blocking — the original guard —
+     * left a window in which a tick landing between the failure save and
+     * {@link RetryInterceptor}'s SCHEDULED save materialized a fresh instance
+     * alongside a retrying one. Treating every FAILED as blocking would let a
+     * retry-exhausted instance deadlock the task forever.
+     *
+     * <p>So FAILED blocks only while it is <em>plausibly</em> mid-handoff:
+     * the retry budget is not provably spent <strong>and</strong> the failure
+     * is younger than {@link #FAILED_RETRY_HANDOFF_GRACE}. Both halves carry
+     * weight. The budget test alone is only approximate, because the
+     * effective ceiling depends on the exception that caused the failure
+     * (per-exception-type policies are registered on the interceptor and are
+     * not readable from the job), so a job that is genuinely terminal under a
+     * stricter policy looks budget-remaining here; the age bound is what
+     * stops that job from blocking its task until
+     * {@link RetryInterceptor#recoverStrandedFailures} happens to reach it.
+     * The budget test in turn keeps the common terminal failure from delaying
+     * the next run at all.
+     */
+    private static boolean blocksNextMaterialization(Job inFlight, Instant now) {
+        JobState current = inFlight.currentState();
+        if (current != JobState.FAILED) {
+            return !current.isTerminal();
+        }
+        if (retryBudgetProvablySpent(inFlight)) return false;
+        List<JobStateEntry> history = inFlight.stateHistory();
+        if (history.isEmpty()) return false;
+        return history.getLast().at().isAfter(now.minus(FAILED_RETRY_HANDOFF_GRACE));
+    }
+
+    /**
+     * Whether the job's retry budget is provably spent from the job alone.
+     * Only the per-job override is readable here; absent or malformed
+     * metadata means "cannot tell", which is reported as budget remaining so
+     * the age bound decides.
+     */
+    private static boolean retryBudgetProvablySpent(Job job) {
+        return job.metadata()
+                .get(RetryInterceptor.META_MAX_ATTEMPTS)
+                .map(raw -> {
+                    try {
+                        return job.attempts() >= Integer.parseInt(raw.trim());
+                    } catch (RuntimeException malformed) {
+                        return false;
+                    }
+                })
+                .orElse(false);
+    }
+
+    /**
      * The most recent nominal fire time at or before {@code now}, starting
      * from the (overdue) {@code overdueFire}. Intervals are computed
      * arithmetically so a tiny interval with a huge backlog cannot spin the
@@ -212,6 +272,15 @@ public final class RecurringMaterializer {
         }
         if (task.maxAttempts() != null) {
             builder.metadata(RetryInterceptor.META_MAX_ATTEMPTS, Integer.toString(task.maxAttempts()));
+        }
+        // An exclusive task claims every instance under one derived key, so
+        // claim-time admission — not this materializer's pile-up guard — is
+        // what serializes them. That covers paths the guard cannot see: a
+        // dashboard manual trigger racing a scheduled instance, and the
+        // retry handoff window, where the fresh instance simply waits for
+        // the retrying one to release the key instead of overlapping it.
+        if (task.exclusive()) {
+            builder.concurrencyKey(CronTask.concurrencyKeyFor(task.name())).concurrencyMode(ConcurrencyMode.EXCLUSIVE);
         }
         Job job = builder.build();
         store.insert(job);

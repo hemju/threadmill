@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 
+import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
@@ -189,6 +190,76 @@ class DashboardApiServiceTest {
 
         assertThat(store.findCronTask("report")).isPresent();
         assertThat(store.findCronTaskState("report")).isPresent();
+    }
+
+    @Test
+    void updateRecurringPreservesTheExclusiveFlag() {
+        // Same trap as the timeout and retry budget before it: updateRecurring
+        // rebuilds the CronTask field-by-field, so a field it forgets is
+        // silently dropped. Dropping this one reverts an exclusive task to
+        // overlapping execution the next time an operator edits anything.
+        var store = new InMemoryJobStore();
+        var service = new DashboardApiService(store, new LocalWakeBus());
+        store.upsertCronTask(exclusiveCronTask("sweep"));
+
+        service.updateRecurring(
+                "sweep",
+                new DashboardPayloads.UpdateRecurringRequest(null, null, null, null, null, 7, null, null, null));
+
+        var updated = store.findCronTask("sweep").orElseThrow();
+        assertThat(updated.priority()).isEqualTo(7);
+        assertThat(updated.exclusive()).isTrue();
+    }
+
+    @Test
+    void manualTriggerOfAnExclusiveTaskCarriesTheDerivedConcurrencyKey() {
+        // The operator's "run now" must serialize with the scheduled
+        // instances rather than overlap them; the pile-up guard cannot do
+        // that, only claim-time admission under the same key can.
+        var store = new InMemoryJobStore();
+        var service = new DashboardApiService(store, new LocalWakeBus());
+        store.upsertCronTask(exclusiveCronTask("sweep"));
+        store.upsertCronTaskState(CronTaskScheduleState.initial("sweep", Instant.now()));
+
+        var response = service.triggerRecurring("sweep");
+
+        assertThat(response.status()).isEqualTo("triggered");
+        var triggered = store.findById(
+                        JobId.of(store.findCronTaskState("sweep").orElseThrow().inFlightJobId()))
+                .orElseThrow();
+        assertThat(triggered.concurrencyKey()).contains("recurring:sweep");
+        assertThat(triggered.concurrencyMode()).contains(ConcurrencyMode.EXCLUSIVE);
+    }
+
+    @Test
+    void manualTriggerOfANonExclusiveTaskCarriesNoConcurrencyKey() {
+        var store = new InMemoryJobStore();
+        var service = new DashboardApiService(store, new LocalWakeBus());
+        store.upsertCronTask(timedCronTask("report", null, null));
+        store.upsertCronTaskState(CronTaskScheduleState.initial("report", Instant.now()));
+
+        service.triggerRecurring("report");
+
+        var triggered = store.findById(
+                        JobId.of(store.findCronTaskState("report").orElseThrow().inFlightJobId()))
+                .orElseThrow();
+        assertThat(triggered.concurrencyKey()).isEmpty();
+    }
+
+    private static CronTask exclusiveCronTask(String name) {
+        return new CronTask(
+                name,
+                new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
+                "com.example.ReportHandler",
+                new JobArgument("com.hemju.threadmill.core.handler.NoPayload", "{}"),
+                "default",
+                0,
+                null,
+                null,
+                true,
+                CronTask.MissedRunPolicy.DROP,
+                ZoneId.of("UTC"),
+                true);
     }
 
     private static CronTask timedCronTask(String name, Duration timeout, Integer maxAttempts) {

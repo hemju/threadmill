@@ -1,10 +1,13 @@
 package com.hemju.threadmill.core.schedule;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
+
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Objects;
 
+import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.spec.JobArgument;
 
 /**
@@ -29,6 +32,10 @@ import com.hemju.threadmill.core.spec.JobArgument;
  * @param maxAttempts       per-instance retry budget, or {@code null} to use
  *                          the {@code RetryInterceptor} defaults; stamped on
  *                          each materialised instance
+ * @param exclusive         whether instances of this task run one at a time
+ *                          across the whole cluster, enforced at claim time
+ *                          under the derived key from
+ *                          {@link #concurrencyKeyFor(String)}
  * @param missedRunPolicy   what to do with runs missed during downtime
  * @param zone              time zone for the cron expression (ignored for interval triggers)
  * @param enabled           whether the task is currently active
@@ -42,9 +49,16 @@ public record CronTask(
         int priority,
         Duration timeout,
         Integer maxAttempts,
+        boolean exclusive,
         MissedRunPolicy missedRunPolicy,
         ZoneId zone,
         boolean enabled) {
+
+    /** Namespace for the derived per-task concurrency key. */
+    private static final String CONCURRENCY_KEY_PREFIX = "recurring:";
+
+    /** {@code Job.concurrencyKey} is capped at 256 UTF-8 bytes. */
+    private static final int MAX_CONCURRENCY_KEY_BYTES = 256;
 
     public CronTask {
         Objects.requireNonNull(name, "name");
@@ -80,7 +94,89 @@ public record CronTask(
             MissedRunPolicy missedRunPolicy,
             ZoneId zone,
             boolean enabled) {
-        this(name, trigger, handlerType, payloadArgument, queue, priority, null, null, missedRunPolicy, zone, enabled);
+        this(
+                name,
+                trigger,
+                handlerType,
+                payloadArgument,
+                queue,
+                priority,
+                null,
+                null,
+                false,
+                missedRunPolicy,
+                zone,
+                enabled);
+    }
+
+    /** Convenience constructor for tasks that do not opt into exclusive execution. */
+    public CronTask(
+            String name,
+            Trigger trigger,
+            String handlerType,
+            JobArgument payloadArgument,
+            String queue,
+            int priority,
+            Duration timeout,
+            Integer maxAttempts,
+            MissedRunPolicy missedRunPolicy,
+            ZoneId zone,
+            boolean enabled) {
+        this(
+                name,
+                trigger,
+                handlerType,
+                payloadArgument,
+                queue,
+                priority,
+                timeout,
+                maxAttempts,
+                false,
+                missedRunPolicy,
+                zone,
+                enabled);
+    }
+
+    /**
+     * The concurrency key every instance of this task claims under when
+     * {@link #exclusive()} is set, or {@code null} when it is not.
+     */
+    public String derivedConcurrencyKey() {
+        return exclusive ? concurrencyKeyFor(name) : null;
+    }
+
+    /**
+     * The derived, namespaced claim-time concurrency key for a recurring task
+     * name. The key is derived rather than user-supplied so the feature stays
+     * declarative and cannot collide with an application's own keys; the
+     * {@code recurring:} namespace is reserved for exactly this.
+     *
+     * <p>Task names may be up to {@link Names#MAX_LENGTH} characters of
+     * arbitrary non-control text, which can exceed the 256-UTF-8-byte
+     * concurrency-key cap. Over-long names are truncated on a code-point
+     * boundary (never mid-surrogate-pair) and disambiguated with a stable hash
+     * suffix, the same shape
+     * {@link RecurringMaterializer#taskMutexName(String)} uses.
+     */
+    public static String concurrencyKeyFor(String taskName) {
+        Objects.requireNonNull(taskName, "taskName");
+        String raw = CONCURRENCY_KEY_PREFIX + taskName;
+        if (raw.getBytes(UTF_8).length <= MAX_CONCURRENCY_KEY_BYTES) {
+            return raw;
+        }
+        String suffix = ":" + Integer.toHexString(taskName.hashCode());
+        int budget = MAX_CONCURRENCY_KEY_BYTES - CONCURRENCY_KEY_PREFIX.length() - suffix.length();
+        var kept = new StringBuilder(CONCURRENCY_KEY_PREFIX);
+        int used = 0;
+        for (int i = 0; i < taskName.length(); ) {
+            int cp = taskName.codePointAt(i);
+            int width = Character.toString(cp).getBytes(UTF_8).length;
+            if (used + width > budget) break;
+            kept.appendCodePoint(cp);
+            used += width;
+            i += Character.charCount(cp);
+        }
+        return kept.append(suffix).toString();
     }
 
     /** A trigger is either a cron expression or a fixed interval. */

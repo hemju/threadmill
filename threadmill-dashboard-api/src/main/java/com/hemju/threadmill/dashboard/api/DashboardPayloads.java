@@ -86,6 +86,7 @@ public final class DashboardPayloads {
             JobArgument payloadArgument,
             String queue,
             int priority,
+            boolean exclusive,
             String missedRunPolicy,
             String zone,
             boolean enabled,
