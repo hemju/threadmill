@@ -8,6 +8,11 @@
   mutexes, recurring definitions/state, and the expired-dedup fallback now use
   explicit Threadmill-owned transactions, restoring the connection's prior
   auto-commit mode after commit or rollback.
+- The recurring materializer now repairs a timing-fingerprint mismatch found
+  during its under-mutex definition reload (issue #112). The current task
+  definition wins: Threadmill preserves run bookkeeping and pending nudge
+  demand, recomputes timing forward from the tick, and does not fire or
+  `CATCH_UP` the obsolete trigger's overdue backlog.
 - Recurring tasks can declare claim-time exclusivity (issue #110). A
   `CronTask` gains an `exclusive` flag, surfaced as
   `@Recurring(exclusive = true)` and as an `exclusive` parameter on

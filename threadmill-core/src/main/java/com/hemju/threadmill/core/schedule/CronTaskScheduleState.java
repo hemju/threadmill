@@ -25,7 +25,8 @@ import java.util.UUID;
  *                          or {@code null} for rows written before the
  *                          fingerprint existed. Written atomically with
  *                          {@code nextRunAt}, it lets {@code Scheduler.upsertCron}
- *                          decide preserve-vs-recompute from this record alone —
+ *                          and {@link RecurringMaterializer} decide
+ *                          preserve-vs-recompute from this record alone —
  *                          a crash between the separate task and state writes can
  *                          never pair a new trigger with old timing undetectably
  * @param nudgeRequestedAt  when an on-demand materialization ("nudge") was most
@@ -84,8 +85,9 @@ public record CronTaskScheduleState(
 
     /**
      * Convenience constructor with no timing fingerprint. A null fingerprint
-     * is always safe — the next re-registration recomputes the schedule
-     * instead of preserving it — but production writers that recompute
+     * is always safe — the next re-registration or materializer tick that is
+     * about to act recomputes the schedule instead of preserving it — but
+     * production writers that recompute
      * {@code nextRunAt} from a task should stamp
      * {@link #timingFingerprintOf(CronTask)} so unchanged re-registrations
      * can preserve overdue state.

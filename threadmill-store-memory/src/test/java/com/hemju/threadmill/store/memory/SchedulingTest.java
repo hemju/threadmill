@@ -224,7 +224,12 @@ class SchedulingTest {
         // Backdate next run by ~1 second; expect ~10 catch-up runs in the first tick.
         var existing = store.findCronTaskState("catchup").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minus(Duration.ofSeconds(1)), null));
+                existing.taskName(),
+                null,
+                null,
+                Instant.now().minus(Duration.ofSeconds(1)),
+                null,
+                existing.timingFingerprint()));
         node = ProcessingNode.builder(store).config(fastConfig()).build();
         node.start();
         await().atMost(Duration.ofSeconds(5)).until(() -> RecorderHandler.RECORD.size() >= 5);
@@ -244,7 +249,12 @@ class SchedulingTest {
         // Backdate next run far into the past.
         var existing = store.findCronTaskState("ping").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minus(Duration.ofSeconds(60)), null));
+                existing.taskName(),
+                null,
+                null,
+                Instant.now().minus(Duration.ofSeconds(60)),
+                null,
+                existing.timingFingerprint()));
         node = ProcessingNode.builder(store).config(fastConfig()).build();
         node.start();
 
@@ -271,7 +281,8 @@ class SchedulingTest {
                 CronTask.MissedRunPolicy.CATCH_UP);
         var existing = store.findCronTaskState("stamped").orElseThrow();
         Instant base = Instant.now().minusMillis(350);
-        store.upsertCronTaskState(new CronTaskScheduleState(existing.taskName(), null, null, base, null));
+        store.upsertCronTaskState(
+                new CronTaskScheduleState(existing.taskName(), null, null, base, null, existing.timingFingerprint()));
 
         new RecurringMaterializer(store).tick(Instant.now());
 
@@ -295,7 +306,7 @@ class SchedulingTest {
         scheduler.defineIntervalTask("locked", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);
         var existing = store.findCronTaskState("locked").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null, existing.timingFingerprint()));
 
         // Another holder (e.g. an upsertCron on a different node) owns the
         // task's schedule-state mutex: the tick must skip, not clobber.
@@ -320,7 +331,7 @@ class SchedulingTest {
                 "guarded", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);
         var existing = store.findCronTaskState("guarded").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null, existing.timingFingerprint()));
         new RecurringMaterializer(store).tick(Instant.now());
         var inFlight = store.findCronTaskState("guarded").orElseThrow().inFlightJobId();
         assertThat(inFlight).isNotNull();
@@ -695,7 +706,7 @@ class SchedulingTest {
                 task.missedRunPolicy());
         var initial = store.findCronTaskState("nightly-sweep").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                initial.taskName(), null, null, Instant.now().minusSeconds(1), null));
+                initial.taskName(), null, null, Instant.now().minusSeconds(1), null, initial.timingFingerprint()));
 
         var materializer = new RecurringMaterializer(store);
         materializer.tick(Instant.now());
@@ -726,7 +737,7 @@ class SchedulingTest {
         scheduler.defineIntervalTask("loose", Duration.ofMinutes(5), new HelloPayload("tick"), RecorderHandler.class);
         var initial = store.findCronTaskState("loose").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                initial.taskName(), null, null, Instant.now().minusSeconds(1), null));
+                initial.taskName(), null, null, Instant.now().minusSeconds(1), null, initial.timingFingerprint()));
         new RecurringMaterializer(store).tick(Instant.now());
 
         var state = store.findCronTaskState("loose").orElseThrow();
@@ -801,7 +812,7 @@ class SchedulingTest {
                 CronTask.MissedRunPolicy.DROP);
         var initial = store.findCronTaskState(task).orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                initial.taskName(), null, null, Instant.now().minusSeconds(1), null));
+                initial.taskName(), null, null, Instant.now().minusSeconds(1), null, initial.timingFingerprint()));
         var materializer = new RecurringMaterializer(store);
         materializer.tick(Instant.now());
         var state = store.findCronTaskState(task).orElseThrow();
@@ -841,7 +852,12 @@ class SchedulingTest {
         var existing = store.findCronTaskState("burst").orElseThrow();
         // ~150 missed intervals — more than one tick's materialization cap.
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minus(Duration.ofSeconds(15)), null));
+                existing.taskName(),
+                null,
+                null,
+                Instant.now().minus(Duration.ofSeconds(15)),
+                null,
+                existing.timingFingerprint()));
 
         Instant now = Instant.now();
         new RecurringMaterializer(store).tick(now);
@@ -859,7 +875,7 @@ class SchedulingTest {
         scheduler.defineIntervalTask("linked", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);
         var existing = store.findCronTaskState("linked").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null, existing.timingFingerprint()));
 
         new RecurringMaterializer(store).tick(Instant.now());
 
@@ -887,7 +903,7 @@ class SchedulingTest {
                 CronTask.MissedRunPolicy.DROP);
         var existing = store.findCronTaskState("timed").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null, existing.timingFingerprint()));
 
         new RecurringMaterializer(store).tick(Instant.now());
 
@@ -903,7 +919,7 @@ class SchedulingTest {
                 "untimed", Duration.ofMillis(100), new HelloPayload("tick"), RecorderHandler.class);
         var existing = store.findCronTaskState("untimed").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null, existing.timingFingerprint()));
 
         new RecurringMaterializer(store).tick(Instant.now());
 
@@ -975,7 +991,7 @@ class SchedulingTest {
         // Backdate next_run_at so the materializer treats the task as due.
         var existing = store.findCronTaskState("no-double-enqueue").orElseThrow();
         store.upsertCronTaskState(new CronTaskScheduleState(
-                existing.taskName(), null, null, Instant.now().minusSeconds(1), null));
+                existing.taskName(), null, null, Instant.now().minusSeconds(1), null, existing.timingFingerprint()));
 
         var materializer = new RecurringMaterializer(store);
         materializer.tick(Instant.now());
@@ -1217,6 +1233,61 @@ class SchedulingTest {
         new RecurringMaterializer(store).tick(Instant.now());
         assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
                 .isEmpty();
+    }
+
+    @Test
+    void materializerRepairsMismatchedTimingFingerprintWithoutCatchingUpTheOldSchedule() {
+        // Crashed timing edit: the new definition landed, but the separate
+        // state write did not. The under-mutex reload must finish that edit
+        // instead of applying CATCH_UP to the obsolete trigger's backlog.
+        scheduler.defineIntervalTask(
+                "crashed-edit",
+                Duration.ofMinutes(5),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.CATCH_UP);
+        var oldTask = store.findCronTask("crashed-edit").orElseThrow();
+        var repairAt = Instant.parse("2026-08-11T12:00:00Z");
+        var lastRunAt = repairAt.minus(Duration.ofDays(2));
+        var lastRunJobId = UUID.randomUUID();
+        var inFlightJobId = UUID.randomUUID();
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                oldTask.name(),
+                lastRunAt,
+                lastRunJobId,
+                repairAt.minus(Duration.ofDays(1)),
+                inFlightJobId,
+                CronTaskScheduleState.timingFingerprintOf(oldTask)));
+
+        var editedTask = new CronTask(
+                oldTask.name(),
+                new CronTask.Trigger.Interval(Duration.ofHours(6)),
+                oldTask.handlerType(),
+                oldTask.payloadArgument(),
+                oldTask.queue(),
+                oldTask.priority(),
+                oldTask.timeout(),
+                oldTask.maxAttempts(),
+                oldTask.exclusive(),
+                CronTask.MissedRunPolicy.CATCH_UP,
+                oldTask.zone(),
+                true);
+        store.upsertCronTask(editedTask);
+
+        new RecurringMaterializer(store).tick(repairAt);
+
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 100))
+                .as("the obsolete trigger's overdue CATCH_UP backlog must not fire")
+                .isEmpty();
+        assertThat(store.findCronTaskState("crashed-edit").orElseThrow()).satisfies(repaired -> {
+            assertThat(repaired.nextRunAt()).isEqualTo(repairAt.plus(Duration.ofHours(6)));
+            assertThat(repaired.timingFingerprint()).isEqualTo(CronTaskScheduleState.timingFingerprintOf(editedTask));
+            assertThat(repaired.lastRunAt()).isEqualTo(lastRunAt);
+            assertThat(repaired.lastRunJobId()).isEqualTo(lastRunJobId);
+            assertThat(repaired.inFlightJobId()).isEqualTo(inFlightJobId);
+        });
     }
 
     @Test

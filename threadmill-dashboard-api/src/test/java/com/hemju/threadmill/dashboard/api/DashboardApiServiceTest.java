@@ -82,8 +82,8 @@ class DashboardApiServiceTest {
 
         // A scheduled instance materialized earlier is still PROCESSING.
         var materializer = new RecurringMaterializer(store);
-        store.upsertCronTaskState(
-                CronTaskScheduleState.initial("report", Instant.now().minusSeconds(60)));
+        store.upsertCronTaskState(CronTaskScheduleState.initial(
+                "report", Instant.now().minusSeconds(60), CronTaskScheduleState.timingFingerprintOf(task)));
         materializer.tick(Instant.now());
         var scheduledInstance =
                 store.claimReady(NodeId.newId(), "default", 1, Instant.now()).getFirst();
@@ -107,7 +107,8 @@ class DashboardApiServiceTest {
                 afterTrigger.lastRunAt(),
                 afterTrigger.lastRunJobId(),
                 Instant.now().minusSeconds(1),
-                afterTrigger.inFlightJobId()));
+                afterTrigger.inFlightJobId(),
+                afterTrigger.timingFingerprint()));
         materializer.tick(Instant.now());
         assertThat(store.findByHandlerSignature("com.example.ReportHandler", 10))
                 .hasSize(2); // scheduled instance + manual trigger, nothing else

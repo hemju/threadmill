@@ -35,6 +35,13 @@ import com.hemju.threadmill.core.store.JobStore;
  * with carry-over. That cap — not re-registration — is the catch-up-storm
  * defense.
  *
+ * <p>If the under-mutex definition reload finds that the schedule state's
+ * timing fingerprint belongs to a different definition, the definition wins:
+ * timing is recomputed forward from the current tick and the stale schedule
+ * produces no firing. This completes a crashed timing edit without running a
+ * trigger the user already replaced. {@code CATCH_UP} resumes normally from
+ * the repaired timing; it never catches up the obsolete trigger's backlog.
+ *
  * <p>If a previously-materialised instance is still un-terminal, no new
  * instance is created until that one finishes. This guard prevents
  * pile-up under long-running recurring work.
@@ -147,6 +154,29 @@ public final class RecurringMaterializer {
         CronTask task = store.findCronTask(listed.name()).orElse(null);
         if (task == null || !task.enabled()) return;
 
+        String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
+        if (!fingerprint.equals(state.timingFingerprint())) {
+            // A timing edit writes the definition before its schedule state.
+            // Seeing a mismatch here is the crash signature for that window.
+            // Finish the edit by scheduling forward from this tick: firing
+            // the stale timing would run a trigger the user already replaced,
+            // while merely skipping would leave the task dormant until some
+            // future re-registration happened to repair it.
+            Instant next = task.trigger().nextAfter(now, task.zone());
+            state = new CronTaskScheduleState(
+                    task.name(),
+                    state.lastRunAt(),
+                    state.lastRunJobId(),
+                    next,
+                    state.inFlightJobId(),
+                    fingerprint,
+                    state.nudgeRequestedAt(),
+                    state.nudgeRevision());
+            store.upsertCronTaskState(state);
+            due = false;
+            if (nudge == null) return;
+        }
+
         // Pile-up guard: an in-flight instance that is still going to run
         // blocks the next materialization.
         if (state.inFlightJobId() != null) {
@@ -166,7 +196,7 @@ public final class RecurringMaterializer {
             // represents no schedule tick), only the nudge origin marker.
             JobId id = materializeNudge(task);
             store.upsertCronTaskState(new CronTaskScheduleState(
-                    task.name(), now, id.asUuid(), state.nextRunAt(), id.asUuid(), state.timingFingerprint()));
+                    task.name(), now, id.asUuid(), state.nextRunAt(), id.asUuid(), fingerprint));
             // Clear AFTER materializing (a crash between the two costs one
             // extra run, never a lost one — see the failure-semantics note in
             // the class Javadoc), and only the observed revision — a nudge
@@ -176,7 +206,6 @@ public final class RecurringMaterializer {
             return;
         }
 
-        String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
         if (task.missedRunPolicy() == CronTask.MissedRunPolicy.CATCH_UP) {
             // Materialize every fire from nextRunAt up to and including now,
             // capped per tick so an unbounded backlog cannot occupy the
