@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.2.1
 
 - Fixed Postgres self-owned writes being silently rolled back when the host
