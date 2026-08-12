@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - Fixed Postgres self-owned writes being silently rolled back when the host
   `DataSource` hands out connections with `autoCommit=false` (issue #111).
