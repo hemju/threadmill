@@ -258,9 +258,10 @@ closing the crash window between the caller's commit and the nudge write, and
 that window is an explicit non-goal: the backstop schedule bounds the
 worst-case latency, and a lost nudge costs one schedule period, never a run.
 
-On the hot path the write is a microseconds-held autocommit update, and an
-in-JVM per-task coalescer additionally bounds the store write rate to about
-one round trip regardless of producer rate.
+On the hot path the write is a short Threadmill-owned transaction that commits
+independently of the pool's `autoCommit` default. An in-JVM per-task coalescer
+additionally bounds the store write rate to about one round trip regardless of
+producer rate.
 
 ## Connection-pool sharing
 

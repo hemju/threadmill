@@ -35,6 +35,13 @@ import com.hemju.threadmill.core.store.JobStore;
  * with carry-over. That cap — not re-registration — is the catch-up-storm
  * defense.
  *
+ * <p>If the under-mutex definition reload finds that the schedule state's
+ * timing fingerprint belongs to a different definition, the definition wins:
+ * timing is recomputed forward from the current tick and the stale schedule
+ * produces no firing. This completes a crashed timing edit without running a
+ * trigger the user already replaced. {@code CATCH_UP} resumes normally from
+ * the repaired timing; it never catches up the obsolete trigger's backlog.
+ *
  * <p>If a previously-materialised instance is still un-terminal, no new
  * instance is created until that one finishes. This guard prevents
  * pile-up under long-running recurring work.
@@ -134,7 +141,9 @@ public final class RecurringMaterializer {
         var state = stateOpt.get();
         Long nudge = state.nudgeRequestedAt() == null ? null : state.nudgeRevision();
         boolean due = state.nextRunAt() != null && !state.nextRunAt().isAfter(now);
-        if (!due && nudge == null) return;
+        boolean listedFingerprintMismatch =
+                !CronTaskScheduleState.timingFingerprintOf(listed).equals(state.timingFingerprint());
+        if (!due && nudge == null && !listedFingerprintMismatch) return;
 
         // About to act — reload the definition now that we hold the task
         // mutex. The listed object was snapshotted by tick() BEFORE the
@@ -142,16 +151,62 @@ public final class RecurringMaterializer {
         // and materializing from the stale object would insert the old
         // handler/payload (and, for a nudge, consume a request that was made
         // against the new definition). The reload is deliberately done only
-        // when a materialization is imminent, so idle ticks stay at one
-        // state read per task.
+        // when a materialization is imminent or the listed definition already
+        // proves the timing state is stale, so ordinary idle ticks stay at one
+        // state read per task while future stale schedules self-heal promptly.
         CronTask task = store.findCronTask(listed.name()).orElse(null);
         if (task == null || !task.enabled()) return;
+
+        String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
+        boolean timingStateChanged = false;
+        if (!fingerprint.equals(state.timingFingerprint())) {
+            String previousFingerprint = state.timingFingerprint();
+            boolean legacyTiming = previousFingerprint == null && state.nextRunAt() != null;
+            // A non-null mismatch is the crash signature for a timing edit
+            // that wrote the definition before its schedule state. Finish it
+            // by scheduling forward from this tick: firing the stale timing
+            // would run a trigger the user already replaced. A legacy null
+            // fingerprint does not prove an edit, so adopt the fingerprint
+            // without dropping or moving an already-recorded firing.
+            Instant next = legacyTiming ? state.nextRunAt() : task.trigger().nextAfter(now, task.zone());
+            if (!legacyTiming) due = false;
+            state = new CronTaskScheduleState(
+                    task.name(),
+                    state.lastRunAt(),
+                    state.lastRunJobId(),
+                    next,
+                    state.inFlightJobId(),
+                    fingerprint,
+                    // These cells are carried in the in-memory record only;
+                    // upsertCronTaskState deliberately never writes them.
+                    state.nudgeRequestedAt(),
+                    state.nudgeRevision());
+            timingStateChanged = true;
+            if (previousFingerprint != null) {
+                LOG.warn(
+                        "Repairing stale recurring timing for task {} from fingerprint {} to {}; next run at {}",
+                        task.name(),
+                        previousFingerprint,
+                        fingerprint,
+                        next);
+            }
+            if (nudge == null && !due) {
+                store.upsertCronTaskState(state);
+                return;
+            }
+        }
+
+        // The listed definition may simply be stale relative to an
+        // authoritative definition and state that already agree. In that
+        // case no scheduled firing or nudge is owed this tick.
+        if (!due && nudge == null) return;
 
         // Pile-up guard: an in-flight instance that is still going to run
         // blocks the next materialization.
         if (state.inFlightJobId() != null) {
             Job inFlight = store.findById(JobId.of(state.inFlightJobId())).orElse(null);
             if (inFlight != null && blocksNextMaterialization(inFlight, now)) {
+                if (timingStateChanged) store.upsertCronTaskState(state);
                 // Still running — leave the next_run_at where it is so we revisit on the next tick.
                 return;
             }
@@ -166,7 +221,7 @@ public final class RecurringMaterializer {
             // represents no schedule tick), only the nudge origin marker.
             JobId id = materializeNudge(task);
             store.upsertCronTaskState(new CronTaskScheduleState(
-                    task.name(), now, id.asUuid(), state.nextRunAt(), id.asUuid(), state.timingFingerprint()));
+                    task.name(), now, id.asUuid(), state.nextRunAt(), id.asUuid(), fingerprint));
             // Clear AFTER materializing (a crash between the two costs one
             // extra run, never a lost one — see the failure-semantics note in
             // the class Javadoc), and only the observed revision — a nudge
@@ -176,7 +231,6 @@ public final class RecurringMaterializer {
             return;
         }
 
-        String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
         if (task.missedRunPolicy() == CronTask.MissedRunPolicy.CATCH_UP) {
             // Materialize every fire from nextRunAt up to and including now,
             // capped per tick so an unbounded backlog cannot occupy the

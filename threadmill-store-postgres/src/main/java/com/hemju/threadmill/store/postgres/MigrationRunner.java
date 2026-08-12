@@ -221,13 +221,18 @@ public final class MigrationRunner {
     public void dropThreadmillObjects() {
         try (Connection conn = dataSource.getConnection()) {
             acquireMigrationLock(conn);
-            try (Statement st = conn.createStatement()) {
-                for (String table : THREADMILL_TABLES) {
-                    st.execute("DROP TABLE IF EXISTS " + table + " CASCADE");
-                }
-                for (String function : THREADMILL_FUNCTIONS) {
-                    st.execute("DROP FUNCTION IF EXISTS " + function + " CASCADE");
-                }
+            try {
+                inTransaction(conn, transaction -> {
+                    try (Statement st = transaction.createStatement()) {
+                        for (String table : THREADMILL_TABLES) {
+                            st.execute("DROP TABLE IF EXISTS " + table + " CASCADE");
+                        }
+                        for (String function : THREADMILL_FUNCTIONS) {
+                            st.execute("DROP FUNCTION IF EXISTS " + function + " CASCADE");
+                        }
+                    }
+                    return null;
+                });
             } finally {
                 releaseMigrationLock(conn);
             }
@@ -237,39 +242,55 @@ public final class MigrationRunner {
     }
 
     private void applyOne(Connection conn, Migration m) throws SQLException {
-        boolean priorAutoCommit = conn.getAutoCommit();
-        conn.setAutoCommit(false);
-        try (Statement st = conn.createStatement()) {
-            st.execute(m.sql());
-            try (PreparedStatement ps = conn.prepareStatement(
-                    "INSERT INTO threadmill_schema_history (version, description, checksum) VALUES (?, ?, ?)")) {
-                ps.setInt(1, m.version());
-                ps.setString(2, m.description());
-                ps.setString(3, checksum(m.sql()));
-                ps.executeUpdate();
-            }
-            conn.commit();
+        try {
+            inTransaction(conn, transaction -> {
+                try (Statement st = transaction.createStatement()) {
+                    st.execute(m.sql());
+                    try (PreparedStatement ps = transaction.prepareStatement(
+                            "INSERT INTO threadmill_schema_history (version, description, checksum) VALUES (?, ?, ?)")) {
+                        ps.setInt(1, m.version());
+                        ps.setString(2, m.description());
+                        ps.setString(3, checksum(m.sql()));
+                        ps.executeUpdate();
+                    }
+                }
+                return null;
+            });
         } catch (SQLException e) {
-            // Preserve the original failure even if the rollback itself fails
-            // (e.g. the connection died), so the operator still sees which
-            // migration and statement failed.
+            throw new MigrationException("Migration " + m.fileName() + " failed", e);
+        }
+    }
+
+    private void ensureHistoryTable(Connection conn) throws SQLException {
+        inTransaction(conn, transaction -> {
+            try (Statement st = transaction.createStatement()) {
+                st.execute(historyTableSql());
+                // Backfill the checksum column for history tables created before it
+                // existed; older rows keep a NULL checksum (validate skips those).
+                st.execute("ALTER TABLE threadmill_schema_history ADD COLUMN IF NOT EXISTS checksum TEXT");
+            }
+            return null;
+        });
+    }
+
+    private static <T> T inTransaction(Connection conn, PostgresConnectionWork<T> work) throws SQLException {
+        boolean previousAutoCommit = conn.getAutoCommit();
+        conn.setAutoCommit(false);
+        try {
+            T result = work.execute(conn);
+            conn.commit();
+            return result;
+        } catch (RuntimeException | SQLException e) {
+            // Preserve the original failure even if rollback also fails (for
+            // example because the connection died mid-DDL).
             try {
                 conn.rollback();
             } catch (SQLException rollbackError) {
                 e.addSuppressed(rollbackError);
             }
-            throw new MigrationException("Migration " + m.fileName() + " failed", e);
+            throw e;
         } finally {
-            conn.setAutoCommit(priorAutoCommit);
-        }
-    }
-
-    private void ensureHistoryTable(Connection conn) throws SQLException {
-        try (Statement st = conn.createStatement()) {
-            st.execute(historyTableSql());
-            // Backfill the checksum column for history tables created before it
-            // existed; older rows keep a NULL checksum (validate skips those).
-            st.execute("ALTER TABLE threadmill_schema_history ADD COLUMN IF NOT EXISTS checksum TEXT");
+            conn.setAutoCommit(previousAutoCommit);
         }
     }
 

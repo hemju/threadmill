@@ -847,8 +847,9 @@ public final class InMemoryJobStore implements JobStore {
     public void clearCronNudge(String taskName, long observedRevision) {
         Names.requireName("cronTask", taskName);
         synchronized (cronLifecycleLock) {
-            // Clear the pending flag only; the revision is never reset, so a
-            // later acceptance can never reuse a cleared identity.
+            // Clear the pending flag only; the revision is never reset while
+            // this state row exists, so a later acceptance in the same task
+            // lifecycle cannot reuse a cleared identity.
             cronTaskStates.computeIfPresent(
                     taskName,
                     (name, prev) -> prev.nudgeRevision() != null

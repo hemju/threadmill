@@ -228,6 +228,9 @@ tasks.register("productionCheck") {
         // The correctness simulation is the gate that caught the C1
         // in-memory concurrency bypass — a release candidate must run it.
         ":threadmill-simulation:simulate",
+        // The process-separated nudge simulation pins maintenance-leader
+        // hard-kill handoff and the documented producer crash window.
+        ":threadmill-simulation:simulateNudge",
     )
     dependsOn(":threadmill-example:run")
 }
@@ -240,6 +243,9 @@ tasks
 
 subprojects {
     tasks
-        .matching { it.name in setOf("jar", "test", "javadoc", "soak", "run") }
+        .matching {
+            it.name in setOf("jar", "test", "javadoc", "soak", "run") ||
+                it.name.startsWith("simulate")
+        }
         .configureEach { mustRunAfter(cleanTask) }
 }

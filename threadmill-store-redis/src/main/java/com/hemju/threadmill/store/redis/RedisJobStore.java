@@ -1909,9 +1909,9 @@ public final class RedisJobStore implements JobStore {
         // cluster slot): the existence + enabled check and the nudge write
         // cannot race a concurrent deleteCronTask, so a nudge can never
         // resurrect schedule state for a removed task. HINCRBY generates the
-        // strictly monotonic, never-reset revision that compare-and-clear
-        // uses as its collision-free identity. Always-string return
-        // -> ScriptOutputType.VALUE per the Lua return-value conventions.
+        // strictly monotonic revision that compare-and-clear uses as its
+        // collision-free identity while this task's state hash exists. The
+        // script always returns a string, hence ScriptOutputType.VALUE.
         try {
             String outcome = evalScript(
                     """

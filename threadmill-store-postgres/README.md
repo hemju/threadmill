@@ -145,7 +145,11 @@ is not a production upgrade strategy.
 ## Connection pool
 
 The host owns the pool. `PostgresJobStore` accepts a `javax.sql.DataSource`;
-it does not create or close one. Recommended floor for the pool size:
+it does not create or close one. Threadmill does not require the pool to default
+to `autoCommit=true`: every self-owned write uses the common owning transaction
+boundary, commits explicitly, and restores the connection's previous mode.
+Migration history bootstrap, individual migrations, and destructive schema
+reset use equivalent explicit boundaries. Recommended floor for the pool size:
 `workerCount + claimBatchSize + headroom` so claim and maintenance never
 contend with handler-side queries.
 

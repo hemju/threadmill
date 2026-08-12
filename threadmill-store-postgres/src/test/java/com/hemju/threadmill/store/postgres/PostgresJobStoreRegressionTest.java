@@ -92,7 +92,7 @@ class PostgresJobStoreRegressionTest {
                 Statement st = conn.createStatement()) {
             st.execute("TRUNCATE threadmill_jobs, threadmill_nodes, threadmill_metadata, "
                     + "threadmill_cron_tasks, threadmill_mutexes, threadmill_leases, "
-                    + "threadmill_dedup_keys, threadmill_concurrency_groups, "
+                    + "threadmill_dedup_keys, threadmill_queue_pauses, threadmill_concurrency_groups, "
                     + "threadmill_concurrency_workflow_holds RESTART IDENTITY CASCADE");
             st.execute("UPDATE threadmill_job_counts SET count = 0");
         }
@@ -671,6 +671,38 @@ class PostgresJobStoreRegressionTest {
     }
 
     @Test
+    void migrationBootstrapCommitsWhenConnectionsDefaultToNonAutoCommit() throws SQLException {
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute("ALTER TABLE threadmill_schema_history DROP COLUMN checksum");
+        }
+
+        new MigrationRunner(new NonAutoCommitDataSource(dataSource)).migrate();
+
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT checksum FROM threadmill_schema_history LIMIT 1")) {
+            assertThat(rs.next()).isTrue();
+        }
+    }
+
+    @Test
+    void schemaDropAndRemigrateCommitWhenConnectionsDefaultToNonAutoCommit() throws SQLException {
+        var runner = new MigrationRunner(new NonAutoCommitDataSource(dataSource));
+        runner.dropThreadmillObjects();
+
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT to_regclass('threadmill_jobs')")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getString(1)).isNull();
+        }
+
+        runner.migrate();
+        new MigrationRunner(dataSource).validate();
+    }
+
+    @Test
     void concurrentCleanSchemaMigrationsAreSerialized() throws Exception {
         dropSchemaObjects();
 
@@ -912,6 +944,31 @@ class PostgresJobStoreRegressionTest {
         store.deleteCronTask(task.name());
         assertThat(store.findCronTask(task.name())).isEmpty();
         assertThat(store.findCronTaskState(task.name())).isEmpty();
+    }
+
+    @Test
+    void selfOwnedWritesCommitWhenConnectionsDefaultToNonAutoCommit() {
+        var writer = new PostgresJobStore(new NonAutoCommitDataSource(dataSource));
+        var observer = store();
+
+        writer.pauseQueue("low-priority", "maintenance");
+        assertThat(observer.listPausedQueues()).contains("low-priority");
+
+        var task = sampleCronTask("non-auto-commit-task");
+        writer.upsertCronTask(task);
+        assertThat(observer.findCronTask(task.name())).contains(task);
+
+        var nodeId = NodeId.newId();
+        var heartbeat = Instant.parse("2026-08-11T12:00:00Z");
+        writer.recordNodeHeartbeat(nodeId, heartbeat);
+        assertThat(observer.readNodeHeartbeat(nodeId)).contains(heartbeat);
+
+        assertThat(writer.tryAcquireMutex("non-auto-commit-mutex", "writer", Duration.ofMinutes(1)))
+                .isTrue();
+        assertThat(observer.tryAcquireMutex("non-auto-commit-mutex", "observer", Duration.ofMinutes(1)))
+                .isFalse();
+
+        writer.resumeQueue("low-priority");
     }
 
     @Test

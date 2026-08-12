@@ -2,6 +2,46 @@
 
 ## Unreleased
 
+- Fixed Postgres self-owned writes being silently rolled back when the host
+  `DataSource` hands out connections with `autoCommit=false` (issue #111).
+  Queue pauses, execution and node heartbeats, maintenance leases, retention,
+  mutexes, recurring definitions/state, and the expired-dedup fallback now use
+  explicit Threadmill-owned transactions, restoring the connection's prior
+  auto-commit mode after commit or rollback. `saveAtomic`, `softDelete`,
+  `claimReady`, and `replaceJob` now use that same boundary instead of forcing
+  auto-commit on return. Migration history bootstrap and destructive schema
+  reset also commit explicitly. The expired-dedup fallback now keeps its
+  `SELECT … FOR UPDATE` lock through the delete, closing a lost-update window
+  that also existed on auto-commit pools.
+- The recurring materializer now repairs a timing-fingerprint mismatch found
+  during its under-mutex definition reload (issue #112). The current task
+  definition wins: Threadmill preserves run bookkeeping and pending nudge
+  demand, recomputes timing forward from the tick, and does not fire or
+  `CATCH_UP` the obsolete trigger's overdue backlog. A listed fingerprint
+  mismatch now triggers that repair even when the stale `nextRunAt` is still in
+  the future, so a faster replacement schedule cannot remain dormant until the
+  obsolete fire time. Legacy null fingerprints are adopted without dropping or
+  moving an existing fire, and detected crashed edits emit an operator-visible
+  warning.
+- Added fixed process-separated nudge simulations for Postgres and Redis
+  (issue #114). They hard-kill a maintenance leader after an accepted nudge
+  and prove the standby serves it, then hard-kill a producer after its durable
+  work write but before its nudge and prove the regular recurring backstop
+  drains the row. Cross-process JSON-lines traces record process ids,
+  leadership, trigger origins, and the verified event ordering. Ready markers
+  are atomically published and trace writes drain their buffers fully; the
+  fixed real-backend simulation is part of `productionCheck`. The failover
+  phase uses a one-minute backstop and five-minute leader poll, then edits the
+  task to an eight-second backstop for the producer-crash phase, eliminating
+  process-start timing races. Simulation work uses its own datastore namespace
+  and long-lived per-process connections.
+- Recorded the issue #113 decision not to add per-task lifecycle generations
+  to the `JobStore` SPI. Issue #114 proves hard-kill handoff and backstop
+  recovery, while the remaining revision-reuse ABA additionally requires an
+  old materializer to resume after outliving its mutex lease and a same-name
+  delete/re-registration. A persistent generation would not replace the
+  existing lifecycle orderings and does not justify its cross-backend storage,
+  migration, and SPI cost without evidence that sequence occurs.
 - Recurring tasks can declare claim-time exclusivity (issue #110). A
   `CronTask` gains an `exclusive` flag, surfaced as
   `@Recurring(exclusive = true)` and as an `exclusive` parameter on
@@ -137,7 +177,8 @@
   trigger timing its `next_run_at` was computed from, written atomically with
   the state row (additive Postgres migration
   `V4__cron_state_timing_fingerprint.sql`; a Redis hash field; legacy rows
-  read as null and simply recompute once). The unchanged-schedule decision
+  read as null and adopt the current fingerprint without moving their recorded
+  timing). The unchanged-schedule decision
   reads this fingerprint rather than comparing stored task definitions, so a
   crash between the separate task-definition and state writes can never pair
   a new trigger with old timing undetectably — the retry detects the
