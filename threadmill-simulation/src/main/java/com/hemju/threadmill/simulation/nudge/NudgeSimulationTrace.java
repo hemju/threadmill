@@ -40,7 +40,8 @@ final class NudgeSimulationTrace {
                             path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
                     var lock = channel.lock()) {
                 if (!lock.isValid()) throw new IllegalStateException("trace lock is not valid: " + path);
-                channel.write(ByteBuffer.wrap(bytes));
+                var buffer = ByteBuffer.wrap(bytes);
+                while (buffer.hasRemaining()) channel.write(buffer);
             }
         } catch (IOException e) {
             throw new IllegalStateException("failed to append nudge simulation trace: " + path, e);

@@ -84,11 +84,11 @@ public record CronTaskScheduleState(
     }
 
     /**
-     * Convenience constructor with no timing fingerprint. A null fingerprint
-     * is always safe — the next re-registration or materializer tick that is
-     * about to act recomputes the schedule instead of preserving it — but
-     * production writers that recompute
-     * {@code nextRunAt} from a task should stamp
+     * Convenience constructor with no timing fingerprint. A materializer tick
+     * adopts the current task's fingerprint without moving a non-null
+     * {@code nextRunAt}; if timing is also null, it initializes the next fire
+     * from that tick. Production writers that compute {@code nextRunAt} from a
+     * task should stamp
      * {@link #timingFingerprintOf(CronTask)} so unchanged re-registrations
      * can preserve overdue state.
      */

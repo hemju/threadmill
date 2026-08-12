@@ -141,7 +141,9 @@ public final class RecurringMaterializer {
         var state = stateOpt.get();
         Long nudge = state.nudgeRequestedAt() == null ? null : state.nudgeRevision();
         boolean due = state.nextRunAt() != null && !state.nextRunAt().isAfter(now);
-        if (!due && nudge == null) return;
+        boolean listedFingerprintMismatch =
+                !CronTaskScheduleState.timingFingerprintOf(listed).equals(state.timingFingerprint());
+        if (!due && nudge == null && !listedFingerprintMismatch) return;
 
         // About to act — reload the definition now that we hold the task
         // mutex. The listed object was snapshotted by tick() BEFORE the
@@ -149,20 +151,25 @@ public final class RecurringMaterializer {
         // and materializing from the stale object would insert the old
         // handler/payload (and, for a nudge, consume a request that was made
         // against the new definition). The reload is deliberately done only
-        // when a materialization is imminent, so idle ticks stay at one
-        // state read per task.
+        // when a materialization is imminent or the listed definition already
+        // proves the timing state is stale, so ordinary idle ticks stay at one
+        // state read per task while future stale schedules self-heal promptly.
         CronTask task = store.findCronTask(listed.name()).orElse(null);
         if (task == null || !task.enabled()) return;
 
         String fingerprint = CronTaskScheduleState.timingFingerprintOf(task);
+        boolean timingStateChanged = false;
         if (!fingerprint.equals(state.timingFingerprint())) {
-            // A timing edit writes the definition before its schedule state.
-            // Seeing a mismatch here is the crash signature for that window.
-            // Finish the edit by scheduling forward from this tick: firing
-            // the stale timing would run a trigger the user already replaced,
-            // while merely skipping would leave the task dormant until some
-            // future re-registration happened to repair it.
-            Instant next = task.trigger().nextAfter(now, task.zone());
+            String previousFingerprint = state.timingFingerprint();
+            boolean legacyTiming = previousFingerprint == null && state.nextRunAt() != null;
+            // A non-null mismatch is the crash signature for a timing edit
+            // that wrote the definition before its schedule state. Finish it
+            // by scheduling forward from this tick: firing the stale timing
+            // would run a trigger the user already replaced. A legacy null
+            // fingerprint does not prove an edit, so adopt the fingerprint
+            // without dropping or moving an already-recorded firing.
+            Instant next = legacyTiming ? state.nextRunAt() : task.trigger().nextAfter(now, task.zone());
+            if (!legacyTiming) due = false;
             state = new CronTaskScheduleState(
                     task.name(),
                     state.lastRunAt(),
@@ -170,11 +177,23 @@ public final class RecurringMaterializer {
                     next,
                     state.inFlightJobId(),
                     fingerprint,
+                    // These cells are carried in the in-memory record only;
+                    // upsertCronTaskState deliberately never writes them.
                     state.nudgeRequestedAt(),
                     state.nudgeRevision());
-            store.upsertCronTaskState(state);
-            due = false;
-            if (nudge == null) return;
+            timingStateChanged = true;
+            if (previousFingerprint != null) {
+                LOG.warn(
+                        "Repairing stale recurring timing for task {} from fingerprint {} to {}; next run at {}",
+                        task.name(),
+                        previousFingerprint,
+                        fingerprint,
+                        next);
+            }
+            if (nudge == null && !due) {
+                store.upsertCronTaskState(state);
+                return;
+            }
         }
 
         // Pile-up guard: an in-flight instance that is still going to run
@@ -182,6 +201,7 @@ public final class RecurringMaterializer {
         if (state.inFlightJobId() != null) {
             Job inFlight = store.findById(JobId.of(state.inFlightJobId())).orElse(null);
             if (inFlight != null && blocksNextMaterialization(inFlight, now)) {
+                if (timingStateChanged) store.upsertCronTaskState(state);
                 // Still running — leave the next_run_at where it is so we revisit on the next tick.
                 return;
             }

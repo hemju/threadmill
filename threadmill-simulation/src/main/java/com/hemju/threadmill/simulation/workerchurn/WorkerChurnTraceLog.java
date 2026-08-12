@@ -36,7 +36,8 @@ final class WorkerChurnTraceLog {
                             path, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
                     FileLock lock = channel.lock()) {
                 if (!lock.isValid()) throw new IllegalStateException("trace lock is not valid: " + path);
-                channel.write(ByteBuffer.wrap(line.getBytes(StandardCharsets.UTF_8)));
+                var buffer = ByteBuffer.wrap(line.getBytes(StandardCharsets.UTF_8));
+                while (buffer.hasRemaining()) channel.write(buffer);
             }
         } catch (IOException e) {
             throw new IllegalStateException("failed to append worker-churn trace: " + path, e);
@@ -45,7 +46,7 @@ final class WorkerChurnTraceLog {
 
     private static String line(String event, Map<String, ?> fields) {
         var out = new StringBuilder(256);
-        out.append("{\"ts\":\"")
+        out.append("{\"timestamp\":\"")
                 .append(Instant.now())
                 .append("\",\"event\":\"")
                 .append(escape(event))

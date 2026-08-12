@@ -1291,6 +1291,202 @@ class SchedulingTest {
     }
 
     @Test
+    void materializerRepairsMismatchedTimingFingerprintBeforeFutureStaleFire() {
+        scheduler.defineIntervalTask(
+                "future-crashed-edit",
+                Duration.ofDays(7),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+        var oldTask = store.findCronTask("future-crashed-edit").orElseThrow();
+        var repairAt = Instant.parse("2026-08-12T06:00:00Z");
+        var staleFutureFire = repairAt.plus(Duration.ofDays(7));
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                oldTask.name(), null, null, staleFutureFire, null, CronTaskScheduleState.timingFingerprintOf(oldTask)));
+
+        var editedTask = new CronTask(
+                oldTask.name(),
+                new CronTask.Trigger.Interval(Duration.ofMinutes(1)),
+                oldTask.handlerType(),
+                oldTask.payloadArgument(),
+                oldTask.queue(),
+                oldTask.priority(),
+                oldTask.timeout(),
+                oldTask.maxAttempts(),
+                oldTask.exclusive(),
+                oldTask.missedRunPolicy(),
+                oldTask.zone(),
+                true);
+        store.upsertCronTask(editedTask);
+
+        new RecurringMaterializer(store).tick(repairAt);
+
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .as("repairing future stale timing must not materialize an instance")
+                .isEmpty();
+        assertThat(store.findCronTaskState(oldTask.name()).orElseThrow()).satisfies(repaired -> {
+            assertThat(repaired.nextRunAt()).isEqualTo(repairAt.plus(Duration.ofMinutes(1)));
+            assertThat(repaired.nextRunAt()).isBefore(staleFutureFire);
+            assertThat(repaired.timingFingerprint()).isEqualTo(CronTaskScheduleState.timingFingerprintOf(editedTask));
+        });
+    }
+
+    @Test
+    void materializerRepairsMismatchedTimingAndServesThePendingNudge() {
+        scheduler.defineIntervalTask(
+                "nudged-crashed-edit",
+                Duration.ofDays(7),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+        var oldTask = store.findCronTask("nudged-crashed-edit").orElseThrow();
+        var repairAt = Instant.parse("2026-08-12T07:00:00Z");
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                oldTask.name(),
+                null,
+                null,
+                repairAt.plus(Duration.ofDays(7)),
+                null,
+                CronTaskScheduleState.timingFingerprintOf(oldTask)));
+        scheduler.nudgeRecurring(oldTask.name());
+
+        var editedTask = new CronTask(
+                oldTask.name(),
+                new CronTask.Trigger.Interval(Duration.ofMinutes(1)),
+                oldTask.handlerType(),
+                oldTask.payloadArgument(),
+                oldTask.queue(),
+                oldTask.priority(),
+                oldTask.timeout(),
+                oldTask.maxAttempts(),
+                oldTask.exclusive(),
+                oldTask.missedRunPolicy(),
+                oldTask.zone(),
+                true);
+        store.upsertCronTask(editedTask);
+
+        new RecurringMaterializer(store).tick(repairAt);
+
+        var instances = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
+        assertThat(instances).hasSize(1);
+        assertThat(instances.getFirst().metadata().get(JobExecutionContext.CRON_ORIGIN_META))
+                .contains(JobExecutionContext.CRON_ORIGIN_NUDGE);
+        assertThat(store.findCronTaskState(oldTask.name()).orElseThrow()).satisfies(repaired -> {
+            assertThat(repaired.nextRunAt()).isEqualTo(repairAt.plus(Duration.ofMinutes(1)));
+            assertThat(repaired.timingFingerprint()).isEqualTo(CronTaskScheduleState.timingFingerprintOf(editedTask));
+            assertThat(repaired.nudgeRequestedAt()).isNull();
+            assertThat(repaired.inFlightJobId())
+                    .isEqualTo(instances.getFirst().id().asUuid());
+        });
+    }
+
+    @Test
+    void pendingNudgeInitializesAMissingScheduleState() {
+        scheduler.defineIntervalTask(
+                "nudge-created-state",
+                Duration.ofHours(2),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+        var task = store.findCronTask("nudge-created-state").orElseThrow();
+        store.deleteCronTask(task.name());
+        store.upsertCronTask(task);
+        scheduler.nudgeRecurring(task.name());
+        assertThat(store.findCronTaskState(task.name()).orElseThrow()).satisfies(created -> {
+            assertThat(created.nextRunAt()).isNull();
+            assertThat(created.timingFingerprint()).isNull();
+            assertThat(created.nudgeRequestedAt()).isNotNull();
+        });
+        var now = Instant.parse("2026-08-12T07:30:00Z");
+
+        new RecurringMaterializer(store).tick(now);
+
+        var instances = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
+        assertThat(instances).hasSize(1);
+        assertThat(instances.getFirst().metadata().get(JobExecutionContext.CRON_ORIGIN_META))
+                .contains(JobExecutionContext.CRON_ORIGIN_NUDGE);
+        assertThat(store.findCronTaskState(task.name()).orElseThrow()).satisfies(initialized -> {
+            assertThat(initialized.nextRunAt()).isEqualTo(now.plus(Duration.ofHours(2)));
+            assertThat(initialized.timingFingerprint()).isEqualTo(CronTaskScheduleState.timingFingerprintOf(task));
+            assertThat(initialized.nudgeRequestedAt()).isNull();
+        });
+    }
+
+    @Test
+    void materializerRepairSuppressesTheObsoleteDropFire() {
+        scheduler.defineIntervalTask(
+                "drop-crashed-edit",
+                Duration.ofMinutes(5),
+                new HelloPayload("tick"),
+                RecorderHandler.class,
+                "default",
+                0,
+                CronTask.MissedRunPolicy.DROP);
+        var oldTask = store.findCronTask("drop-crashed-edit").orElseThrow();
+        var repairAt = Instant.parse("2026-08-12T08:00:00Z");
+        store.upsertCronTaskState(new CronTaskScheduleState(
+                oldTask.name(),
+                null,
+                null,
+                repairAt.minus(Duration.ofDays(1)),
+                null,
+                CronTaskScheduleState.timingFingerprintOf(oldTask)));
+        var editedTask = new CronTask(
+                oldTask.name(),
+                new CronTask.Trigger.Interval(Duration.ofHours(6)),
+                oldTask.handlerType(),
+                oldTask.payloadArgument(),
+                oldTask.queue(),
+                oldTask.priority(),
+                oldTask.timeout(),
+                oldTask.maxAttempts(),
+                oldTask.exclusive(),
+                oldTask.missedRunPolicy(),
+                oldTask.zone(),
+                true);
+        store.upsertCronTask(editedTask);
+
+        new RecurringMaterializer(store).tick(repairAt);
+
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .as("the obsolete trigger's collapsed DROP fire must not run")
+                .isEmpty();
+        assertThat(store.findCronTaskState(oldTask.name()).orElseThrow().nextRunAt())
+                .isEqualTo(repairAt.plus(Duration.ofHours(6)));
+    }
+
+    @Test
+    void materializerAdoptsLegacyNullFingerprintsWithoutDroppingOrMovingTiming() {
+        scheduler.defineIntervalTask("legacy-due", Duration.ofHours(1), new HelloPayload("due"), RecorderHandler.class);
+        scheduler.defineIntervalTask(
+                "legacy-future", Duration.ofHours(1), new HelloPayload("future"), RecorderHandler.class);
+        var now = Instant.parse("2026-08-12T09:00:00Z");
+        var dueAt = now.minus(Duration.ofMinutes(5));
+        var futureAt = now.plus(Duration.ofMinutes(30));
+        store.upsertCronTaskState(new CronTaskScheduleState("legacy-due", null, null, dueAt, null));
+        store.upsertCronTaskState(new CronTaskScheduleState("legacy-future", null, null, futureAt, null));
+
+        new RecurringMaterializer(store).tick(now);
+
+        var instances = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
+        assertThat(instances).hasSize(1);
+        assertThat(instances.getFirst().metadata().get(JobExecutionContext.CRON_ORIGIN_META))
+                .contains(JobExecutionContext.CRON_ORIGIN_SCHEDULE);
+        assertThat(store.findCronTaskState("legacy-future").orElseThrow()).satisfies(adopted -> {
+            assertThat(adopted.nextRunAt()).isEqualTo(futureAt);
+            assertThat(adopted.timingFingerprint())
+                    .isEqualTo(CronTaskScheduleState.timingFingerprintOf(
+                            store.findCronTask("legacy-future").orElseThrow()));
+        });
+    }
+
+    @Test
     void materializerReloadsTheDefinitionUnderTheTaskMutexBeforeActing() {
         // tick() snapshots the task list BEFORE tickOne takes the per-task
         // mutex, so an edit can commit in between. Simulate exactly that

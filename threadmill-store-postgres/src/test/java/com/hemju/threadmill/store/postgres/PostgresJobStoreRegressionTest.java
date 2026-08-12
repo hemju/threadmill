@@ -3,7 +3,6 @@ package com.hemju.threadmill.store.postgres;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
-import java.io.PrintWriter;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -23,7 +22,6 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
-import java.util.logging.Logger;
 
 import javax.sql.DataSource;
 
@@ -94,7 +92,7 @@ class PostgresJobStoreRegressionTest {
                 Statement st = conn.createStatement()) {
             st.execute("TRUNCATE threadmill_jobs, threadmill_nodes, threadmill_metadata, "
                     + "threadmill_cron_tasks, threadmill_mutexes, threadmill_leases, "
-                    + "threadmill_dedup_keys, threadmill_concurrency_groups, "
+                    + "threadmill_dedup_keys, threadmill_queue_pauses, threadmill_concurrency_groups, "
                     + "threadmill_concurrency_workflow_holds RESTART IDENTITY CASCADE");
             st.execute("UPDATE threadmill_job_counts SET count = 0");
         }
@@ -673,6 +671,38 @@ class PostgresJobStoreRegressionTest {
     }
 
     @Test
+    void migrationBootstrapCommitsWhenConnectionsDefaultToNonAutoCommit() throws SQLException {
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement()) {
+            st.execute("ALTER TABLE threadmill_schema_history DROP COLUMN checksum");
+        }
+
+        new MigrationRunner(new NonAutoCommitDataSource(dataSource)).migrate();
+
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT checksum FROM threadmill_schema_history LIMIT 1")) {
+            assertThat(rs.next()).isTrue();
+        }
+    }
+
+    @Test
+    void schemaDropAndRemigrateCommitWhenConnectionsDefaultToNonAutoCommit() throws SQLException {
+        var runner = new MigrationRunner(new NonAutoCommitDataSource(dataSource));
+        runner.dropThreadmillObjects();
+
+        try (Connection conn = dataSource.getConnection();
+                Statement st = conn.createStatement();
+                ResultSet rs = st.executeQuery("SELECT to_regclass('threadmill_jobs')")) {
+            assertThat(rs.next()).isTrue();
+            assertThat(rs.getString(1)).isNull();
+        }
+
+        runner.migrate();
+        new MigrationRunner(dataSource).validate();
+    }
+
+    @Test
     void concurrentCleanSchemaMigrationsAreSerialized() throws Exception {
         dropSchemaObjects();
 
@@ -937,6 +967,8 @@ class PostgresJobStoreRegressionTest {
                 .isTrue();
         assertThat(observer.tryAcquireMutex("non-auto-commit-mutex", "observer", Duration.ofMinutes(1)))
                 .isFalse();
+
+        writer.resumeQueue("low-priority");
     }
 
     @Test
@@ -979,64 +1011,6 @@ class PostgresJobStoreRegressionTest {
                 .initialState(JobState.AWAITING)
                 .createdAt(Instant.now().plusMillis(index))
                 .build();
-    }
-
-    /** A pool-alike whose connections arrive with {@code autoCommit=false}. */
-    private static final class NonAutoCommitDataSource implements DataSource {
-        private final DataSource delegate;
-
-        private NonAutoCommitDataSource(DataSource delegate) {
-            this.delegate = delegate;
-        }
-
-        @Override
-        public Connection getConnection() throws SQLException {
-            var connection = delegate.getConnection();
-            connection.setAutoCommit(false);
-            return connection;
-        }
-
-        @Override
-        public Connection getConnection(String username, String password) throws SQLException {
-            var connection = delegate.getConnection(username, password);
-            connection.setAutoCommit(false);
-            return connection;
-        }
-
-        @Override
-        public PrintWriter getLogWriter() throws SQLException {
-            return delegate.getLogWriter();
-        }
-
-        @Override
-        public void setLogWriter(PrintWriter out) throws SQLException {
-            delegate.setLogWriter(out);
-        }
-
-        @Override
-        public void setLoginTimeout(int seconds) throws SQLException {
-            delegate.setLoginTimeout(seconds);
-        }
-
-        @Override
-        public int getLoginTimeout() throws SQLException {
-            return delegate.getLoginTimeout();
-        }
-
-        @Override
-        public Logger getParentLogger() {
-            return Logger.getLogger("test");
-        }
-
-        @Override
-        public <T> T unwrap(Class<T> iface) throws SQLException {
-            return delegate.unwrap(iface);
-        }
-
-        @Override
-        public boolean isWrapperFor(Class<?> iface) throws SQLException {
-            return delegate.isWrapperFor(iface);
-        }
     }
 
     private static void dropSchemaObjects() throws SQLException {

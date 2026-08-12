@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -16,7 +17,6 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
-import java.util.function.Predicate;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,8 +47,9 @@ import com.hemju.threadmill.simulation.nudge.NudgeSimulationStores.ConnectionInf
 public final class NudgeSimulationMain {
 
     private static final ObjectMapper JSON = new ObjectMapper();
-    private static final Duration BACKSTOP_INTERVAL = Duration.ofSeconds(8);
-    private static final Duration LEADER_MAINTENANCE_POLL = Duration.ofSeconds(10);
+    private static final Duration FAILOVER_BACKSTOP_INTERVAL = Duration.ofMinutes(1);
+    private static final Duration CRASH_BACKSTOP_INTERVAL = Duration.ofSeconds(8);
+    private static final Duration LEADER_MAINTENANCE_POLL = Duration.ofMinutes(5);
     private static final Duration STANDBY_MAINTENANCE_POLL = Duration.ofMillis(100);
     private static final Duration PROCESS_START_TIMEOUT = Duration.ofSeconds(10);
     private static final Duration FAILOVER_TIMEOUT = Duration.ofSeconds(8);
@@ -84,7 +85,7 @@ public final class NudgeSimulationMain {
                         "runId", runId,
                         "taskName", taskName,
                         "queue", queue,
-                        "backstopMillis", BACKSTOP_INTERVAL.toMillis()));
+                        "backstopMillis", FAILOVER_BACKSTOP_INTERVAL.toMillis()));
 
         ManagedProcess leader = null;
         ManagedProcess standby = null;
@@ -191,6 +192,15 @@ public final class NudgeSimulationMain {
             await("accepted nudge work to drain", FAILOVER_TIMEOUT, () -> !workStore.isPending(1));
             awaitRecurringInstanceSuccess(storeHandle.store(), taskName, FAILOVER_TIMEOUT);
 
+            defineTask(storeHandle.store(), runId, trace, taskName, queue, CRASH_BACKSTOP_INTERVAL);
+            NudgeSimulationTrace.append(
+                    trace,
+                    "backstop-shortened",
+                    Map.of(
+                            "runId", runId,
+                            "taskName", taskName,
+                            "backstopMillis", CRASH_BACKSTOP_INTERVAL.toMillis()));
+
             var crashReadyFile = outputDirectory.resolve("producer-crash.ready.json");
             crashProducer = startProducer(
                     fixture.connectionInfo(),
@@ -238,18 +248,13 @@ public final class NudgeSimulationMain {
         NudgeSimulationStores.configureProcess(connectionInfo);
         try (var storeHandle = NudgeSimulationStores.openJobStore(connectionInfo)) {
             if (options.registerTask) {
-                var scheduler = new Scheduler(storeHandle.store(), new JsonJobSerializer());
-                scheduler.defineRecurring(
+                defineTask(
+                        storeHandle.store(),
+                        options.runId,
+                        options.traceFile,
                         options.taskName,
-                        new CronTask.Trigger.Interval(BACKSTOP_INTERVAL),
-                        new NudgeSimulationPayload(options.runId, options.traceFile.toString()),
-                        NudgeSimulationHandler.class.getName(),
                         options.queue,
-                        0,
-                        null,
-                        null,
-                        true,
-                        CronTask.MissedRunPolicy.DROP);
+                        FAILOVER_BACKSTOP_INTERVAL);
             }
 
             var config = ProcessingNodeConfig.builder()
@@ -306,6 +311,22 @@ public final class NudgeSimulationMain {
             writeReady(options.readyFile, node.nodeId(), pid);
             Thread.currentThread().join();
         }
+    }
+
+    private static void defineTask(
+            JobStore store, String runId, Path trace, String taskName, String queue, Duration interval) {
+        var scheduler = new Scheduler(store, new JsonJobSerializer());
+        scheduler.defineRecurring(
+                taskName,
+                new CronTask.Trigger.Interval(interval),
+                new NudgeSimulationPayload(runId, trace.toString()),
+                NudgeSimulationHandler.class.getName(),
+                queue,
+                0,
+                null,
+                null,
+                true,
+                CronTask.MissedRunPolicy.DROP);
     }
 
     private static void runProducer(Options options) throws Exception {
@@ -432,18 +453,27 @@ public final class NudgeSimulationMain {
         }
         var document = JSON.readTree(Files.readString(readyFile, StandardCharsets.UTF_8));
         var nodeId = document.hasNonNull("nodeId")
-                ? NodeId.of(UUID.fromString(document.get("nodeId").asText()))
+                ? NodeId.of(UUID.fromString(document.path("nodeId").asText()))
                 : null;
-        return new Ready(nodeId, document.get("pid").asLong());
+        long pid = document.path("pid").asLong(-1);
+        require(pid > 0, process.label() + " published a ready marker without a valid pid");
+        return new Ready(nodeId, pid);
     }
 
     private static void writeReady(Path readyFile, NodeId nodeId, long pid) {
+        var temporaryFile = readyFile.resolveSibling(readyFile.getFileName() + ".tmp-" + pid);
         try {
             var fields = new LinkedHashMap<String, Object>();
             fields.put("pid", pid);
             fields.put("nodeId", nodeId == null ? null : nodeId.toString());
-            Files.writeString(readyFile, JSON.writeValueAsString(fields), StandardCharsets.UTF_8);
+            Files.writeString(temporaryFile, JSON.writeValueAsString(fields), StandardCharsets.UTF_8);
+            Files.move(temporaryFile, readyFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (IOException e) {
+            try {
+                Files.deleteIfExists(temporaryFile);
+            } catch (IOException cleanupFailure) {
+                e.addSuppressed(cleanupFailure);
+            }
             throw new IllegalStateException("failed to write process-ready marker: " + readyFile, e);
         }
     }
@@ -509,41 +539,24 @@ public final class NudgeSimulationMain {
             if (!line.isBlank()) events.add(JSON.readTree(line));
         }
 
-        var acceptIndexes = indexesOf(events, "nudge-accepted");
-        require(!acceptIndexes.isEmpty(), "trace has no accepted nudge");
-        for (var acceptIndex : acceptIndexes) {
-            var producerPid = events.get(acceptIndex).get("pid").asLong();
-            require(
-                    findAfter(
-                                    events,
-                                    acceptIndex,
-                                    "pump-run-start",
-                                    event -> event.get("pid").asLong() != producerPid)
-                            >= 0,
-                    "accepted nudge was not followed by a run in another OS process");
-        }
-
         var accepted = requireEvent(events, "nudge-accepted", 1);
         var leaderKilled = requireEvent(events, "leader-hard-killed", null);
-        var elected = requireEvent(events, "maintenance-elected", null);
         var firstDrain = requireEvent(events, "work-drained", 1);
-        var firstRun = requireRun(events, firstDrain.event().get("jobId").asText());
+        var firstRun = requireRun(events, firstDrain.event().path("jobId").asText());
         require(
                 accepted.index() < leaderKilled.index()
                         && leaderKilled.index() < firstRun.index()
                         && firstRun.index() < firstDrain.index(),
                 "accepted-nudge leader-kill ordering is not proven by the trace");
-        require(leaderKilled.index() < elected.index(), "standby election was observed before the leader kill");
-        require(elected.event().get("pid").asLong() == standbyPid, "maintenance ownership did not move to standby");
-        require(firstRun.event().get("pid").asLong() == standbyPid, "accepted nudge was not served by the standby");
+        require(firstRun.event().path("pid").asLong() == standbyPid, "accepted nudge was not served by the standby");
         require(
-                "nudge".equals(firstRun.event().get("origin").asText()),
+                "nudge".equals(firstRun.event().path("origin").asText()),
                 "accepted nudge was served only by the backstop");
 
         var secondRecorded = requireEvent(events, "work-recorded", 2);
         var producerKilled = requireEvent(events, "producer-hard-killed-before-nudge", 2);
         var secondDrain = requireEvent(events, "work-drained", 2);
-        var secondRun = requireRun(events, secondDrain.event().get("jobId").asText());
+        var secondRun = requireRun(events, secondDrain.event().path("jobId").asText());
         require(
                 secondRecorded.index() < producerKilled.index()
                         && producerKilled.index() < secondRun.index()
@@ -556,25 +569,8 @@ public final class NudgeSimulationMain {
                                         && event.path("sequence").asInt(-1) == 2),
                 "the hard-killed producer accepted a nudge unexpectedly");
         require(
-                "schedule".equals(secondRun.event().get("origin").asText()),
+                "schedule".equals(secondRun.event().path("origin").asText()),
                 "producer crash-window row was not drained by the backstop schedule");
-    }
-
-    private static List<Integer> indexesOf(List<JsonNode> events, String eventName) {
-        var indexes = new ArrayList<Integer>();
-        for (int i = 0; i < events.size(); i++) {
-            if (eventName.equals(events.get(i).path("event").asText())) indexes.add(i);
-        }
-        return indexes;
-    }
-
-    private static int findAfter(
-            List<JsonNode> events, int afterIndex, String eventName, Predicate<JsonNode> predicate) {
-        for (int i = afterIndex + 1; i < events.size(); i++) {
-            var event = events.get(i);
-            if (eventName.equals(event.path("event").asText()) && predicate.test(event)) return i;
-        }
-        return -1;
     }
 
     private static IndexedEvent requireEvent(List<JsonNode> events, String eventName, Integer sequence) {

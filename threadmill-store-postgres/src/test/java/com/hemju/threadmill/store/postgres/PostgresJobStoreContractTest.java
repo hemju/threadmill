@@ -17,8 +17,9 @@ import com.hemju.threadmill.test.AbstractJobStoreContractTest;
 
 /**
  * Runs the {@link AbstractJobStoreContractTest} against real PostgreSQL via
- * Testcontainers. The exact same 20 tests that the in-memory store passes
- * must also pass here — that is the contract.
+ * Testcontainers. The exact same contract suite that the in-memory store
+ * passes must also pass here — with every borrowed connection starting at
+ * {@code autoCommit=false} and asserting that the store restores that mode.
  */
 class PostgresJobStoreContractTest extends AbstractJobStoreContractTest {
 
@@ -56,7 +57,7 @@ class PostgresJobStoreContractTest extends AbstractJobStoreContractTest {
                 Statement st = conn.createStatement()) {
             st.execute("TRUNCATE threadmill_jobs, threadmill_nodes, threadmill_metadata, "
                     + "threadmill_cron_tasks, threadmill_mutexes, threadmill_leases, "
-                    + "threadmill_dedup_keys, threadmill_concurrency_groups, "
+                    + "threadmill_dedup_keys, threadmill_queue_pauses, threadmill_concurrency_groups, "
                     + "threadmill_concurrency_workflow_holds RESTART IDENTITY CASCADE");
             // The counts table is kept in sync by triggers, but TRUNCATE bypasses them — reset counts manually.
             st.execute("UPDATE threadmill_job_counts SET count = 0");
@@ -65,6 +66,6 @@ class PostgresJobStoreContractTest extends AbstractJobStoreContractTest {
 
     @Override
     protected JobStore createStore() {
-        return new PostgresJobStore(dataSource);
+        return new PostgresJobStore(new NonAutoCommitDataSource(dataSource));
     }
 }

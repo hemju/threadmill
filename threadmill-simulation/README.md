@@ -155,6 +155,9 @@ separate JVMs. Run both backends:
 ./gradlew :threadmill-simulation:simulateNudge
 ```
 
+The combined real-backend task is also part of the root `productionCheck`
+release-candidate gate so the crash paths cannot silently rot.
+
 Or select one:
 
 ```bash
@@ -162,8 +165,11 @@ Or select one:
 ./gradlew :threadmill-simulation:simulateNudgeRedis
 ```
 
-The leader registers an exclusive eight-second recurring outbox pump. The
-supervisor then verifies two crash windows:
+The leader first registers an exclusive one-minute recurring outbox pump, with
+its own maintenance poll set to five minutes, so process startup and lease
+handoff cannot race the backstop or the leader's next tick. After failover is
+proved, the supervisor edits the backstop to eight seconds for the producer
+crash phase. It verifies two crash windows:
 
 - A producer commits durable work and an accepted nudge. The supervisor
   hard-kills the maintenance leader before its next materializer tick; the

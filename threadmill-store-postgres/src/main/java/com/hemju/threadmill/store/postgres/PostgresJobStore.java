@@ -411,69 +411,54 @@ public final class PostgresJobStore implements JobStore {
 
         boolean saved;
         try {
-            saved = DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection()) {
-                    conn.setAutoCommit(false);
-                    try {
-                        JobSnapshot oldSnapshot;
-                        try (PreparedStatement ps = conn.prepareStatement(
-                                "SELECT body, version FROM threadmill_jobs WHERE id = ? FOR UPDATE")) {
-                            ps.setObject(1, snapshot.id().asUuid());
-                            try (ResultSet rs = ps.executeQuery()) {
-                                if (!rs.next()) {
-                                    conn.commit();
-                                    return false;
-                                }
-                                if (rs.getLong(2) != expectedVersion) {
-                                    conn.commit();
-                                    return false;
-                                }
-                                oldSnapshot = serializer
-                                        .deserializeJob(rs.getString(1))
-                                        .snapshot();
-                            }
+            saved = ownedTransaction(conn -> {
+                JobSnapshot oldSnapshot;
+                try (PreparedStatement ps =
+                        conn.prepareStatement("SELECT body, version FROM threadmill_jobs WHERE id = ? FOR UPDATE")) {
+                    ps.setObject(1, snapshot.id().asUuid());
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) {
+                            return false;
                         }
-                        if (oldSnapshot.concurrencyKey() != null) {
-                            lockConcurrencyGroup(conn, oldSnapshot.concurrencyKey());
+                        if (rs.getLong(2) != expectedVersion) {
+                            return false;
                         }
-                        adjustWorkflowHoldOnTransition(conn, oldSnapshot, snapshot.currentState());
-                        try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
-                                + "state = ?, queue = ?, priority = ?, handler_signature = ?, "
-                                + "scheduled_at = ?, owner_node_id = ?, owner_heartbeat_at = ?, last_checkin_at = ?, "
-                                + "current_state_at = ?, version = ?, body = ?, "
-                                + "concurrency_key = ?, concurrency_mode = ?, workflow_root_id = ?, parent_job_id = ? "
-                                + "WHERE id = ? AND version = ?")) {
-                            ps.setString(1, snapshot.currentState().name());
-                            ps.setString(2, snapshot.queue());
-                            ps.setInt(3, snapshot.priority());
-                            ps.setString(4, snapshot.spec().handlerType());
-                            setNullableTimestamp(ps, 5, snapshot.scheduledFor());
-                            setNullableUuid(
-                                    ps,
-                                    6,
-                                    snapshot.ownerNodeId() == null
-                                            ? null
-                                            : snapshot.ownerNodeId().asUuid());
-                            setNullableTimestamp(ps, 7, snapshot.ownerHeartbeatAt());
-                            setNullableTimestamp(ps, 8, snapshot.lastCheckinAt());
-                            ps.setTimestamp(9, Timestamp.from(currentStateAt));
-                            ps.setLong(10, nextVersion);
-                            ps.setString(11, body);
-                            setNullableConcurrency(ps, 12, snapshot.concurrencyKey(), snapshot.concurrencyMode());
-                            ps.setObject(14, snapshot.workflowRootId().asUuid());
-                            setNullableParentJobId(ps, 15, snapshot);
-                            ps.setObject(16, snapshot.id().asUuid());
-                            ps.setLong(17, expectedVersion);
-                            int rows = ps.executeUpdate();
-                            conn.commit();
-                            return rows > 0;
-                        }
-                    } catch (RuntimeException | SQLException e) {
-                        conn.rollback();
-                        throw e;
-                    } finally {
-                        conn.setAutoCommit(true);
+                        oldSnapshot = serializer.deserializeJob(rs.getString(1)).snapshot();
                     }
+                }
+                if (oldSnapshot.concurrencyKey() != null) {
+                    lockConcurrencyGroup(conn, oldSnapshot.concurrencyKey());
+                }
+                adjustWorkflowHoldOnTransition(conn, oldSnapshot, snapshot.currentState());
+                try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
+                        + "state = ?, queue = ?, priority = ?, handler_signature = ?, "
+                        + "scheduled_at = ?, owner_node_id = ?, owner_heartbeat_at = ?, last_checkin_at = ?, "
+                        + "current_state_at = ?, version = ?, body = ?, "
+                        + "concurrency_key = ?, concurrency_mode = ?, workflow_root_id = ?, parent_job_id = ? "
+                        + "WHERE id = ? AND version = ?")) {
+                    ps.setString(1, snapshot.currentState().name());
+                    ps.setString(2, snapshot.queue());
+                    ps.setInt(3, snapshot.priority());
+                    ps.setString(4, snapshot.spec().handlerType());
+                    setNullableTimestamp(ps, 5, snapshot.scheduledFor());
+                    setNullableUuid(
+                            ps,
+                            6,
+                            snapshot.ownerNodeId() == null
+                                    ? null
+                                    : snapshot.ownerNodeId().asUuid());
+                    setNullableTimestamp(ps, 7, snapshot.ownerHeartbeatAt());
+                    setNullableTimestamp(ps, 8, snapshot.lastCheckinAt());
+                    ps.setTimestamp(9, Timestamp.from(currentStateAt));
+                    ps.setLong(10, nextVersion);
+                    ps.setString(11, body);
+                    setNullableConcurrency(ps, 12, snapshot.concurrencyKey(), snapshot.concurrencyMode());
+                    ps.setObject(14, snapshot.workflowRootId().asUuid());
+                    setNullableParentJobId(ps, 15, snapshot);
+                    ps.setObject(16, snapshot.id().asUuid());
+                    ps.setLong(17, expectedVersion);
+                    int rows = ps.executeUpdate();
+                    return rows > 0;
                 }
             });
         } catch (SQLException e) {
@@ -488,58 +473,45 @@ public final class PostgresJobStore implements JobStore {
     @Override
     public boolean softDelete(JobId id) {
         try {
-            return DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection()) {
-                    conn.setAutoCommit(false);
-                    try {
-                        String body;
-                        long version;
-                        try (PreparedStatement ps = conn.prepareStatement(
-                                "SELECT body, version FROM threadmill_jobs WHERE id = ? FOR UPDATE")) {
-                            ps.setObject(1, id.asUuid());
-                            try (ResultSet rs = ps.executeQuery()) {
-                                if (!rs.next()) {
-                                    conn.commit();
-                                    return false;
-                                }
-                                body = rs.getString(1);
-                                version = rs.getLong(2);
-                            }
-                        }
-                        Job j = serializer.deserializeJob(body);
-                        if (j.currentState() == JobState.DELETED) {
-                            conn.commit();
+            return ownedTransaction(conn -> {
+                String body;
+                long version;
+                try (PreparedStatement ps =
+                        conn.prepareStatement("SELECT body, version FROM threadmill_jobs WHERE id = ? FOR UPDATE")) {
+                    ps.setObject(1, id.asUuid());
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) {
                             return false;
                         }
-                        JobSnapshot oldSnapshot = j.snapshot();
-                        if (oldSnapshot.concurrencyKey() != null) {
-                            lockConcurrencyGroup(conn, oldSnapshot.concurrencyKey());
-                        }
-                        j.transitionTo(JobState.DELETED, Instant.now(), "user.delete", null);
-                        long nextVersion = version + 1;
-                        JobSnapshot snapshot = withVersion(j, nextVersion);
-                        String newBody = serializer.serializeJob(snapshot, capabilities);
-                        Instant currentStateAt = lastTransitionTime(snapshot, JobState.DELETED);
-                        adjustWorkflowHoldOnTransition(conn, oldSnapshot, JobState.DELETED);
-                        try (PreparedStatement ps = conn.prepareStatement(
-                                "UPDATE threadmill_jobs SET state = ?, version = ?, body = ?, current_state_at = ? "
-                                        + "WHERE id = ?")) {
-                            ps.setString(1, JobState.DELETED.name());
-                            ps.setLong(2, nextVersion);
-                            ps.setString(3, newBody);
-                            ps.setTimestamp(4, Timestamp.from(currentStateAt));
-                            ps.setObject(5, id.asUuid());
-                            ps.executeUpdate();
-                        }
-                        conn.commit();
-                        return true;
-                    } catch (RuntimeException | SQLException e) {
-                        conn.rollback();
-                        throw e;
-                    } finally {
-                        conn.setAutoCommit(true);
+                        body = rs.getString(1);
+                        version = rs.getLong(2);
                     }
                 }
+                Job j = serializer.deserializeJob(body);
+                if (j.currentState() == JobState.DELETED) {
+                    return false;
+                }
+                JobSnapshot oldSnapshot = j.snapshot();
+                if (oldSnapshot.concurrencyKey() != null) {
+                    lockConcurrencyGroup(conn, oldSnapshot.concurrencyKey());
+                }
+                j.transitionTo(JobState.DELETED, Instant.now(), "user.delete", null);
+                long nextVersion = version + 1;
+                JobSnapshot snapshot = withVersion(j, nextVersion);
+                String newBody = serializer.serializeJob(snapshot, capabilities);
+                Instant currentStateAt = lastTransitionTime(snapshot, JobState.DELETED);
+                adjustWorkflowHoldOnTransition(conn, oldSnapshot, JobState.DELETED);
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "UPDATE threadmill_jobs SET state = ?, version = ?, body = ?, current_state_at = ? "
+                                + "WHERE id = ?")) {
+                    ps.setString(1, JobState.DELETED.name());
+                    ps.setLong(2, nextVersion);
+                    ps.setString(3, newBody);
+                    ps.setTimestamp(4, Timestamp.from(currentStateAt));
+                    ps.setObject(5, id.asUuid());
+                    ps.executeUpdate();
+                }
+                return true;
             });
         } catch (SQLException e) {
             throw new JdbcException("softDelete failed", e);
@@ -558,106 +530,95 @@ public final class PostgresJobStore implements JobStore {
         int cap = Math.min(max, capabilities.maxClaimBatch());
 
         try {
-            return DeadlockRetry.run(() -> {
+            return ownedTransaction(conn -> {
                 List<Job> result = new ArrayList<>();
-                try (Connection conn = dataSource.getConnection()) {
-                    conn.setAutoCommit(false);
-                    try {
-                        // 1. Gather candidates with cost bounded by CLAIMABLE work, not
-                        // by backlog depth: the unkeyed lane pages its dedicated partial
-                        // index, and the keyed lane enumerates distinct pending keys with
-                        // bounded index probes, drops keys whose group counters show an
-                        // EXCLUSIVE in flight, and fetches each remaining key's earliest
-                        // pending heads. The historical single (priority, id) pager
-                        // walked — and FOR UPDATE locked — every concurrency-blocked row
-                        // ahead of claimable work, so claim cost grew linearly with
-                        // backlog (39/s -> 3/s over a 90-minute overload run).
+                // 1. Gather candidates with cost bounded by CLAIMABLE work, not
+                // by backlog depth: the unkeyed lane pages its dedicated partial
+                // index, and the keyed lane enumerates distinct pending keys with
+                // bounded index probes, drops keys whose group counters show an
+                // EXCLUSIVE in flight, and fetches each remaining key's earliest
+                // pending heads. The historical single (priority, id) pager
+                // walked — and FOR UPDATE locked — every concurrency-blocked row
+                // ahead of claimable work, so claim cost grew linearly with
+                // backlog (39/s -> 3/s over a 90-minute overload run).
 
-                        // 2. For each, deserialize, transition to PROCESSING, re-serialize, and UPDATE the row.
-                        // Version-matched as defense-in-depth: correctness rests on the
-                        // FOR UPDATE SKIP LOCKED row lock from lockClaimCandidates, but if
-                        // a future refactor ever fetches candidates without it, this turns
-                        // a silent double-claim into a loud failure.
-                        try (PreparedStatement ps = conn.prepareStatement(
-                                "UPDATE threadmill_jobs SET state = 'PROCESSING', owner_node_id = ?, "
-                                        + "owner_heartbeat_at = ?, last_checkin_at = NULL, current_state_at = ?, version = ?, body = ? "
-                                        + "WHERE id = ? AND version = ?")) {
-                            var alreadyBatched = new HashSet<UUID>();
-                            while (result.size() < cap) {
-                                List<PendingClaim> pending = lockClaimCandidates(conn, queue, cap - result.size());
-                                // Rows batched for UPDATE in an earlier pass are still
-                                // ENQUEUED in the database (the batch executes after the
-                                // loop) and locked by US, so SKIP LOCKED does not hide
-                                // them from our own re-gather.
-                                pending = pending.stream()
-                                        .filter(p -> !alreadyBatched.contains(p.id))
-                                        .toList();
-                                if (pending.isEmpty()) {
-                                    break;
-                                }
-                                List<PendingClaim> claimable = claimableCandidates(conn, pending, cap - result.size());
-                                Map<UUID, String> bodies = fetchBodies(conn, claimable);
-                                int quarantined = 0;
-                                int before = result.size();
-                                for (var p : claimable) {
-                                    if (result.size() >= cap) break;
-                                    Job j;
-                                    try {
-                                        j = serializer.deserializeJob(bodies.get(p.id));
-                                    } catch (RuntimeException corrupt) {
-                                        // An undeserializable body (e.g. a wire form a rollback
-                                        // can't read, or external corruption) must not fail the
-                                        // whole claim and wedge the queue. Quarantine it via a
-                                        // body-independent scalar update so it leaves the
-                                        // ENQUEUED claim path, and continue with the rest.
-                                        quarantineUnreadable(conn, p.id, p.version, heartbeatAt);
-                                        quarantined++;
-                                        continue;
-                                    }
-                                    acquireWorkflowHold(conn, j.snapshot());
-                                    j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
-                                    j.assignOwner(nodeId, heartbeatAt);
-                                    j.incrementAttempts();
-                                    long nextVersion = p.version + 1;
-                                    JobSnapshot snap = withVersion(j, nextVersion);
-                                    String newBody = serializer.serializeJob(snap, capabilities);
-                                    ps.setObject(1, nodeId.asUuid());
-                                    ps.setTimestamp(2, Timestamp.from(heartbeatAt));
-                                    ps.setTimestamp(3, Timestamp.from(heartbeatAt));
-                                    ps.setLong(4, nextVersion);
-                                    ps.setString(5, newBody);
-                                    ps.setObject(6, p.id);
-                                    ps.setLong(7, p.version);
-                                    ps.addBatch();
-                                    alreadyBatched.add(p.id);
-                                    result.add(serializer.deserializeJob(newBody));
-                                }
-                                // No claims and no quarantines means every gathered head is
-                                // concurrency-inadmissible right now — a further pass would
-                                // gather the same heads again. Quarantines are progress: the
-                                // poison left ENQUEUED, so the next pass sees its successor.
-                                if (result.size() == before && quarantined == 0) {
-                                    break;
-                                }
-                            }
-                            int[] updated = ps.executeBatch();
-                            for (int count : updated) {
-                                if (count != 1) {
-                                    throw new IllegalStateException(
-                                            "Claim UPDATE matched " + count + " rows — the row lock taken by "
-                                                    + "readClaimPage no longer guarantees claim exclusivity");
-                                }
-                            }
+                // 2. For each, deserialize, transition to PROCESSING, re-serialize, and UPDATE the row.
+                // Version-matched as defense-in-depth: correctness rests on the
+                // FOR UPDATE SKIP LOCKED row lock from lockClaimCandidates, but if
+                // a future refactor ever fetches candidates without it, this turns
+                // a silent double-claim into a loud failure.
+                try (PreparedStatement ps =
+                        conn.prepareStatement("UPDATE threadmill_jobs SET state = 'PROCESSING', owner_node_id = ?, "
+                                + "owner_heartbeat_at = ?, last_checkin_at = NULL, current_state_at = ?, version = ?, body = ? "
+                                + "WHERE id = ? AND version = ?")) {
+                    var alreadyBatched = new HashSet<UUID>();
+                    while (result.size() < cap) {
+                        List<PendingClaim> pending = lockClaimCandidates(conn, queue, cap - result.size());
+                        // Rows batched for UPDATE in an earlier pass are still
+                        // ENQUEUED in the database (the batch executes after the
+                        // loop) and locked by US, so SKIP LOCKED does not hide
+                        // them from our own re-gather.
+                        pending = pending.stream()
+                                .filter(p -> !alreadyBatched.contains(p.id))
+                                .toList();
+                        if (pending.isEmpty()) {
+                            break;
                         }
-                        conn.commit();
-                        return result;
-                    } catch (RuntimeException | SQLException e) {
-                        conn.rollback();
-                        throw e;
-                    } finally {
-                        conn.setAutoCommit(true);
+                        List<PendingClaim> claimable = claimableCandidates(conn, pending, cap - result.size());
+                        Map<UUID, String> bodies = fetchBodies(conn, claimable);
+                        int quarantined = 0;
+                        int before = result.size();
+                        for (var p : claimable) {
+                            if (result.size() >= cap) break;
+                            Job j;
+                            try {
+                                j = serializer.deserializeJob(bodies.get(p.id));
+                            } catch (RuntimeException corrupt) {
+                                // An undeserializable body (e.g. a wire form a rollback
+                                // can't read, or external corruption) must not fail the
+                                // whole claim and wedge the queue. Quarantine it via a
+                                // body-independent scalar update so it leaves the
+                                // ENQUEUED claim path, and continue with the rest.
+                                quarantineUnreadable(conn, p.id, p.version, heartbeatAt);
+                                quarantined++;
+                                continue;
+                            }
+                            acquireWorkflowHold(conn, j.snapshot());
+                            j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
+                            j.assignOwner(nodeId, heartbeatAt);
+                            j.incrementAttempts();
+                            long nextVersion = p.version + 1;
+                            JobSnapshot snap = withVersion(j, nextVersion);
+                            String newBody = serializer.serializeJob(snap, capabilities);
+                            ps.setObject(1, nodeId.asUuid());
+                            ps.setTimestamp(2, Timestamp.from(heartbeatAt));
+                            ps.setTimestamp(3, Timestamp.from(heartbeatAt));
+                            ps.setLong(4, nextVersion);
+                            ps.setString(5, newBody);
+                            ps.setObject(6, p.id);
+                            ps.setLong(7, p.version);
+                            ps.addBatch();
+                            alreadyBatched.add(p.id);
+                            result.add(serializer.deserializeJob(newBody));
+                        }
+                        // No claims and no quarantines means every gathered head is
+                        // concurrency-inadmissible right now — a further pass would
+                        // gather the same heads again. Quarantines are progress: the
+                        // poison left ENQUEUED, so the next pass sees its successor.
+                        if (result.size() == before && quarantined == 0) {
+                            break;
+                        }
+                    }
+                    int[] updated = ps.executeBatch();
+                    for (int count : updated) {
+                        if (count != 1) {
+                            throw new IllegalStateException(
+                                    "Claim UPDATE matched " + count + " rows — the row lock taken by "
+                                            + "readClaimPage no longer guarantees claim exclusivity");
+                        }
                     }
                 }
+                return result;
             });
         } catch (SQLException e) {
             throw new JdbcException("claimReady failed", e);
@@ -1579,67 +1540,53 @@ public final class PostgresJobStore implements JobStore {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(replacement, "replacement");
         try {
-            return DeadlockRetry.run(() -> {
-                try (Connection conn = dataSource.getConnection()) {
-                    conn.setAutoCommit(false);
-                    try {
-                        String body;
-                        long version;
-                        String state;
-                        try (PreparedStatement ps = conn.prepareStatement(
-                                "SELECT body, version, state FROM threadmill_jobs WHERE id = ? FOR UPDATE")) {
-                            ps.setObject(1, id.asUuid());
-                            try (ResultSet rs = ps.executeQuery()) {
-                                if (!rs.next()) {
-                                    conn.commit();
-                                    return false;
-                                }
-                                body = rs.getString(1);
-                                version = rs.getLong(2);
-                                state = rs.getString(3);
-                            }
-                        }
-                        if (version != expectedVersion) {
-                            conn.commit();
-                            throw new StaleJobException(id, expectedVersion);
-                        }
-                        if (!isReplaceableState(state)) {
-                            conn.commit();
+            return ownedTransaction(conn -> {
+                String body;
+                long version;
+                String state;
+                try (PreparedStatement ps = conn.prepareStatement(
+                        "SELECT body, version, state FROM threadmill_jobs WHERE id = ? FOR UPDATE")) {
+                    ps.setObject(1, id.asUuid());
+                    try (ResultSet rs = ps.executeQuery()) {
+                        if (!rs.next()) {
                             return false;
                         }
-                        Job current = serializer.deserializeJob(body);
-                        Job replaced = JobReplacements.apply(current, replacement);
-                        long nextVersion = version + 1;
-                        JobSnapshot snap = withVersion(replaced, nextVersion);
-                        String newBody = serializer.serializeJob(snap, capabilities);
-                        Instant currentStateAt = lastTransitionTime(snap, snap.currentState());
-                        try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
-                                + "queue = ?, priority = ?, handler_signature = ?, scheduled_at = ?, "
-                                + "current_state_at = ?, version = ?, body = ?, "
-                                + "concurrency_key = ?, concurrency_mode = ?, workflow_root_id = ?, parent_job_id = ? "
-                                + "WHERE id = ? AND version = ?")) {
-                            ps.setString(1, snap.queue());
-                            ps.setInt(2, snap.priority());
-                            ps.setString(3, snap.spec().handlerType());
-                            setNullableTimestamp(ps, 4, snap.scheduledFor());
-                            ps.setTimestamp(5, Timestamp.from(currentStateAt));
-                            ps.setLong(6, nextVersion);
-                            ps.setString(7, newBody);
-                            setNullableConcurrency(ps, 8, snap.concurrencyKey(), snap.concurrencyMode());
-                            ps.setObject(10, snap.workflowRootId().asUuid());
-                            setNullableParentJobId(ps, 11, snap);
-                            ps.setObject(12, id.asUuid());
-                            ps.setLong(13, expectedVersion);
-                            int rows = ps.executeUpdate();
-                            conn.commit();
-                            return rows > 0;
-                        }
-                    } catch (RuntimeException | SQLException e) {
-                        conn.rollback();
-                        throw e;
-                    } finally {
-                        conn.setAutoCommit(true);
+                        body = rs.getString(1);
+                        version = rs.getLong(2);
+                        state = rs.getString(3);
                     }
+                }
+                if (version != expectedVersion) {
+                    throw new StaleJobException(id, expectedVersion);
+                }
+                if (!isReplaceableState(state)) {
+                    return false;
+                }
+                Job current = serializer.deserializeJob(body);
+                Job replaced = JobReplacements.apply(current, replacement);
+                long nextVersion = version + 1;
+                JobSnapshot snap = withVersion(replaced, nextVersion);
+                String newBody = serializer.serializeJob(snap, capabilities);
+                Instant currentStateAt = lastTransitionTime(snap, snap.currentState());
+                try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
+                        + "queue = ?, priority = ?, handler_signature = ?, scheduled_at = ?, "
+                        + "current_state_at = ?, version = ?, body = ?, "
+                        + "concurrency_key = ?, concurrency_mode = ?, workflow_root_id = ?, parent_job_id = ? "
+                        + "WHERE id = ? AND version = ?")) {
+                    ps.setString(1, snap.queue());
+                    ps.setInt(2, snap.priority());
+                    ps.setString(3, snap.spec().handlerType());
+                    setNullableTimestamp(ps, 4, snap.scheduledFor());
+                    ps.setTimestamp(5, Timestamp.from(currentStateAt));
+                    ps.setLong(6, nextVersion);
+                    ps.setString(7, newBody);
+                    setNullableConcurrency(ps, 8, snap.concurrencyKey(), snap.concurrencyMode());
+                    ps.setObject(10, snap.workflowRootId().asUuid());
+                    setNullableParentJobId(ps, 11, snap);
+                    ps.setObject(12, id.asUuid());
+                    ps.setLong(13, expectedVersion);
+                    int rows = ps.executeUpdate();
+                    return rows > 0;
                 }
             });
         } catch (SQLException e) {
