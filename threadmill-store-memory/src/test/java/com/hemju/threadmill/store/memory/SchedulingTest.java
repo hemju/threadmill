@@ -1527,6 +1527,27 @@ class SchedulingTest {
     }
 
     @Test
+    void staleListingWhoseDefinitionAlreadyAgreesWithStateMaterializesNothing() {
+        scheduler.defineIntervalTask("racy", Duration.ofMinutes(5), new HelloPayload("tick"), RecorderHandler.class);
+        var stale = store.findCronTask("racy").orElseThrow();
+        scheduler.defineIntervalTask("racy", Duration.ofMinutes(7), new HelloPayload("tick"), RecorderHandler.class);
+        var committedState = store.findCronTaskState("racy").orElseThrow();
+
+        var staleListing = new ForwardingJobStore(store) {
+            @Override
+            public List<CronTask> listCronTasks() {
+                return List.of(stale);
+            }
+        };
+        new RecurringMaterializer(staleListing).tick(committedState.nextRunAt().minusNanos(1));
+
+        assertThat(store.findByHandlerSignature(RecorderHandler.class.getName(), 10))
+                .as("a stale listing must not invent a nudge after the authoritative definition and state agree")
+                .isEmpty();
+        assertThat(store.findCronTaskState("racy")).contains(committedState);
+    }
+
+    @Test
     void materializerRechecksEnabledUnderTheTaskMutexBeforeActing() {
         // The same list-then-mutex window, for the enabled bit: a disable
         // committing between the listing and the mutex must suppress the

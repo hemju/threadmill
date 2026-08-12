@@ -196,6 +196,11 @@ public final class RecurringMaterializer {
             }
         }
 
+        // The listed definition may simply be stale relative to an
+        // authoritative definition and state that already agree. In that
+        // case no scheduled firing or nudge is owed this tick.
+        if (!due && nudge == null) return;
+
         // Pile-up guard: an in-flight instance that is still going to run
         // blocks the next materialization.
         if (state.inFlightJobId() != null) {
