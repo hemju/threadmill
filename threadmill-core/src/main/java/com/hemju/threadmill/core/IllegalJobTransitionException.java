@@ -7,20 +7,20 @@ package com.hemju.threadmill.core;
  */
 public class IllegalJobTransitionException extends RuntimeException {
 
-    private final JobState from;
-    private final JobState to;
+  private final JobState from;
+  private final JobState to;
 
-    public IllegalJobTransitionException(JobState from, JobState to) {
-        super("Illegal job state transition: " + from + " -> " + to);
-        this.from = from;
-        this.to = to;
-    }
+  public IllegalJobTransitionException(JobState from, JobState to) {
+    super("Illegal job state transition: " + from + " -> " + to);
+    this.from = from;
+    this.to = to;
+  }
 
-    public JobState from() {
-        return from;
-    }
+  public JobState from() {
+    return from;
+  }
 
-    public JobState to() {
-        return to;
-    }
+  public JobState to() {
+    return to;
+  }
 }

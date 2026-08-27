@@ -16,16 +16,16 @@ import java.util.Objects;
  */
 public record RetryPolicy(int maxAttempts, Duration initialBackoff) {
 
-    public RetryPolicy {
-        if (maxAttempts < 1) throw new IllegalArgumentException("maxAttempts must be >= 1");
-        Objects.requireNonNull(initialBackoff, "initialBackoff");
-    }
+  public RetryPolicy {
+    if (maxAttempts < 1) throw new IllegalArgumentException("maxAttempts must be >= 1");
+    Objects.requireNonNull(initialBackoff, "initialBackoff");
+  }
 
-    public static RetryPolicy of(int maxAttempts, Duration initialBackoff) {
-        return new RetryPolicy(maxAttempts, initialBackoff);
-    }
+  public static RetryPolicy of(int maxAttempts, Duration initialBackoff) {
+    return new RetryPolicy(maxAttempts, initialBackoff);
+  }
 
-    public static RetryPolicy noRetry() {
-        return new RetryPolicy(1, Duration.ZERO);
-    }
+  public static RetryPolicy noRetry() {
+    return new RetryPolicy(1, Duration.ZERO);
+  }
 }

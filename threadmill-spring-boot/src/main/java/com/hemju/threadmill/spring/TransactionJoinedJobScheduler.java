@@ -30,115 +30,117 @@ import com.hemju.threadmill.core.store.JobStore;
  */
 public final class TransactionJoinedJobScheduler extends JobScheduler {
 
-    private static final Logger LOG = LoggerFactory.getLogger(TransactionJoinedJobScheduler.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TransactionJoinedJobScheduler.class);
 
-    public TransactionJoinedJobScheduler(
-            JobStore store,
-            JobSerializer serializer,
-            ThreadmillJobRegistry registry,
-            ProcessingNodeConfig config,
-            LocalWakeBus wakeBus) {
-        super(store, serializer, registry, config, wakeBus);
-    }
+  public TransactionJoinedJobScheduler(
+      JobStore store,
+      JobSerializer serializer,
+      ThreadmillJobRegistry registry,
+      ProcessingNodeConfig config,
+      LocalWakeBus wakeBus) {
+    super(store, serializer, registry, config, wakeBus);
+  }
 
-    @Override
-    public <P extends JobPayload> JobId enqueue(Class<? extends JobHandler<P>> handler, P payload) {
-        var registration = registrationFor(handler, payload);
-        Job job = jobFor(payload, null, registration.priority(), null, null, registration);
-        store.insert(job);
-        wakeAfterCommitOrNow(registration.queue());
-        return job.id();
-    }
+  @Override
+  public <P extends JobPayload> JobId enqueue(Class<? extends JobHandler<P>> handler, P payload) {
+    var registration = registrationFor(handler, payload);
+    Job job = jobFor(payload, null, registration.priority(), null, null, registration);
+    store.insert(job);
+    wakeAfterCommitOrNow(registration.queue());
+    return job.id();
+  }
 
-    @Override
-    public <P extends JobPayload> JobId enqueueIn(Class<? extends JobHandler<P>> handler, P payload, Duration delay) {
-        Objects.requireNonNull(delay, "delay");
-        return enqueueAt(handler, payload, Instant.now().plus(delay));
-    }
+  @Override
+  public <P extends JobPayload> JobId enqueueIn(
+      Class<? extends JobHandler<P>> handler, P payload, Duration delay) {
+    Objects.requireNonNull(delay, "delay");
+    return enqueueAt(handler, payload, Instant.now().plus(delay));
+  }
 
-    @Override
-    public <P extends JobPayload> JobId enqueueAt(Class<? extends JobHandler<P>> handler, P payload, Instant when) {
-        Objects.requireNonNull(when, "when");
-        var registration = registrationFor(handler, payload);
-        Job job = jobFor(payload, when, registration.priority(), null, null, registration);
-        store.insert(job);
-        return job.id();
-    }
+  @Override
+  public <P extends JobPayload> JobId enqueueAt(
+      Class<? extends JobHandler<P>> handler, P payload, Instant when) {
+    Objects.requireNonNull(when, "when");
+    var registration = registrationFor(handler, payload);
+    Job job = jobFor(payload, when, registration.priority(), null, null, registration);
+    store.insert(job);
+    return job.id();
+  }
 
-    @Override
-    public <P extends JobPayload> JobId enqueueWithPriority(
-            Class<? extends JobHandler<P>> handler, P payload, int priority) {
-        var registration = registrationFor(handler, payload);
-        Job job = jobFor(payload, null, priority, null, null, registration);
-        store.insert(job);
-        wakeAfterCommitOrNow(registration.queue());
-        return job.id();
-    }
+  @Override
+  public <P extends JobPayload> JobId enqueueWithPriority(
+      Class<? extends JobHandler<P>> handler, P payload, int priority) {
+    var registration = registrationFor(handler, payload);
+    Job job = jobFor(payload, null, priority, null, null, registration);
+    store.insert(job);
+    wakeAfterCommitOrNow(registration.queue());
+    return job.id();
+  }
 
-    @Override
-    public <P extends JobPayload> List<JobId> enqueueAll(
-            Class<? extends JobHandler<P>> handler, List<? extends P> payloads) {
-        Objects.requireNonNull(handler, "handler");
-        Objects.requireNonNull(payloads, "payloads");
-        if (payloads.isEmpty()) return List.of();
-        ThreadmillJobRegistry.Registration registration = null;
-        var jobs = new ArrayList<Job>(payloads.size());
-        for (P p : payloads) {
-            registration = registrationFor(handler, p);
-            jobs.add(jobFor(p, null, registration.priority(), null, null, registration));
-        }
-        List<JobId> ids = store.insertAll(jobs);
-        wakeAfterCommitOrNow(registration.queue());
-        return ids;
+  @Override
+  public <P extends JobPayload> List<JobId> enqueueAll(
+      Class<? extends JobHandler<P>> handler, List<? extends P> payloads) {
+    Objects.requireNonNull(handler, "handler");
+    Objects.requireNonNull(payloads, "payloads");
+    if (payloads.isEmpty()) return List.of();
+    ThreadmillJobRegistry.Registration registration = null;
+    var jobs = new ArrayList<Job>(payloads.size());
+    for (P p : payloads) {
+      registration = registrationFor(handler, p);
+      jobs.add(jobFor(p, null, registration.priority(), null, null, registration));
     }
+    List<JobId> ids = store.insertAll(jobs);
+    wakeAfterCommitOrNow(registration.queue());
+    return ids;
+  }
 
-    @Override
-    public <P extends JobPayload> EnqueueResult enqueueIfAbsent(
-            Class<? extends JobHandler<P>> handler, P payload, String dedupKey, Duration ttl) {
-        Objects.requireNonNull(dedupKey, "dedupKey");
-        Objects.requireNonNull(ttl, "ttl");
-        if (ttl.compareTo(config.maxDedupTtl()) > 0) {
-            throw new IllegalArgumentException("dedup ttl must not exceed " + config.maxDedupTtl());
-        }
-        var registration = registrationFor(handler, payload);
-        Job job = jobFor(payload, null, registration.priority(), dedupKey, ttl, registration);
-        EnqueueResult result = store.enqueueIfAbsent(job, dedupKey, ttl, Instant.now());
-        if (result instanceof EnqueueResult.Created) {
-            wakeAfterCommitOrNow(registration.queue());
-        }
-        return result;
+  @Override
+  public <P extends JobPayload> EnqueueResult enqueueIfAbsent(
+      Class<? extends JobHandler<P>> handler, P payload, String dedupKey, Duration ttl) {
+    Objects.requireNonNull(dedupKey, "dedupKey");
+    Objects.requireNonNull(ttl, "ttl");
+    if (ttl.compareTo(config.maxDedupTtl()) > 0) {
+      throw new IllegalArgumentException("dedup ttl must not exceed " + config.maxDedupTtl());
     }
+    var registration = registrationFor(handler, payload);
+    Job job = jobFor(payload, null, registration.priority(), dedupKey, ttl, registration);
+    EnqueueResult result = store.enqueueIfAbsent(job, dedupKey, ttl, Instant.now());
+    if (result instanceof EnqueueResult.Created) {
+      wakeAfterCommitOrNow(registration.queue());
+    }
+    return result;
+  }
 
-    /**
-     * Nudges are after-commit even in this mode — the one write that
-     * deliberately does <em>not</em> join the caller's transaction.
-     *
-     * <p>Joining would hold the task's single schedule-state row lock for the
-     * whole business transaction, serializing every concurrent producer of
-     * that task behind it. See {@link DeferredNudge} for why that trade is
-     * wrong: the only thing joining buys is closing a crash window the design
-     * explicitly does not need to close, and rollback semantics are identical
-     * either way.
-     */
-    @Override
-    public void nudgeRecurring(String taskName) {
-        DeferredNudge.onCommit(taskName, store, name -> super.nudgeRecurring(name), LOG);
-    }
+  /**
+   * Nudges are after-commit even in this mode — the one write that
+   * deliberately does <em>not</em> join the caller's transaction.
+   *
+   * <p>Joining would hold the task's single schedule-state row lock for the
+   * whole business transaction, serializing every concurrent producer of
+   * that task behind it. See {@link DeferredNudge} for why that trade is
+   * wrong: the only thing joining buys is closing a crash window the design
+   * explicitly does not need to close, and rollback semantics are identical
+   * either way.
+   */
+  @Override
+  public void nudgeRecurring(String taskName) {
+    DeferredNudge.onCommit(taskName, store, name -> super.nudgeRecurring(name), LOG);
+  }
 
-    private void wakeAfterCommitOrNow(String queue) {
-        if (!TransactionSynchronizationManager.isActualTransactionActive()) {
-            wakeBus.wake(queue);
-            return;
-        }
-        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            throw new IllegalStateException(
-                    "Spring transaction is active but transaction synchronization is not active; cannot defer Threadmill wake signal");
-        }
-        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-            @Override
-            public void afterCommit() {
-                wakeBus.wake(queue);
-            }
-        });
+  private void wakeAfterCommitOrNow(String queue) {
+    if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+      wakeBus.wake(queue);
+      return;
     }
+    if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+      throw new IllegalStateException(
+          "Spring transaction is active but transaction synchronization is not active; cannot defer Threadmill wake signal");
+    }
+    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+      @Override
+      public void afterCommit() {
+        wakeBus.wake(queue);
+      }
+    });
+  }
 }

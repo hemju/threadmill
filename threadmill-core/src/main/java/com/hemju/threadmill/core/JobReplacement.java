@@ -27,64 +27,65 @@ import com.hemju.threadmill.core.spec.JobSpec;
  * @param newPriority      new priority, or {@code null} to keep
  * @param newScheduledFor  new {@code scheduled_at}, or {@code null} to keep
  */
-public record JobReplacement(JobSpec newSpec, String newQueue, Integer newPriority, Instant newScheduledFor) {
+public record JobReplacement(
+    JobSpec newSpec, String newQueue, Integer newPriority, Instant newScheduledFor) {
 
-    public static Builder builder() {
-        return new Builder();
+  public static Builder builder() {
+    return new Builder();
+  }
+
+  /** Convenience: replace just the spec. */
+  public static JobReplacement ofSpec(JobSpec newSpec) {
+    return new JobReplacement(newSpec, null, null, null);
+  }
+
+  public Optional<JobSpec> specValue() {
+    return Optional.ofNullable(newSpec);
+  }
+
+  public Optional<String> queueValue() {
+    return Optional.ofNullable(newQueue);
+  }
+
+  public Optional<Integer> priorityValue() {
+    return Optional.ofNullable(newPriority);
+  }
+
+  public Optional<Instant> scheduledForValue() {
+    return Optional.ofNullable(newScheduledFor);
+  }
+
+  /** Builder for a {@link JobReplacement}. */
+  public static final class Builder {
+    private JobSpec spec;
+    private String queue;
+    private Integer priority;
+    private Instant scheduledFor;
+
+    private Builder() {}
+
+    public Builder spec(JobSpec spec) {
+      this.spec = spec;
+      return this;
     }
 
-    /** Convenience: replace just the spec. */
-    public static JobReplacement ofSpec(JobSpec newSpec) {
-        return new JobReplacement(newSpec, null, null, null);
+    public Builder queue(String queue) {
+      this.queue = queue;
+      return this;
     }
 
-    public Optional<JobSpec> specValue() {
-        return Optional.ofNullable(newSpec);
+    public Builder priority(int priority) {
+      this.priority = priority;
+      return this;
     }
 
-    public Optional<String> queueValue() {
-        return Optional.ofNullable(newQueue);
+    public Builder scheduledFor(Instant at) {
+      this.scheduledFor = at;
+      return this;
     }
 
-    public Optional<Integer> priorityValue() {
-        return Optional.ofNullable(newPriority);
+    public JobReplacement build() {
+      return new JobReplacement(spec, queue, priority, scheduledFor);
     }
-
-    public Optional<Instant> scheduledForValue() {
-        return Optional.ofNullable(newScheduledFor);
-    }
-
-    /** Builder for a {@link JobReplacement}. */
-    public static final class Builder {
-        private JobSpec spec;
-        private String queue;
-        private Integer priority;
-        private Instant scheduledFor;
-
-        private Builder() {}
-
-        public Builder spec(JobSpec spec) {
-            this.spec = spec;
-            return this;
-        }
-
-        public Builder queue(String queue) {
-            this.queue = queue;
-            return this;
-        }
-
-        public Builder priority(int priority) {
-            this.priority = priority;
-            return this;
-        }
-
-        public Builder scheduledFor(Instant at) {
-            this.scheduledFor = at;
-            return this;
-        }
-
-        public JobReplacement build() {
-            return new JobReplacement(spec, queue, priority, scheduledFor);
-        }
-    }
+  }
 }

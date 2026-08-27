@@ -59,7 +59,7 @@ spotless {
     java {
         target(javaTargets)
         targetExclude(excludedJavaPaths)
-        palantirJavaFormat(palantirVersion)
+        palantirJavaFormat(palantirVersion).style("GOOGLE")
         importOrder("java", "javax", "jakarta", "", "com.hemju")
         removeUnusedImports()
         trimTrailingWhitespace()

@@ -44,45 +44,48 @@ import com.hemju.threadmill.store.postgres.PostgresJobStore;
 // without the edge, both Threadmill configs sort alphabetically before
 // org.springframework.* and the condition silently backs off, dropping a
 // real application to the in-memory store.
-@AutoConfigureAfter(name = "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration")
+@AutoConfigureAfter(
+    name = "org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration")
 @ConditionalOnClass(PostgresJobStore.class)
 public class ThreadmillPostgresAutoConfiguration {
 
-    private static final Logger LOG = LoggerFactory.getLogger(ThreadmillPostgresAutoConfiguration.class);
+  private static final Logger LOG =
+      LoggerFactory.getLogger(ThreadmillPostgresAutoConfiguration.class);
 
-    @Bean
-    @ConditionalOnMissingBean(JobStore.class)
-    @ConditionalOnBean(DataSource.class)
-    @Conditional(OnRedisStoreNotConfigured.class)
-    public JobStore threadmillJobStore(ThreadmillProperties properties, DataSource dataSource) {
-        LOG.info("Threadmill: using Postgres store wired from the application's DataSource");
-        PostgresJobStore.requireSupportedServer(dataSource);
-        applyPostgresSchemaMode(dataSource, properties.getStore().getPostgres());
-        if (properties.getSpring().getEnqueueMode() == SpringEnqueueMode.JOIN_TRANSACTION) {
-            return new PostgresJobStore(
-                    dataSource,
-                    new JsonJobSerializer(),
-                    JobStoreCapabilities.defaults(),
-                    new SpringPostgresTransactionBoundary(dataSource));
-        }
-        return new PostgresJobStore(dataSource);
+  @Bean
+  @ConditionalOnMissingBean(JobStore.class)
+  @ConditionalOnBean(DataSource.class)
+  @Conditional(OnRedisStoreNotConfigured.class)
+  public JobStore threadmillJobStore(ThreadmillProperties properties, DataSource dataSource) {
+    LOG.info("Threadmill: using Postgres store wired from the application's DataSource");
+    PostgresJobStore.requireSupportedServer(dataSource);
+    applyPostgresSchemaMode(dataSource, properties.getStore().getPostgres());
+    if (properties.getSpring().getEnqueueMode() == SpringEnqueueMode.JOIN_TRANSACTION) {
+      return new PostgresJobStore(
+          dataSource,
+          new JsonJobSerializer(),
+          JobStoreCapabilities.defaults(),
+          new SpringPostgresTransactionBoundary(dataSource));
     }
+    return new PostgresJobStore(dataSource);
+  }
 
-    private static void applyPostgresSchemaMode(
-            DataSource dataSource, ThreadmillProperties.PostgresProperties properties) {
-        var migrations = new MigrationRunner(dataSource);
-        switch (properties.getSchemaMode()) {
-            case MIGRATE -> migrations.migrate();
-            case VALIDATE -> migrations.validate();
-            case NONE -> {}
-            case DROP_AND_MIGRATE -> {
-                if (!properties.isAllowDestructiveSchemaReset()) {
-                    throw new IllegalStateException("threadmill.store.postgres.schema-mode=drop-and-migrate requires"
-                            + " threadmill.store.postgres.allow-destructive-schema-reset=true");
-                }
-                migrations.dropThreadmillObjects();
-                migrations.migrate();
-            }
+  private static void applyPostgresSchemaMode(
+      DataSource dataSource, ThreadmillProperties.PostgresProperties properties) {
+    var migrations = new MigrationRunner(dataSource);
+    switch (properties.getSchemaMode()) {
+      case MIGRATE -> migrations.migrate();
+      case VALIDATE -> migrations.validate();
+      case NONE -> {}
+      case DROP_AND_MIGRATE -> {
+        if (!properties.isAllowDestructiveSchemaReset()) {
+          throw new IllegalStateException(
+              "threadmill.store.postgres.schema-mode=drop-and-migrate requires"
+                  + " threadmill.store.postgres.allow-destructive-schema-reset=true");
         }
+        migrations.dropThreadmillObjects();
+        migrations.migrate();
+      }
     }
+  }
 }

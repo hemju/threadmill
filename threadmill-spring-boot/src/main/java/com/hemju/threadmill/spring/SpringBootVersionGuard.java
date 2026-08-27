@@ -15,50 +15,50 @@ import org.springframework.boot.SpringBootVersion;
  */
 final class SpringBootVersionGuard {
 
-    /** Spring Boot major required by this module. */
-    static final int REQUIRED_MAJOR = 4;
+  /** Spring Boot major required by this module. */
+  static final int REQUIRED_MAJOR = 4;
 
-    private SpringBootVersionGuard() {}
+  private SpringBootVersionGuard() {}
 
-    /** Reads the running Spring Boot version and validates it against {@link #REQUIRED_MAJOR}. */
-    static void requireSpringBootFour() {
-        requireSpringBootFour(SpringBootVersion.getVersion());
+  /** Reads the running Spring Boot version and validates it against {@link #REQUIRED_MAJOR}. */
+  static void requireSpringBootFour() {
+    requireSpringBootFour(SpringBootVersion.getVersion());
+  }
+
+  /**
+   * Package-private overload that takes the version string directly so tests
+   * can exercise the predicate without needing to mock the static getter.
+   *
+   * @param version the value of {@code SpringBootVersion.getVersion()},
+   *                e.g. {@code "4.0.4"}. {@code null} or unparseable values
+   *                are treated as unsatisfied — Threadmill will not run on
+   *                an environment whose Spring Boot version cannot even be
+   *                identified.
+   */
+  static void requireSpringBootFour(String version) {
+    Integer major = parseMajor(version);
+    if (major == null) {
+      throw new IllegalStateException("Threadmill requires Spring Boot " + REQUIRED_MAJOR
+          + " or newer, but the running Spring Boot version could not be identified"
+          + " (SpringBootVersion.getVersion() returned " + version + "). Upgrade to Spring Boot "
+          + REQUIRED_MAJOR + ".x or remove the Threadmill auto-configuration.");
     }
-
-    /**
-     * Package-private overload that takes the version string directly so tests
-     * can exercise the predicate without needing to mock the static getter.
-     *
-     * @param version the value of {@code SpringBootVersion.getVersion()},
-     *                e.g. {@code "4.0.4"}. {@code null} or unparseable values
-     *                are treated as unsatisfied — Threadmill will not run on
-     *                an environment whose Spring Boot version cannot even be
-     *                identified.
-     */
-    static void requireSpringBootFour(String version) {
-        Integer major = parseMajor(version);
-        if (major == null) {
-            throw new IllegalStateException("Threadmill requires Spring Boot " + REQUIRED_MAJOR
-                    + " or newer, but the running Spring Boot version could not be identified"
-                    + " (SpringBootVersion.getVersion() returned " + version + "). Upgrade to Spring Boot "
-                    + REQUIRED_MAJOR + ".x or remove the Threadmill auto-configuration.");
-        }
-        if (major < REQUIRED_MAJOR) {
-            throw new IllegalStateException("Threadmill requires Spring Boot " + REQUIRED_MAJOR
-                    + " or newer, but found Spring Boot " + version + ". Earlier majors are not supported"
-                    + " — their ASM cannot parse Java 25 class files. Upgrade to Spring Boot "
-                    + REQUIRED_MAJOR + ".x.");
-        }
+    if (major < REQUIRED_MAJOR) {
+      throw new IllegalStateException("Threadmill requires Spring Boot " + REQUIRED_MAJOR
+          + " or newer, but found Spring Boot " + version + ". Earlier majors are not supported"
+          + " — their ASM cannot parse Java 25 class files. Upgrade to Spring Boot "
+          + REQUIRED_MAJOR + ".x.");
     }
+  }
 
-    private static Integer parseMajor(String version) {
-        if (version == null || version.isBlank()) return null;
-        int dot = version.indexOf('.');
-        String head = dot < 0 ? version : version.substring(0, dot);
-        try {
-            return Integer.parseInt(head.trim());
-        } catch (NumberFormatException nfe) {
-            return null;
-        }
+  private static Integer parseMajor(String version) {
+    if (version == null || version.isBlank()) return null;
+    int dot = version.indexOf('.');
+    String head = dot < 0 ? version : version.substring(0, dot);
+    try {
+      return Integer.parseInt(head.trim());
+    } catch (NumberFormatException nfe) {
+      return null;
     }
+  }
 }

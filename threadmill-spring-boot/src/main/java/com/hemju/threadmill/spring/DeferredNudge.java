@@ -58,76 +58,79 @@ import com.hemju.threadmill.core.store.JobStore;
  */
 final class DeferredNudge {
 
-    private DeferredNudge() {}
+  private DeferredNudge() {}
 
-    /**
-     * Validate immediately and record the nudge after the caller's
-     * transaction commits; with no active synchronisation, nudge now.
-     *
-     * @param nudgeNow performs the immediate nudge for a given task name
-     */
-    static void onCommit(String taskName, JobStore store, Consumer<String> nudgeNow, Logger log) {
-        Objects.requireNonNull(taskName, "taskName");
-        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            nudgeNow.accept(taskName);
-            return;
-        }
-        // Fail fast while the caller can still react: the deferred write
-        // re-validates in the store, but a throw from afterCommit is
-        // contained below rather than surfaced to anyone.
-        CronTask task = store.findCronTask(taskName)
-                .orElseThrow(() -> new IllegalArgumentException("Unknown recurring task '" + taskName + "'"));
-        if (!task.enabled()) {
-            throw new IllegalStateException(
-                    "Recurring task '" + taskName + "' is disabled; an explicit pause wins over a nudge");
-        }
-        batchForCurrentTransaction(nudgeNow, log).add(taskName);
+  /**
+   * Validate immediately and record the nudge after the caller's
+   * transaction commits; with no active synchronisation, nudge now.
+   *
+   * @param nudgeNow performs the immediate nudge for a given task name
+   */
+  static void onCommit(String taskName, JobStore store, Consumer<String> nudgeNow, Logger log) {
+    Objects.requireNonNull(taskName, "taskName");
+    if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+      nudgeNow.accept(taskName);
+      return;
+    }
+    // Fail fast while the caller can still react: the deferred write
+    // re-validates in the store, but a throw from afterCommit is
+    // contained below rather than surfaced to anyone.
+    CronTask task = store
+        .findCronTask(taskName)
+        .orElseThrow(
+            () -> new IllegalArgumentException("Unknown recurring task '" + taskName + "'"));
+    if (!task.enabled()) {
+      throw new IllegalStateException(
+          "Recurring task '" + taskName + "' is disabled; an explicit pause wins over a nudge");
+    }
+    batchForCurrentTransaction(nudgeNow, log).add(taskName);
+  }
+
+  private static NudgeBatch batchForCurrentTransaction(Consumer<String> nudgeNow, Logger log) {
+    for (TransactionSynchronization existing :
+        TransactionSynchronizationManager.getSynchronizations()) {
+      if (existing instanceof NudgeBatch batch) return batch;
+    }
+    NudgeBatch batch = new NudgeBatch(nudgeNow, log);
+    TransactionSynchronizationManager.registerSynchronization(batch);
+    return batch;
+  }
+
+  /** One transaction's set of tasks to nudge, flushed once on commit. */
+  private static final class NudgeBatch implements TransactionSynchronization {
+
+    // Insertion-ordered so the writes fire in the order the caller asked
+    // for them, which keeps logs and traces readable.
+    private final Set<String> taskNames = new LinkedHashSet<>();
+    private final Consumer<String> nudgeNow;
+    private final Logger log;
+
+    NudgeBatch(Consumer<String> nudgeNow, Logger log) {
+      this.nudgeNow = nudgeNow;
+      this.log = log;
     }
 
-    private static NudgeBatch batchForCurrentTransaction(Consumer<String> nudgeNow, Logger log) {
-        for (TransactionSynchronization existing : TransactionSynchronizationManager.getSynchronizations()) {
-            if (existing instanceof NudgeBatch batch) return batch;
-        }
-        NudgeBatch batch = new NudgeBatch(nudgeNow, log);
-        TransactionSynchronizationManager.registerSynchronization(batch);
-        return batch;
+    void add(String taskName) {
+      taskNames.add(taskName);
     }
 
-    /** One transaction's set of tasks to nudge, flushed once on commit. */
-    private static final class NudgeBatch implements TransactionSynchronization {
-
-        // Insertion-ordered so the writes fire in the order the caller asked
-        // for them, which keeps logs and traces readable.
-        private final Set<String> taskNames = new LinkedHashSet<>();
-        private final Consumer<String> nudgeNow;
-        private final Logger log;
-
-        NudgeBatch(Consumer<String> nudgeNow, Logger log) {
-            this.nudgeNow = nudgeNow;
-            this.log = log;
+    @Override
+    public void afterCommit() {
+      for (String taskName : taskNames) {
+        // Spring runs after-commit callbacks in a bare loop with no
+        // per-item isolation: a throw here would silently skip every
+        // later-registered synchronisation. A lost nudge degrades to
+        // backstop-schedule latency by design, but say so loudly.
+        try {
+          nudgeNow.accept(taskName);
+        } catch (RuntimeException e) {
+          log.error(
+              "Threadmill after-commit nudge for recurring task '{}' was NOT recorded; "
+                  + "the task's backstop schedule bounds the recovery latency",
+              taskName,
+              e);
         }
-
-        void add(String taskName) {
-            taskNames.add(taskName);
-        }
-
-        @Override
-        public void afterCommit() {
-            for (String taskName : taskNames) {
-                // Spring runs after-commit callbacks in a bare loop with no
-                // per-item isolation: a throw here would silently skip every
-                // later-registered synchronisation. A lost nudge degrades to
-                // backstop-schedule latency by design, but say so loudly.
-                try {
-                    nudgeNow.accept(taskName);
-                } catch (RuntimeException e) {
-                    log.error(
-                            "Threadmill after-commit nudge for recurring task '{}' was NOT recorded; "
-                                    + "the task's backstop schedule bounds the recovery latency",
-                            taskName,
-                            e);
-                }
-            }
-        }
+      }
     }
+  }
 }

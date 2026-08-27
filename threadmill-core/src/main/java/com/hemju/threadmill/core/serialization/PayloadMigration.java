@@ -9,10 +9,10 @@ import com.hemju.threadmill.core.spec.JobArgument;
 @FunctionalInterface
 public interface PayloadMigration {
 
-    /**
-     * Convert the old persisted argument into a new argument. Implementations
-     * should parse {@link JobArgument#serialized()} with the application's JSON
-     * tooling and return a new type tag plus serialized payload.
-     */
-    JobArgument migrate(JobArgument oldArgument);
+  /**
+   * Convert the old persisted argument into a new argument. Implementations
+   * should parse {@link JobArgument#serialized()} with the application's JSON
+   * tooling and return a new type tag plus serialized payload.
+   */
+  JobArgument migrate(JobArgument oldArgument);
 }

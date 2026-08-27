@@ -13,28 +13,28 @@ import com.fasterxml.jackson.databind.JsonNode;
  */
 public record TraceEvent(JsonNode json, String rawLine) {
 
-    public TraceEvent {
-        Objects.requireNonNull(json, "json");
-        Objects.requireNonNull(rawLine, "rawLine");
-    }
+  public TraceEvent {
+    Objects.requireNonNull(json, "json");
+    Objects.requireNonNull(rawLine, "rawLine");
+  }
 
-    /** The {@code event} field; empty string when missing. */
-    public String event() {
-        return text("event");
-    }
+  /** The {@code event} field; empty string when missing. */
+  public String event() {
+    return text("event");
+  }
 
-    /** A string field; empty string when missing or null. */
-    public String text(String field) {
-        return json.path(field).asText("");
-    }
+  /** A string field; empty string when missing or null. */
+  public String text(String field) {
+    return json.path(field).asText("");
+  }
 
-    /** An int field with a default for missing/null. */
-    public int intField(String field, int defaultValue) {
-        return json.path(field).asInt(defaultValue);
-    }
+  /** An int field with a default for missing/null. */
+  public int intField(String field, int defaultValue) {
+    return json.path(field).asInt(defaultValue);
+  }
 
-    /** A boolean field with a default for missing/null. */
-    public boolean boolField(String field, boolean defaultValue) {
-        return json.path(field).asBoolean(defaultValue);
-    }
+  /** A boolean field with a default for missing/null. */
+  public boolean boolField(String field, boolean defaultValue) {
+    return json.path(field).asBoolean(defaultValue);
+  }
 }

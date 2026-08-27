@@ -37,262 +37,270 @@ import com.hemju.threadmill.core.store.JobStore;
  */
 public final class ProcessingNode implements AutoCloseable {
 
-    private final NodeId nodeId;
-    private final ProcessingNodeConfig config;
+  private final NodeId nodeId;
+  private final ProcessingNodeConfig config;
+  private final JobStore store;
+  private final JobSerializer serializer;
+  private final ExecutorService workerPool;
+  private final JobInterceptors interceptors;
+  private final RetryInterceptor retryInterceptor;
+  private final JobRunner runner;
+  private final NodeRegistry registry;
+  private final List<Dispatcher> dispatchers = new ArrayList<>();
+  private final List<QueueLane> lanes;
+  private final MaintenanceCycle maintenance;
+  private final LocalWakeBus wakeBus;
+  private final Runnable wakeRegistration;
+  private final Set<String> tags;
+  private final AtomicBoolean started = new AtomicBoolean(false);
+  private final AtomicBoolean stopped = new AtomicBoolean(false);
+  private final AtomicBoolean claimingSuspended = new AtomicBoolean(false);
+
+  public static Builder builder(JobStore store) {
+    return new Builder(store);
+  }
+
+  private ProcessingNode(Builder b) {
+    this.store = Objects.requireNonNull(b.store, "store");
+    this.config = b.config == null ? ProcessingNodeConfig.defaults() : b.config;
+    this.serializer = b.serializer == null ? new JsonJobSerializer() : b.serializer;
+    this.nodeId = b.nodeId == null ? NodeId.newId() : b.nodeId;
+    this.wakeBus = b.wakeBus == null ? new LocalWakeBus() : b.wakeBus;
+    JobHandlerResolver resolver =
+        b.resolver == null ? new ReflectiveJobHandlerResolver() : b.resolver;
+    this.workerPool = Executors.newVirtualThreadPerTaskExecutor();
+    this.interceptors = new JobInterceptors();
+    this.retryInterceptor =
+        new RetryInterceptor(store, config.defaultMaxAttempts(), config.retryInitialBackoff());
+    b.exceptionPolicies.forEach(retryInterceptor::policyFor);
+    this.interceptors.add(retryInterceptor);
+    this.interceptors.add(new WorkflowInterceptor(store));
+    b.userInterceptors.forEach(interceptors::add);
+    this.tags = Set.copyOf(b.tags);
+
+    this.runner = new JobRunner(store, nodeId, resolver, serializer, interceptors, config);
+    this.runner.shutdownSignal(stopped::get);
+    this.registry = new NodeRegistry(
+        store,
+        nodeId,
+        config.heartbeatTimeout(),
+        config.claimHeartbeat(),
+        config.maintenanceLeaseDuration());
+
+    // Build one Dispatcher per configured lane. Each gets its own Semaphore,
+    // which is the engine's defence against starvation: a flood of jobs on
+    // one queue cannot occupy capacity reserved for another.
+    this.lanes = b.lanes.isEmpty()
+        ? List.of(new QueueLane(config.defaultQueue(), config.workerCount()))
+        : List.copyOf(b.lanes);
+    for (QueueLane lane : lanes) {
+      ProcessingNodeConfig laneConfig = config.toBuilder()
+          .defaultQueue(lane.queue())
+          .workerCount(lane.workers())
+          .build();
+      var capacity = new Semaphore(lane.workers());
+      dispatchers.add(new Dispatcher(
+          store, nodeId, runner, workerPool, capacity, laneConfig, tags, lane.family()));
+    }
+    this.wakeRegistration = wakeBus.register(this::wake);
+
+    // When this node's owner-heartbeat writes keep failing, suspend claiming
+    // so the maintenance leader does not orphan-reclaim (and duplicate) this
+    // node's in-flight jobs while it keeps grabbing more.
+    for (Dispatcher d : dispatchers) {
+      d.suspendClaimingWhen(claimingSuspended::get);
+    }
+
+    var materializer = new RecurringMaterializer(store, wakeBus);
+    this.maintenance = new MaintenanceCycle(
+        store, nodeId, registry, runner, materializer, retryInterceptor, config, wakeBus);
+    this.maintenance.setClaimSuspensionGate(claimingSuspended);
+  }
+
+  public NodeId nodeId() {
+    return nodeId;
+  }
+
+  /**
+   * Whether {@link #close()} has been called. A closed node is not
+   * restartable — {@link #start()} on it is a silent no-op — so callers that
+   * manage a lifecycle must check this rather than assume start() resumes a
+   * stopped node.
+   */
+  public boolean isStopped() {
+    return stopped.get();
+  }
+
+  /**
+   * Whether this node has suspended claiming new work because its owner-heartbeat
+   * writes are failing. While suspended, in-flight jobs still drain but no new
+   * jobs are claimed, so the maintenance leader's orphan reclaim of this node's
+   * (now stale-heartbeat) jobs is not compounded by it grabbing more. Clears
+   * automatically once heartbeats succeed again. Useful for a health signal.
+   */
+  public boolean isClaimingSuspended() {
+    return claimingSuspended.get();
+  }
+
+  public ProcessingNodeConfig config() {
+    return config;
+  }
+
+  public JobStore store() {
+    return store;
+  }
+
+  public JobInterceptors interceptors() {
+    return interceptors;
+  }
+
+  /** Persist a freshly-built job. Adopted version is updated on the input. */
+  public void enqueue(Job job) {
+    store.insert(job);
+    if (job.currentState() == JobState.ENQUEUED) {
+      wakeBus.wake(job.queue());
+    }
+  }
+
+  public Optional<Job> findById(JobId id) {
+    return store.findById(id);
+  }
+
+  public synchronized void start() {
+    if (stopped.get()) return;
+    if (!started.compareAndSet(false, true)) return;
+    // NodeRegistry.start() performs the first heartbeat + election
+    // synchronously, so dispatchers can start immediately.
+    registry.start();
+    for (Dispatcher d : dispatchers) d.start();
+    maintenance.start();
+  }
+
+  @Override
+  public synchronized void close() {
+    if (!stopped.compareAndSet(false, true)) return;
+    // Stop claiming new work, then drain the in-flight handlers BEFORE
+    // stopping maintenance. maintenance owns the owner-heartbeat thread; if
+    // it stopped first, a long shutdownGracePeriod would drain with stale
+    // heartbeats and another node would mass-orphan-reclaim the still-running
+    // jobs (duplicate execution on every deploy). Keeping it alive through
+    // the drain keeps the draining jobs' heartbeats fresh.
+    for (Dispatcher d : dispatchers) d.stop();
+    workerPool.shutdown();
+    try {
+      if (!workerPool.awaitTermination(
+          config.shutdownGracePeriod().toMillis(), TimeUnit.MILLISECONDS)) {
+        workerPool.shutdownNow();
+      }
+    } catch (InterruptedException ie) {
+      workerPool.shutdownNow();
+      Thread.currentThread().interrupt();
+    } finally {
+      maintenance.stop();
+      wakeRegistration.run();
+      registry.stop();
+      runner.shutdown();
+    }
+  }
+
+  /** Returns the set of tags this node advertises. */
+  public Set<String> tags() {
+    return tags;
+  }
+
+  /** Returns the queue lanes this node polls. Each lane has its own dispatcher and capacity. */
+  public List<QueueLane> lanes() {
+    return lanes;
+  }
+
+  /**
+   * Wake the local dispatcher(s) handling {@code queue}. Opportunistic — the
+   * dispatcher will pick the job up on its next poll regardless; this just
+   * eliminates the {@code pollInterval} wait when the producer is in the
+   * same JVM. Cross-node wakes are not part of this hook.
+   *
+   * <p>Typically called via {@link LocalWakeBus} after each producer-side
+   * insert that puts a job into {@code ENQUEUED} state.
+   */
+  public void wake(String queue) {
+    for (Dispatcher d : dispatchers) {
+      if (d.matches(queue)) d.wake();
+    }
+  }
+
+  /** Builder for a {@link ProcessingNode}. */
+  public static final class Builder {
     private final JobStore store;
-    private final JobSerializer serializer;
-    private final ExecutorService workerPool;
-    private final JobInterceptors interceptors;
-    private final RetryInterceptor retryInterceptor;
-    private final JobRunner runner;
-    private final NodeRegistry registry;
-    private final List<Dispatcher> dispatchers = new ArrayList<>();
-    private final List<QueueLane> lanes;
-    private final MaintenanceCycle maintenance;
-    private final LocalWakeBus wakeBus;
-    private final Runnable wakeRegistration;
-    private final Set<String> tags;
-    private final AtomicBoolean started = new AtomicBoolean(false);
-    private final AtomicBoolean stopped = new AtomicBoolean(false);
-    private final AtomicBoolean claimingSuspended = new AtomicBoolean(false);
+    private NodeId nodeId;
+    private ProcessingNodeConfig config;
+    private JobHandlerResolver resolver;
+    private JobSerializer serializer;
+    private LocalWakeBus wakeBus;
+    private final List<JobInterceptor> userInterceptors = new ArrayList<>();
+    private final List<QueueLane> lanes = new ArrayList<>();
+    private final Set<String> tags = new LinkedHashSet<>();
+    private final LinkedHashMap<Class<? extends Throwable>, RetryPolicy> exceptionPolicies =
+        new LinkedHashMap<>();
 
-    public static Builder builder(JobStore store) {
-        return new Builder(store);
+    private Builder(JobStore store) {
+      this.store = Objects.requireNonNull(store, "store");
     }
 
-    private ProcessingNode(Builder b) {
-        this.store = Objects.requireNonNull(b.store, "store");
-        this.config = b.config == null ? ProcessingNodeConfig.defaults() : b.config;
-        this.serializer = b.serializer == null ? new JsonJobSerializer() : b.serializer;
-        this.nodeId = b.nodeId == null ? NodeId.newId() : b.nodeId;
-        this.wakeBus = b.wakeBus == null ? new LocalWakeBus() : b.wakeBus;
-        JobHandlerResolver resolver = b.resolver == null ? new ReflectiveJobHandlerResolver() : b.resolver;
-        this.workerPool = Executors.newVirtualThreadPerTaskExecutor();
-        this.interceptors = new JobInterceptors();
-        this.retryInterceptor = new RetryInterceptor(store, config.defaultMaxAttempts(), config.retryInitialBackoff());
-        b.exceptionPolicies.forEach(retryInterceptor::policyFor);
-        this.interceptors.add(retryInterceptor);
-        this.interceptors.add(new WorkflowInterceptor(store));
-        b.userInterceptors.forEach(interceptors::add);
-        this.tags = Set.copyOf(b.tags);
-
-        this.runner = new JobRunner(store, nodeId, resolver, serializer, interceptors, config);
-        this.runner.shutdownSignal(stopped::get);
-        this.registry = new NodeRegistry(
-                store, nodeId, config.heartbeatTimeout(), config.claimHeartbeat(), config.maintenanceLeaseDuration());
-
-        // Build one Dispatcher per configured lane. Each gets its own Semaphore,
-        // which is the engine's defence against starvation: a flood of jobs on
-        // one queue cannot occupy capacity reserved for another.
-        this.lanes = b.lanes.isEmpty()
-                ? List.of(new QueueLane(config.defaultQueue(), config.workerCount()))
-                : List.copyOf(b.lanes);
-        for (QueueLane lane : lanes) {
-            ProcessingNodeConfig laneConfig = config.toBuilder()
-                    .defaultQueue(lane.queue())
-                    .workerCount(lane.workers())
-                    .build();
-            var capacity = new Semaphore(lane.workers());
-            dispatchers.add(
-                    new Dispatcher(store, nodeId, runner, workerPool, capacity, laneConfig, tags, lane.family()));
-        }
-        this.wakeRegistration = wakeBus.register(this::wake);
-
-        // When this node's owner-heartbeat writes keep failing, suspend claiming
-        // so the maintenance leader does not orphan-reclaim (and duplicate) this
-        // node's in-flight jobs while it keeps grabbing more.
-        for (Dispatcher d : dispatchers) {
-            d.suspendClaimingWhen(claimingSuspended::get);
-        }
-
-        var materializer = new RecurringMaterializer(store, wakeBus);
-        this.maintenance =
-                new MaintenanceCycle(store, nodeId, registry, runner, materializer, retryInterceptor, config, wakeBus);
-        this.maintenance.setClaimSuspensionGate(claimingSuspended);
+    public Builder nodeId(NodeId v) {
+      this.nodeId = v;
+      return this;
     }
 
-    public NodeId nodeId() {
-        return nodeId;
+    public Builder config(ProcessingNodeConfig v) {
+      this.config = v;
+      return this;
     }
 
-    /**
-     * Whether {@link #close()} has been called. A closed node is not
-     * restartable — {@link #start()} on it is a silent no-op — so callers that
-     * manage a lifecycle must check this rather than assume start() resumes a
-     * stopped node.
-     */
-    public boolean isStopped() {
-        return stopped.get();
+    public Builder handlerResolver(JobHandlerResolver v) {
+      this.resolver = v;
+      return this;
     }
 
-    /**
-     * Whether this node has suspended claiming new work because its owner-heartbeat
-     * writes are failing. While suspended, in-flight jobs still drain but no new
-     * jobs are claimed, so the maintenance leader's orphan reclaim of this node's
-     * (now stale-heartbeat) jobs is not compounded by it grabbing more. Clears
-     * automatically once heartbeats succeed again. Useful for a health signal.
-     */
-    public boolean isClaimingSuspended() {
-        return claimingSuspended.get();
+    public Builder serializer(JobSerializer v) {
+      this.serializer = v;
+      return this;
     }
 
-    public ProcessingNodeConfig config() {
-        return config;
+    public Builder wakeBus(LocalWakeBus v) {
+      this.wakeBus = v;
+      return this;
     }
 
-    public JobStore store() {
-        return store;
+    public Builder interceptor(JobInterceptor v) {
+      this.userInterceptors.add(v);
+      return this;
     }
 
-    public JobInterceptors interceptors() {
-        return interceptors;
+    public Builder lane(QueueLane v) {
+      this.lanes.add(v);
+      return this;
     }
 
-    /** Persist a freshly-built job. Adopted version is updated on the input. */
-    public void enqueue(Job job) {
-        store.insert(job);
-        if (job.currentState() == JobState.ENQUEUED) {
-            wakeBus.wake(job.queue());
-        }
+    public Builder lane(String queue, int workers) {
+      return lane(new QueueLane(queue, workers));
     }
 
-    public Optional<Job> findById(JobId id) {
-        return store.findById(id);
+    public Builder lane(String pattern, int workers, QueueWeights weights) {
+      return lane(QueueLane.family(pattern, workers, weights));
     }
 
-    public synchronized void start() {
-        if (stopped.get()) return;
-        if (!started.compareAndSet(false, true)) return;
-        // NodeRegistry.start() performs the first heartbeat + election
-        // synchronously, so dispatchers can start immediately.
-        registry.start();
-        for (Dispatcher d : dispatchers) d.start();
-        maintenance.start();
+    public Builder tag(String tag) {
+      this.tags.add(Names.requireName("tag", tag));
+      return this;
     }
 
-    @Override
-    public synchronized void close() {
-        if (!stopped.compareAndSet(false, true)) return;
-        // Stop claiming new work, then drain the in-flight handlers BEFORE
-        // stopping maintenance. maintenance owns the owner-heartbeat thread; if
-        // it stopped first, a long shutdownGracePeriod would drain with stale
-        // heartbeats and another node would mass-orphan-reclaim the still-running
-        // jobs (duplicate execution on every deploy). Keeping it alive through
-        // the drain keeps the draining jobs' heartbeats fresh.
-        for (Dispatcher d : dispatchers) d.stop();
-        workerPool.shutdown();
-        try {
-            if (!workerPool.awaitTermination(config.shutdownGracePeriod().toMillis(), TimeUnit.MILLISECONDS)) {
-                workerPool.shutdownNow();
-            }
-        } catch (InterruptedException ie) {
-            workerPool.shutdownNow();
-            Thread.currentThread().interrupt();
-        } finally {
-            maintenance.stop();
-            wakeRegistration.run();
-            registry.stop();
-            runner.shutdown();
-        }
+    public Builder retryPolicyFor(Class<? extends Throwable> exceptionType, RetryPolicy policy) {
+      this.exceptionPolicies.put(exceptionType, policy);
+      return this;
     }
 
-    /** Returns the set of tags this node advertises. */
-    public Set<String> tags() {
-        return tags;
+    public ProcessingNode build() {
+      return new ProcessingNode(this);
     }
-
-    /** Returns the queue lanes this node polls. Each lane has its own dispatcher and capacity. */
-    public List<QueueLane> lanes() {
-        return lanes;
-    }
-
-    /**
-     * Wake the local dispatcher(s) handling {@code queue}. Opportunistic — the
-     * dispatcher will pick the job up on its next poll regardless; this just
-     * eliminates the {@code pollInterval} wait when the producer is in the
-     * same JVM. Cross-node wakes are not part of this hook.
-     *
-     * <p>Typically called via {@link LocalWakeBus} after each producer-side
-     * insert that puts a job into {@code ENQUEUED} state.
-     */
-    public void wake(String queue) {
-        for (Dispatcher d : dispatchers) {
-            if (d.matches(queue)) d.wake();
-        }
-    }
-
-    /** Builder for a {@link ProcessingNode}. */
-    public static final class Builder {
-        private final JobStore store;
-        private NodeId nodeId;
-        private ProcessingNodeConfig config;
-        private JobHandlerResolver resolver;
-        private JobSerializer serializer;
-        private LocalWakeBus wakeBus;
-        private final List<JobInterceptor> userInterceptors = new ArrayList<>();
-        private final List<QueueLane> lanes = new ArrayList<>();
-        private final Set<String> tags = new LinkedHashSet<>();
-        private final LinkedHashMap<Class<? extends Throwable>, RetryPolicy> exceptionPolicies = new LinkedHashMap<>();
-
-        private Builder(JobStore store) {
-            this.store = Objects.requireNonNull(store, "store");
-        }
-
-        public Builder nodeId(NodeId v) {
-            this.nodeId = v;
-            return this;
-        }
-
-        public Builder config(ProcessingNodeConfig v) {
-            this.config = v;
-            return this;
-        }
-
-        public Builder handlerResolver(JobHandlerResolver v) {
-            this.resolver = v;
-            return this;
-        }
-
-        public Builder serializer(JobSerializer v) {
-            this.serializer = v;
-            return this;
-        }
-
-        public Builder wakeBus(LocalWakeBus v) {
-            this.wakeBus = v;
-            return this;
-        }
-
-        public Builder interceptor(JobInterceptor v) {
-            this.userInterceptors.add(v);
-            return this;
-        }
-
-        public Builder lane(QueueLane v) {
-            this.lanes.add(v);
-            return this;
-        }
-
-        public Builder lane(String queue, int workers) {
-            return lane(new QueueLane(queue, workers));
-        }
-
-        public Builder lane(String pattern, int workers, QueueWeights weights) {
-            return lane(QueueLane.family(pattern, workers, weights));
-        }
-
-        public Builder tag(String tag) {
-            this.tags.add(Names.requireName("tag", tag));
-            return this;
-        }
-
-        public Builder retryPolicyFor(Class<? extends Throwable> exceptionType, RetryPolicy policy) {
-            this.exceptionPolicies.put(exceptionType, policy);
-            return this;
-        }
-
-        public ProcessingNode build() {
-            return new ProcessingNode(this);
-        }
-    }
+  }
 }

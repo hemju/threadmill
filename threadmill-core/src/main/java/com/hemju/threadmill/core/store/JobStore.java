@@ -51,443 +51,444 @@ import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
  */
 public interface JobStore {
 
-    // ---------------------------------------------------------------- capabilities
+  // ---------------------------------------------------------------- capabilities
 
-    /** Returns the static capabilities of this store. */
-    JobStoreCapabilities capabilities();
+  /** Returns the static capabilities of this store. */
+  JobStoreCapabilities capabilities();
 
-    /**
-     * Human-readable, single-line identification of the backing store —
-     * shown in startup banners and operator-facing logs. Should include the
-     * concrete technology plus enough topology / version detail that an
-     * operator can tell which datastore the engine is pointed at (for
-     * example {@code "PostgreSQL 18.1 @ threadmill"} or
-     * {@code "Redis standalone host=localhost port=6379"}). Implementations
-     * must return this in constant time without any I/O against the store.
-     *
-     * <p>The default returns the implementation's simple class name so
-     * existing third-party stores remain compilable.
-     */
-    default String describe() {
-        return getClass().getSimpleName();
-    }
+  /**
+   * Human-readable, single-line identification of the backing store —
+   * shown in startup banners and operator-facing logs. Should include the
+   * concrete technology plus enough topology / version detail that an
+   * operator can tell which datastore the engine is pointed at (for
+   * example {@code "PostgreSQL 18.1 @ threadmill"} or
+   * {@code "Redis standalone host=localhost port=6379"}). Implementations
+   * must return this in constant time without any I/O against the store.
+   *
+   * <p>The default returns the implementation's simple class name so
+   * existing third-party stores remain compilable.
+   */
+  default String describe() {
+    return getClass().getSimpleName();
+  }
 
-    /**
-     * Return the wrapped store when this instance is a decorator.
-     *
-     * <p>Framework integrations use this hook to discover concrete store
-     * capabilities such as PostgreSQL transaction participation without
-     * forcing optional decorators to leak their implementation type. Concrete
-     * stores return {@code this}; decorators should return their immediate
-     * delegate.
-     */
-    default JobStore delegate() {
-        return this;
-    }
+  /**
+   * Return the wrapped store when this instance is a decorator.
+   *
+   * <p>Framework integrations use this hook to discover concrete store
+   * capabilities such as PostgreSQL transaction participation without
+   * forcing optional decorators to leak their implementation type. Concrete
+   * stores return {@code this}; decorators should return their immediate
+   * delegate.
+   */
+  default JobStore delegate() {
+    return this;
+  }
 
-    /**
-     * Lightweight writable probe used after capacity-related store failures.
-     * Implementations with a meaningful no-op write can override this method;
-     * the default preserves the historical read-only probe.
-     */
-    default void verifyWritable() {
-        capabilities();
-    }
+  /**
+   * Lightweight writable probe used after capacity-related store failures.
+   * Implementations with a meaningful no-op write can override this method;
+   * the default preserves the historical read-only probe.
+   */
+  default void verifyWritable() {
+    capabilities();
+  }
 
-    /**
-     * Whether this store can participate in an externally-managed transaction
-     * (e.g. join a caller's JDBC transaction).
-     *
-     * <p>Returned as a generic capability so framework integrations can route
-     * to a transaction-joined scheduler without instanceof-checking concrete
-     * store classes — which keeps the integration module free of optional
-     * store-implementation class references in its constant pool, so it can
-     * be loaded even when the implementation module is not on the classpath.
-     *
-     * <p>Default is {@code false}. Stores that genuinely support external
-     * transactions (today: {@code PostgresJobStore} configured with an
-     * external transaction boundary) override to return {@code true}.
-     */
-    default boolean supportsExternalTransactions() {
-        return false;
-    }
+  /**
+   * Whether this store can participate in an externally-managed transaction
+   * (e.g. join a caller's JDBC transaction).
+   *
+   * <p>Returned as a generic capability so framework integrations can route
+   * to a transaction-joined scheduler without instanceof-checking concrete
+   * store classes — which keeps the integration module free of optional
+   * store-implementation class references in its constant pool, so it can
+   * be loaded even when the implementation module is not on the classpath.
+   *
+   * <p>Default is {@code false}. Stores that genuinely support external
+   * transactions (today: {@code PostgresJobStore} configured with an
+   * external transaction boundary) override to return {@code true}.
+   */
+  default boolean supportsExternalTransactions() {
+    return false;
+  }
 
-    /**
-     * Create a {@link com.hemju.threadmill.core.engine.RemoteWakeChannel} that
-     * delivers cross-node wake hints for jobs in this store, if the backing
-     * technology offers a native pub/sub-style notification mechanism.
-     *
-     * <p>Returned as an SPI hook so framework integrations can wire the
-     * channel without instanceof-checking concrete store classes or
-     * referencing optional store-implementation types. The default returns
-     * {@link java.util.Optional#empty()}; backends that have a native
-     * notification path (today: {@code PostgresJobStore} via {@code LISTEN}/
-     * {@code NOTIFY} and {@code RedisJobStore} via Pub/Sub) override.
-     *
-     * @param channelName the name to use for the notification channel; if
-     *                    {@code null} the store may pick a sensible default.
-     */
-    default Optional<RemoteWakeChannel> createRemoteWakeChannel(String channelName) {
-        return Optional.empty();
-    }
+  /**
+   * Create a {@link com.hemju.threadmill.core.engine.RemoteWakeChannel} that
+   * delivers cross-node wake hints for jobs in this store, if the backing
+   * technology offers a native pub/sub-style notification mechanism.
+   *
+   * <p>Returned as an SPI hook so framework integrations can wire the
+   * channel without instanceof-checking concrete store classes or
+   * referencing optional store-implementation types. The default returns
+   * {@link java.util.Optional#empty()}; backends that have a native
+   * notification path (today: {@code PostgresJobStore} via {@code LISTEN}/
+   * {@code NOTIFY} and {@code RedisJobStore} via Pub/Sub) override.
+   *
+   * @param channelName the name to use for the notification channel; if
+   *                    {@code null} the store may pick a sensible default.
+   */
+  default Optional<RemoteWakeChannel> createRemoteWakeChannel(String channelName) {
+    return Optional.empty();
+  }
 
-    // ---------------------------------------------------------------- single-job ops
+  // ---------------------------------------------------------------- single-job ops
 
-    /**
-     * Insert a freshly-created job. The job's persisted version is set to 1
-     * on success and adopted into the in-memory job via
-     * {@link Job#adoptVersion(long)}.
-     *
-     * @throws IllegalStateException     if a job with the same id already exists
-     * @throws OversizedJobException     if the serialized form exceeds the limit
-     */
-    void insert(Job job);
+  /**
+   * Insert a freshly-created job. The job's persisted version is set to 1
+   * on success and adopted into the in-memory job via
+   * {@link Job#adoptVersion(long)}.
+   *
+   * @throws IllegalStateException     if a job with the same id already exists
+   * @throws OversizedJobException     if the serialized form exceeds the limit
+   */
+  void insert(Job job);
 
-    /**
-     * Atomically insert {@code jobs} as a single logical operation. Either
-     * every job is persisted (and each in-memory job's version adopted), or
-     * none are.
-     *
-     * <p>Failure semantics: if any job in the batch fails serialization
-     * (e.g. an {@link OversizedJobException}), the <strong>entire batch is
-     * rejected</strong> and <strong>no in-memory {@code Job} has its version
-     * mutated</strong>. Backends must funnel serialization through a single
-     * pre-flight pass so partial-batch corruption is impossible by
-     * construction.
-     *
-     * <p>Concurrency-keyed jobs are accepted in the batch without a
-     * fallback to per-job inserts. Threadmill enforces concurrency at
-     * <em>claim</em> time (via {@link JobStoreCapabilities#supportsConcurrencyGroups()}),
-     * so bulk insertion is safe regardless of per-job
-     * {@code concurrencyKey} / {@code concurrencyMode}.
-     *
-     * <p>Implementations should be at least one round-trip cheaper than
-     * {@code jobs.size()} calls to {@link #insert(Job)}. Hosts using
-     * PostgreSQL should set {@code reWriteBatchedInserts=true} on the
-     * pgJDBC URL to realise the batched-insert win.
-     *
-     * @return the inserted job ids, in input order
-     * @throws IllegalStateException if any job's id already exists; the
-     *     batch is rejected as a whole
-     * @throws OversizedJobException if any job's serialized form exceeds
-     *     the limit; the batch is rejected as a whole
-     */
-    List<JobId> insertAll(List<Job> jobs);
+  /**
+   * Atomically insert {@code jobs} as a single logical operation. Either
+   * every job is persisted (and each in-memory job's version adopted), or
+   * none are.
+   *
+   * <p>Failure semantics: if any job in the batch fails serialization
+   * (e.g. an {@link OversizedJobException}), the <strong>entire batch is
+   * rejected</strong> and <strong>no in-memory {@code Job} has its version
+   * mutated</strong>. Backends must funnel serialization through a single
+   * pre-flight pass so partial-batch corruption is impossible by
+   * construction.
+   *
+   * <p>Concurrency-keyed jobs are accepted in the batch without a
+   * fallback to per-job inserts. Threadmill enforces concurrency at
+   * <em>claim</em> time (via {@link JobStoreCapabilities#supportsConcurrencyGroups()}),
+   * so bulk insertion is safe regardless of per-job
+   * {@code concurrencyKey} / {@code concurrencyMode}.
+   *
+   * <p>Implementations should be at least one round-trip cheaper than
+   * {@code jobs.size()} calls to {@link #insert(Job)}. Hosts using
+   * PostgreSQL should set {@code reWriteBatchedInserts=true} on the
+   * pgJDBC URL to realise the batched-insert win.
+   *
+   * @return the inserted job ids, in input order
+   * @throws IllegalStateException if any job's id already exists; the
+   *     batch is rejected as a whole
+   * @throws OversizedJobException if any job's serialized form exceeds
+   *     the limit; the batch is rejected as a whole
+   */
+  List<JobId> insertAll(List<Job> jobs);
 
-    /**
-     * Atomically insert {@code job} unless the deduplication key for its queue
-     * is already active.
-     *
-     * @return {@link EnqueueResult.Created} for a new job, or
-     *         {@link EnqueueResult.Coalesced} with the existing job id
-     */
-    EnqueueResult enqueueIfAbsent(Job job, String dedupKey, Duration ttl, Instant now);
+  /**
+   * Atomically insert {@code job} unless the deduplication key for its queue
+   * is already active.
+   *
+   * @return {@link EnqueueResult.Created} for a new job, or
+   *         {@link EnqueueResult.Coalesced} with the existing job id
+   */
+  EnqueueResult enqueueIfAbsent(Job job, String dedupKey, Duration ttl, Instant now);
 
-    /** Load a job by id; {@code Optional.empty()} if the job does not exist. */
-    Optional<Job> findById(JobId id);
+  /** Load a job by id; {@code Optional.empty()} if the job does not exist. */
+  Optional<Job> findById(JobId id);
 
-    /**
-     * Conditional update: persist {@code job} only if the store's version
-     * still equals {@code expectedVersion}. On success, the new persisted
-     * version is adopted into the in-memory job via {@link Job#adoptVersion(long)}.
-     *
-     * @throws StaleJobException     if the persisted version no longer matches
-     * @throws OversizedJobException if the new serialized form exceeds the limit;
-     *                               the in-memory version is unchanged
-     */
-    void saveAtomic(Job job, long expectedVersion);
+  /**
+   * Conditional update: persist {@code job} only if the store's version
+   * still equals {@code expectedVersion}. On success, the new persisted
+   * version is adopted into the in-memory job via {@link Job#adoptVersion(long)}.
+   *
+   * @throws StaleJobException     if the persisted version no longer matches
+   * @throws OversizedJobException if the new serialized form exceeds the limit;
+   *                               the in-memory version is unchanged
+   */
+  void saveAtomic(Job job, long expectedVersion);
 
-    /**
-     * Soft-delete by id (transition to {@code DELETED}). Acts on the
-     * job's <em>current</em> persisted version atomically. A vanished id is
-     * a no-op (returns {@code false}).
-     *
-     * @return {@code true} if the job existed and is now {@code DELETED}
-     */
-    boolean softDelete(JobId id);
+  /**
+   * Soft-delete by id (transition to {@code DELETED}). Acts on the
+   * job's <em>current</em> persisted version atomically. A vanished id is
+   * a no-op (returns {@code false}).
+   *
+   * @return {@code true} if the job existed and is now {@code DELETED}
+   */
+  boolean softDelete(JobId id);
 
-    // ---------------------------------------------------------------- claim & heartbeat
+  // ---------------------------------------------------------------- claim & heartbeat
 
-    /**
-     * Atomically claim up to {@code max} jobs in {@code queue} that are
-     * ready for dispatch. Each claimed job moves to {@code PROCESSING} with
-     * the given node as owner and {@code heartbeatAt} as its initial
-     * heartbeat. No two nodes can claim the same job.
-     *
-     * <p>If the queue is currently paused via {@link #pauseQueue(String, String)},
-     * the call returns an empty list — pending jobs remain {@code ENQUEUED}
-     * and become claimable again on {@link #resumeQueue(String)}.
-     *
-     * @return the claimed jobs (newest persisted state)
-     */
-    List<Job> claimReady(NodeId nodeId, String queue, int max, Instant heartbeatAt);
+  /**
+   * Atomically claim up to {@code max} jobs in {@code queue} that are
+   * ready for dispatch. Each claimed job moves to {@code PROCESSING} with
+   * the given node as owner and {@code heartbeatAt} as its initial
+   * heartbeat. No two nodes can claim the same job.
+   *
+   * <p>If the queue is currently paused via {@link #pauseQueue(String, String)},
+   * the call returns an empty list — pending jobs remain {@code ENQUEUED}
+   * and become claimable again on {@link #resumeQueue(String)}.
+   *
+   * @return the claimed jobs (newest persisted state)
+   */
+  List<Job> claimReady(NodeId nodeId, String queue, int max, Instant heartbeatAt);
 
-    // ---------------------------------------------------------------- queue pauses
+  // ---------------------------------------------------------------- queue pauses
 
-    /**
-     * Pause claiming from {@code queue}. Idempotent — repeated calls update
-     * the reason / timestamp but never throw. Pending jobs stay
-     * {@code ENQUEUED}; in-flight jobs continue to run to completion.
-     *
-     * @param queue  the queue to pause
-     * @param reason a short free-text label for ops audit trails (nullable)
-     */
-    void pauseQueue(String queue, String reason);
+  /**
+   * Pause claiming from {@code queue}. Idempotent — repeated calls update
+   * the reason / timestamp but never throw. Pending jobs stay
+   * {@code ENQUEUED}; in-flight jobs continue to run to completion.
+   *
+   * @param queue  the queue to pause
+   * @param reason a short free-text label for ops audit trails (nullable)
+   */
+  void pauseQueue(String queue, String reason);
 
-    /**
-     * Resume claiming from {@code queue}. Idempotent — resuming a queue
-     * that is not currently paused is a no-op.
-     */
-    void resumeQueue(String queue);
+  /**
+   * Resume claiming from {@code queue}. Idempotent — resuming a queue
+   * that is not currently paused is a no-op.
+   */
+  void resumeQueue(String queue);
 
-    /** Snapshot of queues currently paused. */
-    Set<String> listPausedQueues();
+  /** Snapshot of queues currently paused. */
+  Set<String> listPausedQueues();
 
-    /**
-     * Update the heartbeat for all jobs this node currently owns to {@code now}.
-     */
-    void touchOwnerHeartbeat(NodeId nodeId, Instant now);
+  /**
+   * Update the heartbeat for all jobs this node currently owns to {@code now}.
+   */
+  void touchOwnerHeartbeat(NodeId nodeId, Instant now);
 
-    /**
-     * Persist execution-time updates such as check-ins, progress, and logs
-     * without advancing the optimistic-lock version. The update applies only
-     * while the job is still {@code PROCESSING} and owned by {@code nodeId}.
-     */
-    boolean saveExecutionUpdate(Job job, NodeId nodeId);
+  /**
+   * Persist execution-time updates such as check-ins, progress, and logs
+   * without advancing the optimistic-lock version. The update applies only
+   * while the job is still {@code PROCESSING} and owned by {@code nodeId}.
+   */
+  boolean saveExecutionUpdate(Job job, NodeId nodeId);
 
-    /** Record a node-level heartbeat. */
-    void recordNodeHeartbeat(NodeId nodeId, Instant now);
+  /** Record a node-level heartbeat. */
+  void recordNodeHeartbeat(NodeId nodeId, Instant now);
 
-    /** Read the last recorded node-level heartbeat, if any. */
-    Optional<Instant> readNodeHeartbeat(NodeId nodeId);
+  /** Read the last recorded node-level heartbeat, if any. */
+  Optional<Instant> readNodeHeartbeat(NodeId nodeId);
 
-    /**
-     * Acquire or renew the cluster-wide maintenance lease for this node.
-     * At most one node may hold the lease at a time; the current holder may
-     * renew it before expiry. Stores should use datastore-side time or TTL
-     * semantics where possible.
-     *
-     * @throws IllegalArgumentException if {@code leaseDuration} is null,
-     *     zero, or negative
-     */
-    boolean acquireOrRenewMaintenanceLease(NodeId nodeId, Duration leaseDuration);
+  /**
+   * Acquire or renew the cluster-wide maintenance lease for this node.
+   * At most one node may hold the lease at a time; the current holder may
+   * renew it before expiry. Stores should use datastore-side time or TTL
+   * semantics where possible.
+   *
+   * @throws IllegalArgumentException if {@code leaseDuration} is null,
+   *     zero, or negative
+   */
+  boolean acquireOrRenewMaintenanceLease(NodeId nodeId, Duration leaseDuration);
 
-    /** Release the maintenance lease iff it is currently held by {@code nodeId}. */
-    void releaseMaintenanceLease(NodeId nodeId);
+  /** Release the maintenance lease iff it is currently held by {@code nodeId}. */
+  void releaseMaintenanceLease(NodeId nodeId);
 
-    /** Read the current maintenance lease owner, if a non-expired owner exists. */
-    Optional<NodeId> readMaintenanceLeaseOwner();
+  /** Read the current maintenance lease owner, if a non-expired owner exists. */
+  Optional<NodeId> readMaintenanceLeaseOwner();
 
-    // ---------------------------------------------------------------- housekeeping queries
+  // ---------------------------------------------------------------- housekeeping queries
 
-    /**
-     * Jobs in {@code SCHEDULED} whose {@code scheduledFor} is at or before
-     * {@code now}. Used by {@code MaintenanceCycle} to promote them to
-     * {@code ENQUEUED}.
-     */
-    List<Job> findDueForPromotion(Instant now, int max);
+  /**
+   * Jobs in {@code SCHEDULED} whose {@code scheduledFor} is at or before
+   * {@code now}. Used by {@code MaintenanceCycle} to promote them to
+   * {@code ENQUEUED}.
+   */
+  List<Job> findDueForPromotion(Instant now, int max);
 
-    /**
-     * Jobs in {@code PROCESSING} whose owner heartbeat is at or before
-     * {@code heartbeatExpiry}. Used by the orphan-recovery path. Recovery
-     * itself flows through {@code FAILED} — never directly back to
-     * {@code ENQUEUED} — so the engine's single failure code path runs.
-     */
-    List<Job> findOrphaned(Instant heartbeatExpiry, int max);
+  /**
+   * Jobs in {@code PROCESSING} whose owner heartbeat is at or before
+   * {@code heartbeatExpiry}. Used by the orphan-recovery path. Recovery
+   * itself flows through {@code FAILED} — never directly back to
+   * {@code ENQUEUED} — so the engine's single failure code path runs.
+   */
+  List<Job> findOrphaned(Instant heartbeatExpiry, int max);
 
-    // ---------------------------------------------------------------- counts & search
+  // ---------------------------------------------------------------- counts & search
 
-    /**
-     * Point-in-time count of jobs per state. May be approximate on stores
-     * that advertise {@code !supportsExactCounts}, but must always include
-     * every state — never omit a key for state with zero jobs.
-     */
-    Map<JobState, Long> countsByState();
+  /**
+   * Point-in-time count of jobs per state. May be approximate on stores
+   * that advertise {@code !supportsExactCounts}, but must always include
+   * every state — never omit a key for state with zero jobs.
+   */
+  Map<JobState, Long> countsByState();
 
-    /** Point-in-time queue depths for active queues. */
-    Map<String, Long> queueDepths();
+  /** Point-in-time queue depths for active queues. */
+  Map<String, Long> queueDepths();
 
-    /** Queue names that currently have at least one ENQUEUED job. */
-    List<String> listEnqueuedQueues();
+  /** Queue names that currently have at least one ENQUEUED job. */
+  List<String> listEnqueuedQueues();
 
-    /**
-     * Bounded dashboard/search query over persisted jobs. Results should be
-     * ordered newest state-transition first, then by id for stable paging.
-     */
-    List<Job> searchJobs(JobSearch search);
+  /**
+   * Bounded dashboard/search query over persisted jobs. Results should be
+   * ordered newest state-transition first, then by id for stable paging.
+   */
+  List<Job> searchJobs(JobSearch search);
 
-    /** Oldest currently ENQUEUED job time for the queue, if the queue has jobs. */
-    Optional<Instant> oldestEnqueuedAt(String queue);
+  /** Oldest currently ENQUEUED job time for the queue, if the queue has jobs. */
+  Optional<Instant> oldestEnqueuedAt(String queue);
 
-    /** Oldest owner heartbeat among PROCESSING jobs, if any. */
-    Optional<Instant> oldestProcessingHeartbeat();
+  /** Oldest owner heartbeat among PROCESSING jobs, if any. */
+  Optional<Instant> oldestProcessingHeartbeat();
 
-    /** Last heartbeat recorded for each known processing node. */
-    List<NodeHeartbeat> listNodeHeartbeats();
+  /** Last heartbeat recorded for each known processing node. */
+  List<NodeHeartbeat> listNodeHeartbeats();
 
-    /**
-     * Delete node heartbeat records at or before {@code cutoff}. This is
-     * registry retention only; it must not affect in-flight job owner
-     * heartbeats or the maintenance lease.
-     *
-     * @return the number of node heartbeat records removed
-     */
-    long deleteNodeHeartbeatsOlderThan(Instant cutoff);
+  /**
+   * Delete node heartbeat records at or before {@code cutoff}. This is
+   * registry retention only; it must not affect in-flight job owner
+   * heartbeats or the maintenance lease.
+   *
+   * @return the number of node heartbeat records removed
+   */
+  long deleteNodeHeartbeatsOlderThan(Instant cutoff);
 
-    /** Delete expired producer-side deduplication records that no longer protect active jobs. */
-    long deleteExpiredDedupKeys(Instant now, int max);
+  /** Delete expired producer-side deduplication records that no longer protect active jobs. */
+  long deleteExpiredDedupKeys(Instant now, int max);
 
-    /**
-     * Find jobs whose handler-type signature matches {@code handlerType}.
-     * Returns at most {@code max}; primarily used by the dashboard and by
-     * cross-job features (workflows / batches / replacement) to locate
-     * candidates.
-     */
-    List<Job> findByHandlerSignature(String handlerType, int max);
+  /**
+   * Find jobs whose handler-type signature matches {@code handlerType}.
+   * Returns at most {@code max}; primarily used by the dashboard and by
+   * cross-job features (workflows / batches / replacement) to locate
+   * candidates.
+   */
+  List<Job> findByHandlerSignature(String handlerType, int max);
 
-    // ---------------------------------------------------------------- retention
+  // ---------------------------------------------------------------- retention
 
-    /**
-     * Hard-delete up to {@code max} jobs in {@code state} that entered that
-     * state at or before {@code cutoff}. Returns the number actually deleted.
-     */
-    long deleteFinishedOlderThan(Instant cutoff, JobState state, int max);
+  /**
+   * Hard-delete up to {@code max} jobs in {@code state} that entered that
+   * state at or before {@code cutoff}. Returns the number actually deleted.
+   */
+  long deleteFinishedOlderThan(Instant cutoff, JobState state, int max);
 
-    // ---------------------------------------------------------------- relationships, mutexes, replacement
+  // ---------------------------------------------------------------- relationships, mutexes,
+  // replacement
 
-    /**
-     * Find AWAITING jobs whose {@code JobRelationship.parentId} equals
-     * {@code parentId}. Used by the workflow successor and batch member
-     * promotion paths. Returns at most {@code max}.
-     */
-    List<Job> findAwaitingByParent(JobId parentId, int max);
+  /**
+   * Find AWAITING jobs whose {@code JobRelationship.parentId} equals
+   * {@code parentId}. Used by the workflow successor and batch member
+   * promotion paths. Returns at most {@code max}.
+   */
+  List<Job> findAwaitingByParent(JobId parentId, int max);
 
-    /**
-     * Acquire a named cross-cluster mutex for {@code holder} for at most
-     * {@code leaseDuration}. Returns {@code true} on success, {@code false}
-     * if the mutex is currently held by another holder. The lease must
-     * survive a holder crash — a stale entry must expire at the lease end,
-     * never block forever.
-     *
-     * <p>Reentrant for the same holder: a successful re-acquire by the
-     * current holder refreshes the lease.
-     *
-     * @throws IllegalArgumentException if {@code leaseDuration} is
-     *     {@code null}, zero, or negative. A non-positive lease has no
-     *     defensible semantics — different stores would diverge on what
-     *     "already-expired" means at acquire time. Surfaced eagerly at the
-     *     call site.
-     */
-    boolean tryAcquireMutex(String name, String holder, Duration leaseDuration);
+  /**
+   * Acquire a named cross-cluster mutex for {@code holder} for at most
+   * {@code leaseDuration}. Returns {@code true} on success, {@code false}
+   * if the mutex is currently held by another holder. The lease must
+   * survive a holder crash — a stale entry must expire at the lease end,
+   * never block forever.
+   *
+   * <p>Reentrant for the same holder: a successful re-acquire by the
+   * current holder refreshes the lease.
+   *
+   * @throws IllegalArgumentException if {@code leaseDuration} is
+   *     {@code null}, zero, or negative. A non-positive lease has no
+   *     defensible semantics — different stores would diverge on what
+   *     "already-expired" means at acquire time. Surfaced eagerly at the
+   *     call site.
+   */
+  boolean tryAcquireMutex(String name, String holder, Duration leaseDuration);
 
-    /** Release a named mutex iff currently held by {@code holder}. */
-    void releaseMutex(String name, String holder);
+  /** Release a named mutex iff currently held by {@code holder}. */
+  void releaseMutex(String name, String holder);
 
-    /**
-     * Atomically replace a non-running job's spec / queue / priority /
-     * scheduled-for, contingent on its current version.
-     *
-     * <p>Only succeeds if:
-     * <ul>
-     *   <li>the job exists,</li>
-     *   <li>its persisted version equals {@code expectedVersion}, and</li>
-     *   <li>its current state is one of
-     *       {@link JobState#ENQUEUED}, {@link JobState#SCHEDULED},
-     *       {@link JobState#AWAITING}.</li>
-     * </ul>
-     *
-     * <p>On success, the version is bumped by one. On version mismatch a
-     * {@link StaleJobException} is thrown. On wrong state or vanished id,
-     * returns {@code false}.
-     *
-     * @return {@code true} if the replacement was applied
-     */
-    boolean replaceJob(JobId id, long expectedVersion, JobReplacement replacement);
+  /**
+   * Atomically replace a non-running job's spec / queue / priority /
+   * scheduled-for, contingent on its current version.
+   *
+   * <p>Only succeeds if:
+   * <ul>
+   *   <li>the job exists,</li>
+   *   <li>its persisted version equals {@code expectedVersion}, and</li>
+   *   <li>its current state is one of
+   *       {@link JobState#ENQUEUED}, {@link JobState#SCHEDULED},
+   *       {@link JobState#AWAITING}.</li>
+   * </ul>
+   *
+   * <p>On success, the version is bumped by one. On version mismatch a
+   * {@link StaleJobException} is thrown. On wrong state or vanished id,
+   * returns {@code false}.
+   *
+   * @return {@code true} if the replacement was applied
+   */
+  boolean replaceJob(JobId id, long expectedVersion, JobReplacement replacement);
 
-    // ---------------------------------------------------------------- recurring tasks
+  // ---------------------------------------------------------------- recurring tasks
 
-    /**
-     * Insert or update a {@link com.hemju.threadmill.core.schedule.CronTask}
-     * by name. Identity is the task name; schedule-state is held separately
-     * (see {@link #upsertCronTaskState}). An upsert that replaces the
-     * definition must not silently reset the schedule-state — that is the
-     * caller's responsibility.
-     */
-    void upsertCronTask(CronTask task);
+  /**
+   * Insert or update a {@link com.hemju.threadmill.core.schedule.CronTask}
+   * by name. Identity is the task name; schedule-state is held separately
+   * (see {@link #upsertCronTaskState}). An upsert that replaces the
+   * definition must not silently reset the schedule-state — that is the
+   * caller's responsibility.
+   */
+  void upsertCronTask(CronTask task);
 
-    /** Load a cron task by name; {@code Optional.empty()} if it does not exist. */
-    Optional<CronTask> findCronTask(String name);
+  /** Load a cron task by name; {@code Optional.empty()} if it does not exist. */
+  Optional<CronTask> findCronTask(String name);
 
-    /** List every registered cron task. */
-    List<CronTask> listCronTasks();
+  /** List every registered cron task. */
+  List<CronTask> listCronTasks();
 
-    /** Delete a cron task and its schedule-state. */
-    void deleteCronTask(String name);
+  /** Delete a cron task and its schedule-state. */
+  void deleteCronTask(String name);
 
-    /** Record that {@code namespace} owns the durable cron task {@code taskName}. */
-    void recordCronTaskOwnership(String namespace, String taskName);
+  /** Record that {@code namespace} owns the durable cron task {@code taskName}. */
+  void recordCronTaskOwnership(String namespace, String taskName);
 
-    /** List task names currently owned by {@code namespace}. */
-    Set<String> listCronTaskNamesOwnedBy(String namespace);
+  /** List task names currently owned by {@code namespace}. */
+  Set<String> listCronTaskNamesOwnedBy(String namespace);
 
-    /**
-     * Insert or update the schedule-state for a cron task.
-     *
-     * <p>Deliberately never writes
-     * {@link CronTaskScheduleState#nudgeRequestedAt()}: a blanket state upsert
-     * must not clobber a nudge accepted concurrently by another node. An
-     * existing pending nudge survives this call unchanged; the only writers of
-     * that field are {@link #requestCronNudge} and {@link #clearCronNudge}.
-     */
-    void upsertCronTaskState(CronTaskScheduleState state);
+  /**
+   * Insert or update the schedule-state for a cron task.
+   *
+   * <p>Deliberately never writes
+   * {@link CronTaskScheduleState#nudgeRequestedAt()}: a blanket state upsert
+   * must not clobber a nudge accepted concurrently by another node. An
+   * existing pending nudge survives this call unchanged; the only writers of
+   * that field are {@link #requestCronNudge} and {@link #clearCronNudge}.
+   */
+  void upsertCronTaskState(CronTaskScheduleState state);
 
-    /** Read a cron task's current schedule-state. */
-    Optional<CronTaskScheduleState> findCronTaskState(String name);
+  /** Read a cron task's current schedule-state. */
+  Optional<CronTaskScheduleState> findCronTaskState(String name);
 
-    /**
-     * Record an on-demand materialization request (a "nudge") for the named
-     * recurring task by stamping
-     * {@link CronTaskScheduleState#nudgeRequestedAt()} with
-     * {@code requestedAt} and advancing the store-generated
-     * {@link CronTaskScheduleState#nudgeRevision()}. A single cell per task:
-     * a burst of nudges overwrites one value and therefore coalesces to at
-     * most one follow-up materialization. The write is durable — it is
-     * consumed by the maintenance master's recurring tick, so acceptance
-     * from any node reaches the materializing node without any transient
-     * signal.
-     *
-     * <p>Guarded: {@link NudgeOutcome#UNKNOWN_TASK} when no such task exists
-     * (a nudge racing task removal must not resurrect schedule state) and
-     * {@link NudgeOutcome#DISABLED} when the task is disabled — an explicit
-     * pause wins over a nudge. The existence/enabled check and the write are
-     * atomic with respect to concurrent task lifecycle operations.
-     */
-    NudgeOutcome requestCronNudge(String taskName, Instant requestedAt);
+  /**
+   * Record an on-demand materialization request (a "nudge") for the named
+   * recurring task by stamping
+   * {@link CronTaskScheduleState#nudgeRequestedAt()} with
+   * {@code requestedAt} and advancing the store-generated
+   * {@link CronTaskScheduleState#nudgeRevision()}. A single cell per task:
+   * a burst of nudges overwrites one value and therefore coalesces to at
+   * most one follow-up materialization. The write is durable — it is
+   * consumed by the maintenance master's recurring tick, so acceptance
+   * from any node reaches the materializing node without any transient
+   * signal.
+   *
+   * <p>Guarded: {@link NudgeOutcome#UNKNOWN_TASK} when no such task exists
+   * (a nudge racing task removal must not resurrect schedule state) and
+   * {@link NudgeOutcome#DISABLED} when the task is disabled — an explicit
+   * pause wins over a nudge. The existence/enabled check and the write are
+   * atomic with respect to concurrent task lifecycle operations.
+   */
+  NudgeOutcome requestCronNudge(String taskName, Instant requestedAt);
 
-    /**
-     * Clear a pending nudge, but only if its current
-     * {@link CronTaskScheduleState#nudgeRevision()} still equals
-     * {@code observedRevision} (compare-and-clear). The revision — never the
-     * wall-clock timestamp, whose finite store precision can collide — is the
-     * CAS identity: a nudge accepted between the caller's read and this clear
-     * carries a strictly greater revision and survives, so the materializer's
-     * next tick produces the follow-up run it promises. That is what makes
-     * the run-after-wake guarantee hold without a producer-side mutex. The
-     * revision is never reset for the lifetime of the task's schedule state,
-     * so a cleared value cannot be reused while the task exists (deleting the
-     * task drops the state row with it, so a task re-registered under the
-     * same name legitimately starts over at one). Clearing an
-     * already-cleared or never-set nudge is a no-op.
-     */
-    void clearCronNudge(String taskName, long observedRevision);
+  /**
+   * Clear a pending nudge, but only if its current
+   * {@link CronTaskScheduleState#nudgeRevision()} still equals
+   * {@code observedRevision} (compare-and-clear). The revision — never the
+   * wall-clock timestamp, whose finite store precision can collide — is the
+   * CAS identity: a nudge accepted between the caller's read and this clear
+   * carries a strictly greater revision and survives, so the materializer's
+   * next tick produces the follow-up run it promises. That is what makes
+   * the run-after-wake guarantee hold without a producer-side mutex. The
+   * revision is never reset for the lifetime of the task's schedule state,
+   * so a cleared value cannot be reused while the task exists (deleting the
+   * task drops the state row with it, so a task re-registered under the
+   * same name legitimately starts over at one). Clearing an
+   * already-cleared or never-set nudge is a no-op.
+   */
+  void clearCronNudge(String taskName, long observedRevision);
 
-    /** Result of {@link #requestCronNudge}. */
-    enum NudgeOutcome {
-        /** The nudge was recorded (or refreshed an already-pending one). */
-        ACCEPTED,
-        /** No recurring task with that name exists. */
-        UNKNOWN_TASK,
-        /** The task exists but is disabled; the nudge was not recorded. */
-        DISABLED
-    }
+  /** Result of {@link #requestCronNudge}. */
+  enum NudgeOutcome {
+    /** The nudge was recorded (or refreshed an already-pending one). */
+    ACCEPTED,
+    /** No recurring task with that name exists. */
+    UNKNOWN_TASK,
+    /** The task exists but is disabled; the nudge was not recorded. */
+    DISABLED
+  }
 }

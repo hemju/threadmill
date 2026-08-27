@@ -29,55 +29,55 @@ import com.hemju.threadmill.core.schedule.CronTask;
 @Target(ElementType.TYPE)
 public @interface Recurring {
 
-    /**
-     * Recurring interval as an ISO-8601 duration string (for example {@code "PT10S"}).
-     * Mutually exclusive with {@link #cron()}.
-     *
-     * <p><strong>Building a wake-driven poller?</strong> If producers call
-     * {@code JobScheduler.nudgeRecurring(YourHandler.class)} when they create
-     * work, this interval stops being "how often the task runs" and becomes a
-     * self-healing backstop: nudges drive the task within a second, and the
-     * schedule only covers the rare case of a nudge lost to a crash between
-     * the producer's commit and the nudge write. Choose it by asking how
-     * stale the work may get in that rare case — minutes to an hour is
-     * normal. A seconds-level interval recreates exactly the row churn
-     * nudging exists to remove. See {@code docs/wake-driven-pollers.md}.
-     */
-    String interval() default "";
+  /**
+   * Recurring interval as an ISO-8601 duration string (for example {@code "PT10S"}).
+   * Mutually exclusive with {@link #cron()}.
+   *
+   * <p><strong>Building a wake-driven poller?</strong> If producers call
+   * {@code JobScheduler.nudgeRecurring(YourHandler.class)} when they create
+   * work, this interval stops being "how often the task runs" and becomes a
+   * self-healing backstop: nudges drive the task within a second, and the
+   * schedule only covers the rare case of a nudge lost to a crash between
+   * the producer's commit and the nudge write. Choose it by asking how
+   * stale the work may get in that rare case — minutes to an hour is
+   * normal. A seconds-level interval recreates exactly the row churn
+   * nudging exists to remove. See {@code docs/wake-driven-pollers.md}.
+   */
+  String interval() default "";
 
-    /**
-     * Recurring schedule as a five-field cron expression. Mutually exclusive with
-     * {@link #interval()}.
-     */
-    String cron() default "";
+  /**
+   * Recurring schedule as a five-field cron expression. Mutually exclusive with
+   * {@link #interval()}.
+   */
+  String cron() default "";
 
-    /**
-     * Policy for runs missed while no node was available to materialize them.
-     */
-    CronTask.MissedRunPolicy missedRunPolicy() default CronTask.MissedRunPolicy.DROP;
+  /**
+   * Policy for runs missed while no node was available to materialize them.
+   */
+  CronTask.MissedRunPolicy missedRunPolicy() default CronTask.MissedRunPolicy.DROP;
 
-    /**
-     * Durable identity for the recurring task. Defaults to the handler's
-     * fully-qualified class name when blank. Set explicitly to keep the same
-     * identity across handler renames or package moves.
-     */
-    String recurringName() default "";
+  /**
+   * Durable identity for the recurring task. Defaults to the handler's
+   * fully-qualified class name when blank. Set explicitly to keep the same
+   * identity across handler renames or package moves.
+   */
+  String recurringName() default "";
 
-    /**
-     * Whether instances of this task run one at a time across the whole
-     * cluster. Every instance is claimed under a derived
-     * {@code recurring:<name>} concurrency key in
-     * {@code ConcurrencyMode.EXCLUSIVE}, so a second instance cannot be
-     * admitted while one is processing — the declarative replacement for a
-     * hand-rolled advisory lock in a singleton sweep.
-     *
-     * <p>This is enforced at claim time by the store, so it also covers a
-     * dashboard manual trigger racing a scheduled instance. It does
-     * <strong>not</strong> close the lease-expiry reclaim window: a node that
-     * stops heartbeating is indistinguishable from one that is paused and
-     * will resume, and reclaim releases the concurrency slot as part of the
-     * terminal failure save, so a reclaimed instance can still overlap a
-     * still-running original. Handlers remain idempotent by contract.
-     */
-    boolean exclusive() default false;
+  /**
+   * Whether instances of this task run one at a time across the whole
+   * cluster. Every instance is claimed under a derived
+   * {@code recurring:<name>} concurrency key in
+   * {@code ConcurrencyMode.EXCLUSIVE}, so a second instance cannot be
+   * admitted while one is processing — the declarative replacement for a
+   * hand-rolled advisory lock in a singleton sweep.
+   *
+   * <p>This is enforced at claim time by the store, so it also covers a
+   * dashboard manual trigger racing a scheduled instance. It does
+   * <strong>not</strong> close the lease-expiry reclaim window: a node that
+   * stops heartbeating is indistinguishable from one that is paused and
+   * will resume, and reclaim releases the concurrency slot as part of the
+   * terminal failure save, so a reclaimed instance can still overlap a
+   * still-running original. Handlers remain idempotent by contract.
+   */
+  boolean exclusive() default false;
 }

@@ -9,21 +9,21 @@ import com.fasterxml.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
 import org.junit.jupiter.api.Test;
 
 class DefaultTypingGuardTest {
-    @Test
-    void rejectsAMapperWithDefaultTypingEnabled() {
-        var unsafe = new ObjectMapper()
-                .activateDefaultTyping(
-                        BasicPolymorphicTypeValidator.builder()
-                                .allowIfBaseType(Object.class)
-                                .build(),
-                        DefaultTyping.NON_FINAL);
-        assertThatThrownBy(() -> new JsonJobSerializer(unsafe))
-                .isInstanceOf(IllegalArgumentException.class)
-                .hasMessageContaining("default typing");
-    }
+  @Test
+  void rejectsAMapperWithDefaultTypingEnabled() {
+    var unsafe = new ObjectMapper()
+        .activateDefaultTyping(
+            BasicPolymorphicTypeValidator.builder()
+                .allowIfBaseType(Object.class)
+                .build(),
+            DefaultTyping.NON_FINAL);
+    assertThatThrownBy(() -> new JsonJobSerializer(unsafe))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("default typing");
+  }
 
-    @Test
-    void acceptsTheDefaultMapper() {
-        assertThat(new JsonJobSerializer(JsonJobSerializer.defaultMapper())).isNotNull();
-    }
+  @Test
+  void acceptsTheDefaultMapper() {
+    assertThat(new JsonJobSerializer(JsonJobSerializer.defaultMapper())).isNotNull();
+  }
 }

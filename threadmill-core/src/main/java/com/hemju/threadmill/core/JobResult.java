@@ -20,12 +20,12 @@ import java.util.Optional;
  */
 public record JobResult(String typeTag, String serialized) {
 
-    public JobResult {
-        Objects.requireNonNull(typeTag, "typeTag");
-        Objects.requireNonNull(serialized, "serialized");
-    }
+  public JobResult {
+    Objects.requireNonNull(typeTag, "typeTag");
+    Objects.requireNonNull(serialized, "serialized");
+  }
 
-    public Optional<String> typeTagValue() {
-        return Optional.of(typeTag);
-    }
+  public Optional<String> typeTagValue() {
+    return Optional.of(typeTag);
+  }
 }

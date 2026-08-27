@@ -22,29 +22,29 @@ import com.networknt.schema.ValidationMessage;
  */
 public final class SummarySchema {
 
-    private static final String RESOURCE = "/com/hemju/threadmill/soak/harness/summary.schema.json";
+  private static final String RESOURCE = "/com/hemju/threadmill/soak/harness/summary.schema.json";
 
-    private SummarySchema() {}
+  private SummarySchema() {}
 
-    public static JsonSchema load() {
-        try (InputStream in = SummarySchema.class.getResourceAsStream(RESOURCE)) {
-            if (in == null) throw new IllegalStateException("schema resource not found: " + RESOURCE);
-            JsonSchemaFactory factory = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
-            return factory.getSchema(in, schemaConfig());
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+  public static JsonSchema load() {
+    try (InputStream in = SummarySchema.class.getResourceAsStream(RESOURCE)) {
+      if (in == null) throw new IllegalStateException("schema resource not found: " + RESOURCE);
+      JsonSchemaFactory factory = JsonSchemaFactory.getInstance(SpecVersion.VersionFlag.V202012);
+      return factory.getSchema(in, schemaConfig());
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
     }
+  }
 
-    private static SchemaValidatorsConfig schemaConfig() {
-        // Networknt 1.5.x: builder style (the no-arg constructor is deprecated).
-        return SchemaValidatorsConfig.builder().build();
-    }
+  private static SchemaValidatorsConfig schemaConfig() {
+    // Networknt 1.5.x: builder style (the no-arg constructor is deprecated).
+    return SchemaValidatorsConfig.builder().build();
+  }
 
-    public static List<String> validate(JsonSchema schema, SummaryReport report) {
-        ObjectMapper mapper = new ObjectMapper();
-        JsonNode node = mapper.valueToTree(report.asMap());
-        Set<ValidationMessage> messages = schema.validate(node);
-        return messages.stream().map(ValidationMessage::getMessage).collect(Collectors.toList());
-    }
+  public static List<String> validate(JsonSchema schema, SummaryReport report) {
+    ObjectMapper mapper = new ObjectMapper();
+    JsonNode node = mapper.valueToTree(report.asMap());
+    Set<ValidationMessage> messages = schema.validate(node);
+    return messages.stream().map(ValidationMessage::getMessage).collect(Collectors.toList());
+  }
 }

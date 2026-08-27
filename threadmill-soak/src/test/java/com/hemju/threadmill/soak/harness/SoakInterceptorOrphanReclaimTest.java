@@ -27,47 +27,49 @@ import com.hemju.threadmill.core.spec.JobSpec;
  */
 final class SoakInterceptorOrphanReclaimTest {
 
-    @Test
-    void orphanReclaimOfANeverStartedAttemptEmitsNoLockReleased(@TempDir Path tempDir) throws Exception {
-        Path traceFile = tempDir.resolve("trace.jsonl");
-        Job job = keyedJob();
-        try (SoakTraceWriter trace = new SoakTraceWriter(traceFile);
-                LatencyTracker latency = new LatencyTracker(tempDir.resolve("latencies.jsonl"))) {
-            var interceptor = new SoakInterceptor(trace, latency);
-            // No onProcessingStarting — the claiming node died before the
-            // handler ran; the surviving node's orphan scan fails the job.
-            interceptor.onProcessingFailed(
-                    job, null, new IllegalStateException("orphaned"), FailureCause.ORPHAN_RECLAIM);
-        }
-        String trace = Files.readString(traceFile);
-        assertThat(trace).contains("\"event\":\"failed\"");
-        assertThat(trace).doesNotContain("\"event\":\"lock_released\"");
+  @Test
+  void orphanReclaimOfANeverStartedAttemptEmitsNoLockReleased(@TempDir Path tempDir)
+      throws Exception {
+    Path traceFile = tempDir.resolve("trace.jsonl");
+    Job job = keyedJob();
+    try (SoakTraceWriter trace = new SoakTraceWriter(traceFile);
+        LatencyTracker latency = new LatencyTracker(tempDir.resolve("latencies.jsonl"))) {
+      var interceptor = new SoakInterceptor(trace, latency);
+      // No onProcessingStarting — the claiming node died before the
+      // handler ran; the surviving node's orphan scan fails the job.
+      interceptor.onProcessingFailed(
+          job, null, new IllegalStateException("orphaned"), FailureCause.ORPHAN_RECLAIM);
     }
+    String trace = Files.readString(traceFile);
+    assertThat(trace).contains("\"event\":\"failed\"");
+    assertThat(trace).doesNotContain("\"event\":\"lock_released\"");
+  }
 
-    @Test
-    void aStartedAttemptStillPairsItsAcquireAndRelease(@TempDir Path tempDir) throws Exception {
-        Path traceFile = tempDir.resolve("trace.jsonl");
-        Job job = keyedJob();
-        try (SoakTraceWriter trace = new SoakTraceWriter(traceFile);
-                LatencyTracker latency = new LatencyTracker(tempDir.resolve("latencies.jsonl"))) {
-            var interceptor = new SoakInterceptor(trace, latency);
-            interceptor.onProcessingStarting(job, null);
-            interceptor.onProcessingFailed(job, null, new IllegalStateException("boom"), FailureCause.ORPHAN_RECLAIM);
-        }
-        String trace = Files.readString(traceFile);
-        assertThat(trace).contains("\"event\":\"lock_acquired\"");
-        assertThat(trace).contains("\"event\":\"lock_released\"");
+  @Test
+  void aStartedAttemptStillPairsItsAcquireAndRelease(@TempDir Path tempDir) throws Exception {
+    Path traceFile = tempDir.resolve("trace.jsonl");
+    Job job = keyedJob();
+    try (SoakTraceWriter trace = new SoakTraceWriter(traceFile);
+        LatencyTracker latency = new LatencyTracker(tempDir.resolve("latencies.jsonl"))) {
+      var interceptor = new SoakInterceptor(trace, latency);
+      interceptor.onProcessingStarting(job, null);
+      interceptor.onProcessingFailed(
+          job, null, new IllegalStateException("boom"), FailureCause.ORPHAN_RECLAIM);
     }
+    String trace = Files.readString(traceFile);
+    assertThat(trace).contains("\"event\":\"lock_acquired\"");
+    assertThat(trace).contains("\"event\":\"lock_released\"");
+  }
 
-    private static Job keyedJob() {
-        // SCHEDULED = the post-retry state, so the failure hook sees a
-        // non-final failure (the orphan-reclaim-then-retry shape).
-        return Job.builder()
-                .spec(new JobSpec("com.example.SomeHandler", List.of()))
-                .queue("project:1")
-                .concurrencyKey("project:1")
-                .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
-                .initialState(JobState.SCHEDULED)
-                .build();
-    }
+  private static Job keyedJob() {
+    // SCHEDULED = the post-retry state, so the failure hook sees a
+    // non-final failure (the orphan-reclaim-then-retry shape).
+    return Job.builder()
+        .spec(new JobSpec("com.example.SomeHandler", List.of()))
+        .queue("project:1")
+        .concurrencyKey("project:1")
+        .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+        .initialState(JobState.SCHEDULED)
+        .build();
+  }
 }

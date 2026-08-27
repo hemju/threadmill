@@ -59,151 +59,159 @@ import com.hemju.threadmill.core.store.JobStore;
  */
 public final class TransactionAwareJobScheduler extends JobScheduler {
 
-    private static final Logger LOG = LoggerFactory.getLogger(TransactionAwareJobScheduler.class);
+  private static final Logger LOG = LoggerFactory.getLogger(TransactionAwareJobScheduler.class);
 
-    public TransactionAwareJobScheduler(
-            JobStore store, JobSerializer serializer, ThreadmillJobRegistry registry, ProcessingNodeConfig config) {
-        super(store, serializer, registry, config);
+  public TransactionAwareJobScheduler(
+      JobStore store,
+      JobSerializer serializer,
+      ThreadmillJobRegistry registry,
+      ProcessingNodeConfig config) {
+    super(store, serializer, registry, config);
+  }
+
+  public TransactionAwareJobScheduler(
+      JobStore store,
+      JobSerializer serializer,
+      ThreadmillJobRegistry registry,
+      ProcessingNodeConfig config,
+      LocalWakeBus wakeBus) {
+    super(store, serializer, registry, config, wakeBus);
+  }
+
+  @Override
+  public <P extends JobPayload> JobId enqueue(Class<? extends JobHandler<P>> handler, P payload) {
+    var registration = registrationFor(handler, payload);
+    return deferredOrImmediate(
+        jobFor(payload, null, registration.priority(), null, null, registration),
+        registration.queue());
+  }
+
+  @Override
+  public <P extends JobPayload> JobId enqueueIn(
+      Class<? extends JobHandler<P>> handler, P payload, Duration delay) {
+    Objects.requireNonNull(delay, "delay");
+    return enqueueAt(handler, payload, Instant.now().plus(delay));
+  }
+
+  @Override
+  public <P extends JobPayload> JobId enqueueAt(
+      Class<? extends JobHandler<P>> handler, P payload, Instant when) {
+    Objects.requireNonNull(when, "when");
+    var registration = registrationFor(handler, payload);
+    // SCHEDULED state — no wake (the maintenance loop will materialize it later).
+    return deferredOrImmediate(
+        jobFor(payload, when, registration.priority(), null, null, registration), null);
+  }
+
+  @Override
+  public <P extends JobPayload> JobId enqueueWithPriority(
+      Class<? extends JobHandler<P>> handler, P payload, int priority) {
+    var registration = registrationFor(handler, payload);
+    return deferredOrImmediate(
+        jobFor(payload, null, priority, null, null, registration), registration.queue());
+  }
+
+  @Override
+  public <P extends JobPayload> List<JobId> enqueueAll(
+      Class<? extends JobHandler<P>> handler, List<? extends P> payloads) {
+    Objects.requireNonNull(payloads, "payloads");
+    if (payloads.isEmpty()) return List.of();
+    ThreadmillJobRegistry.Registration registration = null;
+    var jobs = new ArrayList<Job>(payloads.size());
+    for (P p : payloads) {
+      registration = registrationFor(handler, p);
+      jobs.add(jobFor(p, null, registration.priority(), null, null, registration));
     }
-
-    public TransactionAwareJobScheduler(
-            JobStore store,
-            JobSerializer serializer,
-            ThreadmillJobRegistry registry,
-            ProcessingNodeConfig config,
-            LocalWakeBus wakeBus) {
-        super(store, serializer, registry, config, wakeBus);
-    }
-
-    @Override
-    public <P extends JobPayload> JobId enqueue(Class<? extends JobHandler<P>> handler, P payload) {
-        var registration = registrationFor(handler, payload);
-        return deferredOrImmediate(
-                jobFor(payload, null, registration.priority(), null, null, registration), registration.queue());
-    }
-
-    @Override
-    public <P extends JobPayload> JobId enqueueIn(Class<? extends JobHandler<P>> handler, P payload, Duration delay) {
-        Objects.requireNonNull(delay, "delay");
-        return enqueueAt(handler, payload, Instant.now().plus(delay));
-    }
-
-    @Override
-    public <P extends JobPayload> JobId enqueueAt(Class<? extends JobHandler<P>> handler, P payload, Instant when) {
-        Objects.requireNonNull(when, "when");
-        var registration = registrationFor(handler, payload);
-        // SCHEDULED state — no wake (the maintenance loop will materialize it later).
-        return deferredOrImmediate(jobFor(payload, when, registration.priority(), null, null, registration), null);
-    }
-
-    @Override
-    public <P extends JobPayload> JobId enqueueWithPriority(
-            Class<? extends JobHandler<P>> handler, P payload, int priority) {
-        var registration = registrationFor(handler, payload);
-        return deferredOrImmediate(jobFor(payload, null, priority, null, null, registration), registration.queue());
-    }
-
-    @Override
-    public <P extends JobPayload> List<JobId> enqueueAll(
-            Class<? extends JobHandler<P>> handler, List<? extends P> payloads) {
-        Objects.requireNonNull(payloads, "payloads");
-        if (payloads.isEmpty()) return List.of();
-        ThreadmillJobRegistry.Registration registration = null;
-        var jobs = new ArrayList<Job>(payloads.size());
-        for (P p : payloads) {
-            registration = registrationFor(handler, p);
-            jobs.add(jobFor(p, null, registration.priority(), null, null, registration));
-        }
-        String queueToWake = registration.queue();
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    // Spring invokes after-commit callbacks in a bare loop
-                    // with no per-item isolation: a throw here would silently
-                    // skip every later-registered synchronization in this
-                    // transaction — including other deferred enqueues.
-                    // Contain the failure and log the lost jobs loudly; the
-                    // business transaction is already durably committed.
-                    try {
-                        store.insertAll(jobs);
-                        wakeBus.wake(queueToWake);
-                    } catch (RuntimeException e) {
-                        LOG.error(
-                                "Threadmill after-commit bulk enqueue failed; {} job(s) were NOT inserted: {}",
-                                jobs.size(),
-                                jobs.stream().map(j -> j.id().toString()).toList(),
-                                e);
-                    }
-                }
-            });
-        } else {
+    String queueToWake = registration.queue();
+    if (TransactionSynchronizationManager.isSynchronizationActive()) {
+      TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+        @Override
+        public void afterCommit() {
+          // Spring invokes after-commit callbacks in a bare loop
+          // with no per-item isolation: a throw here would silently
+          // skip every later-registered synchronization in this
+          // transaction — including other deferred enqueues.
+          // Contain the failure and log the lost jobs loudly; the
+          // business transaction is already durably committed.
+          try {
             store.insertAll(jobs);
             wakeBus.wake(queueToWake);
+          } catch (RuntimeException e) {
+            LOG.error(
+                "Threadmill after-commit bulk enqueue failed; {} job(s) were NOT inserted: {}",
+                jobs.size(),
+                jobs.stream().map(j -> j.id().toString()).toList(),
+                e);
+          }
         }
-        var ids = new ArrayList<JobId>(jobs.size());
-        for (Job j : jobs) ids.add(j.id());
-        return List.copyOf(ids);
+      });
+    } else {
+      store.insertAll(jobs);
+      wakeBus.wake(queueToWake);
     }
+    var ids = new ArrayList<JobId>(jobs.size());
+    for (Job j : jobs) ids.add(j.id());
+    return List.copyOf(ids);
+  }
 
-    /**
-     * Nudge with after-commit semantics: validation (unknown / disabled task)
-     * fails fast on the calling thread, but the nudge write itself is deferred
-     * to {@code afterCommit} — a rollback discards it, so producers can nudge
-     * in the same transaction that writes the work row. The residual crash
-     * window between the commit and the deferred write is covered by the
-     * task's backstop schedule (worst case one schedule period of latency,
-     * never a lost run).
-     */
-    @Override
-    public void nudgeRecurring(String taskName) {
-        DeferredNudge.onCommit(taskName, store, name -> super.nudgeRecurring(name), LOG);
+  /**
+   * Nudge with after-commit semantics: validation (unknown / disabled task)
+   * fails fast on the calling thread, but the nudge write itself is deferred
+   * to {@code afterCommit} — a rollback discards it, so producers can nudge
+   * in the same transaction that writes the work row. The residual crash
+   * window between the commit and the deferred write is covered by the
+   * task's backstop schedule (worst case one schedule period of latency,
+   * never a lost run).
+   */
+  @Override
+  public void nudgeRecurring(String taskName) {
+    DeferredNudge.onCommit(taskName, store, name -> super.nudgeRecurring(name), LOG);
+  }
+
+  @Override
+  public <P extends JobPayload> EnqueueResult enqueueIfAbsent(
+      Class<? extends JobHandler<P>> handler, P payload, String dedupKey, Duration ttl) {
+    // Dedup must return a meaningful EnqueueResult (Created vs Coalesced)
+    // synchronously — we cannot defer it without changing the API. So
+    // dedup writes are always immediate. Use a plain enqueue path if
+    // after-commit semantics matter more than dedup.
+    if (TransactionSynchronizationManager.isSynchronizationActive()) {
+      LOG.debug(
+          "enqueueIfAbsent(dedupKey={}) called inside an active transaction: the dedup write is "
+              + "immediate and will survive a rollback of the surrounding transaction",
+          dedupKey);
     }
+    return super.enqueueIfAbsent(handler, payload, dedupKey, ttl);
+  }
 
-    @Override
-    public <P extends JobPayload> EnqueueResult enqueueIfAbsent(
-            Class<? extends JobHandler<P>> handler, P payload, String dedupKey, Duration ttl) {
-        // Dedup must return a meaningful EnqueueResult (Created vs Coalesced)
-        // synchronously — we cannot defer it without changing the API. So
-        // dedup writes are always immediate. Use a plain enqueue path if
-        // after-commit semantics matter more than dedup.
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            LOG.debug(
-                    "enqueueIfAbsent(dedupKey={}) called inside an active transaction: the dedup write is "
-                            + "immediate and will survive a rollback of the surrounding transaction",
-                    dedupKey);
+  /**
+   * @param queueToWake the queue to wake after the insert lands, or {@code null}
+   *                    for SCHEDULED-state inserts where no wake is appropriate
+   */
+  private JobId deferredOrImmediate(Job job, String queueToWake) {
+    if (TransactionSynchronizationManager.isSynchronizationActive()) {
+      TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+        @Override
+        public void afterCommit() {
+          // See enqueueAll: per-synchronization isolation so one
+          // failing insert cannot silently cancel every later
+          // deferred enqueue in the same transaction.
+          try {
+            store.insert(job);
+            if (queueToWake != null) wakeBus.wake(queueToWake);
+          } catch (RuntimeException e) {
+            LOG.error(
+                "Threadmill after-commit enqueue failed; job {} ({}) was NOT inserted",
+                job.id(),
+                job.spec().handlerType(),
+                e);
+          }
         }
-        return super.enqueueIfAbsent(handler, payload, dedupKey, ttl);
+      });
+      return job.id();
     }
-
-    /**
-     * @param queueToWake the queue to wake after the insert lands, or {@code null}
-     *                    for SCHEDULED-state inserts where no wake is appropriate
-     */
-    private JobId deferredOrImmediate(Job job, String queueToWake) {
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-                @Override
-                public void afterCommit() {
-                    // See enqueueAll: per-synchronization isolation so one
-                    // failing insert cannot silently cancel every later
-                    // deferred enqueue in the same transaction.
-                    try {
-                        store.insert(job);
-                        if (queueToWake != null) wakeBus.wake(queueToWake);
-                    } catch (RuntimeException e) {
-                        LOG.error(
-                                "Threadmill after-commit enqueue failed; job {} ({}) was NOT inserted",
-                                job.id(),
-                                job.spec().handlerType(),
-                                e);
-                    }
-                }
-            });
-            return job.id();
-        }
-        store.insert(job);
-        if (queueToWake != null) wakeBus.wake(queueToWake);
-        return job.id();
-    }
+    store.insert(job);
+    if (queueToWake != null) wakeBus.wake(queueToWake);
+    return job.id();
+  }
 }

@@ -312,8 +312,8 @@ Start with `threadmill-example/README.md`.
 
 ## Code formatting
 
-Java is formatted with **Palantir Java Format**; Kotlin / `*.gradle.kts`
-with **ktfmt**. The formatter is pinned in `gradle/libs.versions.toml` so
+Java is formatted with **Palantir Java Format** in its `GOOGLE` style
+(2-space indent, 100-column limit); Kotlin / `*.gradle.kts` with **ktfmt**. The formatter is pinned in `gradle/libs.versions.toml` so
 everyone on the team ends up with byte-identical output, and `./gradlew
 check` fails on violations.
 

@@ -32,51 +32,53 @@ import com.hemju.threadmill.core.handler.JobExecutionContext;
  */
 public final class SoakExecutionTrace {
 
-    private static volatile SoakTraceWriter writer;
+  private static volatile SoakTraceWriter writer;
 
-    private SoakExecutionTrace() {}
+  private SoakExecutionTrace() {}
 
-    /** Install the run's trace writer; called by the runner before nodes start. */
-    public static void install(SoakTraceWriter traceWriter) {
-        writer = Objects.requireNonNull(traceWriter, "traceWriter");
-    }
+  /** Install the run's trace writer; called by the runner before nodes start. */
+  public static void install(SoakTraceWriter traceWriter) {
+    writer = Objects.requireNonNull(traceWriter, "traceWriter");
+  }
 
-    /** Remove the sink; called by the runner after the run's trace is closed. */
-    public static void clear() {
-        writer = null;
-    }
+  /** Remove the sink; called by the runner after the run's trace is closed. */
+  public static void clear() {
+    writer = null;
+  }
 
-    /** First statement of every soak handler's {@code run(...)}. */
-    public static void started(JobExecutionContext ctx) {
-        emit("exec_started", ctx);
-    }
+  /** First statement of every soak handler's {@code run(...)}. */
+  public static void started(JobExecutionContext ctx) {
+    emit("exec_started", ctx);
+  }
 
-    /** Emitted in a {@code finally} so a throwing or interrupted handler still closes its bracket. */
-    public static void finished(JobExecutionContext ctx) {
-        emit("exec_finished", ctx);
-    }
+  /** Emitted in a {@code finally} so a throwing or interrupted handler still closes its bracket. */
+  public static void finished(JobExecutionContext ctx) {
+    emit("exec_finished", ctx);
+  }
 
-    /**
-     * Emit a scenario-defined event through the run's trace writer; a no-op
-     * when no sink is installed. Lets scenario-owned helpers (the outbox)
-     * contribute events from inside handler code without threading the
-     * writer through the reflective handler boundary.
-     */
-    public static void emit(String event, Map<String, Object> fields) {
-        SoakTraceWriter w = writer;
-        if (w == null) return;
-        w.emit(event, fields);
-    }
+  /**
+   * Emit a scenario-defined event through the run's trace writer; a no-op
+   * when no sink is installed. Lets scenario-owned helpers (the outbox)
+   * contribute events from inside handler code without threading the
+   * writer through the reflective handler boundary.
+   */
+  public static void emit(String event, Map<String, Object> fields) {
+    SoakTraceWriter w = writer;
+    if (w == null) return;
+    w.emit(event, fields);
+  }
 
-    private static void emit(String event, JobExecutionContext ctx) {
-        SoakTraceWriter w = writer;
-        if (w == null || ctx == null) return;
-        var fields = new LinkedHashMap<String, Object>();
-        fields.put("jobId", ctx.jobId().toString());
-        fields.put("attempt", ctx.attempt());
-        // Recurring instances carry their trigger origin so the nudge
-        // invariants can tell a pump run from ordinary background work.
-        ctx.metadata().get(JobExecutionContext.CRON_ORIGIN_META).ifPresent(origin -> fields.put("cronOrigin", origin));
-        w.emit(event, fields);
-    }
+  private static void emit(String event, JobExecutionContext ctx) {
+    SoakTraceWriter w = writer;
+    if (w == null || ctx == null) return;
+    var fields = new LinkedHashMap<String, Object>();
+    fields.put("jobId", ctx.jobId().toString());
+    fields.put("attempt", ctx.attempt());
+    // Recurring instances carry their trigger origin so the nudge
+    // invariants can tell a pump run from ordinary background work.
+    ctx.metadata()
+        .get(JobExecutionContext.CRON_ORIGIN_META)
+        .ifPresent(origin -> fields.put("cronOrigin", origin));
+    w.emit(event, fields);
+  }
 }

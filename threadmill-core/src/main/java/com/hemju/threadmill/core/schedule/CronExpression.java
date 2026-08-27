@@ -24,169 +24,172 @@ import com.fasterxml.jackson.annotation.JsonValue;
  */
 public final class CronExpression {
 
-    private final String expression;
-    private final BitSet minutes;
-    private final BitSet hours;
-    private final BitSet daysOfMonth;
-    private final BitSet months;
-    private final BitSet daysOfWeek;
-    private final boolean domRestricted;
-    private final boolean dowRestricted;
+  private final String expression;
+  private final BitSet minutes;
+  private final BitSet hours;
+  private final BitSet daysOfMonth;
+  private final BitSet months;
+  private final BitSet daysOfWeek;
+  private final boolean domRestricted;
+  private final boolean dowRestricted;
 
-    private CronExpression(
-            String expression,
-            BitSet minutes,
-            BitSet hours,
-            BitSet daysOfMonth,
-            BitSet months,
-            BitSet daysOfWeek,
-            boolean domRestricted,
-            boolean dowRestricted) {
-        this.expression = expression;
-        this.minutes = minutes;
-        this.hours = hours;
-        this.daysOfMonth = daysOfMonth;
-        this.months = months;
-        this.daysOfWeek = daysOfWeek;
-        this.domRestricted = domRestricted;
-        this.dowRestricted = dowRestricted;
+  private CronExpression(
+      String expression,
+      BitSet minutes,
+      BitSet hours,
+      BitSet daysOfMonth,
+      BitSet months,
+      BitSet daysOfWeek,
+      boolean domRestricted,
+      boolean dowRestricted) {
+    this.expression = expression;
+    this.minutes = minutes;
+    this.hours = hours;
+    this.daysOfMonth = daysOfMonth;
+    this.months = months;
+    this.daysOfWeek = daysOfWeek;
+    this.domRestricted = domRestricted;
+    this.dowRestricted = dowRestricted;
+  }
+
+  public String expression() {
+    return expression;
+  }
+
+  public static CronExpression parse(String expression) {
+    Objects.requireNonNull(expression, "expression");
+    String[] parts = expression.trim().split("\\s+");
+    if (parts.length != 5) {
+      throw new IllegalArgumentException("cron expression must have 5 fields, got " + parts.length);
     }
-
-    public String expression() {
-        return expression;
+    BitSet min = parseField(parts[0], 0, 59);
+    BitSet hour = parseField(parts[1], 0, 23);
+    BitSet dom = parseField(parts[2], 1, 31);
+    BitSet mon = parseField(parts[3], 1, 12);
+    // Cron historically accepts 7 for Sunday; parse with 7 allowed, then fold it onto 0.
+    BitSet dow = parseField(parts[4], 0, 7);
+    if (dow.get(7)) {
+      dow.clear(7);
+      dow.set(0);
     }
+    return new CronExpression(
+        expression, min, hour, dom, mon, dow, !isStar(parts[2]), !isStar(parts[4]));
+  }
 
-    public static CronExpression parse(String expression) {
-        Objects.requireNonNull(expression, "expression");
-        String[] parts = expression.trim().split("\\s+");
-        if (parts.length != 5) {
-            throw new IllegalArgumentException("cron expression must have 5 fields, got " + parts.length);
+  /**
+   * Compute the next fire time strictly after {@code after}. Returns the
+   * computed {@link Instant} in the supplied zone.
+   */
+  public Instant nextAfter(Instant after, ZoneId zone) {
+    Objects.requireNonNull(after, "after");
+    Objects.requireNonNull(zone, "zone");
+    ZonedDateTime zdt = after.atZone(zone).withSecond(0).withNano(0).plusMinutes(1);
+    for (int safety = 0; safety < 525_600; safety++) { // <= 1 year of minutes
+      int month = zdt.get(ChronoField.MONTH_OF_YEAR);
+      int dom = zdt.get(ChronoField.DAY_OF_MONTH);
+      int dow = zdt.get(ChronoField.DAY_OF_WEEK) % 7; // ISO Mon=1..Sun=7 → cron Sun=0..Sat=6
+      int hour = zdt.get(ChronoField.HOUR_OF_DAY);
+      int minute = zdt.get(ChronoField.MINUTE_OF_HOUR);
+
+      if (!months.get(month)) {
+        zdt = zdt.plusMonths(1).withDayOfMonth(1).withHour(0).withMinute(0);
+        continue;
+      }
+      boolean dayOk = matchesDay(dom, dow);
+      if (!dayOk) {
+        zdt = zdt.plusDays(1).withHour(0).withMinute(0);
+        continue;
+      }
+      if (!hours.get(hour)) {
+        zdt = zdt.plusHours(1).withMinute(0);
+        continue;
+      }
+      if (!minutes.get(minute)) {
+        zdt = zdt.plusMinutes(1);
+        continue;
+      }
+      return zdt.toInstant();
+    }
+    throw new IllegalStateException(
+        "cron expression " + expression + " produced no next fire within a year");
+  }
+
+  private boolean matchesDay(int dom, int dow) {
+    if (domRestricted && dowRestricted) {
+      // Classic cron OR semantics: either restriction satisfied.
+      return daysOfMonth.get(dom) || daysOfWeek.get(dow);
+    }
+    return daysOfMonth.get(dom) && daysOfWeek.get(dow);
+  }
+
+  private static BitSet parseField(String field, int min, int max) {
+    var b = new BitSet(max + 1);
+    for (String part : field.split(",")) {
+      int step = 1;
+      String body = part;
+      int slash = part.indexOf('/');
+      if (slash >= 0) {
+        step = Integer.parseInt(part.substring(slash + 1));
+        if (step < 1) {
+          throw new IllegalArgumentException("Cron step must be >= 1 in field '" + field + "'");
         }
-        BitSet min = parseField(parts[0], 0, 59);
-        BitSet hour = parseField(parts[1], 0, 23);
-        BitSet dom = parseField(parts[2], 1, 31);
-        BitSet mon = parseField(parts[3], 1, 12);
-        // Cron historically accepts 7 for Sunday; parse with 7 allowed, then fold it onto 0.
-        BitSet dow = parseField(parts[4], 0, 7);
-        if (dow.get(7)) {
-            dow.clear(7);
-            dow.set(0);
-        }
-        return new CronExpression(expression, min, hour, dom, mon, dow, !isStar(parts[2]), !isStar(parts[4]));
+        body = part.substring(0, slash);
+      }
+      int start;
+      int end;
+      if ("*".equals(body)) {
+        start = min;
+        end = max;
+      } else if (body.contains("-")) {
+        String[] r = body.split("-");
+        start = Integer.parseInt(r[0]);
+        end = Integer.parseInt(r[1]);
+      } else {
+        int v = Integer.parseInt(body);
+        start = v;
+        end = v;
+      }
+      if (start < min || end > max || start > end) {
+        throw new IllegalArgumentException(
+            "Cron field '" + field + "' out of range [" + min + "," + max + "]");
+      }
+      for (int i = start; i <= end; i += step) {
+        b.set(i);
+      }
     }
+    return b;
+  }
 
-    /**
-     * Compute the next fire time strictly after {@code after}. Returns the
-     * computed {@link Instant} in the supplied zone.
-     */
-    public Instant nextAfter(Instant after, ZoneId zone) {
-        Objects.requireNonNull(after, "after");
-        Objects.requireNonNull(zone, "zone");
-        ZonedDateTime zdt = after.atZone(zone).withSecond(0).withNano(0).plusMinutes(1);
-        for (int safety = 0; safety < 525_600; safety++) { // <= 1 year of minutes
-            int month = zdt.get(ChronoField.MONTH_OF_YEAR);
-            int dom = zdt.get(ChronoField.DAY_OF_MONTH);
-            int dow = zdt.get(ChronoField.DAY_OF_WEEK) % 7; // ISO Mon=1..Sun=7 → cron Sun=0..Sat=6
-            int hour = zdt.get(ChronoField.HOUR_OF_DAY);
-            int minute = zdt.get(ChronoField.MINUTE_OF_HOUR);
+  private static boolean isStar(String field) {
+    return "*".equals(field) || "*/1".equals(field);
+  }
 
-            if (!months.get(month)) {
-                zdt = zdt.plusMonths(1).withDayOfMonth(1).withHour(0).withMinute(0);
-                continue;
-            }
-            boolean dayOk = matchesDay(dom, dow);
-            if (!dayOk) {
-                zdt = zdt.plusDays(1).withHour(0).withMinute(0);
-                continue;
-            }
-            if (!hours.get(hour)) {
-                zdt = zdt.plusHours(1).withMinute(0);
-                continue;
-            }
-            if (!minutes.get(minute)) {
-                zdt = zdt.plusMinutes(1);
-                continue;
-            }
-            return zdt.toInstant();
-        }
-        throw new IllegalStateException("cron expression " + expression + " produced no next fire within a year");
-    }
+  /**
+   * The source expression. {@code @JsonValue} so Jackson serializes this
+   * type as a bare string scalar — without it, the class has no
+   * get-prefixed accessors and dashboard JSON either throws
+   * (FAIL_ON_EMPTY_BEANS) or renders {@code {}}.
+   */
+  @Override
+  @JsonValue
+  public String toString() {
+    return expression;
+  }
 
-    private boolean matchesDay(int dom, int dow) {
-        if (domRestricted && dowRestricted) {
-            // Classic cron OR semantics: either restriction satisfied.
-            return daysOfMonth.get(dom) || daysOfWeek.get(dow);
-        }
-        return daysOfMonth.get(dom) && daysOfWeek.get(dow);
-    }
+  /**
+   * Value equality on the source expression — the same identity the
+   * expression serializes as, so a deserialized instance equals its
+   * original. Two spellings of the same schedule ({@code *} vs
+   * <code>*&#47;1</code>) are deliberately unequal: for schedule-change
+   * detection, a rewritten expression counts as an edit.
+   */
+  @Override
+  public boolean equals(Object o) {
+    return o instanceof CronExpression other && expression.equals(other.expression);
+  }
 
-    private static BitSet parseField(String field, int min, int max) {
-        var b = new BitSet(max + 1);
-        for (String part : field.split(",")) {
-            int step = 1;
-            String body = part;
-            int slash = part.indexOf('/');
-            if (slash >= 0) {
-                step = Integer.parseInt(part.substring(slash + 1));
-                if (step < 1) {
-                    throw new IllegalArgumentException("Cron step must be >= 1 in field '" + field + "'");
-                }
-                body = part.substring(0, slash);
-            }
-            int start;
-            int end;
-            if ("*".equals(body)) {
-                start = min;
-                end = max;
-            } else if (body.contains("-")) {
-                String[] r = body.split("-");
-                start = Integer.parseInt(r[0]);
-                end = Integer.parseInt(r[1]);
-            } else {
-                int v = Integer.parseInt(body);
-                start = v;
-                end = v;
-            }
-            if (start < min || end > max || start > end) {
-                throw new IllegalArgumentException("Cron field '" + field + "' out of range [" + min + "," + max + "]");
-            }
-            for (int i = start; i <= end; i += step) {
-                b.set(i);
-            }
-        }
-        return b;
-    }
-
-    private static boolean isStar(String field) {
-        return "*".equals(field) || "*/1".equals(field);
-    }
-
-    /**
-     * The source expression. {@code @JsonValue} so Jackson serializes this
-     * type as a bare string scalar — without it, the class has no
-     * get-prefixed accessors and dashboard JSON either throws
-     * (FAIL_ON_EMPTY_BEANS) or renders {@code {}}.
-     */
-    @Override
-    @JsonValue
-    public String toString() {
-        return expression;
-    }
-
-    /**
-     * Value equality on the source expression — the same identity the
-     * expression serializes as, so a deserialized instance equals its
-     * original. Two spellings of the same schedule ({@code *} vs
-     * <code>*&#47;1</code>) are deliberately unequal: for schedule-change
-     * detection, a rewritten expression counts as an edit.
-     */
-    @Override
-    public boolean equals(Object o) {
-        return o instanceof CronExpression other && expression.equals(other.expression);
-    }
-
-    @Override
-    public int hashCode() {
-        return expression.hashCode();
-    }
+  @Override
+  public int hashCode() {
+    return expression.hashCode();
+  }
 }

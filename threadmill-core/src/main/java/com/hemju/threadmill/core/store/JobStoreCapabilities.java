@@ -54,68 +54,68 @@ package com.hemju.threadmill.core.store;
  *                               marker metadata entry records the omission.
  */
 public record JobStoreCapabilities(
-        long maxSerializedJobBytes,
-        int maxJobLogBytes,
-        int maxFailureMetadataBytes,
-        int maxClaimBatch,
-        boolean supportsRichSearch,
-        boolean supportsExactCounts,
-        boolean supportsConcurrencyGroups,
-        boolean ordersByCreationTime,
-        int maxMetadataBytes,
-        int maxStateHistoryEntries) {
+    long maxSerializedJobBytes,
+    int maxJobLogBytes,
+    int maxFailureMetadataBytes,
+    int maxClaimBatch,
+    boolean supportsRichSearch,
+    boolean supportsExactCounts,
+    boolean supportsConcurrencyGroups,
+    boolean ordersByCreationTime,
+    int maxMetadataBytes,
+    int maxStateHistoryEntries) {
 
-    /** A reasonable default of 256 KiB per serialized job. */
-    public static final long DEFAULT_MAX_SERIALIZED_BYTES = 256L * 1024L;
+  /** A reasonable default of 256 KiB per serialized job. */
+  public static final long DEFAULT_MAX_SERIALIZED_BYTES = 256L * 1024L;
 
-    /** Default per-job log budget. */
-    public static final int DEFAULT_MAX_JOB_LOG_BYTES = 64 * 1024;
+  /** Default per-job log budget. */
+  public static final int DEFAULT_MAX_JOB_LOG_BYTES = 64 * 1024;
 
-    /** Default failure-metadata budget. */
-    public static final int DEFAULT_MAX_FAILURE_METADATA_BYTES = 32 * 1024;
+  /** Default failure-metadata budget. */
+  public static final int DEFAULT_MAX_FAILURE_METADATA_BYTES = 32 * 1024;
 
-    /** Default metadata budget. */
-    public static final int DEFAULT_MAX_METADATA_BYTES = 64 * 1024;
+  /** Default metadata budget. */
+  public static final int DEFAULT_MAX_METADATA_BYTES = 64 * 1024;
 
-    /** Default state-history entry budget (a retry adds ~3 entries). */
-    public static final int DEFAULT_MAX_STATE_HISTORY_ENTRIES = 200;
+  /** Default state-history entry budget (a retry adds ~3 entries). */
+  public static final int DEFAULT_MAX_STATE_HISTORY_ENTRIES = 200;
 
-    /**
-     * Compatibility constructor deriving the metadata and state-history
-     * budgets from {@code maxSerializedJobBytes}.
-     */
-    public JobStoreCapabilities(
-            long maxSerializedJobBytes,
-            int maxJobLogBytes,
-            int maxFailureMetadataBytes,
-            int maxClaimBatch,
-            boolean supportsRichSearch,
-            boolean supportsExactCounts,
-            boolean supportsConcurrencyGroups,
-            boolean ordersByCreationTime) {
-        this(
-                maxSerializedJobBytes,
-                maxJobLogBytes,
-                maxFailureMetadataBytes,
-                maxClaimBatch,
-                supportsRichSearch,
-                supportsExactCounts,
-                supportsConcurrencyGroups,
-                ordersByCreationTime,
-                (int) Math.min(maxSerializedJobBytes / 4, DEFAULT_MAX_METADATA_BYTES),
-                DEFAULT_MAX_STATE_HISTORY_ENTRIES);
-    }
+  /**
+   * Compatibility constructor deriving the metadata and state-history
+   * budgets from {@code maxSerializedJobBytes}.
+   */
+  public JobStoreCapabilities(
+      long maxSerializedJobBytes,
+      int maxJobLogBytes,
+      int maxFailureMetadataBytes,
+      int maxClaimBatch,
+      boolean supportsRichSearch,
+      boolean supportsExactCounts,
+      boolean supportsConcurrencyGroups,
+      boolean ordersByCreationTime) {
+    this(
+        maxSerializedJobBytes,
+        maxJobLogBytes,
+        maxFailureMetadataBytes,
+        maxClaimBatch,
+        supportsRichSearch,
+        supportsExactCounts,
+        supportsConcurrencyGroups,
+        ordersByCreationTime,
+        (int) Math.min(maxSerializedJobBytes / 4, DEFAULT_MAX_METADATA_BYTES),
+        DEFAULT_MAX_STATE_HISTORY_ENTRIES);
+  }
 
-    /** Sensible defaults for an in-memory or fully-featured relational store. */
-    public static JobStoreCapabilities defaults() {
-        return new JobStoreCapabilities(
-                DEFAULT_MAX_SERIALIZED_BYTES,
-                DEFAULT_MAX_JOB_LOG_BYTES,
-                DEFAULT_MAX_FAILURE_METADATA_BYTES,
-                1000,
-                true,
-                true,
-                true,
-                true);
-    }
+  /** Sensible defaults for an in-memory or fully-featured relational store. */
+  public static JobStoreCapabilities defaults() {
+    return new JobStoreCapabilities(
+        DEFAULT_MAX_SERIALIZED_BYTES,
+        DEFAULT_MAX_JOB_LOG_BYTES,
+        DEFAULT_MAX_FAILURE_METADATA_BYTES,
+        1000,
+        true,
+        true,
+        true,
+        true);
+  }
 }

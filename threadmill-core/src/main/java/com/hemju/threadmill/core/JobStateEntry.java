@@ -15,24 +15,24 @@ import java.util.Optional;
  */
 public record JobStateEntry(JobState state, Instant at, String reason, String message) {
 
-    public JobStateEntry {
-        Objects.requireNonNull(state, "state");
-        Objects.requireNonNull(at, "at");
-    }
+  public JobStateEntry {
+    Objects.requireNonNull(state, "state");
+    Objects.requireNonNull(at, "at");
+  }
 
-    public static JobStateEntry of(JobState state, Instant at) {
-        return new JobStateEntry(state, at, null, null);
-    }
+  public static JobStateEntry of(JobState state, Instant at) {
+    return new JobStateEntry(state, at, null, null);
+  }
 
-    public static JobStateEntry of(JobState state, Instant at, String reason) {
-        return new JobStateEntry(state, at, reason, null);
-    }
+  public static JobStateEntry of(JobState state, Instant at, String reason) {
+    return new JobStateEntry(state, at, reason, null);
+  }
 
-    public Optional<String> reasonValue() {
-        return Optional.ofNullable(reason);
-    }
+  public Optional<String> reasonValue() {
+    return Optional.ofNullable(reason);
+  }
 
-    public Optional<String> messageValue() {
-        return Optional.ofNullable(message);
-    }
+  public Optional<String> messageValue() {
+    return Optional.ofNullable(message);
+  }
 }

@@ -12,13 +12,13 @@ import org.testcontainers.DockerClientFactory;
  */
 public final class DockerAvailable {
 
-    private DockerAvailable() {}
+  private DockerAvailable() {}
 
-    public static boolean check() {
-        try {
-            return DockerClientFactory.instance().isDockerAvailable();
-        } catch (Throwable t) {
-            return false;
-        }
+  public static boolean check() {
+    try {
+      return DockerClientFactory.instance().isDockerAvailable();
+    } catch (Throwable t) {
+      return false;
     }
+  }
 }

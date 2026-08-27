@@ -20,83 +20,83 @@ import com.hemju.threadmill.core.store.JobStoreCapabilities;
  */
 public interface JobSerializer {
 
-    /**
-     * Serialize a job snapshot. The snapshot is immutable, so the result is
-     * free from torn-write hazards by construction.
-     *
-     * <p>This signature performs no truncation — the byte budget is the only
-     * gate. Use {@link #serializeJob(JobSnapshot, JobStoreCapabilities)} for
-     * the engine-side path that needs failure-detail / log truncation so a
-     * {@code PROCESSING → FAILED} transition is never blocked by an
-     * oversized exception trace.
-     *
-     * @param snapshot       the snapshot to serialize
-     * @param maxBytes       upper bound on the serialized size; on overflow,
-     *                       the implementation throws {@link OversizedJobException}
-     *                       and does <em>not</em> mutate caller state
-     */
-    String serializeJob(JobSnapshot snapshot, long maxBytes);
+  /**
+   * Serialize a job snapshot. The snapshot is immutable, so the result is
+   * free from torn-write hazards by construction.
+   *
+   * <p>This signature performs no truncation — the byte budget is the only
+   * gate. Use {@link #serializeJob(JobSnapshot, JobStoreCapabilities)} for
+   * the engine-side path that needs failure-detail / log truncation so a
+   * {@code PROCESSING → FAILED} transition is never blocked by an
+   * oversized exception trace.
+   *
+   * @param snapshot       the snapshot to serialize
+   * @param maxBytes       upper bound on the serialized size; on overflow,
+   *                       the implementation throws {@link OversizedJobException}
+   *                       and does <em>not</em> mutate caller state
+   */
+  String serializeJob(JobSnapshot snapshot, long maxBytes);
 
-    /**
-     * Serialize a job snapshot with the truncation policy from
-     * {@code capabilities}. The serializer:
-     * <ul>
-     *   <li>Trims {@code JobLog} entries from the head (oldest first) until
-     *       the log fits {@link JobStoreCapabilities#maxJobLogBytes()}.</li>
-     *   <li>Caps the {@code message} field of {@code FAILED} and
-     *       {@code QUARANTINED} state-history entries at
-     *       {@link JobStoreCapabilities#maxFailureMetadataBytes()} bytes,
-     *       preserving the leading content and appending a truncation
-     *       sentinel.</li>
-     *   <li>Then enforces the overall
-     *       {@link JobStoreCapabilities#maxSerializedJobBytes()} cap; if the
-     *       truncated body still exceeds the cap (e.g. a metadata explosion),
-     *       throws {@link OversizedJobException} without mutating caller state.</li>
-     * </ul>
-     *
-     * <p>This is the path stores should use. It ensures the single failure
-     * code path (see AGENTS.md §6) cannot be blocked by an oversized stack
-     * trace: truncation lives in the serializer, so {@code RetryInterceptor}
-     * and {@code JobRunner.recordFailure} do not need to know about it.
-     */
-    String serializeJob(JobSnapshot snapshot, JobStoreCapabilities capabilities);
+  /**
+   * Serialize a job snapshot with the truncation policy from
+   * {@code capabilities}. The serializer:
+   * <ul>
+   *   <li>Trims {@code JobLog} entries from the head (oldest first) until
+   *       the log fits {@link JobStoreCapabilities#maxJobLogBytes()}.</li>
+   *   <li>Caps the {@code message} field of {@code FAILED} and
+   *       {@code QUARANTINED} state-history entries at
+   *       {@link JobStoreCapabilities#maxFailureMetadataBytes()} bytes,
+   *       preserving the leading content and appending a truncation
+   *       sentinel.</li>
+   *   <li>Then enforces the overall
+   *       {@link JobStoreCapabilities#maxSerializedJobBytes()} cap; if the
+   *       truncated body still exceeds the cap (e.g. a metadata explosion),
+   *       throws {@link OversizedJobException} without mutating caller state.</li>
+   * </ul>
+   *
+   * <p>This is the path stores should use. It ensures the single failure
+   * code path (see AGENTS.md §6) cannot be blocked by an oversized stack
+   * trace: truncation lives in the serializer, so {@code RetryInterceptor}
+   * and {@code JobRunner.recordFailure} do not need to know about it.
+   */
+  String serializeJob(JobSnapshot snapshot, JobStoreCapabilities capabilities);
 
-    /** Deserialize a job from its wire form. */
-    Job deserializeJob(String wire);
+  /** Deserialize a job from its wire form. */
+  Job deserializeJob(String wire);
 
-    /** Serialize a typed argument or payload to its on-disk representation. */
-    JobArgument serializeArgument(Object value);
+  /** Serialize a typed argument or payload to its on-disk representation. */
+  JobArgument serializeArgument(Object value);
 
-    /**
-     * Deserialize a typed argument to a concrete instance.
-     *
-     * <p>The argument's type tag is persisted data and must not be trusted:
-     * implementations reject tags that do not name a
-     * {@link com.hemju.threadmill.core.handler.JobPayload} type with a
-     * {@link SerializationException}, and must not run static initializers of
-     * the named class before that check.
-     */
-    Object deserializeArgument(JobArgument argument);
+  /**
+   * Deserialize a typed argument to a concrete instance.
+   *
+   * <p>The argument's type tag is persisted data and must not be trusted:
+   * implementations reject tags that do not name a
+   * {@link com.hemju.threadmill.core.handler.JobPayload} type with a
+   * {@link SerializationException}, and must not run static initializers of
+   * the named class before that check.
+   */
+  Object deserializeArgument(JobArgument argument);
 
-    /**
-     * Resolve a persisted type tag to the current Java type name. Serializers
-     * that support class-name aliases override this method.
-     */
-    default String resolveTypeTag(String typeTag) {
-        return typeTag;
-    }
+  /**
+   * Resolve a persisted type tag to the current Java type name. Serializers
+   * that support class-name aliases override this method.
+   */
+  default String resolveTypeTag(String typeTag) {
+    return typeTag;
+  }
 
-    /**
-     * Apply an explicit JSON-level payload migration, if one is registered.
-     * The default implementation leaves the argument unchanged.
-     */
-    default JobArgument migrateArgument(JobArgument argument) {
-        return argument;
-    }
+  /**
+   * Apply an explicit JSON-level payload migration, if one is registered.
+   * The default implementation leaves the argument unchanged.
+   */
+  default JobArgument migrateArgument(JobArgument argument) {
+    return argument;
+  }
 
-    /** Serialize a {@link JobPayload} (a {@code JobArgument} shaped for a payload). */
-    JobArgument serializePayload(JobPayload payload);
+  /** Serialize a {@link JobPayload} (a {@code JobArgument} shaped for a payload). */
+  JobArgument serializePayload(JobPayload payload);
 
-    /** Deserialize a {@code JobPayload} from its on-disk representation. */
-    <P extends JobPayload> P deserializePayload(JobArgument argument, Class<P> type);
+  /** Deserialize a {@code JobPayload} from its on-disk representation. */
+  <P extends JobPayload> P deserializePayload(JobArgument argument, Class<P> type);
 }

@@ -25,84 +25,86 @@ import com.hemju.threadmill.core.handler.JobExecutionContext;
  */
 class EngineScopedValuesTest {
 
-    @Test
-    @Timeout(10)
-    void plainVirtualThreadExecutorDoesNotInheritTheBinding() throws Exception {
-        var observed = new AtomicReference<Boolean>();
-        JobExecutionContext context = fakeContext();
+  @Test
+  @Timeout(10)
+  void plainVirtualThreadExecutorDoesNotInheritTheBinding() throws Exception {
+    var observed = new AtomicReference<Boolean>();
+    JobExecutionContext context = fakeContext();
 
-        ScopedValue.where(EngineScopedValues.CURRENT, context).run(() -> {
-            try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-                executor.submit(() -> observed.set(EngineScopedValues.CURRENT.isBound()))
-                        .get();
-            } catch (Exception e) {
-                throw new IllegalStateException(e);
-            }
-        });
+    ScopedValue.where(EngineScopedValues.CURRENT, context).run(() -> {
+      try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+        executor
+            .submit(() -> observed.set(EngineScopedValues.CURRENT.isBound()))
+            .get();
+      } catch (Exception e) {
+        throw new IllegalStateException(e);
+      }
+    });
 
-        assertThat(observed.get()).isFalse();
-    }
+    assertThat(observed.get()).isFalse();
+  }
 
-    @Test
-    @Timeout(10)
-    void capturingRebindsTheContextAcrossAnExecutorBoundary() throws Exception {
-        var observed = new AtomicReference<JobExecutionContext>();
-        JobExecutionContext context = fakeContext();
+  @Test
+  @Timeout(10)
+  void capturingRebindsTheContextAcrossAnExecutorBoundary() throws Exception {
+    var observed = new AtomicReference<JobExecutionContext>();
+    JobExecutionContext context = fakeContext();
 
-        ScopedValue.where(EngineScopedValues.CURRENT, context).run(() -> {
-            Runnable task = EngineScopedValues.capturing(() -> observed.set(EngineScopedValues.CURRENT.get()));
-            try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
-                executor.submit(task).get();
-            } catch (Exception e) {
-                throw new IllegalStateException(e);
-            }
-        });
+    ScopedValue.where(EngineScopedValues.CURRENT, context).run(() -> {
+      Runnable task =
+          EngineScopedValues.capturing(() -> observed.set(EngineScopedValues.CURRENT.get()));
+      try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+        executor.submit(task).get();
+      } catch (Exception e) {
+        throw new IllegalStateException(e);
+      }
+    });
 
-        assertThat(observed.get()).isSameAs(context);
-    }
+    assertThat(observed.get()).isSameAs(context);
+  }
 
-    @Test
-    void capturingOutsideAnyBindingReturnsTheTaskUnchanged() {
-        Runnable task = () -> {};
-        assertThat(EngineScopedValues.capturing(task)).isSameAs(task);
-    }
+  @Test
+  void capturingOutsideAnyBindingReturnsTheTaskUnchanged() {
+    Runnable task = () -> {};
+    assertThat(EngineScopedValues.capturing(task)).isSameAs(task);
+  }
 
-    private static JobExecutionContext fakeContext() {
-        return new JobExecutionContext() {
-            @Override
-            public JobId jobId() {
-                return JobId.newId();
-            }
+  private static JobExecutionContext fakeContext() {
+    return new JobExecutionContext() {
+      @Override
+      public JobId jobId() {
+        return JobId.newId();
+      }
 
-            @Override
-            public NodeId nodeId() {
-                return NodeId.newId();
-            }
+      @Override
+      public NodeId nodeId() {
+        return NodeId.newId();
+      }
 
-            @Override
-            public int attempt() {
-                return 1;
-            }
+      @Override
+      public int attempt() {
+        return 1;
+      }
 
-            @Override
-            public Instant claimedAt() {
-                return Instant.now();
-            }
+      @Override
+      public Instant claimedAt() {
+        return Instant.now();
+      }
 
-            @Override
-            public JobLog log() {
-                return null;
-            }
+      @Override
+      public JobLog log() {
+        return null;
+      }
 
-            @Override
-            public JobProgress progress() {
-                return null;
-            }
+      @Override
+      public JobProgress progress() {
+        return null;
+      }
 
-            @Override
-            public JobMetadata metadata() {
-                return null;
-            }
-        };
-    }
+      @Override
+      public JobMetadata metadata() {
+        return null;
+      }
+    };
+  }
 }

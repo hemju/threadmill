@@ -12,12 +12,12 @@ package com.hemju.threadmill.soak.harness.invariant;
  */
 public interface SoakInvariant {
 
-    /** Stable id, used in {@code summary.json}. */
-    String name();
+  /** Stable id, used in {@code summary.json}. */
+  String name();
 
-    /** Short human description; surfaced in {@code summary.md}. */
-    String description();
+  /** Short human description; surfaced in {@code summary.md}. */
+  String description();
 
-    /** A fresh stateful check for one run's event stream. */
-    StreamingInvariantCheck newCheck();
+  /** A fresh stateful check for one run's event stream. */
+  StreamingInvariantCheck newCheck();
 }

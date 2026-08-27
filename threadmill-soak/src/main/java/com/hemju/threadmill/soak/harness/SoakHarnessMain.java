@@ -19,41 +19,41 @@ import org.slf4j.LoggerFactory;
  */
 public final class SoakHarnessMain {
 
-    private static final Logger LOG = LoggerFactory.getLogger(SoakHarnessMain.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SoakHarnessMain.class);
 
-    private SoakHarnessMain() {}
+  private SoakHarnessMain() {}
 
-    static void main(String[] args) {
-        String backend = "memory";
-        for (int i = 0; i < args.length - 1; i++) {
-            if ("--backend".equals(args[i])) {
-                backend = args[i + 1].toLowerCase(Locale.ROOT);
-            }
-        }
-        SoakHarnessConfig config = SoakHarnessConfig.fromSystemProperties(backend);
-        String taskLabel = "soak" + Character.toUpperCase(backend.charAt(0)) + backend.substring(1);
-
-        OutputDir outputDir = new OutputDir(config.outputDir(), config.force());
-        try (BackendFixture fixture = openFixture(config)) {
-            SoakHarnessRunner runner = new SoakHarnessRunner(config, fixture, outputDir, taskLabel);
-            SummaryReport report = runner.run();
-            LOG.info("Soak run finished. Output: {} verdict={}", outputDir.root(), report.verdict());
-            System.exit("passed".equals(report.verdict()) ? 0 : 1);
-        } catch (IllegalArgumentException e) {
-            System.err.println("soak harness: " + e.getMessage());
-            System.exit(2);
-        } catch (Exception e) {
-            LOG.error("soak harness failed", e);
-            System.exit(3);
-        }
+  static void main(String[] args) {
+    String backend = "memory";
+    for (int i = 0; i < args.length - 1; i++) {
+      if ("--backend".equals(args[i])) {
+        backend = args[i + 1].toLowerCase(Locale.ROOT);
+      }
     }
+    SoakHarnessConfig config = SoakHarnessConfig.fromSystemProperties(backend);
+    String taskLabel = "soak" + Character.toUpperCase(backend.charAt(0)) + backend.substring(1);
 
-    private static BackendFixture openFixture(SoakHarnessConfig config) {
-        return switch (config.backend()) {
-            case "memory" -> new MemoryHarnessFixture();
-            case "postgres" -> new PostgresHarnessFixture(config.postgresUrl());
-            case "redis" -> new RedisHarnessFixture(config.redisTopology(), config.redisUrl());
-            default -> throw new IllegalArgumentException("unknown backend: " + config.backend());
-        };
+    OutputDir outputDir = new OutputDir(config.outputDir(), config.force());
+    try (BackendFixture fixture = openFixture(config)) {
+      SoakHarnessRunner runner = new SoakHarnessRunner(config, fixture, outputDir, taskLabel);
+      SummaryReport report = runner.run();
+      LOG.info("Soak run finished. Output: {} verdict={}", outputDir.root(), report.verdict());
+      System.exit("passed".equals(report.verdict()) ? 0 : 1);
+    } catch (IllegalArgumentException e) {
+      System.err.println("soak harness: " + e.getMessage());
+      System.exit(2);
+    } catch (Exception e) {
+      LOG.error("soak harness failed", e);
+      System.exit(3);
     }
+  }
+
+  private static BackendFixture openFixture(SoakHarnessConfig config) {
+    return switch (config.backend()) {
+      case "memory" -> new MemoryHarnessFixture();
+      case "postgres" -> new PostgresHarnessFixture(config.postgresUrl());
+      case "redis" -> new RedisHarnessFixture(config.redisTopology(), config.redisUrl());
+      default -> throw new IllegalArgumentException("unknown backend: " + config.backend());
+    };
+  }
 }

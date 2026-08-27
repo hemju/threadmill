@@ -24,165 +24,169 @@ import com.hemju.threadmill.soak.harness.SoakOutbox;
  */
 public final class SoakPayloads {
 
-    private SoakPayloads() {}
+  private SoakPayloads() {}
 
-    /** Fixed-cost work — sleeps the configured duration. */
-    public static final class FixedWork implements JobPayload {
-        public int seq;
-        public long durationMillis;
-        public double failureRate;
+  /** Fixed-cost work — sleeps the configured duration. */
+  public static final class FixedWork implements JobPayload {
+    public int seq;
+    public long durationMillis;
+    public double failureRate;
 
-        public FixedWork() {}
+    public FixedWork() {}
 
-        public FixedWork(int seq, long durationMillis, double failureRate) {
-            this.seq = seq;
-            this.durationMillis = durationMillis;
-            this.failureRate = failureRate;
-        }
+    public FixedWork(int seq, long durationMillis, double failureRate) {
+      this.seq = seq;
+      this.durationMillis = durationMillis;
+      this.failureRate = failureRate;
     }
+  }
 
-    public static final class FixedWorkHandler implements JobHandler<FixedWork> {
+  public static final class FixedWorkHandler implements JobHandler<FixedWork> {
 
-        @Override
-        public void run(FixedWork p, JobExecutionContext ctx) throws InterruptedException {
-            SoakExecutionTrace.started(ctx);
-            try {
-                if (p.failureRate > 0 && ThreadLocalRandom.current().nextDouble() < p.failureRate) {
-                    throw new RuntimeException("soak: simulated failure for seq " + p.seq);
-                }
-                if (p.durationMillis > 0) Thread.sleep(p.durationMillis);
-            } finally {
-                SoakExecutionTrace.finished(ctx);
-            }
+    @Override
+    public void run(FixedWork p, JobExecutionContext ctx) throws InterruptedException {
+      SoakExecutionTrace.started(ctx);
+      try {
+        if (p.failureRate > 0 && ThreadLocalRandom.current().nextDouble() < p.failureRate) {
+          throw new RuntimeException("soak: simulated failure for seq " + p.seq);
         }
+        if (p.durationMillis > 0) Thread.sleep(p.durationMillis);
+      } finally {
+        SoakExecutionTrace.finished(ctx);
+      }
     }
+  }
 
-    /** Sometimes-hangs — fails or runs over jobTimeout with a configured probability. */
-    public static final class FlakyWork implements JobPayload {
-        public int seq;
-        public long durationMillis;
-        public double failureRate;
-        public double timeoutRate;
-        public long timeoutSleepMillis;
+  /** Sometimes-hangs — fails or runs over jobTimeout with a configured probability. */
+  public static final class FlakyWork implements JobPayload {
+    public int seq;
+    public long durationMillis;
+    public double failureRate;
+    public double timeoutRate;
+    public long timeoutSleepMillis;
 
-        public FlakyWork() {}
+    public FlakyWork() {}
 
-        public FlakyWork(
-                int seq, long durationMillis, double failureRate, double timeoutRate, long timeoutSleepMillis) {
-            this.seq = seq;
-            this.durationMillis = durationMillis;
-            this.failureRate = failureRate;
-            this.timeoutRate = timeoutRate;
-            this.timeoutSleepMillis = timeoutSleepMillis;
+    public FlakyWork(
+        int seq,
+        long durationMillis,
+        double failureRate,
+        double timeoutRate,
+        long timeoutSleepMillis) {
+      this.seq = seq;
+      this.durationMillis = durationMillis;
+      this.failureRate = failureRate;
+      this.timeoutRate = timeoutRate;
+      this.timeoutSleepMillis = timeoutSleepMillis;
+    }
+  }
+
+  public static final class FlakyWorkHandler implements JobHandler<FlakyWork> {
+
+    @Override
+    public void run(FlakyWork p, JobExecutionContext ctx) throws InterruptedException {
+      SoakExecutionTrace.started(ctx);
+      try {
+        double dice = ThreadLocalRandom.current().nextDouble();
+        if (dice < p.failureRate) {
+          throw new RuntimeException("soak: flaky failure for seq " + p.seq);
         }
-    }
-
-    public static final class FlakyWorkHandler implements JobHandler<FlakyWork> {
-
-        @Override
-        public void run(FlakyWork p, JobExecutionContext ctx) throws InterruptedException {
-            SoakExecutionTrace.started(ctx);
-            try {
-                double dice = ThreadLocalRandom.current().nextDouble();
-                if (dice < p.failureRate) {
-                    throw new RuntimeException("soak: flaky failure for seq " + p.seq);
-                }
-                if (dice < p.failureRate + p.timeoutRate) {
-                    Thread.sleep(p.timeoutSleepMillis);
-                    return;
-                }
-                if (p.durationMillis > 0) Thread.sleep(p.durationMillis);
-            } finally {
-                SoakExecutionTrace.finished(ctx);
-            }
+        if (dice < p.failureRate + p.timeoutRate) {
+          Thread.sleep(p.timeoutSleepMillis);
+          return;
         }
+        if (p.durationMillis > 0) Thread.sleep(p.durationMillis);
+      } finally {
+        SoakExecutionTrace.finished(ctx);
+      }
     }
+  }
 
-    /** Long-running with periodic check-ins — survives noProgressTimeout. */
-    public static final class CheckingInWork implements JobPayload {
-        public int seq;
-        public long totalDurationMillis;
-        public long checkInIntervalMillis;
+  /** Long-running with periodic check-ins — survives noProgressTimeout. */
+  public static final class CheckingInWork implements JobPayload {
+    public int seq;
+    public long totalDurationMillis;
+    public long checkInIntervalMillis;
 
-        public CheckingInWork() {}
+    public CheckingInWork() {}
 
-        public CheckingInWork(int seq, long totalDurationMillis, long checkInIntervalMillis) {
-            this.seq = seq;
-            this.totalDurationMillis = totalDurationMillis;
-            this.checkInIntervalMillis = checkInIntervalMillis;
+    public CheckingInWork(int seq, long totalDurationMillis, long checkInIntervalMillis) {
+      this.seq = seq;
+      this.totalDurationMillis = totalDurationMillis;
+      this.checkInIntervalMillis = checkInIntervalMillis;
+    }
+  }
+
+  public static final class CheckingInWorkHandler implements JobHandler<CheckingInWork> {
+
+    @Override
+    public void run(CheckingInWork p, JobExecutionContext ctx) throws InterruptedException {
+      SoakExecutionTrace.started(ctx);
+      try {
+        long deadline = System.currentTimeMillis() + p.totalDurationMillis;
+        long interval = Math.max(50L, p.checkInIntervalMillis);
+        while (System.currentTimeMillis() < deadline) {
+          Thread.sleep(Math.min(interval, Math.max(1L, deadline - System.currentTimeMillis())));
+          ctx.checkIn();
         }
+      } finally {
+        SoakExecutionTrace.finished(ctx);
+      }
     }
+  }
 
-    public static final class CheckingInWorkHandler implements JobHandler<CheckingInWork> {
+  /** Stalled long-running — never calls checkIn, so it must be killed. */
+  public static final class StalledWork implements JobPayload {
+    public int seq;
+    public long stallMillis;
 
-        @Override
-        public void run(CheckingInWork p, JobExecutionContext ctx) throws InterruptedException {
-            SoakExecutionTrace.started(ctx);
-            try {
-                long deadline = System.currentTimeMillis() + p.totalDurationMillis;
-                long interval = Math.max(50L, p.checkInIntervalMillis);
-                while (System.currentTimeMillis() < deadline) {
-                    Thread.sleep(Math.min(interval, Math.max(1L, deadline - System.currentTimeMillis())));
-                    ctx.checkIn();
-                }
-            } finally {
-                SoakExecutionTrace.finished(ctx);
-            }
-        }
+    public StalledWork() {}
+
+    public StalledWork(int seq, long stallMillis) {
+      this.seq = seq;
+      this.stallMillis = stallMillis;
     }
+  }
 
-    /** Stalled long-running — never calls checkIn, so it must be killed. */
-    public static final class StalledWork implements JobPayload {
-        public int seq;
-        public long stallMillis;
+  public static final class StalledWorkHandler implements JobHandler<StalledWork> {
 
-        public StalledWork() {}
-
-        public StalledWork(int seq, long stallMillis) {
-            this.seq = seq;
-            this.stallMillis = stallMillis;
-        }
+    @Override
+    public void run(StalledWork p, JobExecutionContext ctx) throws InterruptedException {
+      SoakExecutionTrace.started(ctx);
+      try {
+        // One initial check-in flips the engine from wall-clock jobTimeout
+        // to noProgressTimeout (per AGENTS.md). Then we go silent so the
+        // engine reclaims us — that's the path this scenario tests.
+        ctx.checkIn();
+        Thread.sleep(p.stallMillis);
+      } finally {
+        SoakExecutionTrace.finished(ctx);
+      }
     }
+  }
 
-    public static final class StalledWorkHandler implements JobHandler<StalledWork> {
+  /**
+   * The wake-driven poller under test: drains every visible outbox row.
+   * Every invocation is identical, so it is a {@link JobAction} over
+   * {@link NoPayload} — the canonical shape for a recurring sweep.
+   * Idempotent by construction: draining an already-empty outbox is a
+   * no-op, so an at-least-once re-run is harmless.
+   */
+  public static final class OutboxPumpHandler implements JobAction {
 
-        @Override
-        public void run(StalledWork p, JobExecutionContext ctx) throws InterruptedException {
-            SoakExecutionTrace.started(ctx);
-            try {
-                // One initial check-in flips the engine from wall-clock jobTimeout
-                // to noProgressTimeout (per AGENTS.md). Then we go silent so the
-                // engine reclaims us — that's the path this scenario tests.
-                ctx.checkIn();
-                Thread.sleep(p.stallMillis);
-            } finally {
-                SoakExecutionTrace.finished(ctx);
-            }
-        }
+    @Override
+    public void run(JobExecutionContext ctx) throws InterruptedException {
+      SoakExecutionTrace.started(ctx);
+      SoakOutbox.runStarted();
+      try {
+        // A real pump reads its work table here. Drain first, then do
+        // the (simulated) work, so the drained set is attributable to
+        // this bracket even if the node is churned mid-run.
+        int drained = SoakOutbox.drainAll().size();
+        if (drained > 0) Thread.sleep(Math.min(50L, drained));
+      } finally {
+        SoakExecutionTrace.finished(ctx);
+      }
     }
-
-    /**
-     * The wake-driven poller under test: drains every visible outbox row.
-     * Every invocation is identical, so it is a {@link JobAction} over
-     * {@link NoPayload} — the canonical shape for a recurring sweep.
-     * Idempotent by construction: draining an already-empty outbox is a
-     * no-op, so an at-least-once re-run is harmless.
-     */
-    public static final class OutboxPumpHandler implements JobAction {
-
-        @Override
-        public void run(JobExecutionContext ctx) throws InterruptedException {
-            SoakExecutionTrace.started(ctx);
-            SoakOutbox.runStarted();
-            try {
-                // A real pump reads its work table here. Drain first, then do
-                // the (simulated) work, so the drained set is attributable to
-                // this bracket even if the node is churned mid-run.
-                int drained = SoakOutbox.drainAll().size();
-                if (drained > 0) Thread.sleep(Math.min(50L, drained));
-            } finally {
-                SoakExecutionTrace.finished(ctx);
-            }
-        }
-    }
+  }
 }

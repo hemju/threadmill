@@ -24,34 +24,34 @@ import java.util.function.Consumer;
  */
 public final class LocalWakeBus {
 
-    private final List<Consumer<String>> sinks = new CopyOnWriteArrayList<>();
+  private final List<Consumer<String>> sinks = new CopyOnWriteArrayList<>();
 
-    /**
-     * Register a sink that will be notified of every wake. Typical caller:
-     * {@code wakeBus.register(node::wake)} during {@code ProcessingNode}
-     * wiring.
-     *
-     * @return a handle that unregisters the sink when run
-     */
-    public Runnable register(Consumer<String> sink) {
-        Consumer<String> registered = Objects.requireNonNull(sink, "sink");
-        sinks.add(registered);
-        return () -> sinks.remove(registered);
-    }
+  /**
+   * Register a sink that will be notified of every wake. Typical caller:
+   * {@code wakeBus.register(node::wake)} during {@code ProcessingNode}
+   * wiring.
+   *
+   * @return a handle that unregisters the sink when run
+   */
+  public Runnable register(Consumer<String> sink) {
+    Consumer<String> registered = Objects.requireNonNull(sink, "sink");
+    sinks.add(registered);
+    return () -> sinks.remove(registered);
+  }
 
-    /**
-     * Notify all registered sinks that a job was inserted into {@code queue}.
-     * Exceptions thrown by individual sinks are swallowed: the wake is an
-     * opportunistic latency hint, never a correctness path.
-     */
-    public void wake(String queue) {
-        Objects.requireNonNull(queue, "queue");
-        for (Consumer<String> sink : sinks) {
-            try {
-                sink.accept(queue);
-            } catch (Throwable ignored) {
-                // Wake is opportunistic; failures fall back to the next poll.
-            }
-        }
+  /**
+   * Notify all registered sinks that a job was inserted into {@code queue}.
+   * Exceptions thrown by individual sinks are swallowed: the wake is an
+   * opportunistic latency hint, never a correctness path.
+   */
+  public void wake(String queue) {
+    Objects.requireNonNull(queue, "queue");
+    for (Consumer<String> sink : sinks) {
+      try {
+        sink.accept(queue);
+      } catch (Throwable ignored) {
+        // Wake is opportunistic; failures fall back to the next poll.
+      }
     }
+  }
 }

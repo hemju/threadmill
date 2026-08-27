@@ -10,9 +10,9 @@ package com.hemju.threadmill.core;
  */
 public sealed interface EnqueueResult permits EnqueueResult.Created, EnqueueResult.Coalesced {
 
-    /** A new job was created. */
-    record Created(JobId id) implements EnqueueResult {}
+  /** A new job was created. */
+  record Created(JobId id) implements EnqueueResult {}
 
-    /** The enqueue coalesced with an existing job. */
-    record Coalesced(JobId existingId) implements EnqueueResult {}
+  /** The enqueue coalesced with an existing job. */
+  record Coalesced(JobId existingId) implements EnqueueResult {}
 }

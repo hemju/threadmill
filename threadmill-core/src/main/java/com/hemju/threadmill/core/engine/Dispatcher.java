@@ -41,391 +41,389 @@ import com.hemju.threadmill.core.store.JobStore;
  */
 public final class Dispatcher {
 
-    private static final Logger LOG = LoggerFactory.getLogger(Dispatcher.class);
+  private static final Logger LOG = LoggerFactory.getLogger(Dispatcher.class);
 
-    /** Metadata key that carries a job's required-node-tag set as a comma-separated list. */
-    public static final String REQUIRED_TAGS_META = "threadmill.tags.required";
+  /** Metadata key that carries a job's required-node-tag set as a comma-separated list. */
+  public static final String REQUIRED_TAGS_META = "threadmill.tags.required";
 
-    private final JobStore store;
-    private final NodeId nodeId;
-    private final JobRunner runner;
-    private final ExecutorService workerPool;
-    private final Semaphore workerCapacity;
-    private final ProcessingNodeConfig config;
-    private final Set<String> nodeTags;
-    private final QueueFamily queueFamily;
-    private final Map<String, FamilyQueue> familyQueues = new HashMap<>();
-    private Instant nextDiscoveryAt = Instant.EPOCH;
-    private Set<String> pausedQueues = Set.of();
-    private final CircuitBreaker breaker;
-    private final AtomicBoolean paused = new AtomicBoolean(false);
-    // Set by ProcessingNode and flipped by the owner-heartbeat loop: when this
-    // node cannot persist heartbeats, it must stop claiming NEW work (the
-    // maintenance leader is about to orphan-reclaim its in-flight jobs, and
-    // claiming more would just compound the duplicate execution). In-flight jobs
-    // still drain. Defaults to "never suspended" so existing wiring is unaffected.
-    private volatile BooleanSupplier claimSuspended = () -> false;
-    private final AtomicBoolean running = new AtomicBoolean(false);
-    private final AtomicReference<Thread> loopThread = new AtomicReference<>();
-    private final WakeSignal wakeSignal = new WakeSignal();
+  private final JobStore store;
+  private final NodeId nodeId;
+  private final JobRunner runner;
+  private final ExecutorService workerPool;
+  private final Semaphore workerCapacity;
+  private final ProcessingNodeConfig config;
+  private final Set<String> nodeTags;
+  private final QueueFamily queueFamily;
+  private final Map<String, FamilyQueue> familyQueues = new HashMap<>();
+  private Instant nextDiscoveryAt = Instant.EPOCH;
+  private Set<String> pausedQueues = Set.of();
+  private final CircuitBreaker breaker;
+  private final AtomicBoolean paused = new AtomicBoolean(false);
+  // Set by ProcessingNode and flipped by the owner-heartbeat loop: when this
+  // node cannot persist heartbeats, it must stop claiming NEW work (the
+  // maintenance leader is about to orphan-reclaim its in-flight jobs, and
+  // claiming more would just compound the duplicate execution). In-flight jobs
+  // still drain. Defaults to "never suspended" so existing wiring is unaffected.
+  private volatile BooleanSupplier claimSuspended = () -> false;
+  private final AtomicBoolean running = new AtomicBoolean(false);
+  private final AtomicReference<Thread> loopThread = new AtomicReference<>();
+  private final WakeSignal wakeSignal = new WakeSignal();
 
-    public Dispatcher(
-            JobStore store,
-            NodeId nodeId,
-            JobRunner runner,
-            ExecutorService workerPool,
-            Semaphore workerCapacity,
-            ProcessingNodeConfig config) {
-        this(store, nodeId, runner, workerPool, workerCapacity, config, Set.of());
+  public Dispatcher(
+      JobStore store,
+      NodeId nodeId,
+      JobRunner runner,
+      ExecutorService workerPool,
+      Semaphore workerCapacity,
+      ProcessingNodeConfig config) {
+    this(store, nodeId, runner, workerPool, workerCapacity, config, Set.of());
+  }
+
+  public Dispatcher(
+      JobStore store,
+      NodeId nodeId,
+      JobRunner runner,
+      ExecutorService workerPool,
+      Semaphore workerCapacity,
+      ProcessingNodeConfig config,
+      Set<String> nodeTags) {
+    this(store, nodeId, runner, workerPool, workerCapacity, config, nodeTags, null);
+  }
+
+  public Dispatcher(
+      JobStore store,
+      NodeId nodeId,
+      JobRunner runner,
+      ExecutorService workerPool,
+      Semaphore workerCapacity,
+      ProcessingNodeConfig config,
+      Set<String> nodeTags,
+      QueueFamily queueFamily) {
+    this.store = Objects.requireNonNull(store, "store");
+    this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
+    this.runner = Objects.requireNonNull(runner, "runner");
+    this.workerPool = Objects.requireNonNull(workerPool, "workerPool");
+    this.workerCapacity = Objects.requireNonNull(workerCapacity, "workerCapacity");
+    this.config = Objects.requireNonNull(config, "config");
+    this.nodeTags = Set.copyOf(Objects.requireNonNull(nodeTags, "nodeTags"));
+    this.queueFamily = queueFamily;
+    this.breaker = new CircuitBreaker(config.maxConsecutiveDispatcherFailures());
+  }
+
+  public void start() {
+    if (!running.compareAndSet(false, true)) return;
+    Thread t =
+        Thread.ofPlatform().name("threadmill-dispatcher-" + nodeId).daemon(true).start(this::loop);
+    loopThread.set(t);
+  }
+
+  public void stop() {
+    running.set(false);
+    wakeSignal.signal();
+    Thread t = loopThread.getAndSet(null);
+    if (t != null) t.interrupt();
+  }
+
+  public boolean isPaused() {
+    return paused.get();
+  }
+
+  /**
+   * Returns {@code true} if this dispatcher handles {@code queue} — either as
+   * its fixed queue or as a match against its queue-family pattern. Used by
+   * {@link ProcessingNode#wake(String)} to route a producer-side wake to the
+   * right lane.
+   */
+  boolean matches(String queue) {
+    if (queueFamily != null) return queueFamily.matches(queue);
+    return config.defaultQueue().equals(queue);
+  }
+
+  /**
+   * Wake this dispatcher out of its poll-interval sleep. Opportunistic —
+   * coalesced by {@link WakeSignal}'s single-permit cap; safe to call from
+   * any thread on every enqueue.
+   */
+  void wake() {
+    wakeSignal.signal();
+  }
+
+  /** Wire a gate that, when true, suspends claiming new work (heartbeat impairment). */
+  void suspendClaimingWhen(BooleanSupplier gate) {
+    this.claimSuspended = Objects.requireNonNull(gate, "gate");
+  }
+
+  private void loop() {
+    while (running.get() && !Thread.currentThread().isInterrupted()) {
+      try {
+        if (claimSuspended.getAsBoolean()) {
+          // Owner heartbeats are failing on this node — don't claim more
+          // work; let in-flight jobs drain and wait for recovery.
+          sleep(config.pollInterval());
+          continue;
+        }
+        if (paused.get()) {
+          if (probeStore()) {
+            LOG.info("Store reachable again — resuming dispatcher");
+            paused.set(false);
+            breaker.reset();
+          } else {
+            sleep(config.storeOutagePollInterval());
+            continue;
+          }
+        }
+        doOnePoll();
+        breaker.recordSuccess();
+      } catch (InterruptedException ie) {
+        Thread.currentThread().interrupt();
+        break;
+      } catch (Throwable t) {
+        if (!running.get()) {
+          break;
+        }
+        LOG.warn("Dispatcher poll failed", t);
+        if (breaker.recordFailure()) {
+          LOG.error(
+              "Dispatcher hit its failure threshold ({}) — pausing until the store is reachable",
+              config.maxConsecutiveDispatcherFailures());
+          paused.set(true);
+        }
+        sleep(config.pollInterval());
+      }
     }
+  }
 
-    public Dispatcher(
-            JobStore store,
-            NodeId nodeId,
-            JobRunner runner,
-            ExecutorService workerPool,
-            Semaphore workerCapacity,
-            ProcessingNodeConfig config,
-            Set<String> nodeTags) {
-        this(store, nodeId, runner, workerPool, workerCapacity, config, nodeTags, null);
+  private void doOnePoll() throws InterruptedException {
+    int budget = workerCapacity.availablePermits();
+    if (budget <= 0) {
+      wakeSignal.awaitFor(config.pollInterval());
+      return;
     }
-
-    public Dispatcher(
-            JobStore store,
-            NodeId nodeId,
-            JobRunner runner,
-            ExecutorService workerPool,
-            Semaphore workerCapacity,
-            ProcessingNodeConfig config,
-            Set<String> nodeTags,
-            QueueFamily queueFamily) {
-        this.store = Objects.requireNonNull(store, "store");
-        this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
-        this.runner = Objects.requireNonNull(runner, "runner");
-        this.workerPool = Objects.requireNonNull(workerPool, "workerPool");
-        this.workerCapacity = Objects.requireNonNull(workerCapacity, "workerCapacity");
-        this.config = Objects.requireNonNull(config, "config");
-        this.nodeTags = Set.copyOf(Objects.requireNonNull(nodeTags, "nodeTags"));
-        this.queueFamily = queueFamily;
-        this.breaker = new CircuitBreaker(config.maxConsecutiveDispatcherFailures());
+    pausedQueues = store.listPausedQueues();
+    int max = Math.min(budget, config.claimBatchSize());
+    List<Job> claimed = queueFamily == null ? claimFixedQueue(max) : claimQueueFamily(max);
+    if (claimed.isEmpty()) {
+      wakeSignal.awaitFor(config.pollInterval());
+      return;
     }
+    dispatchClaimed(claimed);
+  }
 
-    public void start() {
-        if (!running.compareAndSet(false, true)) return;
-        Thread t = Thread.ofPlatform()
-                .name("threadmill-dispatcher-" + nodeId)
-                .daemon(true)
-                .start(this::loop);
-        loopThread.set(t);
-    }
-
-    public void stop() {
-        running.set(false);
-        wakeSignal.signal();
-        Thread t = loopThread.getAndSet(null);
-        if (t != null) t.interrupt();
-    }
-
-    public boolean isPaused() {
-        return paused.get();
-    }
-
-    /**
-     * Returns {@code true} if this dispatcher handles {@code queue} — either as
-     * its fixed queue or as a match against its queue-family pattern. Used by
-     * {@link ProcessingNode#wake(String)} to route a producer-side wake to the
-     * right lane.
-     */
-    boolean matches(String queue) {
-        if (queueFamily != null) return queueFamily.matches(queue);
-        return config.defaultQueue().equals(queue);
-    }
-
-    /**
-     * Wake this dispatcher out of its poll-interval sleep. Opportunistic —
-     * coalesced by {@link WakeSignal}'s single-permit cap; safe to call from
-     * any thread on every enqueue.
-     */
-    void wake() {
-        wakeSignal.signal();
-    }
-
-    /** Wire a gate that, when true, suspends claiming new work (heartbeat impairment). */
-    void suspendClaimingWhen(BooleanSupplier gate) {
-        this.claimSuspended = Objects.requireNonNull(gate, "gate");
-    }
-
-    private void loop() {
-        while (running.get() && !Thread.currentThread().isInterrupted()) {
+  /**
+   * Submit each claimed job to the worker pool with per-job error
+   * isolation. A failure dispatching one job must not abandon the
+   * remaining claimed jobs in PROCESSING — the node-wide owner heartbeat
+   * would shield them from orphan reclaim indefinitely. A job that cannot
+   * be dispatched is released through {@link JobRunner#releaseWithoutRunning},
+   * and a submit failure after the permit was acquired releases the
+   * permit so lane capacity cannot leak.
+   */
+  private void dispatchClaimed(List<Job> claimed) throws InterruptedException {
+    for (int i = 0; i < claimed.size(); i++) {
+      Job job = claimed.get(i);
+      try {
+        if (!eligibleByTags(job)) {
+          releaseClaimed(job, "engine.tag-mismatch");
+          continue;
+        }
+        try {
+          workerCapacity.acquire();
+        } catch (InterruptedException interrupted) {
+          releaseRemaining(claimed, i);
+          throw interrupted;
+        }
+        boolean submitted = false;
+        try {
+          workerPool.submit(() -> {
             try {
-                if (claimSuspended.getAsBoolean()) {
-                    // Owner heartbeats are failing on this node — don't claim more
-                    // work; let in-flight jobs drain and wait for recovery.
-                    sleep(config.pollInterval());
-                    continue;
-                }
-                if (paused.get()) {
-                    if (probeStore()) {
-                        LOG.info("Store reachable again — resuming dispatcher");
-                        paused.set(false);
-                        breaker.reset();
-                    } else {
-                        sleep(config.storeOutagePollInterval());
-                        continue;
-                    }
-                }
-                doOnePoll();
-                breaker.recordSuccess();
-            } catch (InterruptedException ie) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (Throwable t) {
-                if (!running.get()) {
-                    break;
-                }
-                LOG.warn("Dispatcher poll failed", t);
-                if (breaker.recordFailure()) {
-                    LOG.error(
-                            "Dispatcher hit its failure threshold ({}) — pausing until the store is reachable",
-                            config.maxConsecutiveDispatcherFailures());
-                    paused.set(true);
-                }
-                sleep(config.pollInterval());
+              runner.run(job);
+            } finally {
+              // Signal only on the transition from "all busy" to
+              // "at least one idle" — otherwise high-churn steady-state
+              // load would burn CPU on permits-already-pending releases.
+              // Exhaustion is captured BEFORE the release: two workers
+              // releasing concurrently could otherwise both observe 2
+              // permits afterwards and neither would signal, leaving a
+              // zero-budget dispatcher to wait out the full pollInterval.
+              boolean wasExhausted = workerCapacity.availablePermits() == 0;
+              workerCapacity.release();
+              if (wasExhausted) {
+                wakeSignal.signal();
+              }
             }
+          });
+          submitted = true;
+        } finally {
+          if (!submitted) {
+            workerCapacity.release();
+          }
         }
+      } catch (InterruptedException interrupted) {
+        throw interrupted;
+      } catch (Throwable t) {
+        LOG.warn("Failed to dispatch claimed job {} — releasing it for redelivery", job.id(), t);
+        releaseClaimed(job, "engine.dispatch-failure");
+      }
     }
+  }
 
-    private void doOnePoll() throws InterruptedException {
-        int budget = workerCapacity.availablePermits();
-        if (budget <= 0) {
-            wakeSignal.awaitFor(config.pollInterval());
-            return;
-        }
-        pausedQueues = store.listPausedQueues();
-        int max = Math.min(budget, config.claimBatchSize());
-        List<Job> claimed = queueFamily == null ? claimFixedQueue(max) : claimQueueFamily(max);
-        if (claimed.isEmpty()) {
-            wakeSignal.awaitFor(config.pollInterval());
-            return;
-        }
-        dispatchClaimed(claimed);
+  private void releaseRemaining(List<Job> claimed, int fromIndex) {
+    for (int i = fromIndex; i < claimed.size(); i++) {
+      releaseClaimed(claimed.get(i), "engine.dispatch-failure");
     }
+  }
 
-    /**
-     * Submit each claimed job to the worker pool with per-job error
-     * isolation. A failure dispatching one job must not abandon the
-     * remaining claimed jobs in PROCESSING — the node-wide owner heartbeat
-     * would shield them from orphan reclaim indefinitely. A job that cannot
-     * be dispatched is released through {@link JobRunner#releaseWithoutRunning},
-     * and a submit failure after the permit was acquired releases the
-     * permit so lane capacity cannot leak.
-     */
-    private void dispatchClaimed(List<Job> claimed) throws InterruptedException {
-        for (int i = 0; i < claimed.size(); i++) {
-            Job job = claimed.get(i);
-            try {
-                if (!eligibleByTags(job)) {
-                    releaseClaimed(job, "engine.tag-mismatch");
-                    continue;
-                }
-                try {
-                    workerCapacity.acquire();
-                } catch (InterruptedException interrupted) {
-                    releaseRemaining(claimed, i);
-                    throw interrupted;
-                }
-                boolean submitted = false;
-                try {
-                    workerPool.submit(() -> {
-                        try {
-                            runner.run(job);
-                        } finally {
-                            // Signal only on the transition from "all busy" to
-                            // "at least one idle" — otherwise high-churn steady-state
-                            // load would burn CPU on permits-already-pending releases.
-                            // Exhaustion is captured BEFORE the release: two workers
-                            // releasing concurrently could otherwise both observe 2
-                            // permits afterwards and neither would signal, leaving a
-                            // zero-budget dispatcher to wait out the full pollInterval.
-                            boolean wasExhausted = workerCapacity.availablePermits() == 0;
-                            workerCapacity.release();
-                            if (wasExhausted) {
-                                wakeSignal.signal();
-                            }
-                        }
-                    });
-                    submitted = true;
-                } finally {
-                    if (!submitted) {
-                        workerCapacity.release();
-                    }
-                }
-            } catch (InterruptedException interrupted) {
-                throw interrupted;
-            } catch (Throwable t) {
-                LOG.warn("Failed to dispatch claimed job {} — releasing it for redelivery", job.id(), t);
-                releaseClaimed(job, "engine.dispatch-failure");
-            }
-        }
+  private List<Job> claimFixedQueue(int max) {
+    if (pausedQueues.contains(config.defaultQueue())) {
+      return List.of();
     }
+    return store.claimReady(nodeId, config.defaultQueue(), max, Instant.now());
+  }
 
-    private void releaseRemaining(List<Job> claimed, int fromIndex) {
-        for (int i = fromIndex; i < claimed.size(); i++) {
-            releaseClaimed(claimed.get(i), "engine.dispatch-failure");
-        }
-    }
-
-    private List<Job> claimFixedQueue(int max) {
-        if (pausedQueues.contains(config.defaultQueue())) {
-            return List.of();
-        }
-        return store.claimReady(nodeId, config.defaultQueue(), max, Instant.now());
-    }
-
-    private List<Job> claimQueueFamily(int max) {
-        var now = Instant.now();
-        discoverFamilyQueues(now);
-        int attempts = Math.max(1, familyQueues.size());
-        for (int i = 0; i < attempts; i++) {
-            FamilyQueue queue = pickFamilyQueue();
-            if (queue == null) {
-                return List.of();
-            }
-            if (pausedQueues.contains(queue.name)) {
-                if (queue.emptySince == null) {
-                    queue.emptySince = now;
-                }
-                continue;
-            }
-            List<Job> claimed = store.claimReady(nodeId, queue.name, max, now);
-            if (!claimed.isEmpty()) {
-                queue.emptySince = null;
-                return claimed;
-            }
-            if (queue.emptySince == null) {
-                queue.emptySince = now;
-            }
-        }
+  private List<Job> claimQueueFamily(int max) {
+    var now = Instant.now();
+    discoverFamilyQueues(now);
+    int attempts = Math.max(1, familyQueues.size());
+    for (int i = 0; i < attempts; i++) {
+      FamilyQueue queue = pickFamilyQueue();
+      if (queue == null) {
         return List.of();
-    }
-
-    private void discoverFamilyQueues(Instant now) {
-        if (now.isBefore(nextDiscoveryAt)) {
-            removeRetainedEmptyQueues(now);
-            return;
+      }
+      if (pausedQueues.contains(queue.name)) {
+        if (queue.emptySince == null) {
+          queue.emptySince = now;
         }
-        nextDiscoveryAt = now.plus(config.queueFamilyDiscoveryInterval());
-        var seen = new HashSet<String>();
-        // Stride-scheduling global-virtual-time: a queue discovered (or
-        // rediscovered after the retention window) mid-run joins at the
-        // minimum pass of the active queues, not at zero — otherwise the
-        // newcomer monopolizes claims until it catches up with passes the
-        // established queues accumulated over the whole run.
-        long joinPass = familyQueues.values().stream()
-                .filter(q -> q.weight > 0)
-                .mapToLong(q -> q.pass)
-                .min()
-                .orElse(0L);
-        for (String queue : store.listEnqueuedQueues()) {
-            if (!queueFamily.matches(queue)) continue;
-            seen.add(queue);
-            int weight = queueFamily.weights().weightFor(queue);
-            familyQueues.compute(queue, (name, existing) -> {
-                FamilyQueue updated;
-                if (existing == null) {
-                    updated = new FamilyQueue(name);
-                    updated.pass = joinPass;
-                } else {
-                    updated = existing;
-                }
-                updated.weight = weight;
-                if (weight > 0) {
-                    updated.emptySince = null;
-                }
-                return updated;
-            });
+        continue;
+      }
+      List<Job> claimed = store.claimReady(nodeId, queue.name, max, now);
+      if (!claimed.isEmpty()) {
+        queue.emptySince = null;
+        return claimed;
+      }
+      if (queue.emptySince == null) {
+        queue.emptySince = now;
+      }
+    }
+    return List.of();
+  }
+
+  private void discoverFamilyQueues(Instant now) {
+    if (now.isBefore(nextDiscoveryAt)) {
+      removeRetainedEmptyQueues(now);
+      return;
+    }
+    nextDiscoveryAt = now.plus(config.queueFamilyDiscoveryInterval());
+    var seen = new HashSet<String>();
+    // Stride-scheduling global-virtual-time: a queue discovered (or
+    // rediscovered after the retention window) mid-run joins at the
+    // minimum pass of the active queues, not at zero — otherwise the
+    // newcomer monopolizes claims until it catches up with passes the
+    // established queues accumulated over the whole run.
+    long joinPass = familyQueues.values().stream()
+        .filter(q -> q.weight > 0)
+        .mapToLong(q -> q.pass)
+        .min()
+        .orElse(0L);
+    for (String queue : store.listEnqueuedQueues()) {
+      if (!queueFamily.matches(queue)) continue;
+      seen.add(queue);
+      int weight = queueFamily.weights().weightFor(queue);
+      familyQueues.compute(queue, (name, existing) -> {
+        FamilyQueue updated;
+        if (existing == null) {
+          updated = new FamilyQueue(name);
+          updated.pass = joinPass;
+        } else {
+          updated = existing;
         }
-        for (FamilyQueue queue : familyQueues.values()) {
-            if (!seen.contains(queue.name) && queue.emptySince == null) {
-                queue.emptySince = now;
-            }
+        updated.weight = weight;
+        if (weight > 0) {
+          updated.emptySince = null;
         }
-        removeRetainedEmptyQueues(now);
+        return updated;
+      });
     }
-
-    private void removeRetainedEmptyQueues(Instant now) {
-        familyQueues
-                .entrySet()
-                .removeIf(e -> e.getValue().emptySince != null
-                        && !e.getValue()
-                                .emptySince
-                                .plus(config.queueFamilyRetentionAfterEmpty())
-                                .isAfter(now));
+    for (FamilyQueue queue : familyQueues.values()) {
+      if (!seen.contains(queue.name) && queue.emptySince == null) {
+        queue.emptySince = now;
+      }
     }
+    removeRetainedEmptyQueues(now);
+  }
 
-    private FamilyQueue pickFamilyQueue() {
-        FamilyQueue best = null;
-        for (FamilyQueue queue : familyQueues.values()) {
-            if (queue.weight <= 0) continue;
-            if (best == null || queue.pass < best.pass) {
-                best = queue;
-            }
-        }
-        if (best == null) {
-            return null;
-        }
-        best.pass += Math.max(1L, 10_000L / best.weight);
-        return best;
+  private void removeRetainedEmptyQueues(Instant now) {
+    familyQueues
+        .entrySet()
+        .removeIf(e -> e.getValue().emptySince != null
+            && !e.getValue()
+                .emptySince
+                .plus(config.queueFamilyRetentionAfterEmpty())
+                .isAfter(now));
+  }
+
+  private FamilyQueue pickFamilyQueue() {
+    FamilyQueue best = null;
+    for (FamilyQueue queue : familyQueues.values()) {
+      if (queue.weight <= 0) continue;
+      if (best == null || queue.pass < best.pass) {
+        best = queue;
+      }
     }
-
-    /**
-     * Returns {@code true} if this node's tag set satisfies the job's required-tag set.
-     * A job without required tags is eligible everywhere. A node with no tags can only
-     * run jobs that have no required tags.
-     */
-    private boolean eligibleByTags(Job job) {
-        var required = job.metadata().get(REQUIRED_TAGS_META);
-        if (required.isEmpty() || required.get().isBlank()) return true;
-        Set<String> wanted = new HashSet<>(Arrays.asList(required.get().split("\\s*,\\s*")));
-        wanted.remove("");
-        return nodeTags.containsAll(wanted);
+    if (best == null) {
+      return null;
     }
+    best.pass += Math.max(1L, 10_000L / best.weight);
+    return best;
+  }
 
-    private void releaseClaimed(Job job, String reason) {
-        // PROCESSING has no legal transition back to a pending state, and the
-        // concurrency slot taken at claim is only freed by a terminal save —
-        // so an unrun claimed job goes through the single failure path with
-        // SHUTDOWN semantics: FAILED frees the slot, and the retry interceptor
-        // reschedules without consuming the claim-time attempt increment. The
-        // promotion loop then puts it back on the queue for any eligible node.
-        runner.releaseWithoutRunning(job, reason);
+  /**
+   * Returns {@code true} if this node's tag set satisfies the job's required-tag set.
+   * A job without required tags is eligible everywhere. A node with no tags can only
+   * run jobs that have no required tags.
+   */
+  private boolean eligibleByTags(Job job) {
+    var required = job.metadata().get(REQUIRED_TAGS_META);
+    if (required.isEmpty() || required.get().isBlank()) return true;
+    Set<String> wanted = new HashSet<>(Arrays.asList(required.get().split("\\s*,\\s*")));
+    wanted.remove("");
+    return nodeTags.containsAll(wanted);
+  }
+
+  private void releaseClaimed(Job job, String reason) {
+    // PROCESSING has no legal transition back to a pending state, and the
+    // concurrency slot taken at claim is only freed by a terminal save —
+    // so an unrun claimed job goes through the single failure path with
+    // SHUTDOWN semantics: FAILED frees the slot, and the retry interceptor
+    // reschedules without consuming the claim-time attempt increment. The
+    // promotion loop then puts it back on the queue for any eligible node.
+    runner.releaseWithoutRunning(job, reason);
+  }
+
+  private boolean probeStore() {
+    try {
+      store.verifyWritable();
+      return true;
+    } catch (Throwable t) {
+      return false;
     }
+  }
 
-    private boolean probeStore() {
-        try {
-            store.verifyWritable();
-            return true;
-        } catch (Throwable t) {
-            return false;
-        }
+  private static void sleep(Duration d) {
+    try {
+      Thread.sleep(d.toMillis());
+    } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
     }
+  }
 
-    private static void sleep(Duration d) {
-        try {
-            Thread.sleep(d.toMillis());
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-        }
+  private static final class FamilyQueue {
+    final String name;
+    int weight = 1;
+    long pass;
+    Instant emptySince;
+
+    FamilyQueue(String name) {
+      this.name = name;
     }
-
-    private static final class FamilyQueue {
-        final String name;
-        int weight = 1;
-        long pass;
-        Instant emptySince;
-
-        FamilyQueue(String name) {
-            this.name = name;
-        }
-    }
+  }
 }

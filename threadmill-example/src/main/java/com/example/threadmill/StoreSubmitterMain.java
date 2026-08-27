@@ -18,35 +18,35 @@ import com.hemju.threadmill.core.serialization.JsonJobSerializer;
  */
 public final class StoreSubmitterMain {
 
-    private static final Logger LOG = LoggerFactory.getLogger(StoreSubmitterMain.class);
+  private static final Logger LOG = LoggerFactory.getLogger(StoreSubmitterMain.class);
 
-    private StoreSubmitterMain() {}
+  private StoreSubmitterMain() {}
 
-    static void main(String[] args) {
-        ExampleStores.Backend backend = ExampleStores.Backend.defaultBackend();
-        int count = 50;
-        if (args.length > 0) {
-            if (isBackend(args[0])) {
-                backend = ExampleStores.Backend.parse(args[0]);
-                if (args.length > 1) count = Integer.parseInt(args[1]);
-            } else {
-                count = Integer.parseInt(args[0]);
-            }
-        }
-
-        try (ExampleStores.StoreHandle handle = ExampleStores.open(backend)) {
-            var scheduler = new Scheduler(handle.store(), new JsonJobSerializer());
-            for (int i = 0; i < count; i++) {
-                scheduler.enqueue(new GreetingPayload("world", i), GreetingHandler.class);
-            }
-        }
-        LOG.info("enqueued {} jobs into {}.", count, backend);
+  static void main(String[] args) {
+    ExampleStores.Backend backend = ExampleStores.Backend.defaultBackend();
+    int count = 50;
+    if (args.length > 0) {
+      if (isBackend(args[0])) {
+        backend = ExampleStores.Backend.parse(args[0]);
+        if (args.length > 1) count = Integer.parseInt(args[1]);
+      } else {
+        count = Integer.parseInt(args[0]);
+      }
     }
 
-    private static boolean isBackend(String value) {
-        return value.equalsIgnoreCase("postgres")
-                || value.equalsIgnoreCase("postgresql")
-                || value.equalsIgnoreCase("pg")
-                || value.equalsIgnoreCase("redis");
+    try (ExampleStores.StoreHandle handle = ExampleStores.open(backend)) {
+      var scheduler = new Scheduler(handle.store(), new JsonJobSerializer());
+      for (int i = 0; i < count; i++) {
+        scheduler.enqueue(new GreetingPayload("world", i), GreetingHandler.class);
+      }
     }
+    LOG.info("enqueued {} jobs into {}.", count, backend);
+  }
+
+  private static boolean isBackend(String value) {
+    return value.equalsIgnoreCase("postgres")
+        || value.equalsIgnoreCase("postgresql")
+        || value.equalsIgnoreCase("pg")
+        || value.equalsIgnoreCase("redis");
+  }
 }

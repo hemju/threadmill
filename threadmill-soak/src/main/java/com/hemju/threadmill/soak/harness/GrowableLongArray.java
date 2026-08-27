@@ -12,20 +12,20 @@ import java.util.Arrays;
  */
 final class GrowableLongArray {
 
-    private long[] values = new long[1024];
-    private int size;
+  private long[] values = new long[1024];
+  private int size;
 
-    void add(long value) {
-        if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
-        values[size++] = value;
-    }
+  void add(long value) {
+    if (size == values.length) values = Arrays.copyOf(values, values.length * 2);
+    values[size++] = value;
+  }
 
-    int size() {
-        return size;
-    }
+  int size() {
+    return size;
+  }
 
-    /** The backing array trimmed to size; the buffer must not be used afterwards. */
-    long[] toArray() {
-        return Arrays.copyOf(values, size);
-    }
+  /** The backing array trimmed to size; the buffer must not be used afterwards. */
+  long[] toArray() {
+    return Arrays.copyOf(values, size);
+  }
 }

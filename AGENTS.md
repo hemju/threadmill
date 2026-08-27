@@ -180,7 +180,7 @@ Testing is a first-class deliverable; treat the test suite as equal in weight to
 - **`main` methods do not carry the `public` modifier.** Java 25 (JEP 512) recognises a main method with any access modifier; declare entry points as `static void main(String[] args)` (or `static void main()` when the args are unused). The `public` keyword on `main` is dropped everywhere in this codebase.
 - No framework types in `threadmill-core`.
 - Public types are documented with Javadoc that stands alone.
-- Source style is enforced by Spotless (Palantir Java Format for Java; ktfmt `kotlinlang` style for Kotlin / `*.gradle.kts`). Import order is fixed: `java`, `javax`, `jakarta`, third-party, `com.hemju`. Trailing whitespace and EOL newlines are enforced on Java, Kotlin, gradle scripts, `*.md`, and `.gitignore`. The formatter version is pinned in `gradle/libs.versions.toml` so everyone produces byte-identical output.
+- Source style is enforced by Spotless (Palantir Java Format in its `GOOGLE` style for Java; ktfmt `kotlinlang` style for Kotlin / `*.gradle.kts`). Import order is fixed: `java`, `javax`, `jakarta`, third-party, `com.hemju`. Trailing whitespace and EOL newlines are enforced on Java, Kotlin, gradle scripts, `*.md`, and `.gitignore`. The formatter version is pinned in `gradle/libs.versions.toml` so everyone produces byte-identical output.
 - Binary JARs include the repository `LICENSE` and `NOTICE` under `META-INF/`; `artifactInspection` fails a release candidate when either legal file is missing. GitHub Actions are pinned to immutable commit SHAs with their human-readable release tags retained as comments.
 
 **Commit conventions**
@@ -328,7 +328,7 @@ This section is the project's memory: the load-bearing decisions worth knowing b
 ### Formatting
 
 - **Spotless gates `check`.** `./gradlew check` runs `spotlessCheck` alongside the tests. `./gradlew spotlessApply` auto-fixes.
-- **Java is formatted with Palantir Java Format** (pinned in `gradle/libs.versions.toml`). 4-space indent, ~120-char lines, readable line breaks. Plus `removeUnusedImports`, fixed `importOrder` (`java`, `javax`, `jakarta`, third-party, `com.hemju`), `trimTrailingWhitespace`, `endWithNewline`.
+- **Java is formatted with Palantir Java Format in its `GOOGLE` style** (`palantirJavaFormat(version).style("GOOGLE")`; the formatter version is pinned in `gradle/libs.versions.toml`). Google Java Style layout — 2-space indent, 4-space continuation, 100-column limit — produced by the Palantir engine, so line-breaking stays Palantir's. Plus `removeUnusedImports`, fixed `importOrder` (`java`, `javax`, `jakarta`, third-party, `com.hemju`), `trimTrailingWhitespace`, `endWithNewline`.
 - **Kotlin** (the convention plugins and every `*.gradle.kts`) is formatted with **ktfmt** in its `kotlinlang` style.
 - **Markdown and `.gitignore`** get trim-trailing-whitespace + EOL-newline hygiene.
 - **Local working notes stay out of formatting and artifacts.** If you add a new Spotless target, keep private local-only directories excluded.

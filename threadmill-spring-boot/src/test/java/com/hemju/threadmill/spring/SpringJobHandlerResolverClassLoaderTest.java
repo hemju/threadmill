@@ -25,8 +25,8 @@ import com.hemju.threadmill.core.handler.JobHandler;
  */
 class SpringJobHandlerResolverClassLoaderTest {
 
-    private static final String HANDLER_NAME = "dyn.ChildLoaderHandler";
-    private static final String HANDLER_SOURCE = """
+  private static final String HANDLER_NAME = "dyn.ChildLoaderHandler";
+  private static final String HANDLER_SOURCE = """
             package dyn;
 
             public class ChildLoaderHandler
@@ -38,50 +38,51 @@ class SpringJobHandlerResolverClassLoaderTest {
             }
             """;
 
-    @TempDir
-    Path tempDir;
+  @TempDir
+  Path tempDir;
 
-    @Test
-    void resolvesHandlerClassesThroughTheContextClassLoader() throws Exception {
-        Path sourceFile = tempDir.resolve("dyn").resolve("ChildLoaderHandler.java");
-        Files.createDirectories(sourceFile.getParent());
-        Files.writeString(sourceFile, HANDLER_SOURCE);
-        var compiler = ToolProvider.getSystemJavaCompiler();
-        int result = compiler.run(
-                null,
-                null,
-                null,
-                "-classpath",
-                System.getProperty("java.class.path"),
-                "-d",
-                tempDir.toString(),
-                sourceFile.toString());
-        assertThat(result).isZero();
+  @Test
+  void resolvesHandlerClassesThroughTheContextClassLoader() throws Exception {
+    Path sourceFile = tempDir.resolve("dyn").resolve("ChildLoaderHandler.java");
+    Files.createDirectories(sourceFile.getParent());
+    Files.writeString(sourceFile, HANDLER_SOURCE);
+    var compiler = ToolProvider.getSystemJavaCompiler();
+    int result = compiler.run(
+        null,
+        null,
+        null,
+        "-classpath",
+        System.getProperty("java.class.path"),
+        "-d",
+        tempDir.toString(),
+        sourceFile.toString());
+    assertThat(result).isZero();
 
-        try (var childLoader = new URLClassLoader(
-                new URL[] {tempDir.toUri().toURL()}, SpringJobHandlerResolverClassLoaderTest.class.getClassLoader())) {
-            // Sanity: the handler is invisible to the library's own loader.
-            assertThat(canLoadWithLibraryLoader()).isFalse();
+    try (var childLoader = new URLClassLoader(
+        new URL[] {tempDir.toUri().toURL()},
+        SpringJobHandlerResolverClassLoaderTest.class.getClassLoader())) {
+      // Sanity: the handler is invisible to the library's own loader.
+      assertThat(canLoadWithLibraryLoader()).isFalse();
 
-            try (var context = new GenericApplicationContext()) {
-                context.setClassLoader(childLoader);
-                context.refresh();
-                var resolver = new SpringJobHandlerResolver(context);
+      try (var context = new GenericApplicationContext()) {
+        context.setClassLoader(childLoader);
+        context.refresh();
+        var resolver = new SpringJobHandlerResolver(context);
 
-                JobHandler<?> handler = resolver.resolve(HANDLER_NAME);
+        JobHandler<?> handler = resolver.resolve(HANDLER_NAME);
 
-                assertThat(handler.getClass().getName()).isEqualTo(HANDLER_NAME);
-                assertThat(handler.getClass().getClassLoader()).isSameAs(childLoader);
-            }
-        }
+        assertThat(handler.getClass().getName()).isEqualTo(HANDLER_NAME);
+        assertThat(handler.getClass().getClassLoader()).isSameAs(childLoader);
+      }
     }
+  }
 
-    private static boolean canLoadWithLibraryLoader() {
-        try {
-            Class.forName(HANDLER_NAME, false, SpringJobHandlerResolver.class.getClassLoader());
-            return true;
-        } catch (ClassNotFoundException expected) {
-            return false;
-        }
+  private static boolean canLoadWithLibraryLoader() {
+    try {
+      Class.forName(HANDLER_NAME, false, SpringJobHandlerResolver.class.getClassLoader());
+      return true;
+    } catch (ClassNotFoundException expected) {
+      return false;
     }
+  }
 }

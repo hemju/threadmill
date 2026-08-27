@@ -17,34 +17,35 @@ import com.hemju.threadmill.core.handler.JobExecutionContext;
  */
 public interface JobInterceptor {
 
-    /** Invoked just before the handler runs. */
-    default void onProcessingStarting(Job job, JobExecutionContext ctx) {}
+  /** Invoked just before the handler runs. */
+  default void onProcessingStarting(Job job, JobExecutionContext ctx) {}
 
-    /** Invoked after the handler returns normally. */
-    default void onProcessingSucceeded(Job job, JobExecutionContext ctx) {}
+  /** Invoked after the handler returns normally. */
+  default void onProcessingSucceeded(Job job, JobExecutionContext ctx) {}
 
+  /**
+   * Invoked exactly once when the engine decides a job has failed —
+   * regardless of whether the cause was a thrown exception, a timeout,
+   * or an orphan reclaim. This is the engine's single failure path.
+   */
+  default void onProcessingFailed(
+      Job job, JobExecutionContext ctx, Throwable cause, FailureCause causeKind) {}
+
+  /** Invoked when the engine transitions a job between states. */
+  default void onStateChange(Job job, JobState from, JobState to) {}
+
+  /** What triggered a failure transition. */
+  enum FailureCause {
+    EXCEPTION,
+    TIMEOUT,
+    ORPHAN_RECLAIM,
+    QUARANTINE,
     /**
-     * Invoked exactly once when the engine decides a job has failed —
-     * regardless of whether the cause was a thrown exception, a timeout,
-     * or an orphan reclaim. This is the engine's single failure path.
+     * The handler was interrupted because its node is shutting down —
+     * not the job's fault. {@code RetryInterceptor} reschedules the job
+     * immediately without consuming a retry attempt, so rolling deploys
+     * do not erode retry budgets.
      */
-    default void onProcessingFailed(Job job, JobExecutionContext ctx, Throwable cause, FailureCause causeKind) {}
-
-    /** Invoked when the engine transitions a job between states. */
-    default void onStateChange(Job job, JobState from, JobState to) {}
-
-    /** What triggered a failure transition. */
-    enum FailureCause {
-        EXCEPTION,
-        TIMEOUT,
-        ORPHAN_RECLAIM,
-        QUARANTINE,
-        /**
-         * The handler was interrupted because its node is shutting down —
-         * not the job's fault. {@code RetryInterceptor} reschedules the job
-         * immediately without consuming a retry attempt, so rolling deploys
-         * do not erode retry budgets.
-         */
-        SHUTDOWN
-    }
+    SHUTDOWN
+  }
 }

@@ -32,68 +32,70 @@ import com.hemju.threadmill.core.engine.ProcessingNode;
  */
 final class NodeChurner {
 
-    private static final Logger LOG = LoggerFactory.getLogger(NodeChurner.class);
+  private static final Logger LOG = LoggerFactory.getLogger(NodeChurner.class);
 
-    private final Thread thread;
-    private volatile boolean stopped;
+  private final Thread thread;
+  private volatile boolean stopped;
 
-    private NodeChurner(
-            Duration interval,
-            List<ProcessingNode> nodes,
-            SoakTraceWriter trace,
-            AtomicBoolean abortRequested,
-            Supplier<ProcessingNode> replacementStarter) {
-        this.thread = Thread.ofVirtual().name("soak-node-churner").unstarted(() -> {
-            while (!stopped) {
-                try {
-                    Thread.sleep(interval.toMillis());
-                } catch (InterruptedException e) {
-                    return;
-                }
-                if (stopped || abortRequested.get()) return;
-                try {
-                    churnOnce(nodes, trace, replacementStarter);
-                } catch (RuntimeException e) {
-                    LOG.warn("node churn cycle failed: {}", e.toString());
-                }
-            }
-        });
-    }
-
-    static NodeChurner start(
-            Duration interval,
-            List<ProcessingNode> nodes,
-            SoakTraceWriter trace,
-            AtomicBoolean abortRequested,
-            Supplier<ProcessingNode> replacementStarter) {
-        Objects.requireNonNull(interval, "interval");
-        var churner = new NodeChurner(interval, nodes, trace, abortRequested, replacementStarter);
-        churner.thread.start();
-        return churner;
-    }
-
-    void stop() {
-        stopped = true;
-        thread.interrupt();
+  private NodeChurner(
+      Duration interval,
+      List<ProcessingNode> nodes,
+      SoakTraceWriter trace,
+      AtomicBoolean abortRequested,
+      Supplier<ProcessingNode> replacementStarter) {
+    this.thread = Thread.ofVirtual().name("soak-node-churner").unstarted(() -> {
+      while (!stopped) {
         try {
-            // The thread may be mid-close() on a node draining its grace
-            // period; give it a moment, but never hold up the run teardown.
-            thread.join(Duration.ofSeconds(30));
+          Thread.sleep(interval.toMillis());
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+          return;
         }
-    }
+        if (stopped || abortRequested.get()) return;
+        try {
+          churnOnce(nodes, trace, replacementStarter);
+        } catch (RuntimeException e) {
+          LOG.warn("node churn cycle failed: {}", e.toString());
+        }
+      }
+    });
+  }
 
-    private static void churnOnce(
-            List<ProcessingNode> nodes, SoakTraceWriter trace, Supplier<ProcessingNode> replacementStarter) {
-        ProcessingNode victim;
-        synchronized (nodes) {
-            if (nodes.size() < 2) return; // never churn the last node
-            victim = nodes.removeFirst();
-        }
-        trace.emit("node_churn_stop", Map.of("nodeId", victim.nodeId().toString()));
-        victim.close();
-        trace.emit("node_stopped", Map.of("nodeId", victim.nodeId().toString(), "reason", "churn"));
-        replacementStarter.get();
+  static NodeChurner start(
+      Duration interval,
+      List<ProcessingNode> nodes,
+      SoakTraceWriter trace,
+      AtomicBoolean abortRequested,
+      Supplier<ProcessingNode> replacementStarter) {
+    Objects.requireNonNull(interval, "interval");
+    var churner = new NodeChurner(interval, nodes, trace, abortRequested, replacementStarter);
+    churner.thread.start();
+    return churner;
+  }
+
+  void stop() {
+    stopped = true;
+    thread.interrupt();
+    try {
+      // The thread may be mid-close() on a node draining its grace
+      // period; give it a moment, but never hold up the run teardown.
+      thread.join(Duration.ofSeconds(30));
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
     }
+  }
+
+  private static void churnOnce(
+      List<ProcessingNode> nodes,
+      SoakTraceWriter trace,
+      Supplier<ProcessingNode> replacementStarter) {
+    ProcessingNode victim;
+    synchronized (nodes) {
+      if (nodes.size() < 2) return; // never churn the last node
+      victim = nodes.removeFirst();
+    }
+    trace.emit("node_churn_stop", Map.of("nodeId", victim.nodeId().toString()));
+    victim.close();
+    trace.emit("node_stopped", Map.of("nodeId", victim.nodeId().toString(), "reason", "churn"));
+    replacementStarter.get();
+  }
 }

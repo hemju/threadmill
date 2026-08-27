@@ -11,22 +11,22 @@ import java.util.function.Consumer;
  */
 public interface RemoteWakeChannel extends AutoCloseable {
 
-    /** Publish a best-effort wake hint for {@code queue}. */
-    void publish(String queue);
+  /** Publish a best-effort wake hint for {@code queue}. */
+  void publish(String queue);
 
-    /**
-     * Start listening for remote wake hints and call {@code wakeSink} with the
-     * queue name from each valid message.
-     */
-    void start(Consumer<String> wakeSink);
+  /**
+   * Start listening for remote wake hints and call {@code wakeSink} with the
+   * queue name from each valid message.
+   */
+  void start(Consumer<String> wakeSink);
 
-    /**
-     * Stop listening and release any owned resources.
-     *
-     * <p>Implementations must be <strong>idempotent</strong>: lifecycle
-     * orchestration (Spring stop/destroy callbacks, user-owned bean
-     * destruction) can invoke {@code close()} more than once.
-     */
-    @Override
-    void close();
+  /**
+   * Stop listening and release any owned resources.
+   *
+   * <p>Implementations must be <strong>idempotent</strong>: lifecycle
+   * orchestration (Spring stop/destroy callbacks, user-owned bean
+   * destruction) can invoke {@code close()} more than once.
+   */
+  @Override
+  void close();
 }

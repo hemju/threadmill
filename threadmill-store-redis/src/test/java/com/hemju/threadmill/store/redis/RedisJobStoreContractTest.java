@@ -20,38 +20,39 @@ import com.hemju.threadmill.test.AbstractJobStoreContractTest;
  */
 class RedisJobStoreContractTest extends AbstractJobStoreContractTest {
 
-    @SuppressWarnings("resource")
-    private static final GenericContainer<?> REDIS = new GenericContainer<>(DockerImageName.parse("redis:7-alpine"))
-            .withExposedPorts(6379)
-            .withCommand("redis-server", "--appendonly", "yes")
-            .waitingFor(Wait.forListeningPort());
+  @SuppressWarnings("resource")
+  private static final GenericContainer<?> REDIS = new GenericContainer<>(
+          DockerImageName.parse("redis:7-alpine"))
+      .withExposedPorts(6379)
+      .withCommand("redis-server", "--appendonly", "yes")
+      .waitingFor(Wait.forListeningPort());
 
-    private static RedisURI uri;
-    private static RedisClient adminClient;
-    private static StatefulRedisConnection<String, String> adminConnection;
+  private static RedisURI uri;
+  private static RedisClient adminClient;
+  private static StatefulRedisConnection<String, String> adminConnection;
 
-    @BeforeAll
-    static void startContainer() {
-        REDIS.start();
-        uri = RedisURI.create("redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
-        adminClient = RedisClient.create(uri);
-        adminConnection = adminClient.connect();
-    }
+  @BeforeAll
+  static void startContainer() {
+    REDIS.start();
+    uri = RedisURI.create("redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
+    adminClient = RedisClient.create(uri);
+    adminConnection = adminClient.connect();
+  }
 
-    @AfterAll
-    static void stopContainer() {
-        if (adminConnection != null) adminConnection.close();
-        if (adminClient != null) adminClient.shutdown();
-        if (REDIS.isRunning()) REDIS.stop();
-    }
+  @AfterAll
+  static void stopContainer() {
+    if (adminConnection != null) adminConnection.close();
+    if (adminClient != null) adminClient.shutdown();
+    if (REDIS.isRunning()) REDIS.stop();
+  }
 
-    @BeforeEach
-    void flushBetweenTests() {
-        adminConnection.sync().flushdb();
-    }
+  @BeforeEach
+  void flushBetweenTests() {
+    adminConnection.sync().flushdb();
+  }
 
-    @Override
-    protected JobStore createStore() {
-        return new RedisJobStore(uri);
-    }
+  @Override
+  protected JobStore createStore() {
+    return new RedisJobStore(uri);
+  }
 }

@@ -29,42 +29,40 @@ import com.hemju.threadmill.store.memory.InMemoryJobStore;
  * the documented dashboard chain is never created.
  */
 @SpringBootTest(
-        classes = ThreadmillDashboardSecurityStarterAutoConfigTest.TestApp.class,
-        properties = "spring.main.web-application-type=servlet")
+    classes = ThreadmillDashboardSecurityStarterAutoConfigTest.TestApp.class,
+    properties = "spring.main.web-application-type=servlet")
 class ThreadmillDashboardSecurityStarterAutoConfigTest {
 
-    private final WebApplicationContext context;
+  private final WebApplicationContext context;
 
-    ThreadmillDashboardSecurityStarterAutoConfigTest(WebApplicationContext context) {
-        this.context = context;
+  ThreadmillDashboardSecurityStarterAutoConfigTest(WebApplicationContext context) {
+    this.context = context;
+  }
+
+  @Test
+  void dashboardChainIsCreatedWhenTheHostReliesOnSecurityStarterAutoConfiguration() {
+    assertThat(context.containsBean("threadmillDashboardSecurityFilterChain")).isTrue();
+  }
+
+  @Test
+  void documentedSessionAndCsrfBehaviorApplies() throws Exception {
+    var mvc =
+        MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
+
+    mvc.perform(get("/threadmill/api/overview")).andExpect(status().isUnauthorized());
+    mvc.perform(get("/threadmill/api/session")
+            .with(user("ada").authorities(new SimpleGrantedAuthority("THREADMILL_READ"))))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.csrf.headerName").exists())
+        .andExpect(jsonPath("$.csrf.token").exists());
+  }
+
+  @SpringBootConfiguration
+  @EnableAutoConfiguration
+  static class TestApp {
+    @Bean
+    JobStore jobStore() {
+      return new InMemoryJobStore();
     }
-
-    @Test
-    void dashboardChainIsCreatedWhenTheHostReliesOnSecurityStarterAutoConfiguration() {
-        assertThat(context.containsBean("threadmillDashboardSecurityFilterChain"))
-                .isTrue();
-    }
-
-    @Test
-    void documentedSessionAndCsrfBehaviorApplies() throws Exception {
-        var mvc = MockMvcBuilders.webAppContextSetup(context)
-                .apply(springSecurity())
-                .build();
-
-        mvc.perform(get("/threadmill/api/overview")).andExpect(status().isUnauthorized());
-        mvc.perform(get("/threadmill/api/session")
-                        .with(user("ada").authorities(new SimpleGrantedAuthority("THREADMILL_READ"))))
-                .andExpect(status().isOk())
-                .andExpect(jsonPath("$.csrf.headerName").exists())
-                .andExpect(jsonPath("$.csrf.token").exists());
-    }
-
-    @SpringBootConfiguration
-    @EnableAutoConfiguration
-    static class TestApp {
-        @Bean
-        JobStore jobStore() {
-            return new InMemoryJobStore();
-        }
-    }
+  }
 }

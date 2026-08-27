@@ -55,78 +55,84 @@ import java.util.UUID;
  *                          accepted
  */
 public record CronTaskScheduleState(
-        String taskName,
-        Instant lastRunAt,
-        UUID lastRunJobId,
-        Instant nextRunAt,
-        UUID inFlightJobId,
-        String timingFingerprint,
-        Instant nudgeRequestedAt,
-        Long nudgeRevision) {
+    String taskName,
+    Instant lastRunAt,
+    UUID lastRunJobId,
+    Instant nextRunAt,
+    UUID inFlightJobId,
+    String timingFingerprint,
+    Instant nudgeRequestedAt,
+    Long nudgeRevision) {
 
-    public CronTaskScheduleState {
-        Objects.requireNonNull(taskName, "taskName");
-    }
+  public CronTaskScheduleState {
+    Objects.requireNonNull(taskName, "taskName");
+  }
 
-    /**
-     * Convenience constructor without the read-only nudge components — the
-     * natural shape for every writer, since {@code upsertCronTaskState} never
-     * persists those fields anyway.
-     */
-    public CronTaskScheduleState(
-            String taskName,
-            Instant lastRunAt,
-            UUID lastRunJobId,
-            Instant nextRunAt,
-            UUID inFlightJobId,
-            String timingFingerprint) {
-        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, timingFingerprint, null, null);
-    }
+  /**
+   * Convenience constructor without the read-only nudge components — the
+   * natural shape for every writer, since {@code upsertCronTaskState} never
+   * persists those fields anyway.
+   */
+  public CronTaskScheduleState(
+      String taskName,
+      Instant lastRunAt,
+      UUID lastRunJobId,
+      Instant nextRunAt,
+      UUID inFlightJobId,
+      String timingFingerprint) {
+    this(
+        taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, timingFingerprint, null, null);
+  }
 
-    /**
-     * Convenience constructor with no timing fingerprint. A materializer tick
-     * adopts the current task's fingerprint without moving a non-null
-     * {@code nextRunAt}; if timing is also null, it initializes the next fire
-     * from that tick. Production writers that compute {@code nextRunAt} from a
-     * task should stamp
-     * {@link #timingFingerprintOf(CronTask)} so unchanged re-registrations
-     * can preserve overdue state.
-     */
-    public CronTaskScheduleState(
-            String taskName, Instant lastRunAt, UUID lastRunJobId, Instant nextRunAt, UUID inFlightJobId) {
-        this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, null, null, null);
-    }
+  /**
+   * Convenience constructor with no timing fingerprint. A materializer tick
+   * adopts the current task's fingerprint without moving a non-null
+   * {@code nextRunAt}; if timing is also null, it initializes the next fire
+   * from that tick. Production writers that compute {@code nextRunAt} from a
+   * task should stamp
+   * {@link #timingFingerprintOf(CronTask)} so unchanged re-registrations
+   * can preserve overdue state.
+   */
+  public CronTaskScheduleState(
+      String taskName,
+      Instant lastRunAt,
+      UUID lastRunJobId,
+      Instant nextRunAt,
+      UUID inFlightJobId) {
+    this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, null, null, null);
+  }
 
-    public static CronTaskScheduleState initial(String taskName, Instant nextRunAt, String timingFingerprint) {
-        return new CronTaskScheduleState(taskName, null, null, nextRunAt, null, timingFingerprint);
-    }
+  public static CronTaskScheduleState initial(
+      String taskName, Instant nextRunAt, String timingFingerprint) {
+    return new CronTaskScheduleState(taskName, null, null, nextRunAt, null, timingFingerprint);
+  }
 
-    /** {@link #initial(String, Instant, String)} without a timing fingerprint. */
-    public static CronTaskScheduleState initial(String taskName, Instant nextRunAt) {
-        return initial(taskName, nextRunAt, null);
-    }
+  /** {@link #initial(String, Instant, String)} without a timing fingerprint. */
+  public static CronTaskScheduleState initial(String taskName, Instant nextRunAt) {
+    return initial(taskName, nextRunAt, null);
+  }
 
-    /**
-     * Canonical fingerprint of the parts of a task definition that determine
-     * its firing times: the trigger, plus the zone for cron triggers only —
-     * a {@link CronTask.Trigger.Interval} deliberately ignores its zone, so
-     * two nodes with different system-default zones must not treat the same
-     * interval as a schedule edit.
-     */
-    public static String timingFingerprintOf(CronTask task) {
-        Objects.requireNonNull(task, "task");
-        return switch (task.trigger()) {
-            case CronTask.Trigger.Interval interval -> "interval:" + interval.interval();
-            case CronTask.Trigger.CronExpr cron ->
-                "cron:" + cron.expression().expression() + "@" + task.zone().getId();
-        };
-    }
+  /**
+   * Canonical fingerprint of the parts of a task definition that determine
+   * its firing times: the trigger, plus the zone for cron triggers only —
+   * a {@link CronTask.Trigger.Interval} deliberately ignores its zone, so
+   * two nodes with different system-default zones must not treat the same
+   * interval as a schedule edit.
+   */
+  public static String timingFingerprintOf(CronTask task) {
+    Objects.requireNonNull(task, "task");
+    return switch (task.trigger()) {
+      case CronTask.Trigger.Interval interval -> "interval:" + interval.interval();
+      case CronTask.Trigger.CronExpr cron ->
+        "cron:" + cron.expression().expression() + "@" + task.zone().getId();
+    };
+  }
 
-    public Optional<Instant> lastRunAtValue() {
-        return Optional.ofNullable(lastRunAt);
-    }
+  public Optional<Instant> lastRunAtValue() {
+    return Optional.ofNullable(lastRunAt);
+  }
 
-    public Optional<UUID> inFlightJobIdValue() {
-        return Optional.ofNullable(inFlightJobId);
-    }
+  public Optional<UUID> inFlightJobIdValue() {
+    return Optional.ofNullable(inFlightJobId);
+  }
 }

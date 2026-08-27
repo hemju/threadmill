@@ -38,118 +38,122 @@ import com.hemju.threadmill.store.redis.RedisJobStore;
 @EnabledIf("com.hemju.threadmill.spring.DockerAvailable#check")
 class StorePrecedenceTest {
 
-    @SuppressWarnings("resource")
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(
-                    DockerImageName.parse("postgres:18-alpine"))
-            .withDatabaseName("threadmill")
-            .withUsername("threadmill")
-            .withPassword("threadmill");
+  @SuppressWarnings("resource")
+  private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(
+          DockerImageName.parse("postgres:18-alpine"))
+      .withDatabaseName("threadmill")
+      .withUsername("threadmill")
+      .withPassword("threadmill");
 
-    @SuppressWarnings("resource")
-    private static final GenericContainer<?> REDIS = new GenericContainer<>(DockerImageName.parse("redis:7-alpine"))
-            .withExposedPorts(6379)
-            .withCommand("redis-server", "--appendonly", "yes")
-            .waitingFor(Wait.forListeningPort());
+  @SuppressWarnings("resource")
+  private static final GenericContainer<?> REDIS = new GenericContainer<>(
+          DockerImageName.parse("redis:7-alpine"))
+      .withExposedPorts(6379)
+      .withCommand("redis-server", "--appendonly", "yes")
+      .waitingFor(Wait.forListeningPort());
 
-    private static DataSource dataSource;
+  private static DataSource dataSource;
 
-    @BeforeAll
-    static void start() {
-        POSTGRES.start();
-        REDIS.start();
-        var ds = new PGSimpleDataSource();
-        ds.setUrl(POSTGRES.getJdbcUrl());
-        ds.setUser(POSTGRES.getUsername());
-        ds.setPassword(POSTGRES.getPassword());
-        dataSource = ds;
-    }
+  @BeforeAll
+  static void start() {
+    POSTGRES.start();
+    REDIS.start();
+    var ds = new PGSimpleDataSource();
+    ds.setUrl(POSTGRES.getJdbcUrl());
+    ds.setUser(POSTGRES.getUsername());
+    ds.setPassword(POSTGRES.getPassword());
+    dataSource = ds;
+  }
 
-    @AfterAll
-    static void stop() {
-        if (POSTGRES.isRunning()) POSTGRES.stop();
-        if (REDIS.isRunning()) REDIS.stop();
-    }
+  @AfterAll
+  static void stop() {
+    if (POSTGRES.isRunning()) POSTGRES.stop();
+    if (REDIS.isRunning()) REDIS.stop();
+  }
 
-    private ApplicationContextRunner runner() {
-        return new ApplicationContextRunner()
-                .withConfiguration(AutoConfigurations.of(
-                        ThreadmillRedisAutoConfiguration.class,
-                        ThreadmillPostgresAutoConfiguration.class,
-                        ThreadmillAutoConfiguration.class))
-                .withBean(DataSource.class, () -> dataSource)
-                .withPropertyValues("threadmill.enabled=false");
-    }
+  private ApplicationContextRunner runner() {
+    return new ApplicationContextRunner()
+        .withConfiguration(AutoConfigurations.of(
+            ThreadmillRedisAutoConfiguration.class,
+            ThreadmillPostgresAutoConfiguration.class,
+            ThreadmillAutoConfiguration.class))
+        .withBean(DataSource.class, () -> dataSource)
+        .withPropertyValues("threadmill.enabled=false");
+  }
 
-    @Test
-    void explicitRedisConfigurationBeatsAPresentDataSource() {
-        runner().withPropertyValues(
-                        "threadmill.store.redis.uri=redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379))
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    assertThat(context.getBean(JobStore.class)).isInstanceOf(RedisJobStore.class);
-                });
-    }
-
-    @Test
-    void withoutRedisPropertiesTheDataSourceResolvesPostgres() {
-        runner().run(context -> {
-            assertThat(context).hasNotFailed();
-            assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
+  @Test
+  void explicitRedisConfigurationBeatsAPresentDataSource() {
+    runner()
+        .withPropertyValues("threadmill.store.redis.uri=redis://" + REDIS.getHost() + ":"
+            + REDIS.getMappedPort(6379))
+        .run(context -> {
+          assertThat(context).hasNotFailed();
+          assertThat(context.getBean(JobStore.class)).isInstanceOf(RedisJobStore.class);
         });
-    }
+  }
 
-    @Test
-    void onRedisStoreNotConfiguredMirrorsEveryRedisPropertyShape() {
-        // The Binder-based snapshot must stay in lockstep with
-        // RedisProperties.isConfigured() (uri / sentinel master / cluster
-        // nodes): a fourth way to configure Redis that this condition does
-        // not see would silently flip precedence to Postgres.
-        var condition = new OnRedisStoreNotConfigured();
+  @Test
+  void withoutRedisPropertiesTheDataSourceResolvesPostgres() {
+    runner().run(context -> {
+      assertThat(context).hasNotFailed();
+      assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
+    });
+  }
 
-        assertThat(matches(condition, new MockEnvironment())).isTrue();
+  @Test
+  void onRedisStoreNotConfiguredMirrorsEveryRedisPropertyShape() {
+    // The Binder-based snapshot must stay in lockstep with
+    // RedisProperties.isConfigured() (uri / sentinel master / cluster
+    // nodes): a fourth way to configure Redis that this condition does
+    // not see would silently flip precedence to Postgres.
+    var condition = new OnRedisStoreNotConfigured();
 
-        var uri = new MockEnvironment().withProperty("threadmill.store.redis.uri", "redis://localhost:6379");
-        assertThat(matches(condition, uri)).isFalse();
+    assertThat(matches(condition, new MockEnvironment())).isTrue();
 
-        var sentinel = new MockEnvironment()
-                .withProperty("threadmill.store.redis.sentinel.master-name", "mymaster")
-                .withProperty("threadmill.store.redis.sentinel.nodes[0]", "localhost:26379");
-        assertThat(matches(condition, sentinel)).isFalse();
+    var uri =
+        new MockEnvironment().withProperty("threadmill.store.redis.uri", "redis://localhost:6379");
+    assertThat(matches(condition, uri)).isFalse();
 
-        var cluster = new MockEnvironment().withProperty("threadmill.store.redis.cluster.nodes[0]", "localhost:7000");
-        assertThat(matches(condition, cluster)).isFalse();
+    var sentinel = new MockEnvironment()
+        .withProperty("threadmill.store.redis.sentinel.master-name", "mymaster")
+        .withProperty("threadmill.store.redis.sentinel.nodes[0]", "localhost:26379");
+    assertThat(matches(condition, sentinel)).isFalse();
 
-        var unrelated = new MockEnvironment().withProperty("threadmill.store.redis.mode", "standalone");
-        assertThat(matches(condition, unrelated)).isTrue();
-    }
+    var cluster = new MockEnvironment()
+        .withProperty("threadmill.store.redis.cluster.nodes[0]", "localhost:7000");
+    assertThat(matches(condition, cluster)).isFalse();
 
-    private static boolean matches(OnRedisStoreNotConfigured condition, MockEnvironment environment) {
-        var context = new ConditionContext() {
-            @Override
-            public ConfigurableListableBeanFactory getBeanFactory() {
-                return null;
-            }
+    var unrelated = new MockEnvironment().withProperty("threadmill.store.redis.mode", "standalone");
+    assertThat(matches(condition, unrelated)).isTrue();
+  }
 
-            @Override
-            public Environment getEnvironment() {
-                return environment;
-            }
+  private static boolean matches(OnRedisStoreNotConfigured condition, MockEnvironment environment) {
+    var context = new ConditionContext() {
+      @Override
+      public ConfigurableListableBeanFactory getBeanFactory() {
+        return null;
+      }
 
-            @Override
-            public ResourceLoader getResourceLoader() {
-                return new DefaultResourceLoader();
-            }
+      @Override
+      public Environment getEnvironment() {
+        return environment;
+      }
 
-            @Override
-            public ClassLoader getClassLoader() {
-                return StorePrecedenceTest.class.getClassLoader();
-            }
+      @Override
+      public ResourceLoader getResourceLoader() {
+        return new DefaultResourceLoader();
+      }
 
-            @Override
-            public BeanDefinitionRegistry getRegistry() {
-                return null;
-            }
-        };
-        return condition.getMatchOutcome(context, null).isMatch();
-    }
+      @Override
+      public ClassLoader getClassLoader() {
+        return StorePrecedenceTest.class.getClassLoader();
+      }
+
+      @Override
+      public BeanDefinitionRegistry getRegistry() {
+        return null;
+      }
+    };
+    return condition.getMatchOutcome(context, null).isMatch();
+  }
 }

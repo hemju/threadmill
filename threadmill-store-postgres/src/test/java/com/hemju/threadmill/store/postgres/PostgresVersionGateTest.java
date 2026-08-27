@@ -25,35 +25,35 @@ import com.hemju.threadmill.core.JobEngineFatalException;
 @SuppressWarnings("resource")
 class PostgresVersionGateTest {
 
-    private static final PostgreSQLContainer POSTGRES_17 = new PostgreSQLContainer(
-                    DockerImageName.parse("postgres:17-alpine"))
-            .withDatabaseName("threadmill")
-            .withUsername("threadmill")
-            .withPassword("threadmill");
+  private static final PostgreSQLContainer POSTGRES_17 = new PostgreSQLContainer(
+          DockerImageName.parse("postgres:17-alpine"))
+      .withDatabaseName("threadmill")
+      .withUsername("threadmill")
+      .withPassword("threadmill");
 
-    private static DataSource dataSource;
+  private static DataSource dataSource;
 
-    @BeforeAll
-    static void start() {
-        POSTGRES_17.start();
-        var ds = new PGSimpleDataSource();
-        ds.setUrl(POSTGRES_17.getJdbcUrl());
-        ds.setUser(POSTGRES_17.getUsername());
-        ds.setPassword(POSTGRES_17.getPassword());
-        dataSource = ds;
-    }
+  @BeforeAll
+  static void start() {
+    POSTGRES_17.start();
+    var ds = new PGSimpleDataSource();
+    ds.setUrl(POSTGRES_17.getJdbcUrl());
+    ds.setUser(POSTGRES_17.getUsername());
+    ds.setPassword(POSTGRES_17.getPassword());
+    dataSource = ds;
+  }
 
-    @AfterAll
-    static void stop() {
-        if (POSTGRES_17.isRunning()) POSTGRES_17.stop();
-    }
+  @AfterAll
+  static void stop() {
+    if (POSTGRES_17.isRunning()) POSTGRES_17.stop();
+  }
 
-    @Test
-    void refusesToStartAgainstPrePostgresEighteenServers() {
-        assertThatThrownBy(() -> new PostgresJobStore(dataSource))
-                .isInstanceOf(JobEngineFatalException.class)
-                .satisfies(e -> assertThat(e.getMessage())
-                        .contains("requires PostgreSQL 18")
-                        .contains("server major 17"));
-    }
+  @Test
+  void refusesToStartAgainstPrePostgresEighteenServers() {
+    assertThatThrownBy(() -> new PostgresJobStore(dataSource))
+        .isInstanceOf(JobEngineFatalException.class)
+        .satisfies(e -> assertThat(e.getMessage())
+            .contains("requires PostgreSQL 18")
+            .contains("server major 17"));
+  }
 }

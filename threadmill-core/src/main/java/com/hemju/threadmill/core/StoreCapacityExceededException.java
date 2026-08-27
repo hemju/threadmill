@@ -6,7 +6,7 @@ package com.hemju.threadmill.core;
  */
 public final class StoreCapacityExceededException extends RuntimeException {
 
-    public StoreCapacityExceededException(String message, Throwable cause) {
-        super(message, cause);
-    }
+  public StoreCapacityExceededException(String message, Throwable cause) {
+    super(message, cause);
+  }
 }

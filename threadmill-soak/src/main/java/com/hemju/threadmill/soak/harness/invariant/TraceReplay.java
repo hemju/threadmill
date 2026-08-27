@@ -22,58 +22,61 @@ import com.fasterxml.jackson.databind.ObjectMapper;
  */
 public final class TraceReplay {
 
-    private TraceReplay() {}
+  private TraceReplay() {}
 
-    /** Verify {@code traceFile} against fresh checks for every invariant; returns final results in order. */
-    public static List<InvariantResult> verify(Path traceFile, List<SoakInvariant> invariants) throws IOException {
-        Objects.requireNonNull(traceFile, "traceFile");
-        List<StreamingInvariantCheck> checks =
-                invariants.stream().map(SoakInvariant::newCheck).toList();
-        List<RuntimeException> failures = feed(traceFile, checks);
-        List<InvariantResult> results = new ArrayList<>(checks.size());
+  /** Verify {@code traceFile} against fresh checks for every invariant; returns final results in order. */
+  public static List<InvariantResult> verify(Path traceFile, List<SoakInvariant> invariants)
+      throws IOException {
+    Objects.requireNonNull(traceFile, "traceFile");
+    List<StreamingInvariantCheck> checks =
+        invariants.stream().map(SoakInvariant::newCheck).toList();
+    List<RuntimeException> failures = feed(traceFile, checks);
+    List<InvariantResult> results = new ArrayList<>(checks.size());
+    for (int i = 0; i < checks.size(); i++) {
+      StreamingInvariantCheck check = checks.get(i);
+      RuntimeException failure = failures.get(i);
+      if (failure != null) {
+        results.add(InvariantResult.fail(
+            check.name(),
+            List.of("invariant raised " + failure.getClass().getSimpleName() + ": "
+                + failure.getMessage()),
+            List.of()));
+      } else {
+        results.add(check.finish());
+      }
+    }
+    return results;
+  }
+
+  /**
+   * Stream every line of {@code traceFile} into {@code checks}. Returns a
+   * parallel list holding the first exception each check raised (or null);
+   * a check that throws receives no further events.
+   */
+  public static List<RuntimeException> feed(Path traceFile, List<StreamingInvariantCheck> checks)
+      throws IOException {
+    var mapper = new ObjectMapper();
+    var failures = new ArrayList<RuntimeException>(checks.size());
+    for (int i = 0; i < checks.size(); i++) failures.add(null);
+    try (var lines = Files.lines(traceFile)) {
+      lines.forEach(line -> {
+        if (line.isBlank()) return;
+        TraceEvent event;
+        try {
+          event = new TraceEvent(mapper.readTree(line), line);
+        } catch (IOException e) {
+          throw new UncheckedIOException("malformed trace line: " + line, e);
+        }
         for (int i = 0; i < checks.size(); i++) {
-            StreamingInvariantCheck check = checks.get(i);
-            RuntimeException failure = failures.get(i);
-            if (failure != null) {
-                results.add(InvariantResult.fail(
-                        check.name(),
-                        List.of("invariant raised " + failure.getClass().getSimpleName() + ": " + failure.getMessage()),
-                        List.of()));
-            } else {
-                results.add(check.finish());
-            }
+          if (failures.get(i) != null) continue;
+          try {
+            checks.get(i).onEvent(event);
+          } catch (RuntimeException e) {
+            failures.set(i, e);
+          }
         }
-        return results;
+      });
     }
-
-    /**
-     * Stream every line of {@code traceFile} into {@code checks}. Returns a
-     * parallel list holding the first exception each check raised (or null);
-     * a check that throws receives no further events.
-     */
-    public static List<RuntimeException> feed(Path traceFile, List<StreamingInvariantCheck> checks) throws IOException {
-        var mapper = new ObjectMapper();
-        var failures = new ArrayList<RuntimeException>(checks.size());
-        for (int i = 0; i < checks.size(); i++) failures.add(null);
-        try (var lines = Files.lines(traceFile)) {
-            lines.forEach(line -> {
-                if (line.isBlank()) return;
-                TraceEvent event;
-                try {
-                    event = new TraceEvent(mapper.readTree(line), line);
-                } catch (IOException e) {
-                    throw new UncheckedIOException("malformed trace line: " + line, e);
-                }
-                for (int i = 0; i < checks.size(); i++) {
-                    if (failures.get(i) != null) continue;
-                    try {
-                        checks.get(i).onEvent(event);
-                    } catch (RuntimeException e) {
-                        failures.set(i, e);
-                    }
-                }
-            });
-        }
-        return failures;
-    }
+    return failures;
+  }
 }

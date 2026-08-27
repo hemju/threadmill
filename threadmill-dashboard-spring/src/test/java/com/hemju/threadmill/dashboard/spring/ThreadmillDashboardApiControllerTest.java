@@ -43,373 +43,392 @@ import com.hemju.threadmill.store.memory.InMemoryJobStore;
 
 class ThreadmillDashboardApiControllerTest {
 
-    private InMemoryJobStore store;
-    private List<DashboardAuditEvent> auditEvents;
-    private ThreadmillDashboardApiController secureController;
+  private InMemoryJobStore store;
+  private List<DashboardAuditEvent> auditEvents;
+  private ThreadmillDashboardApiController secureController;
 
-    @BeforeEach
-    void setUp() {
-        store = new InMemoryJobStore();
-        auditEvents = new ArrayList<>();
-        var service = new DashboardApiService(store, new LocalWakeBus());
-        secureController = new ThreadmillDashboardApiController(
-                service, new SpringSecurityDashboardAuthorizer(), auditEvents::add, DashboardOptions.secureDefaults());
-    }
+  @BeforeEach
+  void setUp() {
+    store = new InMemoryJobStore();
+    auditEvents = new ArrayList<>();
+    var service = new DashboardApiService(store, new LocalWakeBus());
+    secureController = new ThreadmillDashboardApiController(
+        service,
+        new SpringSecurityDashboardAuthorizer(),
+        auditEvents::add,
+        DashboardOptions.secureDefaults());
+  }
 
-    @Test
-    void unauthenticatedRequestsAreRejected() {
-        assertThatThrownBy(() -> secureController.overview(null))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode())
-                        .isEqualTo(HttpStatus.UNAUTHORIZED));
-    }
+  @Test
+  void unauthenticatedRequestsAreRejected() {
+    assertThatThrownBy(() -> secureController.overview(null))
+        .isInstanceOf(ResponseStatusException.class)
+        .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode())
+            .isEqualTo(HttpStatus.UNAUTHORIZED));
+  }
 
-    @Test
-    void missingPermissionReturnsForbidden() {
-        var auth = auth("alice", "THREADMILL_READ");
+  @Test
+  void missingPermissionReturnsForbidden() {
+    var auth = auth("alice", "THREADMILL_READ");
 
-        assertThatThrownBy(() -> secureController.pauseQueue(auth, "default", null))
-                .isInstanceOf(ResponseStatusException.class)
-                .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode())
-                        .isEqualTo(HttpStatus.FORBIDDEN));
-    }
+    assertThatThrownBy(() -> secureController.pauseQueue(auth, "default", null))
+        .isInstanceOf(ResponseStatusException.class)
+        .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode())
+            .isEqualTo(HttpStatus.FORBIDDEN));
+  }
 
-    @Test
-    void recurringPayloadIsRedactedForReadOnlyCallersAndVisibleWithPermission() {
-        store.upsertCronTask(new CronTask(
-                "report",
-                new CronTask.Trigger.CronExpr(CronExpression.parse("*/5 * * * *")),
-                "com.example.Report",
-                new JobArgument("com.example.Payload", "{\"apiKey\":\"secret\"}"),
-                "default",
-                0,
-                CronTask.MissedRunPolicy.DROP,
-                ZoneId.of("UTC"),
-                true));
+  @Test
+  void recurringPayloadIsRedactedForReadOnlyCallersAndVisibleWithPermission() {
+    store.upsertCronTask(new CronTask(
+        "report",
+        new CronTask.Trigger.CronExpr(CronExpression.parse("*/5 * * * *")),
+        "com.example.Report",
+        new JobArgument("com.example.Payload", "{\"apiKey\":\"secret\"}"),
+        "default",
+        0,
+        CronTask.MissedRunPolicy.DROP,
+        ZoneId.of("UTC"),
+        true));
 
-        // Plain READ: payload absent on /recurring AND /overview, trigger
-        // rendered as explicit wire-stable strings.
-        var readOnly = secureController.recurring(auth("alice", "THREADMILL_READ"));
-        assertThat(readOnly).singleElement().satisfies(view -> {
-            assertThat(view.task().payloadArgument()).isNull();
-            assertThat(view.task().payloadRedacted()).isTrue();
-            assertThat(view.task().triggerKind()).isEqualTo("CRON");
-            assertThat(view.task().triggerValue()).isEqualTo("*/5 * * * *");
-        });
-        assertThat(secureController.overview(auth("alice", "THREADMILL_READ")).cronTasks())
-                .singleElement()
-                .satisfies(view -> assertThat(view.task().payloadArgument()).isNull());
+    // Plain READ: payload absent on /recurring AND /overview, trigger
+    // rendered as explicit wire-stable strings.
+    var readOnly = secureController.recurring(auth("alice", "THREADMILL_READ"));
+    assertThat(readOnly).singleElement().satisfies(view -> {
+      assertThat(view.task().payloadArgument()).isNull();
+      assertThat(view.task().payloadRedacted()).isTrue();
+      assertThat(view.task().triggerKind()).isEqualTo("CRON");
+      assertThat(view.task().triggerValue()).isEqualTo("*/5 * * * *");
+    });
+    assertThat(secureController.overview(auth("alice", "THREADMILL_READ")).cronTasks())
+        .singleElement()
+        .satisfies(view -> assertThat(view.task().payloadArgument()).isNull());
 
-        // exposeSensitiveDetails + VIEW_SENSITIVE_DETAILS: payload present.
-        var permissive = new ThreadmillDashboardApiController(
-                new DashboardApiService(store, new LocalWakeBus()),
-                new SpringSecurityDashboardAuthorizer(),
-                auditEvents::add,
-                new DashboardOptions(false, true));
-        var sensitive = permissive.recurring(auth("admin", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"));
-        assertThat(sensitive).singleElement().satisfies(view -> {
-            assertThat(view.task().payloadArgument()).isNotNull();
-            assertThat(view.task().payloadArgument().serialized()).contains("secret");
-            assertThat(view.task().payloadRedacted()).isFalse();
-        });
-    }
+    // exposeSensitiveDetails + VIEW_SENSITIVE_DETAILS: payload present.
+    var permissive = new ThreadmillDashboardApiController(
+        new DashboardApiService(store, new LocalWakeBus()),
+        new SpringSecurityDashboardAuthorizer(),
+        auditEvents::add,
+        new DashboardOptions(false, true));
+    var sensitive =
+        permissive.recurring(auth("admin", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"));
+    assertThat(sensitive).singleElement().satisfies(view -> {
+      assertThat(view.task().payloadArgument()).isNotNull();
+      assertThat(view.task().payloadArgument().serialized()).contains("secret");
+      assertThat(view.task().payloadRedacted()).isFalse();
+    });
+  }
 
-    @Test
-    void redactionIsTheDefaultForJobDetails() {
-        var job = insertSensitiveJob();
+  @Test
+  void redactionIsTheDefaultForJobDetails() {
+    var job = insertSensitiveJob();
 
-        var detail =
-                secureController.job(auth("alice", "THREADMILL_READ"), job.id().toString());
+    var detail = secureController.job(auth("alice", "THREADMILL_READ"), job.id().toString());
 
-        assertThat(detail.sensitiveDetailsRedacted()).isTrue();
-        assertThat(detail.arguments()).isEmpty();
-        assertThat(detail.metadata()).isEmpty();
-        assertThat(detail.log()).isEmpty();
-        assertThat(detail.stateHistory())
-                .allSatisfy(entry -> assertThat(entry.message()).isNull());
-    }
+    assertThat(detail.sensitiveDetailsRedacted()).isTrue();
+    assertThat(detail.arguments()).isEmpty();
+    assertThat(detail.metadata()).isEmpty();
+    assertThat(detail.log()).isEmpty();
+    assertThat(detail.stateHistory())
+        .allSatisfy(entry -> assertThat(entry.message()).isNull());
+  }
 
-    @Test
-    void sensitiveDetailsRequirePermissionAndExplicitConfiguration() {
-        var job = insertSensitiveJob();
-        var controller = new ThreadmillDashboardApiController(
-                new DashboardApiService(store, new LocalWakeBus()),
-                new SpringSecurityDashboardAuthorizer(),
-                auditEvents::add,
-                new DashboardOptions(false, true));
+  @Test
+  void sensitiveDetailsRequirePermissionAndExplicitConfiguration() {
+    var job = insertSensitiveJob();
+    var controller = new ThreadmillDashboardApiController(
+        new DashboardApiService(store, new LocalWakeBus()),
+        new SpringSecurityDashboardAuthorizer(),
+        auditEvents::add,
+        new DashboardOptions(false, true));
 
-        var detail = controller.job(
-                auth("alice", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"),
-                job.id().toString());
+    var detail = controller.job(
+        auth("alice", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"),
+        job.id().toString());
 
-        assertThat(detail.sensitiveDetailsRedacted()).isFalse();
-        assertThat(detail.arguments()).extracting(JobArgument::serialized).containsExactly("{\"secret\":\"value\"}");
-        assertThat(detail.metadata()).containsEntry("token", "secret-token");
-        assertThat(detail.log()).extracting(entry -> entry.message()).containsExactly("hidden log");
-        assertThat(detail.stateHistory()).extracting(entry -> entry.message()).contains("hidden failure");
-    }
+    assertThat(detail.sensitiveDetailsRedacted()).isFalse();
+    assertThat(detail.arguments())
+        .extracting(JobArgument::serialized)
+        .containsExactly("{\"secret\":\"value\"}");
+    assertThat(detail.metadata()).containsEntry("token", "secret-token");
+    assertThat(detail.log()).extracting(entry -> entry.message()).containsExactly("hidden log");
+    assertThat(detail.stateHistory())
+        .extracting(entry -> entry.message())
+        .contains("hidden failure");
+  }
 
-    @Test
-    void mutationActionsAuditSuccessAndFailure() {
-        var failed = Job.builder()
-                .spec(JobSpec.of("com.example.Handler"))
-                .initialState(JobState.FAILED)
-                .build();
-        store.insert(failed);
-        var auth = auth("operator", "THREADMILL_REQUEUE_JOB");
+  @Test
+  void mutationActionsAuditSuccessAndFailure() {
+    var failed = Job.builder()
+        .spec(JobSpec.of("com.example.Handler"))
+        .initialState(JobState.FAILED)
+        .build();
+    store.insert(failed);
+    var auth = auth("operator", "THREADMILL_REQUEUE_JOB");
 
-        var response =
-                secureController.requeue(auth, failed.id().toString(), new VersionedActionRequest(failed.version()));
-        assertThat(response.status()).isEqualTo("requeued");
-        assertThat(auditEvents).extracting(DashboardAuditEvent::outcome).containsExactly("requeued");
+    var response = secureController.requeue(
+        auth, failed.id().toString(), new VersionedActionRequest(failed.version()));
+    assertThat(response.status()).isEqualTo("requeued");
+    assertThat(auditEvents).extracting(DashboardAuditEvent::outcome).containsExactly("requeued");
 
-        var processing = insertProcessingJob();
-        assertThatThrownBy(() -> secureController.requeue(
-                        auth, processing.id().toString(), new VersionedActionRequest(processing.version())))
-                .isInstanceOf(DashboardApiException.class)
-                .satisfies(error -> assertThat(((DashboardApiException) error).code())
-                        .isEqualTo(DashboardApiException.Code.CONFLICT));
-        assertThat(auditEvents).extracting(DashboardAuditEvent::outcome).containsExactly("requeued", "failed");
-    }
+    var processing = insertProcessingJob();
+    assertThatThrownBy(() -> secureController.requeue(
+            auth, processing.id().toString(), new VersionedActionRequest(processing.version())))
+        .isInstanceOf(DashboardApiException.class)
+        .satisfies(error -> assertThat(((DashboardApiException) error).code())
+            .isEqualTo(DashboardApiException.Code.CONFLICT));
+    assertThat(auditEvents)
+        .extracting(DashboardAuditEvent::outcome)
+        .containsExactly("requeued", "failed");
+  }
 
-    @Test
-    void retrySchedulingRequiresFailedStateAndVersionMatch() {
-        var failed = Job.builder()
-                .spec(JobSpec.of("com.example.Handler"))
-                .initialState(JobState.FAILED)
-                .build();
-        store.insert(failed);
-        var auth = auth("operator", "THREADMILL_REQUEUE_JOB");
+  @Test
+  void retrySchedulingRequiresFailedStateAndVersionMatch() {
+    var failed = Job.builder()
+        .spec(JobSpec.of("com.example.Handler"))
+        .initialState(JobState.FAILED)
+        .build();
+    store.insert(failed);
+    var auth = auth("operator", "THREADMILL_REQUEUE_JOB");
 
-        secureController.scheduleRetry(
-                auth, failed.id().toString(), new ScheduleRetryRequest(failed.version(), Duration.ofMinutes(5)));
+    secureController.scheduleRetry(
+        auth,
+        failed.id().toString(),
+        new ScheduleRetryRequest(failed.version(), Duration.ofMinutes(5)));
 
-        var loaded = store.findById(failed.id()).orElseThrow();
-        assertThat(loaded.currentState()).isEqualTo(JobState.SCHEDULED);
-        assertThat(loaded.scheduledFor())
-                .hasValueSatisfying(at -> assertThat(at).isAfter(Instant.now()));
-    }
+    var loaded = store.findById(failed.id()).orElseThrow();
+    assertThat(loaded.currentState()).isEqualTo(JobState.SCHEDULED);
+    assertThat(loaded.scheduledFor())
+        .hasValueSatisfying(at -> assertThat(at).isAfter(Instant.now()));
+  }
 
-    @Test
-    void nonRichStoreSearchRequiresStateOnly() {
-        var limitedStore = new InMemoryJobStore(
-                new JsonJobSerializer(),
-                new JobStoreCapabilities(
-                        JobStoreCapabilities.DEFAULT_MAX_SERIALIZED_BYTES,
-                        JobStoreCapabilities.DEFAULT_MAX_JOB_LOG_BYTES,
-                        JobStoreCapabilities.DEFAULT_MAX_FAILURE_METADATA_BYTES,
-                        1000,
-                        false,
-                        true,
-                        true,
-                        true));
-        var service = new DashboardApiService(limitedStore, new LocalWakeBus());
+  @Test
+  void nonRichStoreSearchRequiresStateOnly() {
+    var limitedStore = new InMemoryJobStore(
+        new JsonJobSerializer(),
+        new JobStoreCapabilities(
+            JobStoreCapabilities.DEFAULT_MAX_SERIALIZED_BYTES,
+            JobStoreCapabilities.DEFAULT_MAX_JOB_LOG_BYTES,
+            JobStoreCapabilities.DEFAULT_MAX_FAILURE_METADATA_BYTES,
+            1000,
+            false,
+            true,
+            true,
+            true));
+    var service = new DashboardApiService(limitedStore, new LocalWakeBus());
 
-        assertThatThrownBy(() -> service.jobs(JobSearch.all()))
-                .isInstanceOf(DashboardApiException.class)
-                .satisfies(error -> assertThat(((DashboardApiException) error).code())
-                        .isEqualTo(DashboardApiException.Code.BAD_REQUEST));
-        assertThatThrownBy(() -> service.jobs(new JobSearch(JobState.ENQUEUED, "default", null, 50, 0)))
-                .isInstanceOf(DashboardApiException.class)
-                .satisfies(error -> assertThat(((DashboardApiException) error).code())
-                        .isEqualTo(DashboardApiException.Code.BAD_REQUEST));
-    }
+    assertThatThrownBy(() -> service.jobs(JobSearch.all()))
+        .isInstanceOf(DashboardApiException.class)
+        .satisfies(error -> assertThat(((DashboardApiException) error).code())
+            .isEqualTo(DashboardApiException.Code.BAD_REQUEST));
+    assertThatThrownBy(() -> service.jobs(new JobSearch(JobState.ENQUEUED, "default", null, 50, 0)))
+        .isInstanceOf(DashboardApiException.class)
+        .satisfies(error -> assertThat(((DashboardApiException) error).code())
+            .isEqualTo(DashboardApiException.Code.BAD_REQUEST));
+  }
 
-    @Test
-    void replaceJobReportsMissingStaleAndWrongStateDistinctly() {
-        var auth = auth("operator", "THREADMILL_REPLACE_JOB");
-        var processing = insertProcessingJob();
-        var pending = Job.builder().spec(JobSpec.of("com.example.Handler")).build();
-        store.insert(pending);
+  @Test
+  void replaceJobReportsMissingStaleAndWrongStateDistinctly() {
+    var auth = auth("operator", "THREADMILL_REPLACE_JOB");
+    var processing = insertProcessingJob();
+    var pending = Job.builder().spec(JobSpec.of("com.example.Handler")).build();
+    store.insert(pending);
 
-        assertThatThrownBy(() -> secureController.replaceJob(
-                        auth,
-                        JobId.newId().toString(),
-                        new DashboardPayloads.ReplaceJobRequest(1, null, null, null, "com.example.Other", List.of())))
-                .isInstanceOf(DashboardApiException.class)
-                .satisfies(error -> assertThat(((DashboardApiException) error).code())
-                        .isEqualTo(DashboardApiException.Code.NOT_FOUND));
-        assertThatThrownBy(() -> secureController.replaceJob(
-                        auth,
-                        pending.id().toString(),
-                        new DashboardPayloads.ReplaceJobRequest(
-                                pending.version() + 1, null, null, null, "com.example.Other", List.of())))
-                .isInstanceOf(DashboardApiException.class)
-                .satisfies(error -> assertThat(((DashboardApiException) error).code())
-                        .isEqualTo(DashboardApiException.Code.CONFLICT));
-        assertThatThrownBy(() -> secureController.replaceJob(
-                        auth,
-                        processing.id().toString(),
-                        new DashboardPayloads.ReplaceJobRequest(
-                                processing.version(), null, null, null, "com.example.Other", List.of())))
-                .isInstanceOf(DashboardApiException.class)
-                .satisfies(error -> assertThat(((DashboardApiException) error).code())
-                        .isEqualTo(DashboardApiException.Code.CONFLICT));
-    }
+    assertThatThrownBy(() -> secureController.replaceJob(
+            auth,
+            JobId.newId().toString(),
+            new DashboardPayloads.ReplaceJobRequest(
+                1, null, null, null, "com.example.Other", List.of())))
+        .isInstanceOf(DashboardApiException.class)
+        .satisfies(error -> assertThat(((DashboardApiException) error).code())
+            .isEqualTo(DashboardApiException.Code.NOT_FOUND));
+    assertThatThrownBy(() -> secureController.replaceJob(
+            auth,
+            pending.id().toString(),
+            new DashboardPayloads.ReplaceJobRequest(
+                pending.version() + 1, null, null, null, "com.example.Other", List.of())))
+        .isInstanceOf(DashboardApiException.class)
+        .satisfies(error -> assertThat(((DashboardApiException) error).code())
+            .isEqualTo(DashboardApiException.Code.CONFLICT));
+    assertThatThrownBy(() -> secureController.replaceJob(
+            auth,
+            processing.id().toString(),
+            new DashboardPayloads.ReplaceJobRequest(
+                processing.version(), null, null, null, "com.example.Other", List.of())))
+        .isInstanceOf(DashboardApiException.class)
+        .satisfies(error -> assertThat(((DashboardApiException) error).code())
+            .isEqualTo(DashboardApiException.Code.CONFLICT));
+  }
 
-    @Test
-    void pauseQueueRejectsOversizedReasons() {
-        var auth = auth("operator", "THREADMILL_PAUSE_QUEUE");
-        var reason = "x".repeat(257);
+  @Test
+  void pauseQueueRejectsOversizedReasons() {
+    var auth = auth("operator", "THREADMILL_PAUSE_QUEUE");
+    var reason = "x".repeat(257);
 
-        assertThatThrownBy(() ->
-                        secureController.pauseQueue(auth, "default", new DashboardPayloads.PauseQueueRequest(reason)))
-                .isInstanceOf(DashboardApiException.class)
-                .satisfies(error -> assertThat(((DashboardApiException) error).code())
-                        .isEqualTo(DashboardApiException.Code.BAD_REQUEST));
-    }
+    assertThatThrownBy(() -> secureController.pauseQueue(
+            auth, "default", new DashboardPayloads.PauseQueueRequest(reason)))
+        .isInstanceOf(DashboardApiException.class)
+        .satisfies(error -> assertThat(((DashboardApiException) error).code())
+            .isEqualTo(DashboardApiException.Code.BAD_REQUEST));
+  }
 
-    @Test
-    void unsafeLocalModeAllowsReadOnlyWithoutAuthentication() {
-        var controller = new ThreadmillDashboardApiController(
-                new DashboardApiService(store, new LocalWakeBus()),
-                new SpringSecurityDashboardAuthorizer(),
-                DashboardAuditSink.noop(),
-                new DashboardOptions(true, false));
+  @Test
+  void unsafeLocalModeAllowsReadOnlyWithoutAuthentication() {
+    var controller = new ThreadmillDashboardApiController(
+        new DashboardApiService(store, new LocalWakeBus()),
+        new SpringSecurityDashboardAuthorizer(),
+        DashboardAuditSink.noop(),
+        new DashboardOptions(true, false));
 
-        assertThat(controller.overview(null).countsByState()).containsKey(JobState.ENQUEUED);
-    }
+    assertThat(controller.overview(null).countsByState()).containsKey(JobState.ENQUEUED);
+  }
 
-    @Test
-    void adminAloneSeesUnredactedDetailsWhenExposureIsConfigured() {
-        var job = insertSensitiveJob();
-        // A custom authorizer may return the bare ADMIN permission without
-        // expanding it — ADMIN must be a superset for redaction too.
-        DashboardAuthorizer adminOnly = authentication -> Set.of(DashboardPermission.ADMIN);
-        var controller = new ThreadmillDashboardApiController(
-                new DashboardApiService(store, new LocalWakeBus()),
-                adminOnly,
-                auditEvents::add,
-                new DashboardOptions(false, true));
+  @Test
+  void adminAloneSeesUnredactedDetailsWhenExposureIsConfigured() {
+    var job = insertSensitiveJob();
+    // A custom authorizer may return the bare ADMIN permission without
+    // expanding it — ADMIN must be a superset for redaction too.
+    DashboardAuthorizer adminOnly = authentication -> Set.of(DashboardPermission.ADMIN);
+    var controller = new ThreadmillDashboardApiController(
+        new DashboardApiService(store, new LocalWakeBus()),
+        adminOnly,
+        auditEvents::add,
+        new DashboardOptions(false, true));
 
-        var detail = controller.job(auth("root"), job.id().toString());
+    var detail = controller.job(auth("root"), job.id().toString());
 
-        assertThat(detail.sensitiveDetailsRedacted()).isFalse();
-        assertThat(detail.arguments()).extracting(JobArgument::serialized).containsExactly("{\"secret\":\"value\"}");
-    }
+    assertThat(detail.sensitiveDetailsRedacted()).isFalse();
+    assertThat(detail.arguments())
+        .extracting(JobArgument::serialized)
+        .containsExactly("{\"secret\":\"value\"}");
+  }
 
-    @Test
-    void deniedMutationAttemptsAreAudited() {
-        assertThatThrownBy(() -> secureController.pauseQueue(
-                        auth("intruder", "THREADMILL_READ"), "default", new DashboardPayloads.PauseQueueRequest(null)))
-                .isInstanceOf(ResponseStatusException.class);
+  @Test
+  void deniedMutationAttemptsAreAudited() {
+    assertThatThrownBy(() -> secureController.pauseQueue(
+            auth("intruder", "THREADMILL_READ"),
+            "default",
+            new DashboardPayloads.PauseQueueRequest(null)))
+        .isInstanceOf(ResponseStatusException.class);
 
-        assertThat(auditEvents).singleElement().satisfies(event -> {
-            assertThat(event.outcome()).isEqualTo("denied");
-            assertThat(event.action()).isEqualTo("pause_queue");
-            assertThat(event.actor()).isEqualTo("intruder");
-        });
-    }
+    assertThat(auditEvents).singleElement().satisfies(event -> {
+      assertThat(event.outcome()).isEqualTo("denied");
+      assertThat(event.action()).isEqualTo("pause_queue");
+      assertThat(event.actor()).isEqualTo("intruder");
+    });
+  }
 
-    @Test
-    void sensitiveDetailViewsAreAudited() {
-        var job = insertSensitiveJob();
-        var controller = new ThreadmillDashboardApiController(
-                new DashboardApiService(store, new LocalWakeBus()),
-                new SpringSecurityDashboardAuthorizer(),
-                auditEvents::add,
-                new DashboardOptions(false, true));
+  @Test
+  void sensitiveDetailViewsAreAudited() {
+    var job = insertSensitiveJob();
+    var controller = new ThreadmillDashboardApiController(
+        new DashboardApiService(store, new LocalWakeBus()),
+        new SpringSecurityDashboardAuthorizer(),
+        auditEvents::add,
+        new DashboardOptions(false, true));
 
-        controller.job(
-                auth("alice", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"),
-                job.id().toString());
+    controller.job(
+        auth("alice", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"),
+        job.id().toString());
 
-        assertThat(auditEvents).singleElement().satisfies(event -> {
-            assertThat(event.action()).isEqualTo("view_sensitive_details");
-            assertThat(event.outcome()).isEqualTo("viewed");
-            assertThat(event.target()).isEqualTo(job.id().toString());
-        });
-    }
+    assertThat(auditEvents).singleElement().satisfies(event -> {
+      assertThat(event.action()).isEqualTo("view_sensitive_details");
+      assertThat(event.outcome()).isEqualTo("viewed");
+      assertThat(event.target()).isEqualTo(job.id().toString());
+    });
+  }
 
-    @Test
-    void sensitiveRecurringAndOverviewViewsAreAudited() {
-        store.upsertCronTask(new CronTask(
-                "report",
-                new CronTask.Trigger.CronExpr(CronExpression.parse("*/5 * * * *")),
-                "com.example.Report",
-                new JobArgument("com.example.Payload", "{\"apiKey\":\"secret\"}"),
-                "default",
-                0,
-                CronTask.MissedRunPolicy.DROP,
-                ZoneId.of("UTC"),
-                true));
-        var controller = new ThreadmillDashboardApiController(
-                new DashboardApiService(store, new LocalWakeBus()),
-                new SpringSecurityDashboardAuthorizer(),
-                auditEvents::add,
-                new DashboardOptions(false, true));
+  @Test
+  void sensitiveRecurringAndOverviewViewsAreAudited() {
+    store.upsertCronTask(new CronTask(
+        "report",
+        new CronTask.Trigger.CronExpr(CronExpression.parse("*/5 * * * *")),
+        "com.example.Report",
+        new JobArgument("com.example.Payload", "{\"apiKey\":\"secret\"}"),
+        "default",
+        0,
+        CronTask.MissedRunPolicy.DROP,
+        ZoneId.of("UTC"),
+        true));
+    var controller = new ThreadmillDashboardApiController(
+        new DashboardApiService(store, new LocalWakeBus()),
+        new SpringSecurityDashboardAuthorizer(),
+        auditEvents::add,
+        new DashboardOptions(false, true));
 
-        controller.recurring(auth("alice", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"));
-        controller.overview(auth("alice", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"));
+    controller.recurring(auth("alice", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"));
+    controller.overview(auth("alice", "THREADMILL_READ", "THREADMILL_VIEW_SENSITIVE_DETAILS"));
 
-        assertThat(auditEvents)
-                .filteredOn(e -> e.action().equals("view_sensitive_details"))
-                .extracting(DashboardAuditEvent::target)
-                .containsExactlyInAnyOrder("recurring", "overview");
-    }
+    assertThat(auditEvents)
+        .filteredOn(e -> e.action().equals("view_sensitive_details"))
+        .extracting(DashboardAuditEvent::target)
+        .containsExactlyInAnyOrder("recurring", "overview");
+  }
 
-    @Test
-    void deniedReadAttemptsAreAudited() {
-        var controller = new ThreadmillDashboardApiController(
-                new DashboardApiService(store, new LocalWakeBus()),
-                new SpringSecurityDashboardAuthorizer(),
-                auditEvents::add,
-                DashboardOptions.secureDefaults());
+  @Test
+  void deniedReadAttemptsAreAudited() {
+    var controller = new ThreadmillDashboardApiController(
+        new DashboardApiService(store, new LocalWakeBus()),
+        new SpringSecurityDashboardAuthorizer(),
+        auditEvents::add,
+        DashboardOptions.secureDefaults());
 
-        assertThatThrownBy(() -> controller.overview(auth("eve"))).isInstanceOf(ResponseStatusException.class);
+    assertThatThrownBy(() -> controller.overview(auth("eve")))
+        .isInstanceOf(ResponseStatusException.class);
 
-        assertThat(auditEvents).anySatisfy(event -> {
-            assertThat(event.action()).isEqualTo("read");
-            assertThat(event.outcome()).isEqualTo("denied");
-            assertThat(event.target()).isEqualTo("overview");
-        });
-    }
+    assertThat(auditEvents).anySatisfy(event -> {
+      assertThat(event.action()).isEqualTo("read");
+      assertThat(event.outcome()).isEqualTo("denied");
+      assertThat(event.target()).isEqualTo("overview");
+    });
+  }
 
-    @Test
-    void throwingAuditSinkDoesNotFailACommittedMutation() {
-        DashboardAuditSink throwingSink = event -> {
-            throw new IllegalStateException("audit backend down");
-        };
-        var controller = new ThreadmillDashboardApiController(
-                new DashboardApiService(store, new LocalWakeBus()),
-                new SpringSecurityDashboardAuthorizer(),
-                throwingSink,
-                DashboardOptions.secureDefaults());
+  @Test
+  void throwingAuditSinkDoesNotFailACommittedMutation() {
+    DashboardAuditSink throwingSink = event -> {
+      throw new IllegalStateException("audit backend down");
+    };
+    var controller = new ThreadmillDashboardApiController(
+        new DashboardApiService(store, new LocalWakeBus()),
+        new SpringSecurityDashboardAuthorizer(),
+        throwingSink,
+        DashboardOptions.secureDefaults());
 
-        var response = controller.pauseQueue(
-                auth("operator", "THREADMILL_PAUSE_QUEUE"), "default", new DashboardPayloads.PauseQueueRequest(null));
+    var response = controller.pauseQueue(
+        auth("operator", "THREADMILL_PAUSE_QUEUE"),
+        "default",
+        new DashboardPayloads.PauseQueueRequest(null));
 
-        assertThat(response.status()).isEqualTo("paused");
-        assertThat(store.listPausedQueues()).contains("default");
-    }
+    assertThat(response.status()).isEqualTo("paused");
+    assertThat(store.listPausedQueues()).contains("default");
+  }
 
-    private Job insertSensitiveJob() {
-        var job = Job.builder()
-                .spec(JobSpec.of("com.example.Handler", new JobArgument("example.Payload", "{\"secret\":\"value\"}")))
-                .metadata("token", "secret-token")
-                .build();
-        job.transitionTo(JobState.PROCESSING, Instant.now(), "test.claim", null);
-        job.transitionTo(JobState.FAILED, Instant.now(), "test.failure", "hidden failure");
-        job.log().info("hidden log");
-        store.insert(job);
-        return job;
-    }
+  private Job insertSensitiveJob() {
+    var job = Job.builder()
+        .spec(JobSpec.of(
+            "com.example.Handler", new JobArgument("example.Payload", "{\"secret\":\"value\"}")))
+        .metadata("token", "secret-token")
+        .build();
+    job.transitionTo(JobState.PROCESSING, Instant.now(), "test.claim", null);
+    job.transitionTo(JobState.FAILED, Instant.now(), "test.failure", "hidden failure");
+    job.log().info("hidden log");
+    store.insert(job);
+    return job;
+  }
 
-    private Job insertProcessingJob() {
-        var job = Job.builder().spec(JobSpec.of("com.example.Handler")).build();
-        store.insert(job);
-        JobId id = job.id();
-        return store.claimReady(NodeId.newId(), "default", 10, Instant.now()).stream()
-                .filter(claimed -> claimed.id().equals(id))
-                .findFirst()
-                .orElseThrow();
-    }
+  private Job insertProcessingJob() {
+    var job = Job.builder().spec(JobSpec.of("com.example.Handler")).build();
+    store.insert(job);
+    JobId id = job.id();
+    return store.claimReady(NodeId.newId(), "default", 10, Instant.now()).stream()
+        .filter(claimed -> claimed.id().equals(id))
+        .findFirst()
+        .orElseThrow();
+  }
 
-    private static Authentication auth(String name, String... authorities) {
-        var granted =
-                List.of(authorities).stream().map(SimpleGrantedAuthority::new).toList();
-        var authentication = new TestingAuthenticationToken(name, "n/a", granted);
-        authentication.setAuthenticated(true);
-        return authentication;
-    }
+  private static Authentication auth(String name, String... authorities) {
+    var granted = List.of(authorities).stream().map(SimpleGrantedAuthority::new).toList();
+    var authentication = new TestingAuthenticationToken(name, "n/a", granted);
+    authentication.setAuthenticated(true);
+    return authentication;
+  }
 }

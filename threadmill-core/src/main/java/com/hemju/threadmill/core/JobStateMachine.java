@@ -38,66 +38,67 @@ import java.util.Set;
  */
 public final class JobStateMachine {
 
-    private static final Map<JobState, Set<JobState>> TABLE = buildTable();
+  private static final Map<JobState, Set<JobState>> TABLE = buildTable();
 
-    private JobStateMachine() {}
+  private JobStateMachine() {}
 
-    private static Map<JobState, Set<JobState>> buildTable() {
-        var t = new EnumMap<JobState, Set<JobState>>(JobState.class);
-        t.put(
-                JobState.AWAITING,
-                EnumSet.of(
-                        JobState.AWAITING,
-                        JobState.SCHEDULED,
-                        JobState.ENQUEUED,
-                        JobState.DELETED,
-                        JobState.QUARANTINED));
-        t.put(
-                JobState.SCHEDULED,
-                EnumSet.of(
-                        JobState.AWAITING,
-                        JobState.SCHEDULED,
-                        JobState.ENQUEUED,
-                        JobState.SUCCEEDED,
-                        JobState.FAILED,
-                        JobState.DELETED,
-                        JobState.QUARANTINED));
-        t.put(
-                JobState.ENQUEUED,
-                EnumSet.of(
-                        JobState.AWAITING,
-                        JobState.SCHEDULED,
-                        JobState.PROCESSING,
-                        JobState.SUCCEEDED,
-                        JobState.FAILED,
-                        JobState.DELETED,
-                        JobState.QUARANTINED));
-        t.put(
-                JobState.PROCESSING,
-                EnumSet.of(JobState.SUCCEEDED, JobState.FAILED, JobState.DELETED, JobState.QUARANTINED));
-        t.put(JobState.PROCESSED, EnumSet.noneOf(JobState.class));
-        t.put(
-                JobState.SUCCEEDED,
-                EnumSet.of(JobState.SCHEDULED, JobState.ENQUEUED, JobState.DELETED, JobState.QUARANTINED));
-        t.put(
-                JobState.FAILED,
-                EnumSet.of(JobState.SCHEDULED, JobState.ENQUEUED, JobState.DELETED, JobState.QUARANTINED));
-        t.put(JobState.DELETED, EnumSet.of(JobState.SCHEDULED, JobState.ENQUEUED, JobState.QUARANTINED));
-        t.put(JobState.QUARANTINED, EnumSet.noneOf(JobState.class));
-        return Collections.unmodifiableMap(t);
+  private static Map<JobState, Set<JobState>> buildTable() {
+    var t = new EnumMap<JobState, Set<JobState>>(JobState.class);
+    t.put(
+        JobState.AWAITING,
+        EnumSet.of(
+            JobState.AWAITING,
+            JobState.SCHEDULED,
+            JobState.ENQUEUED,
+            JobState.DELETED,
+            JobState.QUARANTINED));
+    t.put(
+        JobState.SCHEDULED,
+        EnumSet.of(
+            JobState.AWAITING,
+            JobState.SCHEDULED,
+            JobState.ENQUEUED,
+            JobState.SUCCEEDED,
+            JobState.FAILED,
+            JobState.DELETED,
+            JobState.QUARANTINED));
+    t.put(
+        JobState.ENQUEUED,
+        EnumSet.of(
+            JobState.AWAITING,
+            JobState.SCHEDULED,
+            JobState.PROCESSING,
+            JobState.SUCCEEDED,
+            JobState.FAILED,
+            JobState.DELETED,
+            JobState.QUARANTINED));
+    t.put(
+        JobState.PROCESSING,
+        EnumSet.of(JobState.SUCCEEDED, JobState.FAILED, JobState.DELETED, JobState.QUARANTINED));
+    t.put(JobState.PROCESSED, EnumSet.noneOf(JobState.class));
+    t.put(
+        JobState.SUCCEEDED,
+        EnumSet.of(JobState.SCHEDULED, JobState.ENQUEUED, JobState.DELETED, JobState.QUARANTINED));
+    t.put(
+        JobState.FAILED,
+        EnumSet.of(JobState.SCHEDULED, JobState.ENQUEUED, JobState.DELETED, JobState.QUARANTINED));
+    t.put(
+        JobState.DELETED, EnumSet.of(JobState.SCHEDULED, JobState.ENQUEUED, JobState.QUARANTINED));
+    t.put(JobState.QUARANTINED, EnumSet.noneOf(JobState.class));
+    return Collections.unmodifiableMap(t);
+  }
+
+  public static boolean isLegal(JobState from, JobState to) {
+    return TABLE.get(from).contains(to);
+  }
+
+  public static void requireLegal(JobState from, JobState to) {
+    if (!isLegal(from, to)) {
+      throw new IllegalJobTransitionException(from, to);
     }
+  }
 
-    public static boolean isLegal(JobState from, JobState to) {
-        return TABLE.get(from).contains(to);
-    }
-
-    public static void requireLegal(JobState from, JobState to) {
-        if (!isLegal(from, to)) {
-            throw new IllegalJobTransitionException(from, to);
-        }
-    }
-
-    public static Set<JobState> legalSuccessorsOf(JobState from) {
-        return Collections.unmodifiableSet(TABLE.get(from));
-    }
+  public static Set<JobState> legalSuccessorsOf(JobState from) {
+    return Collections.unmodifiableSet(TABLE.get(from));
+  }
 }

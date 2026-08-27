@@ -16,18 +16,19 @@ import java.time.Duration;
  */
 public final class Mutexes {
 
-    private Mutexes() {}
+  private Mutexes() {}
 
-    /**
-     * Throws {@link IllegalArgumentException} unless {@code leaseDuration}
-     * is non-null and strictly positive.
-     */
-    public static void requirePositive(Duration leaseDuration) {
-        if (leaseDuration == null) {
-            throw new IllegalArgumentException("leaseDuration must not be null");
-        }
-        if (leaseDuration.isZero() || leaseDuration.isNegative()) {
-            throw new IllegalArgumentException("leaseDuration must be strictly positive, got " + leaseDuration);
-        }
+  /**
+   * Throws {@link IllegalArgumentException} unless {@code leaseDuration}
+   * is non-null and strictly positive.
+   */
+  public static void requirePositive(Duration leaseDuration) {
+    if (leaseDuration == null) {
+      throw new IllegalArgumentException("leaseDuration must not be null");
     }
+    if (leaseDuration.isZero() || leaseDuration.isNegative()) {
+      throw new IllegalArgumentException(
+          "leaseDuration must be strictly positive, got " + leaseDuration);
+    }
+  }
 }

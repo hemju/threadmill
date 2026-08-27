@@ -12,9 +12,9 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * so API consumers see {@code "task-name"} rather than {@code {"name":"..."}}.
  */
 public record CronTaskId(@JsonValue String name) {
-    @JsonCreator
-    public CronTaskId {
-        Objects.requireNonNull(name, "name");
-        if (name.isBlank()) throw new IllegalArgumentException("name must not be blank");
-    }
+  @JsonCreator
+  public CronTaskId {
+    Objects.requireNonNull(name, "name");
+    if (name.isBlank()) throw new IllegalArgumentException("name must not be blank");
+  }
 }

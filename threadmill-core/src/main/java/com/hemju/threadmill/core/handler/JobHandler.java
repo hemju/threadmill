@@ -23,14 +23,14 @@ package com.hemju.threadmill.core.handler;
  */
 public interface JobHandler<P extends JobPayload> {
 
-    /**
-     * Run the job.
-     *
-     * @param payload the typed payload to operate on
-     * @param ctx     the per-execution context
-     * @throws Exception any exception thrown here funnels through the engine's
-     *                   single failure path: state transition to {@code FAILED}
-     *                   plus interceptor notification
-     */
-    void run(P payload, JobExecutionContext ctx) throws Exception;
+  /**
+   * Run the job.
+   *
+   * @param payload the typed payload to operate on
+   * @param ctx     the per-execution context
+   * @throws Exception any exception thrown here funnels through the engine's
+   *                   single failure path: state transition to {@code FAILED}
+   *                   plus interceptor notification
+   */
+  void run(P payload, JobExecutionContext ctx) throws Exception;
 }

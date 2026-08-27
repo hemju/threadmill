@@ -8,20 +8,20 @@ package com.hemju.threadmill.core;
  */
 public class OversizedJobException extends RuntimeException {
 
-    private final long actualBytes;
-    private final long limitBytes;
+  private final long actualBytes;
+  private final long limitBytes;
 
-    public OversizedJobException(long actualBytes, long limitBytes) {
-        super("Job serialized form is " + actualBytes + " bytes, exceeds limit of " + limitBytes);
-        this.actualBytes = actualBytes;
-        this.limitBytes = limitBytes;
-    }
+  public OversizedJobException(long actualBytes, long limitBytes) {
+    super("Job serialized form is " + actualBytes + " bytes, exceeds limit of " + limitBytes);
+    this.actualBytes = actualBytes;
+    this.limitBytes = limitBytes;
+  }
 
-    public long actualBytes() {
-        return actualBytes;
-    }
+  public long actualBytes() {
+    return actualBytes;
+  }
 
-    public long limitBytes() {
-        return limitBytes;
-    }
+  public long limitBytes() {
+    return limitBytes;
+  }
 }

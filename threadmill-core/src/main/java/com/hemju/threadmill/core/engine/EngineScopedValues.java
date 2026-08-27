@@ -23,25 +23,25 @@ import com.hemju.threadmill.core.handler.JobExecutionContext;
  */
 public final class EngineScopedValues {
 
-    /** The currently-executing job's context, or null when not inside a handler. */
-    public static final ScopedValue<JobExecutionContext> CURRENT = ScopedValue.newInstance();
+  /** The currently-executing job's context, or null when not inside a handler. */
+  public static final ScopedValue<JobExecutionContext> CURRENT = ScopedValue.newInstance();
 
-    /**
-     * Wrap {@code task} so the calling thread's current
-     * {@link JobExecutionContext} binding is re-established around its run.
-     * Use this when fanning out to a plain (virtual-thread) executor, which
-     * does not inherit scoped-value bindings; structured concurrency via
-     * {@code StructuredTaskScope} inherits them without help.
-     *
-     * <p>If no context is bound on the calling thread, the task is returned
-     * unchanged.
-     */
-    public static Runnable capturing(Runnable task) {
-        Objects.requireNonNull(task, "task");
-        if (!CURRENT.isBound()) return task;
-        JobExecutionContext context = CURRENT.get();
-        return () -> ScopedValue.where(CURRENT, context).run(task);
-    }
+  /**
+   * Wrap {@code task} so the calling thread's current
+   * {@link JobExecutionContext} binding is re-established around its run.
+   * Use this when fanning out to a plain (virtual-thread) executor, which
+   * does not inherit scoped-value bindings; structured concurrency via
+   * {@code StructuredTaskScope} inherits them without help.
+   *
+   * <p>If no context is bound on the calling thread, the task is returned
+   * unchanged.
+   */
+  public static Runnable capturing(Runnable task) {
+    Objects.requireNonNull(task, "task");
+    if (!CURRENT.isBound()) return task;
+    JobExecutionContext context = CURRENT.get();
+    return () -> ScopedValue.where(CURRENT, context).run(task);
+  }
 
-    private EngineScopedValues() {}
+  private EngineScopedValues() {}
 }

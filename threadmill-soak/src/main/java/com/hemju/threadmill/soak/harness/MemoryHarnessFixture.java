@@ -6,15 +6,15 @@ import com.hemju.threadmill.store.memory.InMemoryJobStore;
 /** Trivial in-memory fixture — no lifecycle, no external resources. */
 public final class MemoryHarnessFixture implements BackendFixture {
 
-    private final InMemoryJobStore store = new InMemoryJobStore();
+  private final InMemoryJobStore store = new InMemoryJobStore();
 
-    @Override
-    public JobStore store() {
-        return store;
-    }
+  @Override
+  public JobStore store() {
+    return store;
+  }
 
-    @Override
-    public void close() {
-        // nothing to release
-    }
+  @Override
+  public void close() {
+    // nothing to release
+  }
 }

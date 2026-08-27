@@ -37,115 +37,116 @@ import com.hemju.threadmill.core.store.JobStore;
  */
 public final class MetricsSampler implements AutoCloseable {
 
-    private static final Logger LOG = LoggerFactory.getLogger(MetricsSampler.class);
+  private static final Logger LOG = LoggerFactory.getLogger(MetricsSampler.class);
 
-    private final JobStore store;
-    private final LatencyTracker latencyTracker;
-    private final BufferedWriter writer;
-    private final ObjectMapper mapper;
-    private final ReentrantLock writeLock = new ReentrantLock();
-    private final ScheduledExecutorService scheduler;
-    private final Instant startedAt;
-    private volatile Snapshot lastSnapshot = Snapshot.empty();
+  private final JobStore store;
+  private final LatencyTracker latencyTracker;
+  private final BufferedWriter writer;
+  private final ObjectMapper mapper;
+  private final ReentrantLock writeLock = new ReentrantLock();
+  private final ScheduledExecutorService scheduler;
+  private final Instant startedAt;
+  private volatile Snapshot lastSnapshot = Snapshot.empty();
 
-    public MetricsSampler(Path file, JobStore store, LatencyTracker latencyTracker) throws IOException {
-        Objects.requireNonNull(file, "file");
-        this.store = Objects.requireNonNull(store, "store");
-        this.latencyTracker = Objects.requireNonNull(latencyTracker, "latencyTracker");
-        if (file.getParent() != null) Files.createDirectories(file.getParent());
-        this.writer = Files.newBufferedWriter(
-                file,
-                StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING,
-                StandardOpenOption.WRITE);
-        this.mapper = new ObjectMapper()
-                .registerModule(new JavaTimeModule())
-                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-            var t = new Thread(r, "soak-metrics-sampler");
-            t.setDaemon(true);
-            return t;
-        });
-        this.startedAt = Instant.now();
+  public MetricsSampler(Path file, JobStore store, LatencyTracker latencyTracker)
+      throws IOException {
+    Objects.requireNonNull(file, "file");
+    this.store = Objects.requireNonNull(store, "store");
+    this.latencyTracker = Objects.requireNonNull(latencyTracker, "latencyTracker");
+    if (file.getParent() != null) Files.createDirectories(file.getParent());
+    this.writer = Files.newBufferedWriter(
+        file,
+        StandardCharsets.UTF_8,
+        StandardOpenOption.CREATE,
+        StandardOpenOption.TRUNCATE_EXISTING,
+        StandardOpenOption.WRITE);
+    this.mapper = new ObjectMapper()
+        .registerModule(new JavaTimeModule())
+        .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+      var t = new Thread(r, "soak-metrics-sampler");
+      t.setDaemon(true);
+      return t;
+    });
+    this.startedAt = Instant.now();
+  }
+
+  public void start() {
+    scheduler.scheduleAtFixedRate(this::sampleAndWrite, 0, 1, TimeUnit.SECONDS);
+  }
+
+  public Snapshot lastSnapshot() {
+    return lastSnapshot;
+  }
+
+  private void sampleAndWrite() {
+    try {
+      Map<JobState, Long> counts = store.countsByState();
+      Map<String, Long> queueDepths = store.queueDepths();
+      int inflight = latencyTracker.inflight();
+      long p99 = latencyTracker.currentP99EndToEndMs();
+      long elapsedSeconds =
+          Math.max(0, Duration.between(startedAt, Instant.now()).toSeconds());
+      Snapshot snapshot = new Snapshot(elapsedSeconds, counts, queueDepths, inflight, p99);
+      lastSnapshot = snapshot;
+      Map<String, Object> row = new LinkedHashMap<>();
+      row.put("timestamp", Instant.now().toString());
+      row.put("elapsedSeconds", elapsedSeconds);
+      Map<String, Long> stateCounts = new LinkedHashMap<>();
+      for (JobState s : JobState.values()) stateCounts.put(s.name(), counts.getOrDefault(s, 0L));
+      row.put("states", stateCounts);
+      row.put("queueDepths", queueDepths);
+      row.put("inflight", inflight);
+      row.put("endToEndP99Ms", p99);
+      writeLine(row);
+    } catch (RuntimeException e) {
+      // The store outage circuit breaker pauses the cluster, not the harness;
+      // log and keep sampling. The same outage will be visible in trace.jsonl.
+      LOG.warn("metrics sample failed: {}", e.toString());
     }
+  }
 
-    public void start() {
-        scheduler.scheduleAtFixedRate(this::sampleAndWrite, 0, 1, TimeUnit.SECONDS);
+  private void writeLine(Map<String, Object> row) {
+    writeLock.lock();
+    try {
+      writer.write(mapper.writeValueAsString(row));
+      writer.write('\n');
+      writer.flush();
+    } catch (JsonProcessingException e) {
+      throw new IllegalArgumentException("metrics row not serialisable", e);
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    } finally {
+      writeLock.unlock();
     }
+  }
 
-    public Snapshot lastSnapshot() {
-        return lastSnapshot;
+  @Override
+  public void close() throws IOException {
+    scheduler.shutdownNow();
+    try {
+      scheduler.awaitTermination(2, TimeUnit.SECONDS);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
     }
-
-    private void sampleAndWrite() {
-        try {
-            Map<JobState, Long> counts = store.countsByState();
-            Map<String, Long> queueDepths = store.queueDepths();
-            int inflight = latencyTracker.inflight();
-            long p99 = latencyTracker.currentP99EndToEndMs();
-            long elapsedSeconds =
-                    Math.max(0, Duration.between(startedAt, Instant.now()).toSeconds());
-            Snapshot snapshot = new Snapshot(elapsedSeconds, counts, queueDepths, inflight, p99);
-            lastSnapshot = snapshot;
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("timestamp", Instant.now().toString());
-            row.put("elapsedSeconds", elapsedSeconds);
-            Map<String, Long> stateCounts = new LinkedHashMap<>();
-            for (JobState s : JobState.values()) stateCounts.put(s.name(), counts.getOrDefault(s, 0L));
-            row.put("states", stateCounts);
-            row.put("queueDepths", queueDepths);
-            row.put("inflight", inflight);
-            row.put("endToEndP99Ms", p99);
-            writeLine(row);
-        } catch (RuntimeException e) {
-            // The store outage circuit breaker pauses the cluster, not the harness;
-            // log and keep sampling. The same outage will be visible in trace.jsonl.
-            LOG.warn("metrics sample failed: {}", e.toString());
-        }
+    writeLock.lock();
+    try {
+      writer.flush();
+      writer.close();
+    } finally {
+      writeLock.unlock();
     }
+  }
 
-    private void writeLine(Map<String, Object> row) {
-        writeLock.lock();
-        try {
-            writer.write(mapper.writeValueAsString(row));
-            writer.write('\n');
-            writer.flush();
-        } catch (JsonProcessingException e) {
-            throw new IllegalArgumentException("metrics row not serialisable", e);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        } finally {
-            writeLock.unlock();
-        }
+  public record Snapshot(
+      long elapsedSeconds,
+      Map<JobState, Long> states,
+      Map<String, Long> queueDepths,
+      int inflight,
+      long endToEndP99Ms) {
+
+    public static Snapshot empty() {
+      return new Snapshot(0L, Map.of(), Map.of(), 0, 0L);
     }
-
-    @Override
-    public void close() throws IOException {
-        scheduler.shutdownNow();
-        try {
-            scheduler.awaitTermination(2, TimeUnit.SECONDS);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-        writeLock.lock();
-        try {
-            writer.flush();
-            writer.close();
-        } finally {
-            writeLock.unlock();
-        }
-    }
-
-    public record Snapshot(
-            long elapsedSeconds,
-            Map<JobState, Long> states,
-            Map<String, Long> queueDepths,
-            int inflight,
-            long endToEndP99Ms) {
-
-        public static Snapshot empty() {
-            return new Snapshot(0L, Map.of(), Map.of(), 0, 0L);
-        }
-    }
+  }
 }

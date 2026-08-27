@@ -10,8 +10,8 @@ import com.hemju.threadmill.core.NodeId;
  */
 public record NodeHeartbeat(NodeId nodeId, Instant lastHeartbeatAt) {
 
-    public NodeHeartbeat {
-        Objects.requireNonNull(nodeId, "nodeId");
-        Objects.requireNonNull(lastHeartbeatAt, "lastHeartbeatAt");
-    }
+  public NodeHeartbeat {
+    Objects.requireNonNull(nodeId, "nodeId");
+    Objects.requireNonNull(lastHeartbeatAt, "lastHeartbeatAt");
+  }
 }
