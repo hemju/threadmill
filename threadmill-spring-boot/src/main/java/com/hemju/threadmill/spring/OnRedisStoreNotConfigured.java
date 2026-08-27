@@ -18,14 +18,17 @@ import org.springframework.core.type.AnnotatedTypeMetadata;
  */
 final class OnRedisStoreNotConfigured extends SpringBootCondition {
 
-    @Override
-    public ConditionOutcome getMatchOutcome(ConditionContext context, AnnotatedTypeMetadata metadata) {
-        var binder = Binder.get(context.getEnvironment());
-        var redis = binder.bind("threadmill.store.redis", Bindable.of(ThreadmillProperties.RedisProperties.class))
-                .orElseGet(ThreadmillProperties.RedisProperties::new);
-        if (redis.isConfigured()) {
-            return ConditionOutcome.noMatch("threadmill.store.redis is configured; Redis takes precedence");
-        }
-        return ConditionOutcome.match("threadmill.store.redis is not configured");
+  @Override
+  public ConditionOutcome getMatchOutcome(
+      ConditionContext context, AnnotatedTypeMetadata metadata) {
+    var binder = Binder.get(context.getEnvironment());
+    var redis = binder
+        .bind("threadmill.store.redis", Bindable.of(ThreadmillProperties.RedisProperties.class))
+        .orElseGet(ThreadmillProperties.RedisProperties::new);
+    if (redis.isConfigured()) {
+      return ConditionOutcome.noMatch(
+          "threadmill.store.redis is configured; Redis takes precedence");
     }
+    return ConditionOutcome.match("threadmill.store.redis is not configured");
+  }
 }

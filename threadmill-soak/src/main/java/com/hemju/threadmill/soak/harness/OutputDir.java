@@ -17,82 +17,82 @@ import java.util.stream.Stream;
  */
 public final class OutputDir {
 
-    private final Path root;
-    private final boolean force;
+  private final Path root;
+  private final boolean force;
 
-    public OutputDir(Path root, boolean force) {
-        this.root = Objects.requireNonNull(root, "root");
-        this.force = force;
+  public OutputDir(Path root, boolean force) {
+    this.root = Objects.requireNonNull(root, "root");
+    this.force = force;
+  }
+
+  public void prepare() throws IOException {
+    if (Files.exists(root)) {
+      if (!force) {
+        throw new IOException("output dir already exists: " + root
+            + " — pass -Pforce=true to overwrite, or choose a different -PoutputDir");
+      }
+      deleteRecursively(root);
     }
+    Files.createDirectories(root);
+  }
 
-    public void prepare() throws IOException {
-        if (Files.exists(root)) {
-            if (!force) {
-                throw new IOException("output dir already exists: " + root
-                        + " — pass -Pforce=true to overwrite, or choose a different -PoutputDir");
-            }
-            deleteRecursively(root);
+  public Path root() {
+    return root;
+  }
+
+  public Path configJson() {
+    return root.resolve("config.json");
+  }
+
+  public Path traceJsonl() {
+    return root.resolve("trace.jsonl");
+  }
+
+  public Path lockEventsJsonl() {
+    return root.resolve("lock-events.jsonl");
+  }
+
+  public Path metricsJsonl() {
+    return root.resolve("metrics.jsonl");
+  }
+
+  public Path latenciesJsonl() {
+    return root.resolve("latencies.jsonl");
+  }
+
+  public Path invariantsJson() {
+    return root.resolve("invariants.json");
+  }
+
+  public Path progressJson() {
+    return root.resolve("progress.json");
+  }
+
+  public Path summaryJson() {
+    return root.resolve("summary.json");
+  }
+
+  public Path summaryMd() {
+    return root.resolve("summary.md");
+  }
+
+  public Path stdoutLog() {
+    return root.resolve("stdout.log");
+  }
+
+  public Path stderrLog() {
+    return root.resolve("stderr.log");
+  }
+
+  private static void deleteRecursively(Path path) throws IOException {
+    try (Stream<Path> entries = Files.walk(path)) {
+      entries.sorted(Comparator.reverseOrder()).forEach(p -> {
+        try {
+          Files.deleteIfExists(p);
+        } catch (IOException e) {
+          throw new RuntimeException("could not delete " + p, e);
         }
-        Files.createDirectories(root);
+      });
     }
-
-    public Path root() {
-        return root;
-    }
-
-    public Path configJson() {
-        return root.resolve("config.json");
-    }
-
-    public Path traceJsonl() {
-        return root.resolve("trace.jsonl");
-    }
-
-    public Path lockEventsJsonl() {
-        return root.resolve("lock-events.jsonl");
-    }
-
-    public Path metricsJsonl() {
-        return root.resolve("metrics.jsonl");
-    }
-
-    public Path latenciesJsonl() {
-        return root.resolve("latencies.jsonl");
-    }
-
-    public Path invariantsJson() {
-        return root.resolve("invariants.json");
-    }
-
-    public Path progressJson() {
-        return root.resolve("progress.json");
-    }
-
-    public Path summaryJson() {
-        return root.resolve("summary.json");
-    }
-
-    public Path summaryMd() {
-        return root.resolve("summary.md");
-    }
-
-    public Path stdoutLog() {
-        return root.resolve("stdout.log");
-    }
-
-    public Path stderrLog() {
-        return root.resolve("stderr.log");
-    }
-
-    private static void deleteRecursively(Path path) throws IOException {
-        try (Stream<Path> entries = Files.walk(path)) {
-            entries.sorted(Comparator.reverseOrder()).forEach(p -> {
-                try {
-                    Files.deleteIfExists(p);
-                } catch (IOException e) {
-                    throw new RuntimeException("could not delete " + p, e);
-                }
-            });
-        }
-    }
+  }
 }

@@ -23,49 +23,50 @@ import com.hemju.threadmill.test.AbstractJobStoreContractTest;
  */
 class PostgresJobStoreContractTest extends AbstractJobStoreContractTest {
 
-    @SuppressWarnings("resource")
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(
-                    DockerImageName.parse("postgres:18-alpine"))
-            .withDatabaseName("threadmill")
-            .withUsername("threadmill")
-            .withPassword("threadmill")
-            .withReuse(false);
+  @SuppressWarnings("resource")
+  private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(
+          DockerImageName.parse("postgres:18-alpine"))
+      .withDatabaseName("threadmill")
+      .withUsername("threadmill")
+      .withPassword("threadmill")
+      .withReuse(false);
 
-    private static DataSource dataSource;
+  private static DataSource dataSource;
 
-    @BeforeAll
-    static void startContainer() {
-        POSTGRES.start();
-        var ds = new PGSimpleDataSource();
-        ds.setUrl(POSTGRES.getJdbcUrl());
-        ds.setUser(POSTGRES.getUsername());
-        ds.setPassword(POSTGRES.getPassword());
-        dataSource = ds;
+  @BeforeAll
+  static void startContainer() {
+    POSTGRES.start();
+    var ds = new PGSimpleDataSource();
+    ds.setUrl(POSTGRES.getJdbcUrl());
+    ds.setUser(POSTGRES.getUsername());
+    ds.setPassword(POSTGRES.getPassword());
+    dataSource = ds;
+  }
+
+  @AfterAll
+  static void stopContainer() {
+    if (POSTGRES.isRunning()) {
+      POSTGRES.stop();
     }
+  }
 
-    @AfterAll
-    static void stopContainer() {
-        if (POSTGRES.isRunning()) {
-            POSTGRES.stop();
-        }
+  @BeforeEach
+  void truncateBetweenTests() throws Exception {
+    new MigrationRunner(dataSource).migrate();
+    try (Connection conn = dataSource.getConnection();
+        Statement st = conn.createStatement()) {
+      st.execute("TRUNCATE threadmill_jobs, threadmill_nodes, threadmill_metadata, "
+          + "threadmill_cron_tasks, threadmill_mutexes, threadmill_leases, "
+          + "threadmill_dedup_keys, threadmill_queue_pauses, threadmill_concurrency_groups, "
+          + "threadmill_concurrency_workflow_holds RESTART IDENTITY CASCADE");
+      // The counts table is kept in sync by triggers, but TRUNCATE bypasses them — reset counts
+      // manually.
+      st.execute("UPDATE threadmill_job_counts SET count = 0");
     }
+  }
 
-    @BeforeEach
-    void truncateBetweenTests() throws Exception {
-        new MigrationRunner(dataSource).migrate();
-        try (Connection conn = dataSource.getConnection();
-                Statement st = conn.createStatement()) {
-            st.execute("TRUNCATE threadmill_jobs, threadmill_nodes, threadmill_metadata, "
-                    + "threadmill_cron_tasks, threadmill_mutexes, threadmill_leases, "
-                    + "threadmill_dedup_keys, threadmill_queue_pauses, threadmill_concurrency_groups, "
-                    + "threadmill_concurrency_workflow_holds RESTART IDENTITY CASCADE");
-            // The counts table is kept in sync by triggers, but TRUNCATE bypasses them — reset counts manually.
-            st.execute("UPDATE threadmill_job_counts SET count = 0");
-        }
-    }
-
-    @Override
-    protected JobStore createStore() {
-        return new PostgresJobStore(new NonAutoCommitDataSource(dataSource));
-    }
+  @Override
+  protected JobStore createStore() {
+    return new PostgresJobStore(new NonAutoCommitDataSource(dataSource));
+  }
 }

@@ -13,63 +13,66 @@ import com.hemju.threadmill.store.redis.RedisJobStore;
 /** Store wiring for the worker-churn simulation. */
 final class WorkerChurnStores {
 
-    private WorkerChurnStores() {}
+  private WorkerChurnStores() {}
 
-    enum Backend {
-        POSTGRES,
-        REDIS;
+  enum Backend {
+    POSTGRES,
+    REDIS;
 
-        static Backend defaultBackend() {
-            return parse(System.getProperty("threadmill.workerChurn.backend", "postgres"));
-        }
-
-        static Backend parse(String value) {
-            return switch (value.toLowerCase()) {
-                case "postgres", "postgresql", "pg" -> POSTGRES;
-                case "redis" -> REDIS;
-                default -> throw new IllegalArgumentException("backend must be postgres or redis, got: " + value);
-            };
-        }
+    static Backend defaultBackend() {
+      return parse(System.getProperty("threadmill.workerChurn.backend", "postgres"));
     }
 
-    record StoreHandle(JobStore store, AutoCloseable closeAction) implements AutoCloseable {
-        @Override
-        public void close() {
-            if (closeAction == null) return;
-            try {
-                closeAction.close();
-            } catch (Exception e) {
-                throw new IllegalStateException("failed to close worker-churn store", e);
-            }
-        }
+    static Backend parse(String value) {
+      return switch (value.toLowerCase()) {
+        case "postgres", "postgresql", "pg" -> POSTGRES;
+        case "redis" -> REDIS;
+        default ->
+          throw new IllegalArgumentException("backend must be postgres or redis, got: " + value);
+      };
     }
+  }
 
-    static DataSource postgresDataSource() {
-        var url = System.getenv().getOrDefault("THREADMILL_JDBC_URL", "jdbc:postgresql://localhost:55432/threadmill");
-        var user = System.getenv().getOrDefault("THREADMILL_DB_USER", "threadmill");
-        var pass = System.getenv().getOrDefault("THREADMILL_DB_PASSWORD", "threadmill");
-        var ds = new PGSimpleDataSource();
-        ds.setUrl(url);
-        ds.setUser(user);
-        ds.setPassword(pass);
-        return ds;
+  record StoreHandle(JobStore store, AutoCloseable closeAction) implements AutoCloseable {
+    @Override
+    public void close() {
+      if (closeAction == null) return;
+      try {
+        closeAction.close();
+      } catch (Exception e) {
+        throw new IllegalStateException("failed to close worker-churn store", e);
+      }
     }
+  }
 
-    static RedisURI redisUri() {
-        return RedisURI.create(System.getenv().getOrDefault("THREADMILL_REDIS_URI", "redis://localhost:56379/0"));
-    }
+  static DataSource postgresDataSource() {
+    var url = System.getenv()
+        .getOrDefault("THREADMILL_JDBC_URL", "jdbc:postgresql://localhost:55432/threadmill");
+    var user = System.getenv().getOrDefault("THREADMILL_DB_USER", "threadmill");
+    var pass = System.getenv().getOrDefault("THREADMILL_DB_PASSWORD", "threadmill");
+    var ds = new PGSimpleDataSource();
+    ds.setUrl(url);
+    ds.setUser(user);
+    ds.setPassword(pass);
+    return ds;
+  }
 
-    static StoreHandle open(Backend backend) {
-        return switch (backend) {
-            case POSTGRES -> {
-                DataSource ds = postgresDataSource();
-                new MigrationRunner(ds).migrate();
-                yield new StoreHandle(new PostgresJobStore(ds), null);
-            }
-            case REDIS -> {
-                var store = new RedisJobStore(redisUri());
-                yield new StoreHandle(store, store::close);
-            }
-        };
-    }
+  static RedisURI redisUri() {
+    return RedisURI.create(
+        System.getenv().getOrDefault("THREADMILL_REDIS_URI", "redis://localhost:56379/0"));
+  }
+
+  static StoreHandle open(Backend backend) {
+    return switch (backend) {
+      case POSTGRES -> {
+        DataSource ds = postgresDataSource();
+        new MigrationRunner(ds).migrate();
+        yield new StoreHandle(new PostgresJobStore(ds), null);
+      }
+      case REDIS -> {
+        var store = new RedisJobStore(redisUri());
+        yield new StoreHandle(store, store::close);
+      }
+    };
+  }
 }

@@ -25,58 +25,59 @@ import java.util.Optional;
  * @param dedupKey     optional producer-side deduplication key
  * @param dedupTtl     optional deduplication window; required when {@code dedupKey} is set
  */
-public record JobSpec(String handlerType, List<JobArgument> arguments, String dedupKey, Duration dedupTtl) {
+public record JobSpec(
+    String handlerType, List<JobArgument> arguments, String dedupKey, Duration dedupTtl) {
 
-    public static final int MAX_DEDUP_KEY_BYTES = 256;
-    /** Maximum UTF-8 bytes accepted for a handler type name. */
-    public static final int MAX_HANDLER_TYPE_BYTES = 1024;
+  public static final int MAX_DEDUP_KEY_BYTES = 256;
+  /** Maximum UTF-8 bytes accepted for a handler type name. */
+  public static final int MAX_HANDLER_TYPE_BYTES = 1024;
 
-    public JobSpec(String handlerType, List<JobArgument> arguments) {
-        this(handlerType, arguments, null, null);
+  public JobSpec(String handlerType, List<JobArgument> arguments) {
+    this(handlerType, arguments, null, null);
+  }
+
+  public JobSpec {
+    Objects.requireNonNull(handlerType, "handlerType");
+    if (handlerType.isBlank()) {
+      throw new IllegalArgumentException("handlerType must not be blank");
     }
-
-    public JobSpec {
-        Objects.requireNonNull(handlerType, "handlerType");
-        if (handlerType.isBlank()) {
-            throw new IllegalArgumentException("handlerType must not be blank");
-        }
-        if (handlerType.getBytes(StandardCharsets.UTF_8).length > MAX_HANDLER_TYPE_BYTES) {
-            throw new IllegalArgumentException("handlerType must be at most 1024 UTF-8 bytes");
-        }
-        Objects.requireNonNull(arguments, "arguments");
-        arguments = List.copyOf(arguments);
-        if (dedupKey != null) {
-            if (dedupKey.isBlank()) {
-                throw new IllegalArgumentException("dedupKey must not be blank");
-            }
-            int bytes = dedupKey.getBytes(StandardCharsets.UTF_8).length;
-            if (bytes > MAX_DEDUP_KEY_BYTES) {
-                throw new IllegalArgumentException("dedupKey must be at most 256 UTF-8 bytes");
-            }
-            if (dedupTtl == null) {
-                throw new IllegalArgumentException("dedupTtl is required when dedupKey is set");
-            }
-            if (dedupTtl.isZero() || dedupTtl.isNegative()) {
-                throw new IllegalArgumentException("dedupTtl must be positive");
-            }
-        } else if (dedupTtl != null) {
-            throw new IllegalArgumentException("dedupTtl requires dedupKey");
-        }
+    if (handlerType.getBytes(StandardCharsets.UTF_8).length > MAX_HANDLER_TYPE_BYTES) {
+      throw new IllegalArgumentException("handlerType must be at most 1024 UTF-8 bytes");
     }
-
-    public static JobSpec of(String handlerType, JobArgument... args) {
-        return new JobSpec(handlerType, List.of(args));
+    Objects.requireNonNull(arguments, "arguments");
+    arguments = List.copyOf(arguments);
+    if (dedupKey != null) {
+      if (dedupKey.isBlank()) {
+        throw new IllegalArgumentException("dedupKey must not be blank");
+      }
+      int bytes = dedupKey.getBytes(StandardCharsets.UTF_8).length;
+      if (bytes > MAX_DEDUP_KEY_BYTES) {
+        throw new IllegalArgumentException("dedupKey must be at most 256 UTF-8 bytes");
+      }
+      if (dedupTtl == null) {
+        throw new IllegalArgumentException("dedupTtl is required when dedupKey is set");
+      }
+      if (dedupTtl.isZero() || dedupTtl.isNegative()) {
+        throw new IllegalArgumentException("dedupTtl must be positive");
+      }
+    } else if (dedupTtl != null) {
+      throw new IllegalArgumentException("dedupTtl requires dedupKey");
     }
+  }
 
-    public JobSpec withDedup(String key, Duration ttl) {
-        return new JobSpec(handlerType, arguments, key, ttl);
-    }
+  public static JobSpec of(String handlerType, JobArgument... args) {
+    return new JobSpec(handlerType, List.of(args));
+  }
 
-    public Optional<String> dedupKeyValue() {
-        return Optional.ofNullable(dedupKey);
-    }
+  public JobSpec withDedup(String key, Duration ttl) {
+    return new JobSpec(handlerType, arguments, key, ttl);
+  }
 
-    public Optional<Duration> dedupTtlValue() {
-        return Optional.ofNullable(dedupTtl);
-    }
+  public Optional<String> dedupKeyValue() {
+    return Optional.ofNullable(dedupKey);
+  }
+
+  public Optional<Duration> dedupTtlValue() {
+    return Optional.ofNullable(dedupTtl);
+  }
 }

@@ -19,45 +19,45 @@ import com.hemju.threadmill.core.spec.JobSpec;
  * {@code scheduledFor}, owner, etc.).
  */
 public record JobSnapshot(
-        JobId id,
-        JobSpec spec,
-        String queue,
-        int priority,
-        Instant createdAt,
-        String cronTaskName,
-        JobRelationship relationship,
-        JobId workflowRootId,
-        String concurrencyKey,
-        ConcurrencyMode concurrencyMode,
-        List<JobStateEntry> stateHistory,
-        Map<String, String> metadata,
-        List<JobLog.Entry> log,
-        JobProgress.Snapshot progress,
-        long version,
-        NodeId ownerNodeId,
-        Instant ownerHeartbeatAt,
-        Instant lastCheckinAt,
-        Instant scheduledFor,
-        JobResult result,
-        int attempts) {
+    JobId id,
+    JobSpec spec,
+    String queue,
+    int priority,
+    Instant createdAt,
+    String cronTaskName,
+    JobRelationship relationship,
+    JobId workflowRootId,
+    String concurrencyKey,
+    ConcurrencyMode concurrencyMode,
+    List<JobStateEntry> stateHistory,
+    Map<String, String> metadata,
+    List<JobLog.Entry> log,
+    JobProgress.Snapshot progress,
+    long version,
+    NodeId ownerNodeId,
+    Instant ownerHeartbeatAt,
+    Instant lastCheckinAt,
+    Instant scheduledFor,
+    JobResult result,
+    int attempts) {
 
-    public JobSnapshot {
-        Objects.requireNonNull(id, "id");
-        Objects.requireNonNull(spec, "spec");
-        Objects.requireNonNull(queue, "queue");
-        Objects.requireNonNull(createdAt, "createdAt");
-        Objects.requireNonNull(stateHistory, "stateHistory");
-        Objects.requireNonNull(metadata, "metadata");
-        Objects.requireNonNull(log, "log");
-        stateHistory = List.copyOf(stateHistory);
-        metadata = Map.copyOf(metadata);
-        log = List.copyOf(log);
-        if (stateHistory.isEmpty()) {
-            throw new IllegalArgumentException("stateHistory must not be empty");
-        }
+  public JobSnapshot {
+    Objects.requireNonNull(id, "id");
+    Objects.requireNonNull(spec, "spec");
+    Objects.requireNonNull(queue, "queue");
+    Objects.requireNonNull(createdAt, "createdAt");
+    Objects.requireNonNull(stateHistory, "stateHistory");
+    Objects.requireNonNull(metadata, "metadata");
+    Objects.requireNonNull(log, "log");
+    stateHistory = List.copyOf(stateHistory);
+    metadata = Map.copyOf(metadata);
+    log = List.copyOf(log);
+    if (stateHistory.isEmpty()) {
+      throw new IllegalArgumentException("stateHistory must not be empty");
     }
+  }
 
-    public JobState currentState() {
-        return stateHistory.get(stateHistory.size() - 1).state();
-    }
+  public JobState currentState() {
+    return stateHistory.get(stateHistory.size() - 1).state();
+  }
 }

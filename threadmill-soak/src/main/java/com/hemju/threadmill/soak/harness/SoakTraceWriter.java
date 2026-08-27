@@ -51,67 +51,67 @@ import com.hemju.threadmill.soak.harness.invariant.TraceEvent;
  */
 public final class SoakTraceWriter implements AutoCloseable {
 
-    private static final Logger LOG = LoggerFactory.getLogger(SoakTraceWriter.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SoakTraceWriter.class);
 
-    private final ObjectMapper mapper;
-    private final BufferedWriter writer;
-    private final ReentrantLock lock = new ReentrantLock();
-    private final Consumer<TraceEvent> listener;
+  private final ObjectMapper mapper;
+  private final BufferedWriter writer;
+  private final ReentrantLock lock = new ReentrantLock();
+  private final Consumer<TraceEvent> listener;
 
-    public SoakTraceWriter(Path file) throws IOException {
-        this(file, null);
-    }
+  public SoakTraceWriter(Path file) throws IOException {
+    this(file, null);
+  }
 
-    public SoakTraceWriter(Path file, Consumer<TraceEvent> listener) throws IOException {
-        Objects.requireNonNull(file, "file");
-        if (file.getParent() != null) Files.createDirectories(file.getParent());
-        this.writer = Files.newBufferedWriter(
-                file,
-                StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE,
-                StandardOpenOption.TRUNCATE_EXISTING,
-                StandardOpenOption.WRITE);
-        this.mapper = new ObjectMapper()
-                .registerModule(new JavaTimeModule())
-                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
-        this.listener = listener;
-    }
+  public SoakTraceWriter(Path file, Consumer<TraceEvent> listener) throws IOException {
+    Objects.requireNonNull(file, "file");
+    if (file.getParent() != null) Files.createDirectories(file.getParent());
+    this.writer = Files.newBufferedWriter(
+        file,
+        StandardCharsets.UTF_8,
+        StandardOpenOption.CREATE,
+        StandardOpenOption.TRUNCATE_EXISTING,
+        StandardOpenOption.WRITE);
+    this.mapper = new ObjectMapper()
+        .registerModule(new JavaTimeModule())
+        .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+    this.listener = listener;
+  }
 
-    public void emit(String event, Map<String, Object> fields) {
-        Objects.requireNonNull(event, "event");
-        Map<String, Object> ordered = new LinkedHashMap<>();
-        ordered.put("timestamp", Instant.now().toString());
-        ordered.put("event", event);
-        if (fields != null) ordered.putAll(fields);
-        lock.lock();
+  public void emit(String event, Map<String, Object> fields) {
+    Objects.requireNonNull(event, "event");
+    Map<String, Object> ordered = new LinkedHashMap<>();
+    ordered.put("timestamp", Instant.now().toString());
+    ordered.put("event", event);
+    if (fields != null) ordered.putAll(fields);
+    lock.lock();
+    try {
+      String line = mapper.writeValueAsString(ordered);
+      writer.write(line);
+      writer.write('\n');
+      if (listener != null) {
         try {
-            String line = mapper.writeValueAsString(ordered);
-            writer.write(line);
-            writer.write('\n');
-            if (listener != null) {
-                try {
-                    listener.accept(new TraceEvent(mapper.valueToTree(ordered), line));
-                } catch (RuntimeException e) {
-                    LOG.warn("trace listener failed for event {}: {}", event, e.toString());
-                }
-            }
-        } catch (JsonProcessingException e) {
-            throw new IllegalArgumentException("Trace value not JSON-serialisable for event " + event, e);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        } finally {
-            lock.unlock();
+          listener.accept(new TraceEvent(mapper.valueToTree(ordered), line));
+        } catch (RuntimeException e) {
+          LOG.warn("trace listener failed for event {}: {}", event, e.toString());
         }
+      }
+    } catch (JsonProcessingException e) {
+      throw new IllegalArgumentException("Trace value not JSON-serialisable for event " + event, e);
+    } catch (IOException e) {
+      throw new UncheckedIOException(e);
+    } finally {
+      lock.unlock();
     }
+  }
 
-    @Override
-    public void close() throws IOException {
-        lock.lock();
-        try {
-            writer.flush();
-            writer.close();
-        } finally {
-            lock.unlock();
-        }
+  @Override
+  public void close() throws IOException {
+    lock.lock();
+    try {
+      writer.flush();
+      writer.close();
+    } finally {
+      lock.unlock();
     }
+  }
 }

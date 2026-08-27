@@ -10,8 +10,8 @@ import com.hemju.threadmill.core.store.JobStore;
  */
 public interface BackendFixture extends AutoCloseable {
 
-    JobStore store();
+  JobStore store();
 
-    @Override
-    void close();
+  @Override
+  void close();
 }

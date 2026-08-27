@@ -29,44 +29,42 @@ import com.hemju.threadmill.core.spec.JobSpec;
  */
 class JobRunnerWatchdogTest {
 
-    private final JsonJobSerializer serializer = new JsonJobSerializer();
+  private final JsonJobSerializer serializer = new JsonJobSerializer();
 
-    @Test
-    @DisplayName("cancelled watchdog tasks are removed from the delay queue, not retained")
-    void cancelledWatchdogTasksDoNotAccumulate() throws Exception {
-        var store = new InMemoryJobStore();
-        var nodeId = NodeId.newId();
-        var runner = new JobRunner(
-                store,
-                nodeId,
-                new ReflectiveJobHandlerResolver(),
-                serializer,
-                new JobInterceptors(),
-                ProcessingNodeConfig.builder().jobTimeout(Duration.ofMinutes(5)).build());
-        try {
-            var field = JobRunner.class.getDeclaredField("timeoutExecutor");
-            field.setAccessible(true);
-            var executor = (ScheduledThreadPoolExecutor) field.get(runner);
-            assertThat(executor.getRemoveOnCancelPolicy()).isTrue();
+  @Test
+  @DisplayName("cancelled watchdog tasks are removed from the delay queue, not retained")
+  void cancelledWatchdogTasksDoNotAccumulate() throws Exception {
+    var store = new InMemoryJobStore();
+    var nodeId = NodeId.newId();
+    var runner = new JobRunner(
+        store,
+        nodeId,
+        new ReflectiveJobHandlerResolver(),
+        serializer,
+        new JobInterceptors(),
+        ProcessingNodeConfig.builder().jobTimeout(Duration.ofMinutes(5)).build());
+    try {
+      var field = JobRunner.class.getDeclaredField("timeoutExecutor");
+      field.setAccessible(true);
+      var executor = (ScheduledThreadPoolExecutor) field.get(runner);
+      assertThat(executor.getRemoveOnCancelPolicy()).isTrue();
 
-            for (int i = 0; i < 200; i++) {
-                JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("x"));
-                Job job = Job.builder()
-                        .spec(new JobSpec(EngineTestHandlers.CountingHandler.class.getName(), List.of(arg)))
-                        .build();
-                store.insert(job);
-                Job claimed =
-                        store.claimReady(nodeId, "default", 1, Instant.now()).get(0);
-                runner.run(claimed);
-            }
+      for (int i = 0; i < 200; i++) {
+        JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("x"));
+        Job job = Job.builder()
+            .spec(new JobSpec(EngineTestHandlers.CountingHandler.class.getName(), List.of(arg)))
+            .build();
+        store.insert(job);
+        Job claimed = store.claimReady(nodeId, "default", 1, Instant.now()).get(0);
+        runner.run(claimed);
+      }
 
-            // With removeOnCancelPolicy, each completed job's watchdog leaves the
-            // queue at once; it would otherwise hold ~200 entries for 5 minutes.
-            await().atMost(Duration.ofSeconds(5))
-                    .until(() -> executor.getQueue().isEmpty());
-            assertThat(executor.getQueue()).isEmpty();
-        } finally {
-            runner.shutdown();
-        }
+      // With removeOnCancelPolicy, each completed job's watchdog leaves the
+      // queue at once; it would otherwise hold ~200 entries for 5 minutes.
+      await().atMost(Duration.ofSeconds(5)).until(() -> executor.getQueue().isEmpty());
+      assertThat(executor.getQueue()).isEmpty();
+    } finally {
+      runner.shutdown();
     }
+  }
 }

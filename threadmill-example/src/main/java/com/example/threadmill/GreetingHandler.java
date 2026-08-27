@@ -14,16 +14,21 @@ import com.hemju.threadmill.core.handler.JobHandler;
  */
 public final class GreetingHandler implements JobHandler<GreetingPayload> {
 
-    private static final Logger LOG = LoggerFactory.getLogger(GreetingHandler.class);
+  private static final Logger LOG = LoggerFactory.getLogger(GreetingHandler.class);
 
-    @Override
-    public void run(GreetingPayload p, JobExecutionContext ctx) throws InterruptedException {
-        LOG.info("ran #{} ({}) on node={} attempt={}", p.sequence, p.name, shortId(ctx.nodeId()), ctx.attempt());
-        // Simulate a little work so multi-node behaviour is visible to the eye.
-        Thread.sleep(150);
-    }
+  @Override
+  public void run(GreetingPayload p, JobExecutionContext ctx) throws InterruptedException {
+    LOG.info(
+        "ran #{} ({}) on node={} attempt={}",
+        p.sequence,
+        p.name,
+        shortId(ctx.nodeId()),
+        ctx.attempt());
+    // Simulate a little work so multi-node behaviour is visible to the eye.
+    Thread.sleep(150);
+  }
 
-    private static String shortId(NodeId n) {
-        return n.asUuid().toString().substring(0, 8);
-    }
+  private static String shortId(NodeId n) {
+    return n.asUuid().toString().substring(0, 8);
+  }
 }

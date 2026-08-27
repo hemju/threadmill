@@ -57,316 +57,337 @@ import com.hemju.threadmill.dashboard.api.DashboardPermission;
 @RequestMapping("${threadmill.dashboard.api.base-path:/threadmill/api}")
 public final class ThreadmillDashboardApiController {
 
-    private static final Logger LOG = LoggerFactory.getLogger(ThreadmillDashboardApiController.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ThreadmillDashboardApiController.class);
 
-    private final DashboardApiService service;
-    private final DashboardAuthorizer authorizer;
-    private final DashboardAuditSink auditSink;
-    private final DashboardOptions options;
+  private final DashboardApiService service;
+  private final DashboardAuthorizer authorizer;
+  private final DashboardAuditSink auditSink;
+  private final DashboardOptions options;
 
-    public ThreadmillDashboardApiController(
-            DashboardApiService service,
-            DashboardAuthorizer authorizer,
-            DashboardAuditSink auditSink,
-            DashboardOptions options) {
-        this.service = service;
-        this.authorizer = authorizer;
-        this.auditSink = auditSink;
-        this.options = options;
+  public ThreadmillDashboardApiController(
+      DashboardApiService service,
+      DashboardAuthorizer authorizer,
+      DashboardAuditSink auditSink,
+      DashboardOptions options) {
+    this.service = service;
+    this.authorizer = authorizer;
+    this.auditSink = auditSink;
+    this.options = options;
+  }
+
+  @GetMapping("/session")
+  public SessionResponse session(Authentication authentication, HttpServletRequest request) {
+    var permissions = permissions(authentication);
+    var csrf = (CsrfToken) request.getAttribute(CsrfToken.class.getName());
+    return new SessionResponse(
+        authorizer.displayName(authentication),
+        permissions,
+        csrf == null
+            ? null
+            : new SessionResponse.Csrf(
+                csrf.getHeaderName(), csrf.getParameterName(), csrf.getToken()),
+        sensitiveDetailsAllowed(permissions) ? "full" : "redacted");
+  }
+
+  @GetMapping("/overview")
+  public OverviewResponse overview(Authentication authentication) {
+    var permissions = requireRead(authentication, "overview");
+    boolean includeSensitive = sensitiveDetailsAllowed(permissions);
+    if (includeSensitive) {
+      auditSensitiveView(authentication, "overview");
     }
+    return service.overview(includeSensitive);
+  }
 
-    @GetMapping("/session")
-    public SessionResponse session(Authentication authentication, HttpServletRequest request) {
-        var permissions = permissions(authentication);
-        var csrf = (CsrfToken) request.getAttribute(CsrfToken.class.getName());
-        return new SessionResponse(
-                authorizer.displayName(authentication),
-                permissions,
-                csrf == null
-                        ? null
-                        : new SessionResponse.Csrf(csrf.getHeaderName(), csrf.getParameterName(), csrf.getToken()),
-                sensitiveDetailsAllowed(permissions) ? "full" : "redacted");
-    }
+  @GetMapping("/jobs")
+  public JobListResponse jobs(
+      Authentication authentication,
+      @RequestParam(name = "state", required = false) JobState state,
+      @RequestParam(name = "queue", required = false) String queue,
+      @RequestParam(name = "handlerType", required = false) String handlerType,
+      @RequestParam(name = "limit", defaultValue = "50") int limit,
+      @RequestParam(name = "offset", defaultValue = "0") int offset) {
+    requireRead(authentication, "jobs");
+    return service.jobs(new JobSearch(state, queue, handlerType, limit, offset));
+  }
 
-    @GetMapping("/overview")
-    public OverviewResponse overview(Authentication authentication) {
-        var permissions = requireRead(authentication, "overview");
-        boolean includeSensitive = sensitiveDetailsAllowed(permissions);
-        if (includeSensitive) {
-            auditSensitiveView(authentication, "overview");
-        }
-        return service.overview(includeSensitive);
+  @GetMapping("/jobs/{id}")
+  public JobDetail job(Authentication authentication, @PathVariable("id") String id) {
+    var permissions = requireRead(authentication, "jobs/" + id);
+    boolean includeSensitive = sensitiveDetailsAllowed(permissions);
+    var detail = service.job(JobId.parse(id), includeSensitive);
+    if (includeSensitive) {
+      auditSensitiveView(authentication, id);
     }
+    return detail;
+  }
 
-    @GetMapping("/jobs")
-    public JobListResponse jobs(
-            Authentication authentication,
-            @RequestParam(name = "state", required = false) JobState state,
-            @RequestParam(name = "queue", required = false) String queue,
-            @RequestParam(name = "handlerType", required = false) String handlerType,
-            @RequestParam(name = "limit", defaultValue = "50") int limit,
-            @RequestParam(name = "offset", defaultValue = "0") int offset) {
-        requireRead(authentication, "jobs");
-        return service.jobs(new JobSearch(state, queue, handlerType, limit, offset));
-    }
+  private boolean sensitiveDetailsAllowed(Set<DashboardPermission> permissions) {
+    return options.exposeSensitiveDetails()
+        && has(permissions, DashboardPermission.VIEW_SENSITIVE_DETAILS);
+  }
 
-    @GetMapping("/jobs/{id}")
-    public JobDetail job(Authentication authentication, @PathVariable("id") String id) {
-        var permissions = requireRead(authentication, "jobs/" + id);
-        boolean includeSensitive = sensitiveDetailsAllowed(permissions);
-        var detail = service.job(JobId.parse(id), includeSensitive);
-        if (includeSensitive) {
-            auditSensitiveView(authentication, id);
-        }
-        return detail;
-    }
+  /** Reading an unredacted payload is a security-relevant event. */
+  private void auditSensitiveView(Authentication authentication, String target) {
+    recordQuietly(new DashboardAuditEvent(
+        Instant.now(),
+        authorizer.displayName(authentication),
+        DashboardPermission.VIEW_SENSITIVE_DETAILS,
+        "view_sensitive_details",
+        target,
+        "viewed"));
+  }
 
-    private boolean sensitiveDetailsAllowed(Set<DashboardPermission> permissions) {
-        return options.exposeSensitiveDetails() && has(permissions, DashboardPermission.VIEW_SENSITIVE_DETAILS);
+  /**
+   * READ gate for GET endpoints that audits a denied attempt, mirroring the
+   * denial audit on mutations. Mutations keep using {@link #require} via
+   * {@link #action} (which audits their own denials), so there is no double
+   * record.
+   */
+  private Set<DashboardPermission> requireRead(Authentication authentication, String target) {
+    try {
+      return require(authentication, DashboardPermission.READ);
+    } catch (ResponseStatusException denied) {
+      String actor = authentication == null ? "anonymous" : authorizer.displayName(authentication);
+      recordQuietly(new DashboardAuditEvent(
+          Instant.now(), actor, DashboardPermission.READ, "read", target, "denied"));
+      throw denied;
     }
+  }
 
-    /** Reading an unredacted payload is a security-relevant event. */
-    private void auditSensitiveView(Authentication authentication, String target) {
-        recordQuietly(new DashboardAuditEvent(
-                Instant.now(),
-                authorizer.displayName(authentication),
-                DashboardPermission.VIEW_SENSITIVE_DETAILS,
-                "view_sensitive_details",
-                target,
-                "viewed"));
-    }
+  /** ADMIN is a superset of every permission — including the redaction decision. */
+  private static boolean has(Set<DashboardPermission> permissions, DashboardPermission permission) {
+    return permissions.contains(permission) || permissions.contains(DashboardPermission.ADMIN);
+  }
 
-    /**
-     * READ gate for GET endpoints that audits a denied attempt, mirroring the
-     * denial audit on mutations. Mutations keep using {@link #require} via
-     * {@link #action} (which audits their own denials), so there is no double
-     * record.
-     */
-    private Set<DashboardPermission> requireRead(Authentication authentication, String target) {
-        try {
-            return require(authentication, DashboardPermission.READ);
-        } catch (ResponseStatusException denied) {
-            String actor = authentication == null ? "anonymous" : authorizer.displayName(authentication);
-            recordQuietly(
-                    new DashboardAuditEvent(Instant.now(), actor, DashboardPermission.READ, "read", target, "denied"));
-            throw denied;
-        }
-    }
+  @GetMapping("/queues")
+  public List<QueueView> queues(Authentication authentication) {
+    requireRead(authentication, "queues");
+    return service.queues();
+  }
 
-    /** ADMIN is a superset of every permission — including the redaction decision. */
-    private static boolean has(Set<DashboardPermission> permissions, DashboardPermission permission) {
-        return permissions.contains(permission) || permissions.contains(DashboardPermission.ADMIN);
+  @GetMapping("/recurring")
+  public List<RecurringTaskView> recurring(Authentication authentication) {
+    var permissions = requireRead(authentication, "recurring");
+    boolean includeSensitive = sensitiveDetailsAllowed(permissions);
+    if (includeSensitive) {
+      auditSensitiveView(authentication, "recurring");
     }
+    return service.recurringTasks(includeSensitive);
+  }
 
-    @GetMapping("/queues")
-    public List<QueueView> queues(Authentication authentication) {
-        requireRead(authentication, "queues");
-        return service.queues();
-    }
+  @GetMapping("/nodes")
+  public List<NodeHeartbeat> nodes(Authentication authentication) {
+    requireRead(authentication, "nodes");
+    return service.nodeHeartbeats();
+  }
 
-    @GetMapping("/recurring")
-    public List<RecurringTaskView> recurring(Authentication authentication) {
-        var permissions = requireRead(authentication, "recurring");
-        boolean includeSensitive = sensitiveDetailsAllowed(permissions);
-        if (includeSensitive) {
-            auditSensitiveView(authentication, "recurring");
-        }
-        return service.recurringTasks(includeSensitive);
-    }
+  @PostMapping("/queues/{queue}/pause")
+  public ActionResponse pauseQueue(
+      Authentication authentication,
+      @PathVariable("queue") String queue,
+      @RequestBody(required = false) PauseQueueRequest request) {
+    return action(
+        authentication,
+        DashboardPermission.PAUSE_QUEUE,
+        "pause_queue",
+        queue,
+        () -> service.pauseQueue(queue, request == null ? null : request.reason()));
+  }
 
-    @GetMapping("/nodes")
-    public List<NodeHeartbeat> nodes(Authentication authentication) {
-        requireRead(authentication, "nodes");
-        return service.nodeHeartbeats();
-    }
+  @PostMapping("/queues/{queue}/resume")
+  public ActionResponse resumeQueue(
+      Authentication authentication, @PathVariable("queue") String queue) {
+    return action(
+        authentication,
+        DashboardPermission.RESUME_QUEUE,
+        "resume_queue",
+        queue,
+        () -> service.resumeQueue(queue));
+  }
 
-    @PostMapping("/queues/{queue}/pause")
-    public ActionResponse pauseQueue(
-            Authentication authentication,
-            @PathVariable("queue") String queue,
-            @RequestBody(required = false) PauseQueueRequest request) {
-        return action(
-                authentication,
-                DashboardPermission.PAUSE_QUEUE,
-                "pause_queue",
-                queue,
-                () -> service.pauseQueue(queue, request == null ? null : request.reason()));
-    }
+  @PostMapping("/jobs/{id}/requeue")
+  public ActionResponse requeue(
+      Authentication authentication,
+      @PathVariable("id") String id,
+      @RequestBody VersionedActionRequest request) {
+    return action(
+        authentication,
+        DashboardPermission.REQUEUE_JOB,
+        "requeue_job",
+        id,
+        () -> service.requeue(JobId.parse(id), request.expectedVersion()));
+  }
 
-    @PostMapping("/queues/{queue}/resume")
-    public ActionResponse resumeQueue(Authentication authentication, @PathVariable("queue") String queue) {
-        return action(
-                authentication,
-                DashboardPermission.RESUME_QUEUE,
-                "resume_queue",
-                queue,
-                () -> service.resumeQueue(queue));
-    }
+  @PostMapping("/jobs/{id}/schedule-retry")
+  public ActionResponse scheduleRetry(
+      Authentication authentication,
+      @PathVariable("id") String id,
+      @RequestBody ScheduleRetryRequest request) {
+    return action(
+        authentication,
+        DashboardPermission.REQUEUE_JOB,
+        "schedule_retry",
+        id,
+        () -> service.scheduleRetry(JobId.parse(id), request.expectedVersion(), request.delay()));
+  }
 
-    @PostMapping("/jobs/{id}/requeue")
-    public ActionResponse requeue(
-            Authentication authentication, @PathVariable("id") String id, @RequestBody VersionedActionRequest request) {
-        return action(
-                authentication,
-                DashboardPermission.REQUEUE_JOB,
-                "requeue_job",
-                id,
-                () -> service.requeue(JobId.parse(id), request.expectedVersion()));
-    }
+  @DeleteMapping("/jobs/{id}")
+  public ActionResponse deleteJob(
+      Authentication authentication,
+      @PathVariable("id") String id,
+      @RequestParam(name = "expectedVersion") long expectedVersion) {
+    return action(
+        authentication,
+        DashboardPermission.DELETE_JOB,
+        "delete_job",
+        id,
+        () -> service.deleteJob(JobId.parse(id), expectedVersion));
+  }
 
-    @PostMapping("/jobs/{id}/schedule-retry")
-    public ActionResponse scheduleRetry(
-            Authentication authentication, @PathVariable("id") String id, @RequestBody ScheduleRetryRequest request) {
-        return action(
-                authentication,
-                DashboardPermission.REQUEUE_JOB,
-                "schedule_retry",
-                id,
-                () -> service.scheduleRetry(JobId.parse(id), request.expectedVersion(), request.delay()));
-    }
+  @PatchMapping("/jobs/{id}")
+  public ActionResponse replaceJob(
+      Authentication authentication,
+      @PathVariable("id") String id,
+      @RequestBody ReplaceJobRequest request) {
+    return action(
+        authentication,
+        DashboardPermission.REPLACE_JOB,
+        "replace_job",
+        id,
+        () -> service.replaceJob(JobId.parse(id), request));
+  }
 
-    @DeleteMapping("/jobs/{id}")
-    public ActionResponse deleteJob(
-            Authentication authentication,
-            @PathVariable("id") String id,
-            @RequestParam(name = "expectedVersion") long expectedVersion) {
-        return action(
-                authentication,
-                DashboardPermission.DELETE_JOB,
-                "delete_job",
-                id,
-                () -> service.deleteJob(JobId.parse(id), expectedVersion));
-    }
+  @PostMapping("/recurring/{name}/trigger")
+  public ActionResponse triggerRecurring(
+      Authentication authentication, @PathVariable("name") String name) {
+    return action(
+        authentication,
+        DashboardPermission.TRIGGER_RECURRING,
+        "trigger_recurring",
+        name,
+        () -> service.triggerRecurring(name));
+  }
 
-    @PatchMapping("/jobs/{id}")
-    public ActionResponse replaceJob(
-            Authentication authentication, @PathVariable("id") String id, @RequestBody ReplaceJobRequest request) {
-        return action(
-                authentication,
-                DashboardPermission.REPLACE_JOB,
-                "replace_job",
-                id,
-                () -> service.replaceJob(JobId.parse(id), request));
-    }
+  @PutMapping("/recurring/{name}")
+  public ActionResponse updateRecurring(
+      Authentication authentication,
+      @PathVariable("name") String name,
+      @RequestBody UpdateRecurringRequest request) {
+    return action(
+        authentication,
+        DashboardPermission.UPDATE_RECURRING,
+        "update_recurring",
+        name,
+        () -> service.updateRecurring(name, request));
+  }
 
-    @PostMapping("/recurring/{name}/trigger")
-    public ActionResponse triggerRecurring(Authentication authentication, @PathVariable("name") String name) {
-        return action(
-                authentication,
-                DashboardPermission.TRIGGER_RECURRING,
-                "trigger_recurring",
-                name,
-                () -> service.triggerRecurring(name));
-    }
+  @DeleteMapping("/recurring/{name}")
+  public ActionResponse deleteRecurring(
+      Authentication authentication, @PathVariable("name") String name) {
+    return action(
+        authentication,
+        DashboardPermission.DELETE_RECURRING,
+        "delete_recurring",
+        name,
+        () -> service.deleteRecurring(name));
+  }
 
-    @PutMapping("/recurring/{name}")
-    public ActionResponse updateRecurring(
-            Authentication authentication,
-            @PathVariable("name") String name,
-            @RequestBody UpdateRecurringRequest request) {
-        return action(
-                authentication,
-                DashboardPermission.UPDATE_RECURRING,
-                "update_recurring",
-                name,
-                () -> service.updateRecurring(name, request));
+  private Set<DashboardPermission> require(
+      Authentication authentication, DashboardPermission permission) {
+    var permissions = permissions(authentication);
+    if (!has(permissions, permission)) {
+      throw new ResponseStatusException(HttpStatus.FORBIDDEN, "missing " + permission);
     }
+    return permissions;
+  }
 
-    @DeleteMapping("/recurring/{name}")
-    public ActionResponse deleteRecurring(Authentication authentication, @PathVariable("name") String name) {
-        return action(
-                authentication,
-                DashboardPermission.DELETE_RECURRING,
-                "delete_recurring",
-                name,
-                () -> service.deleteRecurring(name));
+  private Set<DashboardPermission> permissions(Authentication authentication) {
+    if (authentication == null && options.allowUnsafeReadOnlyWithoutAuthentication()) {
+      return Set.of(DashboardPermission.READ);
     }
+    if (authentication == null)
+      throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "authentication required");
+    return authorizer.permissions(authentication);
+  }
 
-    private Set<DashboardPermission> require(Authentication authentication, DashboardPermission permission) {
-        var permissions = permissions(authentication);
-        if (!has(permissions, permission)) {
-            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "missing " + permission);
-        }
-        return permissions;
+  private ActionResponse action(
+      Authentication authentication,
+      DashboardPermission permission,
+      String action,
+      String target,
+      DashboardAction work) {
+    String actor = authorizer.displayName(authentication);
+    try {
+      require(authentication, permission);
+    } catch (ResponseStatusException e) {
+      // Denied mutation attempts are security-relevant events.
+      recordQuietly(
+          new DashboardAuditEvent(Instant.now(), actor, permission, action, target, "denied"));
+      throw e;
     }
+    ActionResponse response;
+    try {
+      response = work.run();
+    } catch (RuntimeException e) {
+      recordQuietly(
+          new DashboardAuditEvent(Instant.now(), actor, permission, action, target, "failed"));
+      throw e;
+    }
+    // The mutation is durably applied at this point: a throwing audit
+    // sink must not convert it into a false "failed" + 500.
+    recordQuietly(new DashboardAuditEvent(
+        Instant.now(), actor, permission, action, target, response.status()));
+    return response;
+  }
 
-    private Set<DashboardPermission> permissions(Authentication authentication) {
-        if (authentication == null && options.allowUnsafeReadOnlyWithoutAuthentication()) {
-            return Set.of(DashboardPermission.READ);
-        }
-        if (authentication == null)
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "authentication required");
-        return authorizer.permissions(authentication);
+  private void recordQuietly(DashboardAuditEvent event) {
+    try {
+      auditSink.record(event);
+    } catch (RuntimeException e) {
+      LOG.warn(
+          "Dashboard audit sink failed for {} {} ({})",
+          event.action(),
+          event.target(),
+          event.outcome(),
+          e);
     }
+  }
 
-    private ActionResponse action(
-            Authentication authentication,
-            DashboardPermission permission,
-            String action,
-            String target,
-            DashboardAction work) {
-        String actor = authorizer.displayName(authentication);
-        try {
-            require(authentication, permission);
-        } catch (ResponseStatusException e) {
-            // Denied mutation attempts are security-relevant events.
-            recordQuietly(new DashboardAuditEvent(Instant.now(), actor, permission, action, target, "denied"));
-            throw e;
-        }
-        ActionResponse response;
-        try {
-            response = work.run();
-        } catch (RuntimeException e) {
-            recordQuietly(new DashboardAuditEvent(Instant.now(), actor, permission, action, target, "failed"));
-            throw e;
-        }
-        // The mutation is durably applied at this point: a throwing audit
-        // sink must not convert it into a false "failed" + 500.
-        recordQuietly(new DashboardAuditEvent(Instant.now(), actor, permission, action, target, response.status()));
-        return response;
-    }
+  @FunctionalInterface
+  private interface DashboardAction {
+    ActionResponse run();
+  }
 
-    private void recordQuietly(DashboardAuditEvent event) {
-        try {
-            auditSink.record(event);
-        } catch (RuntimeException e) {
-            LOG.warn("Dashboard audit sink failed for {} {} ({})", event.action(), event.target(), event.outcome(), e);
-        }
-    }
+  @ExceptionHandler(StaleJobException.class)
+  @ResponseStatus(HttpStatus.CONFLICT)
+  ProblemDetail staleJob(StaleJobException e) {
+    return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, "stale job version");
+  }
 
-    @FunctionalInterface
-    private interface DashboardAction {
-        ActionResponse run();
-    }
+  @ExceptionHandler(DashboardApiException.class)
+  ResponseEntity<ProblemDetail> dashboardApiFailure(DashboardApiException e) {
+    var status =
+        switch (e.code()) {
+          case BAD_REQUEST -> HttpStatus.BAD_REQUEST;
+          case NOT_FOUND -> HttpStatus.NOT_FOUND;
+          case CONFLICT -> HttpStatus.CONFLICT;
+        };
+    return ResponseEntity.status(status)
+        .body(ProblemDetail.forStatusAndDetail(status, e.getMessage()));
+  }
 
-    @ExceptionHandler(StaleJobException.class)
-    @ResponseStatus(HttpStatus.CONFLICT)
-    ProblemDetail staleJob(StaleJobException e) {
-        return ProblemDetail.forStatusAndDetail(HttpStatus.CONFLICT, "stale job version");
-    }
+  @ExceptionHandler(IllegalArgumentException.class)
+  @ResponseStatus(HttpStatus.BAD_REQUEST)
+  ProblemDetail invalidRequest(IllegalArgumentException e) {
+    return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, e.getMessage());
+  }
 
-    @ExceptionHandler(DashboardApiException.class)
-    ResponseEntity<ProblemDetail> dashboardApiFailure(DashboardApiException e) {
-        var status =
-                switch (e.code()) {
-                    case BAD_REQUEST -> HttpStatus.BAD_REQUEST;
-                    case NOT_FOUND -> HttpStatus.NOT_FOUND;
-                    case CONFLICT -> HttpStatus.CONFLICT;
-                };
-        return ResponseEntity.status(status).body(ProblemDetail.forStatusAndDetail(status, e.getMessage()));
-    }
-
-    @ExceptionHandler(IllegalArgumentException.class)
-    @ResponseStatus(HttpStatus.BAD_REQUEST)
-    ProblemDetail invalidRequest(IllegalArgumentException e) {
-        return ProblemDetail.forStatusAndDetail(HttpStatus.BAD_REQUEST, e.getMessage());
-    }
-
-    @ExceptionHandler(OversizedJobException.class)
-    @ResponseStatus(HttpStatus.CONTENT_TOO_LARGE)
-    ProblemDetail oversizedJob(OversizedJobException e) {
-        return ProblemDetail.forStatusAndDetail(
-                HttpStatus.CONTENT_TOO_LARGE,
-                "job serialized form is " + e.actualBytes() + " bytes, exceeds limit of " + e.limitBytes());
-    }
+  @ExceptionHandler(OversizedJobException.class)
+  @ResponseStatus(HttpStatus.CONTENT_TOO_LARGE)
+  ProblemDetail oversizedJob(OversizedJobException e) {
+    return ProblemDetail.forStatusAndDetail(
+        HttpStatus.CONTENT_TOO_LARGE,
+        "job serialized form is " + e.actualBytes() + " bytes, exceeds limit of " + e.limitBytes());
+  }
 }

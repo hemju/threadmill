@@ -4,25 +4,25 @@ package com.hemju.threadmill.dashboard.api;
 @FunctionalInterface
 public interface DashboardAuditSink {
 
-    void record(DashboardAuditEvent event);
+  void record(DashboardAuditEvent event);
 
-    default boolean isNoop() {
-        return false;
-    }
+  default boolean isNoop() {
+    return false;
+  }
 
-    static DashboardAuditSink noop() {
-        return NoopDashboardAuditSink.INSTANCE;
-    }
+  static DashboardAuditSink noop() {
+    return NoopDashboardAuditSink.INSTANCE;
+  }
 }
 
 enum NoopDashboardAuditSink implements DashboardAuditSink {
-    INSTANCE;
+  INSTANCE;
 
-    @Override
-    public void record(DashboardAuditEvent event) {}
+  @Override
+  public void record(DashboardAuditEvent event) {}
 
-    @Override
-    public boolean isNoop() {
-        return true;
-    }
+  @Override
+  public boolean isNoop() {
+    return true;
+  }
 }

@@ -21,47 +21,47 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class JobMetadata {
 
-    private final ConcurrentHashMap<String, String> entries = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, String> entries = new ConcurrentHashMap<>();
 
-    public JobMetadata() {}
+  public JobMetadata() {}
 
-    public JobMetadata(Map<String, String> initial) {
-        Objects.requireNonNull(initial, "initial");
-        initial.forEach((k, v) -> {
-            Objects.requireNonNull(k, "metadata key");
-            Objects.requireNonNull(v, "metadata value for key " + k);
-            entries.put(k, v);
-        });
-    }
+  public JobMetadata(Map<String, String> initial) {
+    Objects.requireNonNull(initial, "initial");
+    initial.forEach((k, v) -> {
+      Objects.requireNonNull(k, "metadata key");
+      Objects.requireNonNull(v, "metadata value for key " + k);
+      entries.put(k, v);
+    });
+  }
 
-    public void put(String key, String value) {
-        Objects.requireNonNull(key, "key");
-        Objects.requireNonNull(value, "value");
-        entries.put(key, value);
-    }
+  public void put(String key, String value) {
+    Objects.requireNonNull(key, "key");
+    Objects.requireNonNull(value, "value");
+    entries.put(key, value);
+  }
 
-    public Optional<String> get(String key) {
-        return Optional.ofNullable(entries.get(key));
-    }
+  public Optional<String> get(String key) {
+    return Optional.ofNullable(entries.get(key));
+  }
 
-    public boolean containsKey(String key) {
-        return entries.containsKey(key);
-    }
+  public boolean containsKey(String key) {
+    return entries.containsKey(key);
+  }
 
-    public int size() {
-        return entries.size();
-    }
+  public int size() {
+    return entries.size();
+  }
 
-    public boolean isEmpty() {
-        return entries.isEmpty();
-    }
+  public boolean isEmpty() {
+    return entries.isEmpty();
+  }
 
-    /**
-     * Returns an immutable, point-in-time snapshot of the metadata. Intended
-     * for the engine: a serialization that reads from the snapshot cannot
-     * observe partial state caused by concurrent mutation.
-     */
-    public Map<String, String> snapshot() {
-        return Collections.unmodifiableMap(new LinkedHashMap<>(entries));
-    }
+  /**
+   * Returns an immutable, point-in-time snapshot of the metadata. Intended
+   * for the engine: a serialization that reads from the snapshot cannot
+   * observe partial state caused by concurrent mutation.
+   */
+  public Map<String, String> snapshot() {
+    return Collections.unmodifiableMap(new LinkedHashMap<>(entries));
+  }
 }

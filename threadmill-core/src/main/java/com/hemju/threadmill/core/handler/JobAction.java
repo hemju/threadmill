@@ -17,15 +17,15 @@ package com.hemju.threadmill.core.handler;
  */
 public interface JobAction extends JobHandler<NoPayload> {
 
-    @Override
-    default void run(NoPayload payload, JobExecutionContext ctx) throws Exception {
-        run(ctx);
-    }
+  @Override
+  default void run(NoPayload payload, JobExecutionContext ctx) throws Exception {
+    run(ctx);
+  }
 
-    /**
-     * Run the job. See {@link JobHandler#run(JobPayload, JobExecutionContext)}
-     * for the at-least-once delivery and exception semantics — both apply
-     * here unchanged.
-     */
-    void run(JobExecutionContext ctx) throws Exception;
+  /**
+   * Run the job. See {@link JobHandler#run(JobPayload, JobExecutionContext)}
+   * for the at-least-once delivery and exception semantics — both apply
+   * here unchanged.
+   */
+  void run(JobExecutionContext ctx) throws Exception;
 }

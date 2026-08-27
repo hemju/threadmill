@@ -24,129 +24,129 @@ import com.hemju.threadmill.store.memory.InMemoryJobStore;
 
 class TransactionJoinedJobSchedulerTest {
 
-    private InMemoryJobStore store;
-    private TransactionJoinedJobScheduler scheduler;
-    private CopyOnWriteArrayList<String> wakeCalls;
+  private InMemoryJobStore store;
+  private TransactionJoinedJobScheduler scheduler;
+  private CopyOnWriteArrayList<String> wakeCalls;
 
-    public static final class GreetPayload implements JobPayload {
-        public String tag;
+  public static final class GreetPayload implements JobPayload {
+    public String tag;
 
-        public GreetPayload() {}
+    public GreetPayload() {}
 
-        public GreetPayload(String tag) {
-            this.tag = tag;
-        }
+    public GreetPayload(String tag) {
+      this.tag = tag;
     }
+  }
 
-    public static final class GreetHandler implements JobHandler<GreetPayload> {
-        @Override
-        public void run(GreetPayload p, JobExecutionContext c) {}
+  public static final class GreetHandler implements JobHandler<GreetPayload> {
+    @Override
+    public void run(GreetPayload p, JobExecutionContext c) {}
+  }
+
+  @BeforeEach
+  void setUp() {
+    store = new InMemoryJobStore();
+    var wakeBus = new LocalWakeBus();
+    wakeCalls = new CopyOnWriteArrayList<>();
+    wakeBus.register(wakeCalls::add);
+    scheduler = new TransactionJoinedJobScheduler(
+        store,
+        new JsonJobSerializer(),
+        new TestRegistry(),
+        ProcessingNodeConfig.builder().build(),
+        wakeBus);
+  }
+
+  @AfterEach
+  void tearDown() {
+    if (TransactionSynchronizationManager.isSynchronizationActive()) {
+      TransactionSynchronizationManager.clear();
     }
+    TransactionSynchronizationManager.setActualTransactionActive(false);
+  }
 
-    @BeforeEach
-    void setUp() {
-        store = new InMemoryJobStore();
-        var wakeBus = new LocalWakeBus();
-        wakeCalls = new CopyOnWriteArrayList<>();
-        wakeBus.register(wakeCalls::add);
-        scheduler = new TransactionJoinedJobScheduler(
-                store,
-                new JsonJobSerializer(),
-                new TestRegistry(),
-                ProcessingNodeConfig.builder().build(),
-                wakeBus);
+  @Test
+  void enqueueInsideTransactionWritesImmediatelyButWakesAfterCommit() {
+    beginTransaction();
+    try {
+      JobId id = scheduler.enqueue(GreetHandler.class, new GreetPayload("joined"));
+
+      assertThat(store.findById(id)).isPresent();
+      assertThat(wakeCalls).isEmpty();
+
+      triggerAfterCommit();
+      assertThat(wakeCalls).containsExactly("default");
+    } finally {
+      TransactionSynchronizationManager.clear();
+      TransactionSynchronizationManager.setActualTransactionActive(false);
     }
+  }
 
-    @AfterEach
-    void tearDown() {
-        if (TransactionSynchronizationManager.isSynchronizationActive()) {
-            TransactionSynchronizationManager.clear();
-        }
-        TransactionSynchronizationManager.setActualTransactionActive(false);
+  @Test
+  void enqueueAllInsideTransactionWakesAfterCommit() {
+    beginTransaction();
+    try {
+      List<JobId> ids = scheduler.enqueueAll(
+          GreetHandler.class, List.of(new GreetPayload("a"), new GreetPayload("b")));
+
+      assertThat(ids).allSatisfy(id -> assertThat(store.findById(id)).isPresent());
+      assertThat(wakeCalls).isEmpty();
+
+      triggerAfterCommit();
+      assertThat(wakeCalls).containsExactly("default");
+    } finally {
+      TransactionSynchronizationManager.clear();
+      TransactionSynchronizationManager.setActualTransactionActive(false);
     }
+  }
 
-    @Test
-    void enqueueInsideTransactionWritesImmediatelyButWakesAfterCommit() {
-        beginTransaction();
-        try {
-            JobId id = scheduler.enqueue(GreetHandler.class, new GreetPayload("joined"));
+  @Test
+  void dedupInsideTransactionReturnsCreatedSynchronouslyAndWakesAfterCommit() {
+    beginTransaction();
+    try {
+      EnqueueResult result = scheduler.enqueueIfAbsent(
+          GreetHandler.class, new GreetPayload("dedup"), "tenant-1:greet", Duration.ofMinutes(5));
 
-            assertThat(store.findById(id)).isPresent();
-            assertThat(wakeCalls).isEmpty();
+      assertThat(result).isInstanceOf(EnqueueResult.Created.class);
+      assertThat(wakeCalls).isEmpty();
 
-            triggerAfterCommit();
-            assertThat(wakeCalls).containsExactly("default");
-        } finally {
-            TransactionSynchronizationManager.clear();
-            TransactionSynchronizationManager.setActualTransactionActive(false);
-        }
+      triggerAfterCommit();
+      assertThat(wakeCalls).containsExactly("default");
+    } finally {
+      TransactionSynchronizationManager.clear();
+      TransactionSynchronizationManager.setActualTransactionActive(false);
     }
+  }
 
-    @Test
-    void enqueueAllInsideTransactionWakesAfterCommit() {
-        beginTransaction();
-        try {
-            List<JobId> ids =
-                    scheduler.enqueueAll(GreetHandler.class, List.of(new GreetPayload("a"), new GreetPayload("b")));
+  @Test
+  void scheduledEnqueueInsideTransactionDoesNotWake() {
+    beginTransaction();
+    try {
+      scheduler.enqueueIn(GreetHandler.class, new GreetPayload("later"), Duration.ofMinutes(5));
+      triggerAfterCommit();
 
-            assertThat(ids).allSatisfy(id -> assertThat(store.findById(id)).isPresent());
-            assertThat(wakeCalls).isEmpty();
-
-            triggerAfterCommit();
-            assertThat(wakeCalls).containsExactly("default");
-        } finally {
-            TransactionSynchronizationManager.clear();
-            TransactionSynchronizationManager.setActualTransactionActive(false);
-        }
+      assertThat(wakeCalls).isEmpty();
+    } finally {
+      TransactionSynchronizationManager.clear();
+      TransactionSynchronizationManager.setActualTransactionActive(false);
     }
+  }
 
-    @Test
-    void dedupInsideTransactionReturnsCreatedSynchronouslyAndWakesAfterCommit() {
-        beginTransaction();
-        try {
-            EnqueueResult result = scheduler.enqueueIfAbsent(
-                    GreetHandler.class, new GreetPayload("dedup"), "tenant-1:greet", Duration.ofMinutes(5));
+  private static void beginTransaction() {
+    TransactionSynchronizationManager.initSynchronization();
+    TransactionSynchronizationManager.setActualTransactionActive(true);
+  }
 
-            assertThat(result).isInstanceOf(EnqueueResult.Created.class);
-            assertThat(wakeCalls).isEmpty();
-
-            triggerAfterCommit();
-            assertThat(wakeCalls).containsExactly("default");
-        } finally {
-            TransactionSynchronizationManager.clear();
-            TransactionSynchronizationManager.setActualTransactionActive(false);
-        }
+  private static void triggerAfterCommit() {
+    for (TransactionSynchronization s : TransactionSynchronizationManager.getSynchronizations()) {
+      s.afterCommit();
     }
+  }
 
-    @Test
-    void scheduledEnqueueInsideTransactionDoesNotWake() {
-        beginTransaction();
-        try {
-            scheduler.enqueueIn(GreetHandler.class, new GreetPayload("later"), Duration.ofMinutes(5));
-            triggerAfterCommit();
-
-            assertThat(wakeCalls).isEmpty();
-        } finally {
-            TransactionSynchronizationManager.clear();
-            TransactionSynchronizationManager.setActualTransactionActive(false);
-        }
+  private static final class TestRegistry extends ThreadmillJobRegistry {
+    TestRegistry() {
+      super(new ThreadmillJobRegistry.Registration(
+          GreetPayload.class, GreetHandler.class, "default", 0, 5, Duration.ofMinutes(5), null));
     }
-
-    private static void beginTransaction() {
-        TransactionSynchronizationManager.initSynchronization();
-        TransactionSynchronizationManager.setActualTransactionActive(true);
-    }
-
-    private static void triggerAfterCommit() {
-        for (TransactionSynchronization s : TransactionSynchronizationManager.getSynchronizations()) {
-            s.afterCommit();
-        }
-    }
-
-    private static final class TestRegistry extends ThreadmillJobRegistry {
-        TestRegistry() {
-            super(new ThreadmillJobRegistry.Registration(
-                    GreetPayload.class, GreetHandler.class, "default", 0, 5, Duration.ofMinutes(5), null));
-        }
-    }
+  }
 }

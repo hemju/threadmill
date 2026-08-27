@@ -25,67 +25,68 @@ import com.hemju.threadmill.core.store.JobStore;
  */
 public final class StoreWorkerMain {
 
-    private static final Logger LOG = LoggerFactory.getLogger(StoreWorkerMain.class);
+  private static final Logger LOG = LoggerFactory.getLogger(StoreWorkerMain.class);
 
-    private StoreWorkerMain() {}
+  private StoreWorkerMain() {}
 
-    static void main(String[] args) throws Exception {
-        ExampleStores.Backend backend = ExampleStores.Backend.defaultBackend();
-        String label = "node-" + ProcessHandle.current().pid();
-        if (args.length > 0) {
-            if (isBackend(args[0])) {
-                backend = ExampleStores.Backend.parse(args[0]);
-                if (args.length > 1) label = args[1];
-            } else {
-                label = args[0];
-            }
-        }
-        ExampleStores.Backend selectedBackend = backend;
-        String selectedLabel = label;
-
-        ProcessingNodeConfig config = ProcessingNodeConfig.builder()
-                .workerCount(4)
-                .pollInterval(Duration.ofMillis(200))
-                .claimHeartbeat(Duration.ofSeconds(2))
-                .heartbeatTimeout(Duration.ofSeconds(15))
-                .jobTimeout(Duration.ofSeconds(30))
-                .defaultMaxAttempts(3)
-                .retryInitialBackoff(Duration.ofSeconds(2))
-                .storeOutagePollInterval(Duration.ofSeconds(2))
-                .claimBatchSize(4)
-                .build();
-
-        ExampleStores.StoreHandle handle = ExampleStores.open(selectedBackend);
-        JobStore store = handle.store();
-        ProcessingNode node = ProcessingNode.builder(store)
-                .config(config)
-                .lane(new QueueLane("default", 4))
-                .build();
-
-        Runtime.getRuntime()
-                .addShutdownHook(new Thread(
-                        () -> {
-                            LOG.info("[{}:{}] shutting down (node={})", selectedBackend, selectedLabel, shortId(node));
-                            node.close();
-                            handle.close();
-                        },
-                        "threadmill-example-shutdown"));
-
-        LOG.info("[{}:{}] starting worker (node={})", selectedBackend, selectedLabel, shortId(node));
-        node.start();
-
-        // Park forever; Ctrl-C triggers the shutdown hook above.
-        Thread.currentThread().join();
+  static void main(String[] args) throws Exception {
+    ExampleStores.Backend backend = ExampleStores.Backend.defaultBackend();
+    String label = "node-" + ProcessHandle.current().pid();
+    if (args.length > 0) {
+      if (isBackend(args[0])) {
+        backend = ExampleStores.Backend.parse(args[0]);
+        if (args.length > 1) label = args[1];
+      } else {
+        label = args[0];
+      }
     }
+    ExampleStores.Backend selectedBackend = backend;
+    String selectedLabel = label;
 
-    private static String shortId(ProcessingNode node) {
-        return node.nodeId().asUuid().toString().substring(0, 8);
-    }
+    ProcessingNodeConfig config = ProcessingNodeConfig.builder()
+        .workerCount(4)
+        .pollInterval(Duration.ofMillis(200))
+        .claimHeartbeat(Duration.ofSeconds(2))
+        .heartbeatTimeout(Duration.ofSeconds(15))
+        .jobTimeout(Duration.ofSeconds(30))
+        .defaultMaxAttempts(3)
+        .retryInitialBackoff(Duration.ofSeconds(2))
+        .storeOutagePollInterval(Duration.ofSeconds(2))
+        .claimBatchSize(4)
+        .build();
 
-    private static boolean isBackend(String value) {
-        return value.equalsIgnoreCase("postgres")
-                || value.equalsIgnoreCase("postgresql")
-                || value.equalsIgnoreCase("pg")
-                || value.equalsIgnoreCase("redis");
-    }
+    ExampleStores.StoreHandle handle = ExampleStores.open(selectedBackend);
+    JobStore store = handle.store();
+    ProcessingNode node = ProcessingNode.builder(store)
+        .config(config)
+        .lane(new QueueLane("default", 4))
+        .build();
+
+    Runtime.getRuntime()
+        .addShutdownHook(new Thread(
+            () -> {
+              LOG.info(
+                  "[{}:{}] shutting down (node={})", selectedBackend, selectedLabel, shortId(node));
+              node.close();
+              handle.close();
+            },
+            "threadmill-example-shutdown"));
+
+    LOG.info("[{}:{}] starting worker (node={})", selectedBackend, selectedLabel, shortId(node));
+    node.start();
+
+    // Park forever; Ctrl-C triggers the shutdown hook above.
+    Thread.currentThread().join();
+  }
+
+  private static String shortId(ProcessingNode node) {
+    return node.nodeId().asUuid().toString().substring(0, 8);
+  }
+
+  private static boolean isBackend(String value) {
+    return value.equalsIgnoreCase("postgres")
+        || value.equalsIgnoreCase("postgresql")
+        || value.equalsIgnoreCase("pg")
+        || value.equalsIgnoreCase("redis");
+  }
 }

@@ -25,67 +25,73 @@ import com.hemju.threadmill.store.memory.InMemoryJobStore;
  */
 class JobSchedulerRetryMetadataTest {
 
-    private InMemoryJobStore store;
-    private JobScheduler scheduler;
+  private InMemoryJobStore store;
+  private JobScheduler scheduler;
 
-    public static final class CappedPayload implements JobPayload {
-        public String tag = "capped";
-    }
+  public static final class CappedPayload implements JobPayload {
+    public String tag = "capped";
+  }
 
-    public static final class CappedHandler implements JobHandler<CappedPayload> {
-        @Override
-        public void run(CappedPayload p, JobExecutionContext c) {}
-    }
+  public static final class CappedHandler implements JobHandler<CappedPayload> {
+    @Override
+    public void run(CappedPayload p, JobExecutionContext c) {}
+  }
 
-    public static final class UncappedPayload implements JobPayload {
-        public String tag = "uncapped";
-    }
+  public static final class UncappedPayload implements JobPayload {
+    public String tag = "uncapped";
+  }
 
-    public static final class UncappedHandler implements JobHandler<UncappedPayload> {
-        @Override
-        public void run(UncappedPayload p, JobExecutionContext c) {}
-    }
+  public static final class UncappedHandler implements JobHandler<UncappedPayload> {
+    @Override
+    public void run(UncappedPayload p, JobExecutionContext c) {}
+  }
 
-    private static final class TestRegistry extends ThreadmillJobRegistry {
-        TestRegistry() {
-            super(
-                    new ThreadmillJobRegistry.Registration(
-                            CappedPayload.class, CappedHandler.class, "default", 0, 4, Duration.ofMinutes(5), null),
-                    new ThreadmillJobRegistry.Registration(
-                            UncappedPayload.class,
-                            UncappedHandler.class,
-                            "default",
-                            0,
-                            null,
-                            Duration.ofMinutes(5),
-                            null));
-        }
+  private static final class TestRegistry extends ThreadmillJobRegistry {
+    TestRegistry() {
+      super(
+          new ThreadmillJobRegistry.Registration(
+              CappedPayload.class,
+              CappedHandler.class,
+              "default",
+              0,
+              4,
+              Duration.ofMinutes(5),
+              null),
+          new ThreadmillJobRegistry.Registration(
+              UncappedPayload.class,
+              UncappedHandler.class,
+              "default",
+              0,
+              null,
+              Duration.ofMinutes(5),
+              null));
     }
+  }
 
-    @BeforeEach
-    void setUp() {
-        store = new InMemoryJobStore();
-        scheduler = new JobScheduler(
-                store,
-                new JsonJobSerializer(),
-                new TestRegistry(),
-                ProcessingNodeConfig.builder().build());
-    }
+  @BeforeEach
+  void setUp() {
+    store = new InMemoryJobStore();
+    scheduler = new JobScheduler(
+        store,
+        new JsonJobSerializer(),
+        new TestRegistry(),
+        ProcessingNodeConfig.builder().build());
+  }
 
-    @Test
-    void explicitMaxAttemptsIsStampedAsPerJobRetryMetadata() {
-        JobId id = scheduler.enqueue(CappedHandler.class, new CappedPayload());
-        var job = store.findById(id).orElseThrow();
-        assertThat(job.metadata().get(RetryInterceptor.META_MAX_ATTEMPTS)).contains("4");
-    }
+  @Test
+  void explicitMaxAttemptsIsStampedAsPerJobRetryMetadata() {
+    JobId id = scheduler.enqueue(CappedHandler.class, new CappedPayload());
+    var job = store.findById(id).orElseThrow();
+    assertThat(job.metadata().get(RetryInterceptor.META_MAX_ATTEMPTS)).contains("4");
+  }
 
-    @Test
-    void defaultRetryBudgetLeavesRetryMetadataUnstamped() {
-        // With no explicit @Job(maxAttempts) the job carries no per-job retry
-        // metadata: the RetryInterceptor's per-exception-type policies and
-        // global default stay reachable for it.
-        JobId id = scheduler.enqueue(UncappedHandler.class, new UncappedPayload());
-        var job = store.findById(id).orElseThrow();
-        assertThat(job.metadata().get(RetryInterceptor.META_MAX_ATTEMPTS)).isEmpty();
-    }
+  @Test
+  void defaultRetryBudgetLeavesRetryMetadataUnstamped() {
+    // With no explicit @Job(maxAttempts) the job carries no per-job retry
+    // metadata: the RetryInterceptor's per-exception-type policies and
+    // global default stay reachable for it.
+    JobId id = scheduler.enqueue(UncappedHandler.class, new UncappedPayload());
+    var job = store.findById(id).orElseThrow();
+    assertThat(job.metadata().get(RetryInterceptor.META_MAX_ATTEMPTS)).isEmpty();
+  }
 }

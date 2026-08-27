@@ -14,25 +14,25 @@ package com.hemju.threadmill.core.handler;
  */
 public interface JobHandlerResolver {
 
-    /**
-     * Resolve a handler instance for a fully-qualified type name.
-     *
-     * @param handlerTypeName fully-qualified handler type name as carried in
-     *                        the {@code JobSpec}
-     * @return a usable handler instance
-     * @throws HandlerResolutionException if the type cannot be located,
-     *         instantiated, or assigned to {@link JobHandler}
-     */
-    JobHandler<?> resolve(String handlerTypeName) throws HandlerResolutionException;
+  /**
+   * Resolve a handler instance for a fully-qualified type name.
+   *
+   * @param handlerTypeName fully-qualified handler type name as carried in
+   *                        the {@code JobSpec}
+   * @return a usable handler instance
+   * @throws HandlerResolutionException if the type cannot be located,
+   *         instantiated, or assigned to {@link JobHandler}
+   */
+  JobHandler<?> resolve(String handlerTypeName) throws HandlerResolutionException;
 
-    /** Thrown when a handler cannot be resolved. */
-    class HandlerResolutionException extends Exception {
-        public HandlerResolutionException(String message) {
-            super(message);
-        }
-
-        public HandlerResolutionException(String message, Throwable cause) {
-            super(message, cause);
-        }
+  /** Thrown when a handler cannot be resolved. */
+  class HandlerResolutionException extends Exception {
+    public HandlerResolutionException(String message) {
+      super(message);
     }
+
+    public HandlerResolutionException(String message, Throwable cause) {
+      super(message, cause);
+    }
+  }
 }

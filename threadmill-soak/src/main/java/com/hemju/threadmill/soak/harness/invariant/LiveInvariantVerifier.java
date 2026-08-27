@@ -27,67 +27,69 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 public final class LiveInvariantVerifier {
 
-    private final List<StreamingInvariantCheck> checks;
-    private final RuntimeException[] checkFailures;
-    private final Runnable onFirstDefiniteViolation;
-    private final AtomicBoolean violationSignalled = new AtomicBoolean();
+  private final List<StreamingInvariantCheck> checks;
+  private final RuntimeException[] checkFailures;
+  private final Runnable onFirstDefiniteViolation;
+  private final AtomicBoolean violationSignalled = new AtomicBoolean();
 
-    public LiveInvariantVerifier(List<SoakInvariant> invariants, Runnable onFirstDefiniteViolation) {
-        Objects.requireNonNull(invariants, "invariants");
-        this.onFirstDefiniteViolation = Objects.requireNonNull(onFirstDefiniteViolation, "onFirstDefiniteViolation");
-        this.checks = invariants.stream().map(SoakInvariant::newCheck).toList();
-        this.checkFailures = new RuntimeException[checks.size()];
-    }
+  public LiveInvariantVerifier(List<SoakInvariant> invariants, Runnable onFirstDefiniteViolation) {
+    Objects.requireNonNull(invariants, "invariants");
+    this.onFirstDefiniteViolation =
+        Objects.requireNonNull(onFirstDefiniteViolation, "onFirstDefiniteViolation");
+    this.checks = invariants.stream().map(SoakInvariant::newCheck).toList();
+    this.checkFailures = new RuntimeException[checks.size()];
+  }
 
-    /** Consume the next trace event; called once per emitted line, in file order. */
-    public synchronized void onEvent(TraceEvent event) {
-        boolean anyViolation = false;
-        for (int i = 0; i < checks.size(); i++) {
-            if (checkFailures[i] != null) continue;
-            StreamingInvariantCheck check = checks.get(i);
-            try {
-                check.onEvent(event);
-            } catch (RuntimeException e) {
-                checkFailures[i] = e;
-                continue;
-            }
-            anyViolation |= check.violationCount() > 0;
-        }
-        // onFinish() has not run yet, so any counted violation is definite.
-        if (anyViolation && violationSignalled.compareAndSet(false, true)) {
-            onFirstDefiniteViolation.run();
-        }
+  /** Consume the next trace event; called once per emitted line, in file order. */
+  public synchronized void onEvent(TraceEvent event) {
+    boolean anyViolation = false;
+    for (int i = 0; i < checks.size(); i++) {
+      if (checkFailures[i] != null) continue;
+      StreamingInvariantCheck check = checks.get(i);
+      try {
+        check.onEvent(event);
+      } catch (RuntimeException e) {
+        checkFailures[i] = e;
+        continue;
+      }
+      anyViolation |= check.violationCount() > 0;
     }
+    // onFinish() has not run yet, so any counted violation is definite.
+    if (anyViolation && violationSignalled.compareAndSet(false, true)) {
+      onFirstDefiniteViolation.run();
+    }
+  }
 
-    /** True once any check has counted a definite violation. */
-    public boolean hasDefiniteViolation() {
-        return violationSignalled.get();
-    }
+  /** True once any check has counted a definite violation. */
+  public boolean hasDefiniteViolation() {
+    return violationSignalled.get();
+  }
 
-    /** Mid-run results: definite violations only, no completeness evaluation. */
-    public List<InvariantResult> snapshotResults() {
-        return results(false);
-    }
+  /** Mid-run results: definite violations only, no completeness evaluation. */
+  public List<InvariantResult> snapshotResults() {
+    return results(false);
+  }
 
-    /** Final results, including completeness violations. Idempotent. */
-    public List<InvariantResult> finishResults() {
-        return results(true);
-    }
+  /** Final results, including completeness violations. Idempotent. */
+  public List<InvariantResult> finishResults() {
+    return results(true);
+  }
 
-    private synchronized List<InvariantResult> results(boolean finish) {
-        var results = new ArrayList<InvariantResult>(checks.size());
-        for (int i = 0; i < checks.size(); i++) {
-            StreamingInvariantCheck check = checks.get(i);
-            RuntimeException failure = checkFailures[i];
-            if (failure != null) {
-                results.add(InvariantResult.fail(
-                        check.name(),
-                        List.of("invariant raised " + failure.getClass().getSimpleName() + ": " + failure.getMessage()),
-                        List.of()));
-            } else {
-                results.add(finish ? check.finish() : check.snapshot());
-            }
-        }
-        return results;
+  private synchronized List<InvariantResult> results(boolean finish) {
+    var results = new ArrayList<InvariantResult>(checks.size());
+    for (int i = 0; i < checks.size(); i++) {
+      StreamingInvariantCheck check = checks.get(i);
+      RuntimeException failure = checkFailures[i];
+      if (failure != null) {
+        results.add(InvariantResult.fail(
+            check.name(),
+            List.of("invariant raised " + failure.getClass().getSimpleName() + ": "
+                + failure.getMessage()),
+            List.of()));
+      } else {
+        results.add(finish ? check.finish() : check.snapshot());
+      }
     }
+    return results;
+  }
 }

@@ -44,365 +44,378 @@ import com.hemju.threadmill.soak.harness.scenario.SoakScenario;
  */
 public final class SoakHarnessRunner {
 
-    private static final Logger LOG = LoggerFactory.getLogger(SoakHarnessRunner.class);
+  private static final Logger LOG = LoggerFactory.getLogger(SoakHarnessRunner.class);
 
-    private final SoakHarnessConfig config;
-    private final BackendFixture fixture;
-    private final OutputDir outputDir;
-    private final String taskLabel;
+  private final SoakHarnessConfig config;
+  private final BackendFixture fixture;
+  private final OutputDir outputDir;
+  private final String taskLabel;
 
-    public SoakHarnessRunner(SoakHarnessConfig config, BackendFixture fixture, OutputDir outputDir, String taskLabel) {
-        this.config = Objects.requireNonNull(config, "config");
-        this.fixture = Objects.requireNonNull(fixture, "fixture");
-        this.outputDir = Objects.requireNonNull(outputDir, "outputDir");
-        this.taskLabel = Objects.requireNonNull(taskLabel, "taskLabel");
+  public SoakHarnessRunner(
+      SoakHarnessConfig config, BackendFixture fixture, OutputDir outputDir, String taskLabel) {
+    this.config = Objects.requireNonNull(config, "config");
+    this.fixture = Objects.requireNonNull(fixture, "fixture");
+    this.outputDir = Objects.requireNonNull(outputDir, "outputDir");
+    this.taskLabel = Objects.requireNonNull(taskLabel, "taskLabel");
+  }
+
+  public SummaryReport run() throws Exception {
+    outputDir.prepare();
+    RunConfigWriter.write(config, outputDir);
+
+    SoakScenario scenario = Scenarios.of(config.scenario());
+    if (config.producers() > 1 && !scenario.supportsConcurrentProducers()) {
+      throw new IllegalArgumentException("scenario '" + scenario.name()
+          + "' does not support -Pproducers > 1 — its workload has run-level side effects");
     }
+    JobStore store = fixture.store();
+    Scheduler scheduler = new Scheduler(store, new JsonJobSerializer());
+    Instant runStart = Instant.now();
 
-    public SummaryReport run() throws Exception {
-        outputDir.prepare();
-        RunConfigWriter.write(config, outputDir);
+    // Mutated by the main thread, read by scenario threads, and — when
+    // node churn is on — mutated by the churn thread too. Every access
+    // synchronizes on the list itself.
+    List<ProcessingNode> nodes = new ArrayList<>();
+    var abortRequested = new AtomicBoolean();
+    LiveInvariantVerifier verifier = new LiveInvariantVerifier(scenario.invariants(), () -> {
+      if (config.failFast()) {
+        LOG.error("definite invariant violation detected — aborting run (failFast=true)");
+        abortRequested.set(true);
+      } else {
+        LOG.error("definite invariant violation detected — continuing (failFast=false)");
+      }
+    });
+    SoakTraceWriter trace = new SoakTraceWriter(outputDir.traceJsonl(), verifier::onEvent);
+    // Handlers emit their exec_started / exec_finished brackets through
+    // the static sink — the execution-level invariants judge those.
+    SoakExecutionTrace.install(trace);
+    LatencyTracker latency = new LatencyTracker(outputDir.latenciesJsonl());
+    MetricsSampler metrics = new MetricsSampler(outputDir.metricsJsonl(), store, latency);
+    SoakInterceptor interceptor = new SoakInterceptor(trace, latency);
+    // jobsPerSecond is the run's total target; each producer paces at the split.
+    int perProducerRate = Math.max(1, config.jobsPerSecond() / config.producers());
+    var enqueuedCount = new AtomicLong();
+    LoadGenerator gen =
+        new LoadGenerator(scheduler, trace, latency, perProducerRate, enqueuedCount);
+    StdoutStatusPrinter printer = new StdoutStatusPrinter(
+        taskLabel, config.scenario(), config.runId(), metrics, interceptor, gen.enqueuedCount());
+    ProgressReporter progress = new ProgressReporter(
+        outputDir.progressJson(),
+        config,
+        runStart,
+        metrics,
+        interceptor,
+        gen.enqueuedCount(),
+        verifier,
+        abortRequested::get);
 
-        SoakScenario scenario = Scenarios.of(config.scenario());
-        if (config.producers() > 1 && !scenario.supportsConcurrentProducers()) {
-            throw new IllegalArgumentException("scenario '" + scenario.name()
-                    + "' does not support -Pproducers > 1 — its workload has run-level side effects");
-        }
-        JobStore store = fixture.store();
-        Scheduler scheduler = new Scheduler(store, new JsonJobSerializer());
-        Instant runStart = Instant.now();
+    try {
+      ProcessingNodeConfig baseConfig = scenario
+          .tuneConfig(ProcessingNodeConfig.builder()
+              .workerCount(config.workerCount())
+              .pollInterval(Duration.ofMillis(25))
+              .claimHeartbeat(Duration.ofMillis(200))
+              .heartbeatTimeout(Duration.ofSeconds(5))
+              .maintenanceLeaseDuration(Duration.ofSeconds(2))
+              .jobTimeout(Duration.ofSeconds(30))
+              .defaultMaxAttempts(3)
+              .retryInitialBackoff(Duration.ofMillis(50))
+              .claimBatchSize(16)
+              .storeOutagePollInterval(Duration.ofMillis(200)))
+          .build();
 
-        // Mutated by the main thread, read by scenario threads, and — when
-        // node churn is on — mutated by the churn thread too. Every access
-        // synchronizes on the list itself.
-        List<ProcessingNode> nodes = new ArrayList<>();
-        var abortRequested = new AtomicBoolean();
-        LiveInvariantVerifier verifier = new LiveInvariantVerifier(scenario.invariants(), () -> {
-            if (config.failFast()) {
-                LOG.error("definite invariant violation detected — aborting run (failFast=true)");
-                abortRequested.set(true);
-            } else {
-                LOG.error("definite invariant violation detected — continuing (failFast=false)");
+      for (int i = 0; i < config.nodes(); i++) {
+        startNode(scenario, baseConfig, store, interceptor, trace, nodes, "initial");
+      }
+
+      metrics.start();
+      printer.start();
+      progress.start();
+
+      NodeChurner churner = config
+          .nodeChurn()
+          .map(interval -> NodeChurner.start(
+              interval,
+              nodes,
+              trace,
+              abortRequested,
+              () -> startNode(
+                  scenario, baseConfig, store, interceptor, trace, nodes, "churn-replacement")))
+          .orElse(null);
+
+      SoakRunContext ctx = new SoakRunContext(
+          config,
+          store,
+          trace,
+          runStart,
+          () -> {
+            synchronized (nodes) {
+              return List.copyOf(nodes);
             }
-        });
-        SoakTraceWriter trace = new SoakTraceWriter(outputDir.traceJsonl(), verifier::onEvent);
-        // Handlers emit their exec_started / exec_finished brackets through
-        // the static sink — the execution-level invariants judge those.
-        SoakExecutionTrace.install(trace);
-        LatencyTracker latency = new LatencyTracker(outputDir.latenciesJsonl());
-        MetricsSampler metrics = new MetricsSampler(outputDir.metricsJsonl(), store, latency);
-        SoakInterceptor interceptor = new SoakInterceptor(trace, latency);
-        // jobsPerSecond is the run's total target; each producer paces at the split.
-        int perProducerRate = Math.max(1, config.jobsPerSecond() / config.producers());
-        var enqueuedCount = new AtomicLong();
-        LoadGenerator gen = new LoadGenerator(scheduler, trace, latency, perProducerRate, enqueuedCount);
-        StdoutStatusPrinter printer = new StdoutStatusPrinter(
-                taskLabel, config.scenario(), config.runId(), metrics, interceptor, gen.enqueuedCount());
-        ProgressReporter progress = new ProgressReporter(
-                outputDir.progressJson(),
-                config,
-                runStart,
-                metrics,
-                interceptor,
-                gen.enqueuedCount(),
-                verifier,
-                abortRequested::get);
+          },
+          abortRequested);
+      try {
+        if (config.producers() == 1) {
+          scenario.runWorkload(gen, ctx);
+        } else {
+          runProducers(
+              scenario, ctx, gen, scheduler, trace, latency, perProducerRate, enqueuedCount);
+        }
+      } finally {
+        if (churner != null) churner.stop();
+      }
+      progress.phase("draining");
+      waitForDrain(store, scenario.drainBudget());
 
+      List<ProcessingNode> remaining;
+      synchronized (nodes) {
+        remaining = List.copyOf(nodes);
+        nodes.clear();
+      }
+      for (ProcessingNode node : remaining) {
+        trace.emit("node_stopped", Map.of("nodeId", node.nodeId().toString()));
+        node.close();
+      }
+    } finally {
+      printer.close();
+      progress.close();
+      try {
+        metrics.close();
+      } catch (IOException ignore) {
+        // best effort
+      }
+      List<ProcessingNode> leftover;
+      synchronized (nodes) {
+        leftover = List.copyOf(nodes);
+      }
+      for (ProcessingNode node : leftover) {
         try {
-            ProcessingNodeConfig baseConfig = scenario.tuneConfig(ProcessingNodeConfig.builder()
-                            .workerCount(config.workerCount())
-                            .pollInterval(Duration.ofMillis(25))
-                            .claimHeartbeat(Duration.ofMillis(200))
-                            .heartbeatTimeout(Duration.ofSeconds(5))
-                            .maintenanceLeaseDuration(Duration.ofSeconds(2))
-                            .jobTimeout(Duration.ofSeconds(30))
-                            .defaultMaxAttempts(3)
-                            .retryInitialBackoff(Duration.ofMillis(50))
-                            .claimBatchSize(16)
-                            .storeOutagePollInterval(Duration.ofMillis(200)))
-                    .build();
-
-            for (int i = 0; i < config.nodes(); i++) {
-                startNode(scenario, baseConfig, store, interceptor, trace, nodes, "initial");
-            }
-
-            metrics.start();
-            printer.start();
-            progress.start();
-
-            NodeChurner churner = config.nodeChurn()
-                    .map(interval -> NodeChurner.start(
-                            interval,
-                            nodes,
-                            trace,
-                            abortRequested,
-                            () -> startNode(
-                                    scenario, baseConfig, store, interceptor, trace, nodes, "churn-replacement")))
-                    .orElse(null);
-
-            SoakRunContext ctx = new SoakRunContext(
-                    config,
-                    store,
-                    trace,
-                    runStart,
-                    () -> {
-                        synchronized (nodes) {
-                            return List.copyOf(nodes);
-                        }
-                    },
-                    abortRequested);
-            try {
-                if (config.producers() == 1) {
-                    scenario.runWorkload(gen, ctx);
-                } else {
-                    runProducers(scenario, ctx, gen, scheduler, trace, latency, perProducerRate, enqueuedCount);
-                }
-            } finally {
-                if (churner != null) churner.stop();
-            }
-            progress.phase("draining");
-            waitForDrain(store, scenario.drainBudget());
-
-            List<ProcessingNode> remaining;
-            synchronized (nodes) {
-                remaining = List.copyOf(nodes);
-                nodes.clear();
-            }
-            for (ProcessingNode node : remaining) {
-                trace.emit("node_stopped", Map.of("nodeId", node.nodeId().toString()));
-                node.close();
-            }
-        } finally {
-            printer.close();
-            progress.close();
-            try {
-                metrics.close();
-            } catch (IOException ignore) {
-                // best effort
-            }
-            List<ProcessingNode> leftover;
-            synchronized (nodes) {
-                leftover = List.copyOf(nodes);
-            }
-            for (ProcessingNode node : leftover) {
-                try {
-                    node.close();
-                } catch (RuntimeException ignore) {
-                    // best effort — the runner is exiting
-                }
-            }
-            SoakExecutionTrace.clear();
-            try {
-                trace.close();
-            } catch (IOException ignore) {
-                // best effort
-            }
-            try {
-                latency.close();
-            } catch (IOException ignore) {
-                // best effort
-            }
+          node.close();
+        } catch (RuntimeException ignore) {
+          // best effort — the runner is exiting
         }
-
-        return finishRun(verifier, interceptor, gen.enqueuedCount().get(), runStart, abortRequested.get());
+      }
+      SoakExecutionTrace.clear();
+      try {
+        trace.close();
+      } catch (IOException ignore) {
+        // best effort
+      }
+      try {
+        latency.close();
+      } catch (IOException ignore) {
+        // best effort
+      }
     }
 
-    /**
-     * Fan the workload out over {@code producers} virtual threads. The first
-     * producer reuses {@code gen}; the rest get their own generator at the
-     * same split rate, all sharing the run-total enqueued counter. A producer
-     * that dies is logged and the rest keep producing — losing one stream is
-     * a degraded stress test, not a reason to stop the others.
-     */
-    private void runProducers(
-            SoakScenario scenario,
-            SoakRunContext ctx,
-            LoadGenerator gen,
-            Scheduler scheduler,
-            SoakTraceWriter trace,
-            LatencyTracker latency,
-            int perProducerRate,
-            AtomicLong enqueuedCount)
-            throws InterruptedException {
-        var producerThreads = new ArrayList<Thread>(config.producers());
-        for (int p = 0; p < config.producers(); p++) {
-            LoadGenerator producerGen =
-                    p == 0 ? gen : new LoadGenerator(scheduler, trace, latency, perProducerRate, enqueuedCount);
-            int producerIndex = p;
-            producerThreads.add(Thread.ofVirtual().name("soak-producer-" + p).start(() -> {
-                try {
-                    scenario.runWorkload(producerGen, ctx);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                } catch (Exception e) {
-                    LOG.error("producer {} failed — the remaining producers keep running", producerIndex, e);
-                }
-            }));
+    return finishRun(
+        verifier, interceptor, gen.enqueuedCount().get(), runStart, abortRequested.get());
+  }
+
+  /**
+   * Fan the workload out over {@code producers} virtual threads. The first
+   * producer reuses {@code gen}; the rest get their own generator at the
+   * same split rate, all sharing the run-total enqueued counter. A producer
+   * that dies is logged and the rest keep producing — losing one stream is
+   * a degraded stress test, not a reason to stop the others.
+   */
+  private void runProducers(
+      SoakScenario scenario,
+      SoakRunContext ctx,
+      LoadGenerator gen,
+      Scheduler scheduler,
+      SoakTraceWriter trace,
+      LatencyTracker latency,
+      int perProducerRate,
+      AtomicLong enqueuedCount)
+      throws InterruptedException {
+    var producerThreads = new ArrayList<Thread>(config.producers());
+    for (int p = 0; p < config.producers(); p++) {
+      LoadGenerator producerGen = p == 0
+          ? gen
+          : new LoadGenerator(scheduler, trace, latency, perProducerRate, enqueuedCount);
+      int producerIndex = p;
+      producerThreads.add(Thread.ofVirtual().name("soak-producer-" + p).start(() -> {
+        try {
+          scenario.runWorkload(producerGen, ctx);
+        } catch (InterruptedException e) {
+          Thread.currentThread().interrupt();
+        } catch (Exception e) {
+          LOG.error("producer {} failed — the remaining producers keep running", producerIndex, e);
         }
-        for (Thread producer : producerThreads) {
-            producer.join();
-        }
+      }));
     }
-
-    private ProcessingNode startNode(
-            SoakScenario scenario,
-            ProcessingNodeConfig baseConfig,
-            JobStore store,
-            SoakInterceptor interceptor,
-            SoakTraceWriter trace,
-            List<ProcessingNode> nodes,
-            String reason) {
-        var nb = ProcessingNode.builder(store).config(baseConfig).interceptor(interceptor);
-        scenario.configureNode(nb);
-        ProcessingNode node = nb.build();
-        trace.emit(
-                "node_started",
-                Map.of(
-                        "nodeId", node.nodeId().toString(),
-                        "workerCount", config.workerCount(),
-                        "backend", config.backend(),
-                        "reason", reason));
-        node.start();
-        synchronized (nodes) {
-            nodes.add(node);
-        }
-        return node;
+    for (Thread producer : producerThreads) {
+      producer.join();
     }
+  }
 
-    private SummaryReport finishRun(
-            LiveInvariantVerifier verifier,
-            SoakInterceptor interceptor,
-            long enqueued,
-            Instant runStart,
-            boolean aborted)
-            throws IOException {
-        // The verifier consumed the identical event stream that landed in
-        // trace.jsonl, so its final results ARE the trace verification —
-        // re-reading a multi-gigabyte endurance trace here would only repeat
-        // the same computation. TraceReplay remains for offline re-checks.
-        List<InvariantResult> results = verifier.finishResults();
-        SummaryWriter.writeInvariants(outputDir, results);
-
-        SummaryReport.LockContention lockContention = LockEventsWriter.write(outputDir.traceJsonl(), outputDir);
-
-        SummaryReport.Performance perf =
-                buildPerformance(enqueued, interceptor, Duration.between(runStart, Instant.now()), lockContention);
-
-        boolean passed = results.stream().allMatch(InvariantResult::passed);
-        List<String> notes = new ArrayList<>();
-        notes.add("Generated by threadmill-soak harness. Drop this directory into an AI agent to analyse.");
-        if (aborted) {
-            notes.add("Run was aborted early after a definite invariant violation (failFast=true);"
-                    + " the trace covers the shortened run.");
-        }
-        SummaryReport report = new SummaryReport(
-                config.runId(),
-                config.scenario(),
-                config.backend(),
-                RunConfigWriter.asMap(config),
-                passed ? "passed" : "failed",
-                results,
-                perf,
-                List.copyOf(notes));
-
-        JsonSchema schema = SummarySchema.load();
-        List<String> schemaErrors = SummarySchema.validate(schema, report);
-        if (!schemaErrors.isEmpty()) {
-            LOG.error("summary.json failed schema validation: {}", schemaErrors);
-        }
-        new SummaryWriter().write(report, outputDir);
-        return report;
+  private ProcessingNode startNode(
+      SoakScenario scenario,
+      ProcessingNodeConfig baseConfig,
+      JobStore store,
+      SoakInterceptor interceptor,
+      SoakTraceWriter trace,
+      List<ProcessingNode> nodes,
+      String reason) {
+    var nb = ProcessingNode.builder(store).config(baseConfig).interceptor(interceptor);
+    scenario.configureNode(nb);
+    ProcessingNode node = nb.build();
+    trace.emit(
+        "node_started",
+        Map.of(
+            "nodeId", node.nodeId().toString(),
+            "workerCount", config.workerCount(),
+            "backend", config.backend(),
+            "reason", reason));
+    node.start();
+    synchronized (nodes) {
+      nodes.add(node);
     }
+    return node;
+  }
 
-    private SummaryReport.Performance buildPerformance(
-            long enqueued, SoakInterceptor interceptor, Duration wallClock, SummaryReport.LockContention contention) {
-        long durationMs = Math.max(1L, wallClock.toMillis());
-        double overall = interceptor.succeeded() * 1000.0 / durationMs;
+  private SummaryReport finishRun(
+      LiveInvariantVerifier verifier,
+      SoakInterceptor interceptor,
+      long enqueued,
+      Instant runStart,
+      boolean aborted)
+      throws IOException {
+    // The verifier consumed the identical event stream that landed in
+    // trace.jsonl, so its final results ARE the trace verification —
+    // re-reading a multi-gigabyte endurance trace here would only repeat
+    // the same computation. TraceReplay remains for offline re-checks.
+    List<InvariantResult> results = verifier.finishResults();
+    SummaryWriter.writeInvariants(outputDir, results);
 
-        Map<String, Double> byQueue = new LinkedHashMap<>();
-        interceptor.succeededByQueue().forEach((q, c) -> byQueue.put(q, c * 1000.0 / durationMs));
-        Map<String, Double> byHandler = new LinkedHashMap<>();
-        interceptor.succeededByHandler().forEach((h, c) -> byHandler.put(h, c * 1000.0 / durationMs));
+    SummaryReport.LockContention lockContention =
+        LockEventsWriter.write(outputDir.traceJsonl(), outputDir);
 
-        // Read latency percentiles from latencies.jsonl after it's been closed.
-        var latencyByStage = latencyPercentilesFromFile();
-        return new SummaryReport.Performance(
-                enqueued,
-                interceptor.succeeded(),
-                interceptor.failed(),
-                interceptor.timedOut(),
-                interceptor.quarantined(),
-                interceptor.retried(),
-                wallClock.toMillis(),
-                new SummaryReport.ThroughputBreakdown(overall, byQueue, byHandler),
-                new SummaryReport.LatencyBreakdown(
-                        latencyByStage.getOrDefault("enqueueToClaimMs", Percentiles.Summary.empty()),
-                        latencyByStage.getOrDefault("claimToStartMs", Percentiles.Summary.empty()),
-                        latencyByStage.getOrDefault("startToCompleteMs", Percentiles.Summary.empty()),
-                        latencyByStage.getOrDefault("endToEndMs", Percentiles.Summary.empty())),
-                contention);
+    SummaryReport.Performance perf = buildPerformance(
+        enqueued, interceptor, Duration.between(runStart, Instant.now()), lockContention);
+
+    boolean passed = results.stream().allMatch(InvariantResult::passed);
+    List<String> notes = new ArrayList<>();
+    notes.add(
+        "Generated by threadmill-soak harness. Drop this directory into an AI agent to analyse.");
+    if (aborted) {
+      notes.add("Run was aborted early after a definite invariant violation (failFast=true);"
+          + " the trace covers the shortened run.");
     }
+    SummaryReport report = new SummaryReport(
+        config.runId(),
+        config.scenario(),
+        config.backend(),
+        RunConfigWriter.asMap(config),
+        passed ? "passed" : "failed",
+        results,
+        perf,
+        List.copyOf(notes));
 
-    /**
-     * Read latencies.jsonl from disk and compute percentiles per stage. We
-     * do this after the file is closed (the in-memory tracker was already
-     * closed by run()'s finally block) so the summary always reflects the
-     * exact file an AI agent would see.
-     */
-    private Map<String, Percentiles.Summary> latencyPercentilesFromFile() {
-        Map<String, Percentiles.Summary> result = new LinkedHashMap<>();
-        var enqueueToClaim = new GrowableLongArray();
-        var claimToStart = new GrowableLongArray();
-        var startToComplete = new GrowableLongArray();
-        var endToEnd = new GrowableLongArray();
-        try (var lines = Files.lines(outputDir.latenciesJsonl())) {
-            var mapper = new ObjectMapper();
-            lines.forEach(line -> {
-                if (line.isBlank()) return;
-                try {
-                    JsonNode n = mapper.readTree(line);
-                    pushIfPresent(n, "enqueueToClaimMs", enqueueToClaim);
-                    pushIfPresent(n, "claimToStartMs", claimToStart);
-                    pushIfPresent(n, "startToCompleteMs", startToComplete);
-                    pushIfPresent(n, "endToEndMs", endToEnd);
-                } catch (IOException e) {
-                    // Skip malformed lines; the file is append-only and a
-                    // truncated write at process end would be the only source.
-                }
-            });
-        } catch (IOException ignore) {
-            // Empty file or missing — leave all percentiles at zero.
+    JsonSchema schema = SummarySchema.load();
+    List<String> schemaErrors = SummarySchema.validate(schema, report);
+    if (!schemaErrors.isEmpty()) {
+      LOG.error("summary.json failed schema validation: {}", schemaErrors);
+    }
+    new SummaryWriter().write(report, outputDir);
+    return report;
+  }
+
+  private SummaryReport.Performance buildPerformance(
+      long enqueued,
+      SoakInterceptor interceptor,
+      Duration wallClock,
+      SummaryReport.LockContention contention) {
+    long durationMs = Math.max(1L, wallClock.toMillis());
+    double overall = interceptor.succeeded() * 1000.0 / durationMs;
+
+    Map<String, Double> byQueue = new LinkedHashMap<>();
+    interceptor.succeededByQueue().forEach((q, c) -> byQueue.put(q, c * 1000.0 / durationMs));
+    Map<String, Double> byHandler = new LinkedHashMap<>();
+    interceptor.succeededByHandler().forEach((h, c) -> byHandler.put(h, c * 1000.0 / durationMs));
+
+    // Read latency percentiles from latencies.jsonl after it's been closed.
+    var latencyByStage = latencyPercentilesFromFile();
+    return new SummaryReport.Performance(
+        enqueued,
+        interceptor.succeeded(),
+        interceptor.failed(),
+        interceptor.timedOut(),
+        interceptor.quarantined(),
+        interceptor.retried(),
+        wallClock.toMillis(),
+        new SummaryReport.ThroughputBreakdown(overall, byQueue, byHandler),
+        new SummaryReport.LatencyBreakdown(
+            latencyByStage.getOrDefault("enqueueToClaimMs", Percentiles.Summary.empty()),
+            latencyByStage.getOrDefault("claimToStartMs", Percentiles.Summary.empty()),
+            latencyByStage.getOrDefault("startToCompleteMs", Percentiles.Summary.empty()),
+            latencyByStage.getOrDefault("endToEndMs", Percentiles.Summary.empty())),
+        contention);
+  }
+
+  /**
+   * Read latencies.jsonl from disk and compute percentiles per stage. We
+   * do this after the file is closed (the in-memory tracker was already
+   * closed by run()'s finally block) so the summary always reflects the
+   * exact file an AI agent would see.
+   */
+  private Map<String, Percentiles.Summary> latencyPercentilesFromFile() {
+    Map<String, Percentiles.Summary> result = new LinkedHashMap<>();
+    var enqueueToClaim = new GrowableLongArray();
+    var claimToStart = new GrowableLongArray();
+    var startToComplete = new GrowableLongArray();
+    var endToEnd = new GrowableLongArray();
+    try (var lines = Files.lines(outputDir.latenciesJsonl())) {
+      var mapper = new ObjectMapper();
+      lines.forEach(line -> {
+        if (line.isBlank()) return;
+        try {
+          JsonNode n = mapper.readTree(line);
+          pushIfPresent(n, "enqueueToClaimMs", enqueueToClaim);
+          pushIfPresent(n, "claimToStartMs", claimToStart);
+          pushIfPresent(n, "startToCompleteMs", startToComplete);
+          pushIfPresent(n, "endToEndMs", endToEnd);
+        } catch (IOException e) {
+          // Skip malformed lines; the file is append-only and a
+          // truncated write at process end would be the only source.
         }
-        result.put("enqueueToClaimMs", Percentiles.summarise(enqueueToClaim.toArray()));
-        result.put("claimToStartMs", Percentiles.summarise(claimToStart.toArray()));
-        result.put("startToCompleteMs", Percentiles.summarise(startToComplete.toArray()));
-        result.put("endToEndMs", Percentiles.summarise(endToEnd.toArray()));
-        return result;
+      });
+    } catch (IOException ignore) {
+      // Empty file or missing — leave all percentiles at zero.
     }
+    result.put("enqueueToClaimMs", Percentiles.summarise(enqueueToClaim.toArray()));
+    result.put("claimToStartMs", Percentiles.summarise(claimToStart.toArray()));
+    result.put("startToCompleteMs", Percentiles.summarise(startToComplete.toArray()));
+    result.put("endToEndMs", Percentiles.summarise(endToEnd.toArray()));
+    return result;
+  }
 
-    private static void pushIfPresent(JsonNode n, String field, GrowableLongArray dest) {
-        JsonNode v = n.get(field);
-        if (v != null && !v.isNull()) dest.add(v.asLong());
-    }
+  private static void pushIfPresent(JsonNode n, String field, GrowableLongArray dest) {
+    JsonNode v = n.get(field);
+    if (v != null && !v.isNull()) dest.add(v.asLong());
+  }
 
-    private void waitForDrain(JobStore store, Duration drainBudget) throws InterruptedException {
-        Instant deadline = Instant.now().plus(drainBudget);
-        while (Instant.now().isBefore(deadline)) {
-            long active = activeCount(store);
-            if (active == 0) return;
-            Thread.sleep(200);
-        }
-        long active = activeCount(store);
-        if (active > 0) {
-            LOG.warn("drain budget elapsed with {} active jobs remaining", active);
-        }
+  private void waitForDrain(JobStore store, Duration drainBudget) throws InterruptedException {
+    Instant deadline = Instant.now().plus(drainBudget);
+    while (Instant.now().isBefore(deadline)) {
+      long active = activeCount(store);
+      if (active == 0) return;
+      Thread.sleep(200);
     }
+    long active = activeCount(store);
+    if (active > 0) {
+      LOG.warn("drain budget elapsed with {} active jobs remaining", active);
+    }
+  }
 
-    private static long activeCount(JobStore store) {
-        Map<JobState, Long> c = store.countsByState();
-        long a = 0;
-        for (JobState s : List.of(JobState.ENQUEUED, JobState.SCHEDULED, JobState.AWAITING, JobState.PROCESSING)) {
-            a += c.getOrDefault(s, 0L);
-        }
-        return a;
+  private static long activeCount(JobStore store) {
+    Map<JobState, Long> c = store.countsByState();
+    long a = 0;
+    for (JobState s :
+        List.of(JobState.ENQUEUED, JobState.SCHEDULED, JobState.AWAITING, JobState.PROCESSING)) {
+      a += c.getOrDefault(s, 0L);
     }
+    return a;
+  }
 }

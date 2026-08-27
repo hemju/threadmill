@@ -28,102 +28,102 @@ import com.hemju.threadmill.core.NodeId;
  */
 public interface JobExecutionContext {
 
-    /**
-     * Metadata key carrying the nominal fire time of a recurring instance,
-     * stamped by the recurring materializer as an ISO-8601 instant.
-     */
-    String CRON_FIRE_TIME_META = "threadmill.cron.fireTime";
+  /**
+   * Metadata key carrying the nominal fire time of a recurring instance,
+   * stamped by the recurring materializer as an ISO-8601 instant.
+   */
+  String CRON_FIRE_TIME_META = "threadmill.cron.fireTime";
 
-    /**
-     * Metadata key distinguishing what triggered a recurring instance:
-     * {@link #CRON_ORIGIN_SCHEDULE} for a regular schedule fire,
-     * {@link #CRON_ORIGIN_NUDGE} for an on-demand nudge
-     * ({@code Scheduler.nudgeRecurring}), and {@link #CRON_ORIGIN_MANUAL}
-     * for the dashboard's operator force-trigger.
-     */
-    String CRON_ORIGIN_META = "threadmill.cron.origin";
+  /**
+   * Metadata key distinguishing what triggered a recurring instance:
+   * {@link #CRON_ORIGIN_SCHEDULE} for a regular schedule fire,
+   * {@link #CRON_ORIGIN_NUDGE} for an on-demand nudge
+   * ({@code Scheduler.nudgeRecurring}), and {@link #CRON_ORIGIN_MANUAL}
+   * for the dashboard's operator force-trigger.
+   */
+  String CRON_ORIGIN_META = "threadmill.cron.origin";
 
-    /** {@link #CRON_ORIGIN_META} value for a regular schedule fire. */
-    String CRON_ORIGIN_SCHEDULE = "schedule";
+  /** {@link #CRON_ORIGIN_META} value for a regular schedule fire. */
+  String CRON_ORIGIN_SCHEDULE = "schedule";
 
-    /** {@link #CRON_ORIGIN_META} value for an on-demand nudge. */
-    String CRON_ORIGIN_NUDGE = "nudge";
+  /** {@link #CRON_ORIGIN_META} value for an on-demand nudge. */
+  String CRON_ORIGIN_NUDGE = "nudge";
 
-    /** {@link #CRON_ORIGIN_META} value for the dashboard's operator force-trigger. */
-    String CRON_ORIGIN_MANUAL = "manual";
+  /** {@link #CRON_ORIGIN_META} value for the dashboard's operator force-trigger. */
+  String CRON_ORIGIN_MANUAL = "manual";
 
-    /** The id of the job being executed. */
-    JobId jobId();
+  /** The id of the job being executed. */
+  JobId jobId();
 
-    /** The id of the node executing the job. */
-    NodeId nodeId();
+  /** The id of the node executing the job. */
+  NodeId nodeId();
 
-    /** The attempt number, starting at 1. */
-    int attempt();
+  /** The attempt number, starting at 1. */
+  int attempt();
 
-    /** The instant the engine claimed this job for this attempt. */
-    Instant claimedAt();
+  /** The instant the engine claimed this job for this attempt. */
+  Instant claimedAt();
 
-    /** Append-only per-job log. */
-    JobLog log();
+  /** Append-only per-job log. */
+  JobLog log();
 
-    /** Progress reporting for the job. */
-    JobProgress progress();
+  /** Progress reporting for the job. */
+  JobProgress progress();
 
-    /** Mutable per-job metadata. */
-    JobMetadata metadata();
+  /** Mutable per-job metadata. */
+  JobMetadata metadata();
 
-    /** Record that this long-running job is alive and making progress. */
-    default void checkIn() {}
+  /** Record that this long-running job is alive and making progress. */
+  default void checkIn() {}
 
-    /** Record a check-in and append a user-visible log message. */
-    default void checkIn(String message) {
-        checkIn();
-        log(message);
-    }
+  /** Record a check-in and append a user-visible log message. */
+  default void checkIn(String message) {
+    checkIn();
+    log(message);
+  }
 
-    /** Update the current fraction complete, from {@code 0.0} through {@code 1.0}. */
-    default void updateProgress(double fractionComplete) {
-        progress().update(fractionComplete);
-    }
+  /** Update the current fraction complete, from {@code 0.0} through {@code 1.0}. */
+  default void updateProgress(double fractionComplete) {
+    progress().update(fractionComplete);
+  }
 
-    /** Append an INFO entry to the per-job log. */
-    default void log(String message) {
-        log().info(message);
-    }
+  /** Append an INFO entry to the per-job log. */
+  default void log(String message) {
+    log().info(message);
+  }
 
-    /**
-     * Record a result for this job. The engine persists it together with
-     * the {@code SUCCEEDED} state transition. The result is bounded by the
-     * same job size cap as the rest of the job body.
-     */
-    default void setResult(Object value) {
-        // default no-op; the engine's ExecutionContext overrides this.
-    }
+  /**
+   * Record a result for this job. The engine persists it together with
+   * the {@code SUCCEEDED} state transition. The result is bounded by the
+   * same job size cap as the rest of the job body.
+   */
+  default void setResult(Object value) {
+    // default no-op; the engine's ExecutionContext overrides this.
+  }
 
-    /** Read the result previously set by this handler, if any. */
-    default Optional<Object> readResult() {
-        return Optional.empty();
-    }
+  /** Read the result previously set by this handler, if any. */
+  default Optional<Object> readResult() {
+    return Optional.empty();
+  }
 
-    /**
-     * The nominal fire time of this recurring instance — the schedule tick
-     * the instance represents, not the wall-clock materialization time.
-     * Present only for jobs materialized from a recurring definition. Under
-     * the {@code CATCH_UP} missed-run policy every missed interval's instance
-     * carries its own distinct fire time, so an idempotent handler can derive
-     * a per-interval idempotency key from it.
-     */
-    default Optional<Instant> cronFireTime() {
-        return metadata().get(CRON_FIRE_TIME_META).map(Instant::parse);
-    }
+  /**
+   * The nominal fire time of this recurring instance — the schedule tick
+   * the instance represents, not the wall-clock materialization time.
+   * Present only for jobs materialized from a recurring definition. Under
+   * the {@code CATCH_UP} missed-run policy every missed interval's instance
+   * carries its own distinct fire time, so an idempotent handler can derive
+   * a per-interval idempotency key from it.
+   */
+  default Optional<Instant> cronFireTime() {
+    return metadata().get(CRON_FIRE_TIME_META).map(Instant::parse);
+  }
 
-    /**
-     * What triggered this recurring instance: {@link #CRON_ORIGIN_SCHEDULE},
-     * {@link #CRON_ORIGIN_NUDGE}, or {@link #CRON_ORIGIN_MANUAL}. Present only
-     * for jobs materialized from a recurring definition.
-     */
-    default Optional<String> cronOrigin() {
-        return metadata().get(CRON_ORIGIN_META);
-    }
+  /**
+   * What triggered this recurring instance: {@link #CRON_ORIGIN_SCHEDULE},
+   * {@link #CRON_ORIGIN_NUDGE}, or {@link #CRON_ORIGIN_MANUAL}. Present only
+   * for jobs materialized from a recurring definition.
+   */
+  default Optional<String> cronOrigin() {
+    return metadata().get(CRON_ORIGIN_META);
+  }
 }

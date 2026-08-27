@@ -13,5 +13,5 @@ package com.hemju.threadmill.core.handler;
  */
 public record NoPayload() implements JobPayload {
 
-    public static final NoPayload INSTANCE = new NoPayload();
+  public static final NoPayload INSTANCE = new NoPayload();
 }

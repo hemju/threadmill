@@ -13,23 +13,23 @@ import java.util.Objects;
  */
 public record JobRelationship(JobId parentId, Kind kind) {
 
-    public JobRelationship {
-        Objects.requireNonNull(parentId, "parentId");
-        Objects.requireNonNull(kind, "kind");
-    }
+  public JobRelationship {
+    Objects.requireNonNull(parentId, "parentId");
+    Objects.requireNonNull(kind, "kind");
+  }
 
-    /** The defined relationship kinds. */
-    public enum Kind {
-        /** The job is one step in a workflow rooted at the parent. */
-        WORKFLOW_STEP,
+  /** The defined relationship kinds. */
+  public enum Kind {
+    /** The job is one step in a workflow rooted at the parent. */
+    WORKFLOW_STEP,
 
-        /** The job is a member of a batch; the parent represents the batch. */
-        BATCH_MEMBER,
+    /** The job is a member of a batch; the parent represents the batch. */
+    BATCH_MEMBER,
 
-        /** The job is waiting on an external trigger held by the parent. */
-        EXTERNAL_TRIGGER,
+    /** The job is waiting on an external trigger held by the parent. */
+    EXTERNAL_TRIGGER,
 
-        /** The job is a continuation of the parent (custom). */
-        CONTINUATION,
-    }
+    /** The job is a continuation of the parent (custom). */
+    CONTINUATION,
+  }
 }

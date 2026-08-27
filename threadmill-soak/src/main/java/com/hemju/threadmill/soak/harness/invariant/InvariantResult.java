@@ -8,18 +8,20 @@ import java.util.List;
  * raw JSON events that proved the violation, so an AI agent can trace the
  * exact lifecycle that broke it.
  */
-public record InvariantResult(String name, boolean passed, List<String> violations, List<List<String>> sampleChains) {
+public record InvariantResult(
+    String name, boolean passed, List<String> violations, List<List<String>> sampleChains) {
 
-    public InvariantResult {
-        violations = List.copyOf(violations);
-        sampleChains = List.copyOf(sampleChains);
-    }
+  public InvariantResult {
+    violations = List.copyOf(violations);
+    sampleChains = List.copyOf(sampleChains);
+  }
 
-    public static InvariantResult pass(String name) {
-        return new InvariantResult(name, true, List.of(), List.of());
-    }
+  public static InvariantResult pass(String name) {
+    return new InvariantResult(name, true, List.of(), List.of());
+  }
 
-    public static InvariantResult fail(String name, List<String> violations, List<List<String>> sampleChains) {
-        return new InvariantResult(name, false, violations, sampleChains);
-    }
+  public static InvariantResult fail(
+      String name, List<String> violations, List<List<String>> sampleChains) {
+    return new InvariantResult(name, false, violations, sampleChains);
+  }
 }

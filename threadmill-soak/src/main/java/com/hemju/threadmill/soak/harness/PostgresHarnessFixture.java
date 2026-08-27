@@ -22,70 +22,71 @@ import com.hemju.threadmill.store.postgres.PostgresJobStore;
  */
 public final class PostgresHarnessFixture implements BackendFixture {
 
-    private static final int MAX_CONNECTIONS = 80;
+  private static final int MAX_CONNECTIONS = 80;
 
-    @SuppressWarnings({"resource", "deprecation"})
-    private final PostgreSQLContainer container;
+  @SuppressWarnings({"resource", "deprecation"})
+  private final PostgreSQLContainer container;
 
-    private final HarnessPooledDataSource dataSource;
-    private final PostgresJobStore store;
+  private final HarnessPooledDataSource dataSource;
+  private final PostgresJobStore store;
 
-    @SuppressWarnings({"resource", "deprecation"})
-    public PostgresHarnessFixture(Optional<String> externalJdbcUrl) {
-        if (externalJdbcUrl.isPresent()) {
-            this.container = null;
-            this.dataSource = dataSourceFromUrl(externalJdbcUrl.get());
-        } else {
-            this.container = new PostgreSQLContainer(DockerImageName.parse("postgres:18-alpine"))
-                    .withDatabaseName("threadmill")
-                    .withUsername("threadmill")
-                    .withPassword("threadmill");
-            container.start();
-            this.dataSource = dataSourceFromContainer(container);
-        }
-        new MigrationRunner(dataSource).migrate();
-        truncate();
-        this.store = new PostgresJobStore(dataSource);
+  @SuppressWarnings({"resource", "deprecation"})
+  public PostgresHarnessFixture(Optional<String> externalJdbcUrl) {
+    if (externalJdbcUrl.isPresent()) {
+      this.container = null;
+      this.dataSource = dataSourceFromUrl(externalJdbcUrl.get());
+    } else {
+      this.container = new PostgreSQLContainer(DockerImageName.parse("postgres:18-alpine"))
+          .withDatabaseName("threadmill")
+          .withUsername("threadmill")
+          .withPassword("threadmill");
+      container.start();
+      this.dataSource = dataSourceFromContainer(container);
     }
+    new MigrationRunner(dataSource).migrate();
+    truncate();
+    this.store = new PostgresJobStore(dataSource);
+  }
 
-    private void truncate() {
-        try (Connection conn = dataSource.getConnection();
-                Statement st = conn.createStatement()) {
-            st.execute("TRUNCATE threadmill_jobs, threadmill_nodes, threadmill_metadata, "
-                    + "threadmill_cron_task_state, threadmill_cron_tasks, threadmill_mutexes, "
-                    + "threadmill_dedup_keys, threadmill_concurrency_groups, "
-                    + "threadmill_concurrency_workflow_holds RESTART IDENTITY CASCADE");
-            st.execute("UPDATE threadmill_job_counts SET count = 0");
-        } catch (SQLException e) {
-            throw new JobEngineFatalException("could not truncate Postgres tables before run: " + e.getMessage(), e);
-        }
+  private void truncate() {
+    try (Connection conn = dataSource.getConnection();
+        Statement st = conn.createStatement()) {
+      st.execute("TRUNCATE threadmill_jobs, threadmill_nodes, threadmill_metadata, "
+          + "threadmill_cron_task_state, threadmill_cron_tasks, threadmill_mutexes, "
+          + "threadmill_dedup_keys, threadmill_concurrency_groups, "
+          + "threadmill_concurrency_workflow_holds RESTART IDENTITY CASCADE");
+      st.execute("UPDATE threadmill_job_counts SET count = 0");
+    } catch (SQLException e) {
+      throw new JobEngineFatalException(
+          "could not truncate Postgres tables before run: " + e.getMessage(), e);
     }
+  }
 
-    @Override
-    public JobStore store() {
-        return store;
-    }
+  @Override
+  public JobStore store() {
+    return store;
+  }
 
-    @Override
-    public void close() {
-        dataSource.close();
-        if (container != null && container.isRunning()) container.stop();
-    }
+  @Override
+  public void close() {
+    dataSource.close();
+    if (container != null && container.isRunning()) container.stop();
+  }
 
-    @SuppressWarnings("deprecation")
-    private static HarnessPooledDataSource dataSourceFromContainer(PostgreSQLContainer container) {
-        var ds = new PGSimpleDataSource();
-        ds.setServerName(container.getHost());
-        ds.setPortNumber(container.getMappedPort(5432));
-        ds.setDatabaseName(container.getDatabaseName());
-        ds.setUser(container.getUsername());
-        ds.setPassword(container.getPassword());
-        return new HarnessPooledDataSource(ds, MAX_CONNECTIONS);
-    }
+  @SuppressWarnings("deprecation")
+  private static HarnessPooledDataSource dataSourceFromContainer(PostgreSQLContainer container) {
+    var ds = new PGSimpleDataSource();
+    ds.setServerName(container.getHost());
+    ds.setPortNumber(container.getMappedPort(5432));
+    ds.setDatabaseName(container.getDatabaseName());
+    ds.setUser(container.getUsername());
+    ds.setPassword(container.getPassword());
+    return new HarnessPooledDataSource(ds, MAX_CONNECTIONS);
+  }
 
-    private static HarnessPooledDataSource dataSourceFromUrl(String jdbcUrl) {
-        var ds = new PGSimpleDataSource();
-        ds.setUrl(jdbcUrl);
-        return new HarnessPooledDataSource(ds, MAX_CONNECTIONS);
-    }
+  private static HarnessPooledDataSource dataSourceFromUrl(String jdbcUrl) {
+    var ds = new PGSimpleDataSource();
+    ds.setUrl(jdbcUrl);
+    return new HarnessPooledDataSource(ds, MAX_CONNECTIONS);
+  }
 }

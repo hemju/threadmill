@@ -10,8 +10,8 @@ import com.hemju.threadmill.test.AbstractJobStoreContractTest;
  */
 class InMemoryJobStoreContractTest extends AbstractJobStoreContractTest {
 
-    @Override
-    protected JobStore createStore() {
-        return new InMemoryJobStore();
-    }
+  @Override
+  protected JobStore createStore() {
+    return new InMemoryJobStore();
+  }
 }

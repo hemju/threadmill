@@ -23,60 +23,61 @@ import com.hemju.threadmill.store.redis.RedisKeys;
 @EnabledIf("com.hemju.threadmill.spring.DockerAvailable#check")
 class SpringRedisResetAutoConfigurationTest {
 
-    @SuppressWarnings("resource")
-    private static final GenericContainer<?> REDIS = new GenericContainer<>(DockerImageName.parse("redis:7-alpine"))
-            .withExposedPorts(6379)
-            .withCommand("redis-server", "--appendonly", "yes")
-            .waitingFor(Wait.forListeningPort());
+  @SuppressWarnings("resource")
+  private static final GenericContainer<?> REDIS = new GenericContainer<>(
+          DockerImageName.parse("redis:7-alpine"))
+      .withExposedPorts(6379)
+      .withCommand("redis-server", "--appendonly", "yes")
+      .waitingFor(Wait.forListeningPort());
 
-    private static RedisURI uri;
-    private static RedisClient adminClient;
-    private static StatefulRedisConnection<String, String> adminConnection;
+  private static RedisURI uri;
+  private static RedisClient adminClient;
+  private static StatefulRedisConnection<String, String> adminConnection;
 
-    @BeforeAll
-    static void start() {
-        REDIS.start();
-        uri = RedisURI.create("redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
-        adminClient = RedisClient.create(uri);
-        adminConnection = adminClient.connect();
-    }
+  @BeforeAll
+  static void start() {
+    REDIS.start();
+    uri = RedisURI.create("redis://" + REDIS.getHost() + ":" + REDIS.getMappedPort(6379));
+    adminClient = RedisClient.create(uri);
+    adminConnection = adminClient.connect();
+  }
 
-    @AfterAll
-    static void stop() {
-        if (adminConnection != null) adminConnection.close();
-        if (adminClient != null) adminClient.shutdown();
-        if (REDIS.isRunning()) REDIS.stop();
-    }
+  @AfterAll
+  static void stop() {
+    if (adminConnection != null) adminConnection.close();
+    if (adminClient != null) adminClient.shutdown();
+    if (REDIS.isRunning()) REDIS.stop();
+  }
 
-    @BeforeEach
-    void flush() {
-        adminConnection.sync().configSet("maxmemory", "0");
-        adminConnection.sync().configSet("maxmemory-policy", "noeviction");
-        adminConnection.sync().flushdb();
-    }
+  @BeforeEach
+  void flush() {
+    adminConnection.sync().configSet("maxmemory", "0");
+    adminConnection.sync().configSet("maxmemory-policy", "noeviction");
+    adminConnection.sync().flushdb();
+  }
 
-    @Test
-    void resetOnStartDropsThreadmillKeysWhenExplicitlyAllowed() {
-        adminConnection.sync().set(RedisKeys.PREFIX + "job:existing", "stale");
-        adminConnection.sync().set("other-app:keep", "yes");
+  @Test
+  void resetOnStartDropsThreadmillKeysWhenExplicitlyAllowed() {
+    adminConnection.sync().set(RedisKeys.PREFIX + "job:existing", "stale");
+    adminConnection.sync().set("other-app:keep", "yes");
 
-        new ApplicationContextRunner()
-                .withConfiguration(AutoConfigurations.of(
-                        ThreadmillRedisAutoConfiguration.class,
-                        ThreadmillPostgresAutoConfiguration.class,
-                        ThreadmillAutoConfiguration.class))
-                .withPropertyValues(
-                        "threadmill.enabled=false",
-                        "threadmill.remote-wake.enabled=false",
-                        "threadmill.store.redis.uri=" + uri,
-                        "threadmill.store.redis.reset-on-start=true",
-                        "threadmill.store.redis.allow-destructive-reset=true")
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    assertThat(context.getBean(JobStore.class)).isInstanceOf(RedisJobStore.class);
-                });
+    new ApplicationContextRunner()
+        .withConfiguration(AutoConfigurations.of(
+            ThreadmillRedisAutoConfiguration.class,
+            ThreadmillPostgresAutoConfiguration.class,
+            ThreadmillAutoConfiguration.class))
+        .withPropertyValues(
+            "threadmill.enabled=false",
+            "threadmill.remote-wake.enabled=false",
+            "threadmill.store.redis.uri=" + uri,
+            "threadmill.store.redis.reset-on-start=true",
+            "threadmill.store.redis.allow-destructive-reset=true")
+        .run(context -> {
+          assertThat(context).hasNotFailed();
+          assertThat(context.getBean(JobStore.class)).isInstanceOf(RedisJobStore.class);
+        });
 
-        assertThat(adminConnection.sync().keys(RedisKeys.PREFIX + "*")).isEmpty();
-        assertThat(adminConnection.sync().get("other-app:keep")).isEqualTo("yes");
-    }
+    assertThat(adminConnection.sync().keys(RedisKeys.PREFIX + "*")).isEmpty();
+    assertThat(adminConnection.sync().get("other-app:keep")).isEqualTo("yes");
+  }
 }

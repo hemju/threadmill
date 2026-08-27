@@ -36,70 +36,72 @@ import com.hemju.threadmill.store.redis.RedisStoreConfig;
 @ConditionalOnClass(RedisJobStore.class)
 public class ThreadmillRedisAutoConfiguration {
 
-    private static final Logger LOG = LoggerFactory.getLogger(ThreadmillRedisAutoConfiguration.class);
+  private static final Logger LOG = LoggerFactory.getLogger(ThreadmillRedisAutoConfiguration.class);
 
-    @Bean
-    @ConditionalOnMissingBean(JobStore.class)
-    @Conditional(OnRedisStoreConfigured.class)
-    public JobStore threadmillJobStore(ThreadmillProperties properties) {
-        var redis = properties.getStore().getRedis();
-        if (redis.isResetOnStart() && !redis.isAllowDestructiveReset()) {
-            throw new IllegalStateException("threadmill.store.redis.reset-on-start=true requires"
-                    + " threadmill.store.redis.allow-destructive-reset=true");
-        }
-        LOG.info("Threadmill: using Redis store");
-        var store = new RedisJobStore(redisStoreConfig(redis));
-        if (redis.isResetOnStart()) {
-            store.dropThreadmillKeys();
-        }
-        return store;
+  @Bean
+  @ConditionalOnMissingBean(JobStore.class)
+  @Conditional(OnRedisStoreConfigured.class)
+  public JobStore threadmillJobStore(ThreadmillProperties properties) {
+    var redis = properties.getStore().getRedis();
+    if (redis.isResetOnStart() && !redis.isAllowDestructiveReset()) {
+      throw new IllegalStateException("threadmill.store.redis.reset-on-start=true requires"
+          + " threadmill.store.redis.allow-destructive-reset=true");
     }
+    LOG.info("Threadmill: using Redis store");
+    var store = new RedisJobStore(redisStoreConfig(redis));
+    if (redis.isResetOnStart()) {
+      store.dropThreadmillKeys();
+    }
+    return store;
+  }
 
-    private static RedisStoreConfig redisStoreConfig(ThreadmillProperties.RedisProperties redis) {
-        var safety = redis.isNoEvictionExternallyValidated()
-                ? RedisStoreConfig.RedisSafetyValidation.externallyValidatedMode()
-                : RedisStoreConfig.RedisSafetyValidation.strict();
-        return switch (redis.getMode().toLowerCase(Locale.ROOT)) {
-            case "standalone" -> {
-                if (redis.getUri() == null || redis.getUri().isBlank()) {
-                    throw new IllegalArgumentException("threadmill.store.redis.uri must be set for standalone Redis");
-                }
-                yield new RedisStoreConfig.Standalone(RedisURI.create(redis.getUri()), safety);
-            }
-            case "sentinel" -> {
-                var sentinel = redis.getSentinel();
-                yield new RedisStoreConfig.Sentinel(
-                        sentinel.getMasterName(), parseRedisNodes(sentinel.getNodes()), sentinel.getPassword(), safety);
-            }
-            case "cluster" -> {
-                var cluster = redis.getCluster();
-                yield new RedisStoreConfig.Cluster(
-                        parseRedisNodes(cluster.getNodes()), cluster.getReadPolicy(), safety);
-            }
-            default ->
-                throw new IllegalArgumentException(
-                        "threadmill.store.redis.mode must be standalone, sentinel, or cluster");
-        };
-    }
+  private static RedisStoreConfig redisStoreConfig(ThreadmillProperties.RedisProperties redis) {
+    var safety = redis.isNoEvictionExternallyValidated()
+        ? RedisStoreConfig.RedisSafetyValidation.externallyValidatedMode()
+        : RedisStoreConfig.RedisSafetyValidation.strict();
+    return switch (redis.getMode().toLowerCase(Locale.ROOT)) {
+      case "standalone" -> {
+        if (redis.getUri() == null || redis.getUri().isBlank()) {
+          throw new IllegalArgumentException(
+              "threadmill.store.redis.uri must be set for standalone Redis");
+        }
+        yield new RedisStoreConfig.Standalone(RedisURI.create(redis.getUri()), safety);
+      }
+      case "sentinel" -> {
+        var sentinel = redis.getSentinel();
+        yield new RedisStoreConfig.Sentinel(
+            sentinel.getMasterName(),
+            parseRedisNodes(sentinel.getNodes()),
+            sentinel.getPassword(),
+            safety);
+      }
+      case "cluster" -> {
+        var cluster = redis.getCluster();
+        yield new RedisStoreConfig.Cluster(
+            parseRedisNodes(cluster.getNodes()), cluster.getReadPolicy(), safety);
+      }
+      default ->
+        throw new IllegalArgumentException(
+            "threadmill.store.redis.mode must be standalone, sentinel, or cluster");
+    };
+  }
 
-    private static List<RedisStoreConfig.HostAndPort> parseRedisNodes(List<String> nodes) {
-        if (nodes == null || nodes.isEmpty()) {
-            throw new IllegalArgumentException("threadmill.store.redis nodes must not be empty");
-        }
-        return nodes.stream()
-                .map(ThreadmillRedisAutoConfiguration::parseRedisNode)
-                .toList();
+  private static List<RedisStoreConfig.HostAndPort> parseRedisNodes(List<String> nodes) {
+    if (nodes == null || nodes.isEmpty()) {
+      throw new IllegalArgumentException("threadmill.store.redis nodes must not be empty");
     }
+    return nodes.stream().map(ThreadmillRedisAutoConfiguration::parseRedisNode).toList();
+  }
 
-    private static RedisStoreConfig.HostAndPort parseRedisNode(String value) {
-        if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException("Redis node must not be blank");
-        }
-        int colon = value.lastIndexOf(':');
-        if (colon < 1 || colon == value.length() - 1) {
-            throw new IllegalArgumentException("Redis node must use host:port format: " + value);
-        }
-        return new RedisStoreConfig.HostAndPort(
-                value.substring(0, colon), Integer.parseInt(value.substring(colon + 1)));
+  private static RedisStoreConfig.HostAndPort parseRedisNode(String value) {
+    if (value == null || value.isBlank()) {
+      throw new IllegalArgumentException("Redis node must not be blank");
     }
+    int colon = value.lastIndexOf(':');
+    if (colon < 1 || colon == value.length() - 1) {
+      throw new IllegalArgumentException("Redis node must use host:port format: " + value);
+    }
+    return new RedisStoreConfig.HostAndPort(
+        value.substring(0, colon), Integer.parseInt(value.substring(colon + 1)));
+  }
 }

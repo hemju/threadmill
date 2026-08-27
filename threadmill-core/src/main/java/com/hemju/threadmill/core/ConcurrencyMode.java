@@ -8,9 +8,9 @@ package com.hemju.threadmill.core;
  * processing. {@link #EXCLUSIVE} jobs run alone for their key.
  */
 public enum ConcurrencyMode {
-    /** Run alone for the job's concurrency key. */
-    EXCLUSIVE,
+  /** Run alone for the job's concurrency key. */
+  EXCLUSIVE,
 
-    /** Run alongside adjacent shared jobs for the job's concurrency key. */
-    SHARED
+  /** Run alongside adjacent shared jobs for the job's concurrency key. */
+  SHARED
 }

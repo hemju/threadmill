@@ -31,52 +31,52 @@ import com.hemju.threadmill.store.postgres.PostgresJobStore;
 @EnabledIf("com.hemju.threadmill.spring.DockerAvailable#check")
 class SpringAutoConfigurationOrderingTest {
 
-    @SuppressWarnings("resource")
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(
-                    DockerImageName.parse("postgres:18-alpine"))
-            .withDatabaseName("threadmill")
-            .withUsername("threadmill")
-            .withPassword("threadmill");
+  @SuppressWarnings("resource")
+  private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(
+          DockerImageName.parse("postgres:18-alpine"))
+      .withDatabaseName("threadmill")
+      .withUsername("threadmill")
+      .withPassword("threadmill");
 
-    @BeforeAll
-    static void start() {
-        POSTGRES.start();
-    }
+  @BeforeAll
+  static void start() {
+    POSTGRES.start();
+  }
 
-    @AfterAll
-    static void stop() {
-        if (POSTGRES.isRunning()) POSTGRES.stop();
-    }
+  @AfterAll
+  static void stop() {
+    if (POSTGRES.isRunning()) POSTGRES.stop();
+  }
 
-    @Test
-    void autoConfiguredDataSourceResolvesThePostgresStore() {
-        new ApplicationContextRunner()
-                .withConfiguration(AutoConfigurations.of(
-                        DataSourceAutoConfiguration.class,
-                        ThreadmillPostgresAutoConfiguration.class,
-                        ThreadmillAutoConfiguration.class))
-                .withPropertyValues(
-                        "threadmill.enabled=false",
-                        "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
-                        "spring.datasource.username=" + POSTGRES.getUsername(),
-                        "spring.datasource.password=" + POSTGRES.getPassword())
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
-                });
-    }
+  @Test
+  void autoConfiguredDataSourceResolvesThePostgresStore() {
+    new ApplicationContextRunner()
+        .withConfiguration(AutoConfigurations.of(
+            DataSourceAutoConfiguration.class,
+            ThreadmillPostgresAutoConfiguration.class,
+            ThreadmillAutoConfiguration.class))
+        .withPropertyValues(
+            "threadmill.enabled=false",
+            "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
+            "spring.datasource.username=" + POSTGRES.getUsername(),
+            "spring.datasource.password=" + POSTGRES.getPassword())
+        .run(context -> {
+          assertThat(context).hasNotFailed();
+          assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
+        });
+  }
 
-    @Test
-    void withoutADataSourceTheInMemoryStoreRequiresExplicitOptIn() {
-        new ApplicationContextRunner()
-                .withConfiguration(AutoConfigurations.of(
-                        ThreadmillRedisAutoConfiguration.class,
-                        ThreadmillPostgresAutoConfiguration.class,
-                        ThreadmillAutoConfiguration.class))
-                .withPropertyValues("threadmill.enabled=false", "threadmill.store.memory.enabled=true")
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    assertThat(context.getBean(JobStore.class)).isInstanceOf(InMemoryJobStore.class);
-                });
-    }
+  @Test
+  void withoutADataSourceTheInMemoryStoreRequiresExplicitOptIn() {
+    new ApplicationContextRunner()
+        .withConfiguration(AutoConfigurations.of(
+            ThreadmillRedisAutoConfiguration.class,
+            ThreadmillPostgresAutoConfiguration.class,
+            ThreadmillAutoConfiguration.class))
+        .withPropertyValues("threadmill.enabled=false", "threadmill.store.memory.enabled=true")
+        .run(context -> {
+          assertThat(context).hasNotFailed();
+          assertThat(context.getBean(JobStore.class)).isInstanceOf(InMemoryJobStore.class);
+        });
+  }
 }

@@ -12,28 +12,28 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class CircuitBreaker {
 
-    private final int threshold;
-    private final AtomicInteger consecutive = new AtomicInteger(0);
+  private final int threshold;
+  private final AtomicInteger consecutive = new AtomicInteger(0);
 
-    public CircuitBreaker(int threshold) {
-        if (threshold <= 0) throw new IllegalArgumentException("threshold must be positive");
-        this.threshold = threshold;
-    }
+  public CircuitBreaker(int threshold) {
+    if (threshold <= 0) throw new IllegalArgumentException("threshold must be positive");
+    this.threshold = threshold;
+  }
 
-    public void recordSuccess() {
-        consecutive.updateAndGet(v -> Math.max(0, v - 1));
-    }
+  public void recordSuccess() {
+    consecutive.updateAndGet(v -> Math.max(0, v - 1));
+  }
 
-    /** Returns {@code true} if the threshold has been reached after this failure. */
-    public boolean recordFailure() {
-        return consecutive.incrementAndGet() >= threshold;
-    }
+  /** Returns {@code true} if the threshold has been reached after this failure. */
+  public boolean recordFailure() {
+    return consecutive.incrementAndGet() >= threshold;
+  }
 
-    public int current() {
-        return consecutive.get();
-    }
+  public int current() {
+    return consecutive.get();
+  }
 
-    public void reset() {
-        consecutive.set(0);
-    }
+  public void reset() {
+    consecutive.set(0);
+  }
 }

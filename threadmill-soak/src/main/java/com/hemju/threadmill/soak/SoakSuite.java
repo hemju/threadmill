@@ -8,5 +8,5 @@ package com.hemju.threadmill.soak;
  */
 public final class SoakSuite {
 
-    private SoakSuite() {}
+  private SoakSuite() {}
 }

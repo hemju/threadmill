@@ -44,208 +44,209 @@ import com.hemju.threadmill.core.store.JobStore;
  */
 public final class ThreadmillMetrics {
 
-    private final MeterRegistry registry;
-    private final JobStore store;
-    private final Map<JobState, AtomicLong> stateGauges = new EnumMap<>(JobState.class);
-    private final Map<String, AtomicLong> queueDepthGauges = new ConcurrentHashMap<>();
-    private final AtomicLong oldestProcessingHeartbeatAgeMillis = new AtomicLong(0);
-    private final Counter processedCounter;
-    private final Counter refreshErrors;
-    private final Map<String, Counter> failedCounters = new ConcurrentHashMap<>();
-    private final Map<String, Counter> recurringRunCounters = new ConcurrentHashMap<>();
-    private final Timer processingTime;
-    private final Timer claimLatency;
-    private final ConcurrentHashMap<String, Instant> inFlightStart = new ConcurrentHashMap<>();
+  private final MeterRegistry registry;
+  private final JobStore store;
+  private final Map<JobState, AtomicLong> stateGauges = new EnumMap<>(JobState.class);
+  private final Map<String, AtomicLong> queueDepthGauges = new ConcurrentHashMap<>();
+  private final AtomicLong oldestProcessingHeartbeatAgeMillis = new AtomicLong(0);
+  private final Counter processedCounter;
+  private final Counter refreshErrors;
+  private final Map<String, Counter> failedCounters = new ConcurrentHashMap<>();
+  private final Map<String, Counter> recurringRunCounters = new ConcurrentHashMap<>();
+  private final Timer processingTime;
+  private final Timer claimLatency;
+  private final ConcurrentHashMap<String, Instant> inFlightStart = new ConcurrentHashMap<>();
 
-    /**
-     * Coalesce the per-completion {@link #refresh()} so a high-throughput node
-     * does not run three store reads (counts, queue depths, oldest heartbeat)
-     * on every single job. The dashboard uses the same 1s-TTL approach.
-     */
-    private static final long REFRESH_TTL_NANOS = Duration.ofSeconds(1).toNanos();
+  /**
+   * Coalesce the per-completion {@link #refresh()} so a high-throughput node
+   * does not run three store reads (counts, queue depths, oldest heartbeat)
+   * on every single job. The dashboard uses the same 1s-TTL approach.
+   */
+  private static final long REFRESH_TTL_NANOS = Duration.ofSeconds(1).toNanos();
 
-    private final AtomicLong lastRefreshNanos = new AtomicLong(Long.MIN_VALUE);
+  private final AtomicLong lastRefreshNanos = new AtomicLong(Long.MIN_VALUE);
 
-    public ThreadmillMetrics(MeterRegistry registry, JobStore store) {
-        this.registry = Objects.requireNonNull(registry, "registry");
-        this.store = Objects.requireNonNull(store, "store");
-        for (JobState s : JobState.values()) {
-            var v = new AtomicLong();
-            stateGauges.put(s, v);
-            Gauge.builder("threadmill.jobs.count", v, AtomicLong::doubleValue)
-                    .tag("state", s.name())
-                    .description("Number of Threadmill jobs in this state")
-                    .register(registry);
+  public ThreadmillMetrics(MeterRegistry registry, JobStore store) {
+    this.registry = Objects.requireNonNull(registry, "registry");
+    this.store = Objects.requireNonNull(store, "store");
+    for (JobState s : JobState.values()) {
+      var v = new AtomicLong();
+      stateGauges.put(s, v);
+      Gauge.builder("threadmill.jobs.count", v, AtomicLong::doubleValue)
+          .tag("state", s.name())
+          .description("Number of Threadmill jobs in this state")
+          .register(registry);
+    }
+    this.processedCounter = Counter.builder("threadmill.jobs.processed")
+        .description("Total successfully-processed Threadmill jobs since startup")
+        .register(registry);
+    this.refreshErrors = Counter.builder("threadmill.metrics.refresh.errors")
+        .description("Errors while refreshing Threadmill metrics from the store")
+        .register(registry);
+    this.processingTime = Timer.builder("threadmill.jobs.processing.time")
+        .description("Wall-clock time from claim to terminal transition")
+        .register(registry);
+    this.claimLatency = Timer.builder("threadmill.claim.latency")
+        .description("Wall-clock time spent in JobStore claimReady calls when recorded by the host")
+        .register(registry);
+    Gauge.builder(
+            "threadmill.processing.oldest.heartbeat.age",
+            oldestProcessingHeartbeatAgeMillis,
+            AtomicLong::doubleValue)
+        .description("Age in milliseconds of the oldest processing heartbeat")
+        .register(registry);
+    refresh();
+  }
+
+  /** Refresh the per-state gauges from the store. */
+  public void refresh() {
+    try {
+      Map<JobState, Long> counts = store.countsByState();
+      for (JobState s : JobState.values()) {
+        stateGauges.get(s).set(counts.getOrDefault(s, 0L));
+      }
+      Map<String, Long> depths = store.queueDepths();
+      for (var e : depths.entrySet()) {
+        queueGauge(e.getKey()).set(e.getValue());
+      }
+      // Evict meters for queues that no longer have ENQUEUED work, so a
+      // drained or churned-away (e.g. queue-family) queue does not report
+      // a stale phantom depth forever, accumulate unbounded meter
+      // cardinality, or keep costing an oldestEnqueuedAt store call per
+      // scrape.
+      queueDepthGauges.keySet().removeIf(q -> {
+        if (!depths.containsKey(q)) {
+          removeQueueMeters(q);
+          return true;
         }
-        this.processedCounter = Counter.builder("threadmill.jobs.processed")
-                .description("Total successfully-processed Threadmill jobs since startup")
-                .register(registry);
-        this.refreshErrors = Counter.builder("threadmill.metrics.refresh.errors")
-                .description("Errors while refreshing Threadmill metrics from the store")
-                .register(registry);
-        this.processingTime = Timer.builder("threadmill.jobs.processing.time")
-                .description("Wall-clock time from claim to terminal transition")
-                .register(registry);
-        this.claimLatency = Timer.builder("threadmill.claim.latency")
-                .description("Wall-clock time spent in JobStore claimReady calls when recorded by the host")
-                .register(registry);
-        Gauge.builder(
-                        "threadmill.processing.oldest.heartbeat.age",
-                        oldestProcessingHeartbeatAgeMillis,
-                        AtomicLong::doubleValue)
-                .description("Age in milliseconds of the oldest processing heartbeat")
-                .register(registry);
-        refresh();
+        return false;
+      });
+      long age = store
+          .oldestProcessingHeartbeat()
+          .map(at -> Math.max(0L, Duration.between(at, Instant.now()).toMillis()))
+          .orElse(0L);
+      oldestProcessingHeartbeatAgeMillis.set(age);
+    } catch (RuntimeException e) {
+      refreshErrors.increment();
     }
+  }
 
-    /** Refresh the per-state gauges from the store. */
-    public void refresh() {
-        try {
-            Map<JobState, Long> counts = store.countsByState();
-            for (JobState s : JobState.values()) {
-                stateGauges.get(s).set(counts.getOrDefault(s, 0L));
-            }
-            Map<String, Long> depths = store.queueDepths();
-            for (var e : depths.entrySet()) {
-                queueGauge(e.getKey()).set(e.getValue());
-            }
-            // Evict meters for queues that no longer have ENQUEUED work, so a
-            // drained or churned-away (e.g. queue-family) queue does not report
-            // a stale phantom depth forever, accumulate unbounded meter
-            // cardinality, or keep costing an oldestEnqueuedAt store call per
-            // scrape.
-            queueDepthGauges.keySet().removeIf(q -> {
-                if (!depths.containsKey(q)) {
-                    removeQueueMeters(q);
-                    return true;
-                }
-                return false;
-            });
-            long age = store.oldestProcessingHeartbeat()
-                    .map(at -> Math.max(0L, Duration.between(at, Instant.now()).toMillis()))
-                    .orElse(0L);
-            oldestProcessingHeartbeatAgeMillis.set(age);
-        } catch (RuntimeException e) {
-            refreshErrors.increment();
-        }
+  /** Coalesced refresh for the hot per-completion path. */
+  private void refreshThrottled() {
+    long now = System.nanoTime();
+    long last = lastRefreshNanos.get();
+    if (now - last < REFRESH_TTL_NANOS) {
+      return;
     }
-
-    /** Coalesced refresh for the hot per-completion path. */
-    private void refreshThrottled() {
-        long now = System.nanoTime();
-        long last = lastRefreshNanos.get();
-        if (now - last < REFRESH_TTL_NANOS) {
-            return;
-        }
-        if (lastRefreshNanos.compareAndSet(last, now)) {
-            refresh();
-        }
+    if (lastRefreshNanos.compareAndSet(last, now)) {
+      refresh();
     }
+  }
 
-    private void removeQueueMeters(String queue) {
-        for (String name : new String[] {"threadmill.queue.depth", "threadmill.queue.oldest.enqueued.age"}) {
-            var meter = registry.find(name).tag("queue", queue).meter();
-            if (meter != null) {
-                registry.remove(meter);
-            }
-        }
+  private void removeQueueMeters(String queue) {
+    for (String name :
+        new String[] {"threadmill.queue.depth", "threadmill.queue.oldest.enqueued.age"}) {
+      var meter = registry.find(name).tag("queue", queue).meter();
+      if (meter != null) {
+        registry.remove(meter);
+      }
     }
+  }
 
-    /** Record an externally-observed claim latency. */
-    public void recordClaimLatency(Duration duration) {
-        claimLatency.record(duration);
-    }
+  /** Record an externally-observed claim latency. */
+  public void recordClaimLatency(Duration duration) {
+    claimLatency.record(duration);
+  }
 
-    private void recordRecurringRun(String origin) {
-        // Clamp to the three known origins so arbitrary metadata can never
-        // explode the tag cardinality.
-        String tag =
-                switch (origin) {
-                    case JobExecutionContext.CRON_ORIGIN_SCHEDULE,
-                            JobExecutionContext.CRON_ORIGIN_NUDGE,
-                            JobExecutionContext.CRON_ORIGIN_MANUAL -> origin;
-                    default -> "other";
-                };
-        recurringRunCounters
-                .computeIfAbsent(
-                        tag,
-                        t -> Counter.builder("threadmill.jobs.recurring.runs")
-                                .tag("origin", t)
-                                .description("Recurring-task instances started, by trigger origin")
-                                .register(registry))
-                .increment();
-    }
-
-    /** A JobInterceptor that drives the success / failure counters and the timer. */
-    public JobInterceptor asInterceptor() {
-        return new JobInterceptor() {
-            @Override
-            public void onProcessingStarting(Job job, JobExecutionContext ctx) {
-                inFlightStart.put(job.id().toString(), Instant.now());
-                // This hook fires once per attempt, but the meter counts
-                // recurring *instances* — operators read the nudge-to-schedule
-                // ratio off it, and a retry-storming task would inflate both
-                // origins and make that reading meaningless.
-                if (job.attempts() <= 1) {
-                    job.metadata()
-                            .get(JobExecutionContext.CRON_ORIGIN_META)
-                            .ifPresent(ThreadmillMetrics.this::recordRecurringRun);
-                }
-            }
-
-            @Override
-            public void onProcessingSucceeded(Job job, JobExecutionContext ctx) {
-                processedCounter.increment();
-                recordElapsed(job);
-                refreshThrottled();
-            }
-
-            @Override
-            public void onProcessingFailed(Job job, JobExecutionContext ctx, Throwable cause, FailureCause kind) {
-                failedCounters
-                        .computeIfAbsent(
-                                kind.name(),
-                                k -> Counter.builder("threadmill.jobs.failed")
-                                        .tag("cause", k)
-                                        .register(registry))
-                        .increment();
-                recordElapsed(job);
-                refreshThrottled();
-            }
+  private void recordRecurringRun(String origin) {
+    // Clamp to the three known origins so arbitrary metadata can never
+    // explode the tag cardinality.
+    String tag =
+        switch (origin) {
+          case JobExecutionContext.CRON_ORIGIN_SCHEDULE,
+              JobExecutionContext.CRON_ORIGIN_NUDGE,
+              JobExecutionContext.CRON_ORIGIN_MANUAL -> origin;
+          default -> "other";
         };
-    }
+    recurringRunCounters
+        .computeIfAbsent(
+            tag,
+            t -> Counter.builder("threadmill.jobs.recurring.runs")
+                .tag("origin", t)
+                .description("Recurring-task instances started, by trigger origin")
+                .register(registry))
+        .increment();
+  }
 
-    private void recordElapsed(Job job) {
-        Instant started = inFlightStart.remove(job.id().toString());
-        if (started != null) {
-            processingTime.record(Duration.between(started, Instant.now()));
+  /** A JobInterceptor that drives the success / failure counters and the timer. */
+  public JobInterceptor asInterceptor() {
+    return new JobInterceptor() {
+      @Override
+      public void onProcessingStarting(Job job, JobExecutionContext ctx) {
+        inFlightStart.put(job.id().toString(), Instant.now());
+        // This hook fires once per attempt, but the meter counts
+        // recurring *instances* — operators read the nudge-to-schedule
+        // ratio off it, and a retry-storming task would inflate both
+        // origins and make that reading meaningless.
+        if (job.attempts() <= 1) {
+          job.metadata()
+              .get(JobExecutionContext.CRON_ORIGIN_META)
+              .ifPresent(ThreadmillMetrics.this::recordRecurringRun);
         }
-    }
+      }
 
-    private AtomicLong queueGauge(String queue) {
-        return queueDepthGauges.computeIfAbsent(queue, q -> {
-            var v = new AtomicLong();
-            Gauge.builder("threadmill.queue.depth", v, AtomicLong::doubleValue)
-                    .tag("queue", q)
-                    .description("Number of ENQUEUED Threadmill jobs in this queue")
-                    .register(registry);
-            Gauge.builder("threadmill.queue.oldest.enqueued.age", v, ignored -> queueAgeMillis(q))
-                    .tag("queue", q)
-                    .description("Age in milliseconds of the oldest ENQUEUED job in this queue")
-                    .register(registry);
-            return v;
-        });
-    }
+      @Override
+      public void onProcessingSucceeded(Job job, JobExecutionContext ctx) {
+        processedCounter.increment();
+        recordElapsed(job);
+        refreshThrottled();
+      }
 
-    private double queueAgeMillis(String queue) {
-        try {
-            return store.oldestEnqueuedAt(queue)
-                    .map(at -> (double)
-                            Math.max(0L, Duration.between(at, Instant.now()).toMillis()))
-                    .orElse(0d);
-        } catch (RuntimeException e) {
-            refreshErrors.increment();
-            return 0d;
-        }
+      @Override
+      public void onProcessingFailed(
+          Job job, JobExecutionContext ctx, Throwable cause, FailureCause kind) {
+        failedCounters
+            .computeIfAbsent(
+                kind.name(),
+                k -> Counter.builder("threadmill.jobs.failed").tag("cause", k).register(registry))
+            .increment();
+        recordElapsed(job);
+        refreshThrottled();
+      }
+    };
+  }
+
+  private void recordElapsed(Job job) {
+    Instant started = inFlightStart.remove(job.id().toString());
+    if (started != null) {
+      processingTime.record(Duration.between(started, Instant.now()));
     }
+  }
+
+  private AtomicLong queueGauge(String queue) {
+    return queueDepthGauges.computeIfAbsent(queue, q -> {
+      var v = new AtomicLong();
+      Gauge.builder("threadmill.queue.depth", v, AtomicLong::doubleValue)
+          .tag("queue", q)
+          .description("Number of ENQUEUED Threadmill jobs in this queue")
+          .register(registry);
+      Gauge.builder("threadmill.queue.oldest.enqueued.age", v, ignored -> queueAgeMillis(q))
+          .tag("queue", q)
+          .description("Age in milliseconds of the oldest ENQUEUED job in this queue")
+          .register(registry);
+      return v;
+    });
+  }
+
+  private double queueAgeMillis(String queue) {
+    try {
+      return store
+          .oldestEnqueuedAt(queue)
+          .map(at -> (double) Math.max(0L, Duration.between(at, Instant.now()).toMillis()))
+          .orElse(0d);
+    } catch (RuntimeException e) {
+      refreshErrors.increment();
+      return 0d;
+    }
+  }
 }

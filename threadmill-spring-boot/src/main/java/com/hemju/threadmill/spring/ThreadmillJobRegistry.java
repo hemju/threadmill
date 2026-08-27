@@ -42,307 +42,319 @@ import com.hemju.threadmill.core.schedule.CronTask;
  */
 public class ThreadmillJobRegistry {
 
-    private final Map<Class<?>, Registration> byHandler;
-    private final Map<Class<? extends JobPayload>, List<Registration>> byPayload;
+  private final Map<Class<?>, Registration> byHandler;
+  private final Map<Class<? extends JobPayload>, List<Registration>> byPayload;
 
-    /** Test seam: build a registry from a fixed registration list. */
-    protected ThreadmillJobRegistry(Registration... registrations) {
-        Map<Class<?>, Registration> handlerIndex = new LinkedHashMap<>();
-        Map<Class<? extends JobPayload>, List<Registration>> payloadIndex = new LinkedHashMap<>();
-        for (Registration r : registrations) {
-            recordRegistration(handlerIndex, payloadIndex, r);
+  /** Test seam: build a registry from a fixed registration list. */
+  protected ThreadmillJobRegistry(Registration... registrations) {
+    Map<Class<?>, Registration> handlerIndex = new LinkedHashMap<>();
+    Map<Class<? extends JobPayload>, List<Registration>> payloadIndex = new LinkedHashMap<>();
+    for (Registration r : registrations) {
+      recordRegistration(handlerIndex, payloadIndex, r);
+    }
+    requireUniqueRecurringNames(handlerIndex.values());
+    this.byHandler = Map.copyOf(handlerIndex);
+    this.byPayload = copyOfPayloadIndex(payloadIndex);
+  }
+
+  public ThreadmillJobRegistry(ApplicationContext context, ThreadmillProperties properties) {
+    Objects.requireNonNull(context, "context");
+    Objects.requireNonNull(properties, "properties");
+    Map<Class<?>, Registration> handlerIndex = new LinkedHashMap<>();
+    Map<Class<? extends JobPayload>, List<Registration>> payloadIndex = new LinkedHashMap<>();
+    for (String beanName : context.getBeanNamesForAnnotation(Job.class)) {
+      // Inspect the bean definition WITHOUT triggering instantiation. Calling
+      // context.getBean(beanName) here would eagerly create every @Job
+      // handler, which deadlocks any handler that constructor-injects
+      // JobScheduler (which itself depends on this registry).
+      Class<?> rawBeanType = context.getType(beanName);
+      if (rawBeanType == null) continue;
+      Class<?> beanType = ClassUtils.getUserClass(rawBeanType);
+      Job annotation = context.findAnnotationOnBean(beanName, Job.class);
+      if (annotation == null) continue;
+      if (!JobHandler.class.isAssignableFrom(beanType)) {
+        throw new IllegalStateException(
+            "@Job bean does not implement JobHandler: " + beanType.getName());
+      }
+      Class<? extends JobPayload> payloadType = payloadType(beanType);
+      Names.requireName("queue", annotation.queue());
+      Recurring recurring = context.findAnnotationOnBean(beanName, Recurring.class);
+      var registration = new Registration(
+          payloadType,
+          beanType,
+          annotation.queue(),
+          annotation.priority(),
+          maxAttemptsFor(beanType, annotation),
+          annotation.timeout().isBlank()
+              ? properties.getJobTimeout()
+              : Duration.parse(annotation.timeout()),
+          recurringSpecFor(beanType, recurring));
+      recordRegistration(handlerIndex, payloadIndex, registration);
+    }
+    requireUniqueRecurringNames(handlerIndex.values());
+    this.byHandler = Map.copyOf(handlerIndex);
+    this.byPayload = copyOfPayloadIndex(payloadIndex);
+  }
+
+  /**
+   * Look up the registration for {@code handlerType}. The handler-class
+   * index is the primary route used by {@link JobScheduler#enqueue} and
+   * friends, which always have the handler class in hand.
+   */
+  public Registration registrationFor(Class<?> handlerType) {
+    Objects.requireNonNull(handlerType, "handlerType");
+    Registration registration = byHandler.get(handlerType);
+    if (registration == null) {
+      throw new IllegalStateException("No @Job handler registered for " + handlerType.getName());
+    }
+    return registration;
+  }
+
+  /**
+   * Look up the registration solely by payload type. Convenient when only
+   * the payload is in scope; rejects with a clear message if more than one
+   * handler shares the payload (today only happens for
+   * {@link com.hemju.threadmill.core.handler.JobAction}/{@code NoPayload}).
+   */
+  public Registration registrationFor(JobPayload payload) {
+    Objects.requireNonNull(payload, "payload");
+    List<Registration> matches = byPayload.get(payload.getClass());
+    if (matches == null || matches.isEmpty()) {
+      throw new IllegalStateException(
+          "No @Job handler registered for payload " + payload.getClass().getName());
+    }
+    if (matches.size() > 1) {
+      var names = new ArrayList<String>(matches.size());
+      for (Registration r : matches) names.add(r.handlerType().getName());
+      throw new IllegalStateException("Multiple @Job handlers registered for payload "
+          + payload.getClass().getName()
+          + " ("
+          + String.join(", ", names)
+          + "); resolve by handler class via registrationFor(Class).");
+    }
+    return matches.get(0);
+  }
+
+  /**
+   * Registrations whose declared payload type is exactly
+   * {@code payloadType} (possibly empty). Used by the enqueue-time
+   * dispatch-ambiguity check: a payload subtype with its own handler must
+   * not silently route to a supertype's handler.
+   */
+  public List<Registration> registrationsForExactPayloadType(
+      Class<? extends JobPayload> payloadType) {
+    Objects.requireNonNull(payloadType, "payloadType");
+    return byPayload.getOrDefault(payloadType, List.of());
+  }
+
+  public List<Registration> registrations() {
+    var out = new ArrayList<>(byHandler.values());
+    out.sort(Comparator.comparing(r -> r.handlerType().getName()));
+    return List.copyOf(out);
+  }
+
+  private static void recordRegistration(
+      Map<Class<?>, Registration> handlerIndex,
+      Map<Class<? extends JobPayload>, List<Registration>> payloadIndex,
+      Registration r) {
+    Registration prior = handlerIndex.putIfAbsent(r.handlerType(), r);
+    if (prior != null) {
+      // Spring bean discovery should never see the same handler class twice,
+      // but the defensive check keeps the test-seam constructor honest too.
+      throw new IllegalStateException(
+          "Duplicate @Job registration for handler " + r.handlerType().getName());
+    }
+    var existing = payloadIndex.computeIfAbsent(r.payloadType(), k -> new ArrayList<>());
+    if (!existing.isEmpty() && r.payloadType() != NoPayload.class) {
+      // Two handlers claiming the same non-NoPayload payload type is almost always
+      // a bug — pick-the-right-one is impossible from the payload alone. NoPayload
+      // is the deliberate exception: every JobAction shares it by construction,
+      // and JobScheduler routes by handler class so the ambiguity does not bite.
+      throw new IllegalStateException("Multiple Threadmill handlers for payload "
+          + r.payloadType().getName()
+          + ": "
+          + existing.get(0).handlerType().getName()
+          + " and "
+          + r.handlerType().getName());
+    }
+    existing.add(r);
+  }
+
+  /**
+   * Recurring tasks are keyed by name in the store: a duplicate
+   * {@code recurringName} would silently last-win at registration and one
+   * schedule would never run. Fail startup naming both handler classes,
+   * mirroring the payload-collision check.
+   */
+  private static void requireUniqueRecurringNames(Collection<Registration> registrations) {
+    var byName = new LinkedHashMap<String, Registration>();
+    for (Registration r : registrations) {
+      if (!r.isRecurring()) continue;
+      Registration prior = byName.putIfAbsent(r.recurring().name(), r);
+      if (prior != null) {
+        throw new IllegalStateException("Duplicate @Recurring name '"
+            + r.recurring().name()
+            + "': "
+            + prior.handlerType().getName()
+            + " and "
+            + r.handlerType().getName());
+      }
+    }
+  }
+
+  private static Map<Class<? extends JobPayload>, List<Registration>> copyOfPayloadIndex(
+      Map<Class<? extends JobPayload>, List<Registration>> src) {
+    var out = new LinkedHashMap<Class<? extends JobPayload>, List<Registration>>(src.size());
+    for (var e : src.entrySet()) out.put(e.getKey(), List.copyOf(e.getValue()));
+    return Map.copyOf(out);
+  }
+
+  /**
+   * Resolve {@code @Job(maxAttempts)} to the registration value: {@code null}
+   * for the {@code -1} sentinel (leave the retry budget to the
+   * {@code RetryInterceptor}), the value itself when {@code >= 1}. Anything
+   * else fails startup — the historical behaviour of silently substituting
+   * the engine default turned an explicit "don't retry" misspelling
+   * ({@code 0}) into five attempts.
+   */
+  private static Integer maxAttemptsFor(Class<?> beanType, Job annotation) {
+    int declared = annotation.maxAttempts();
+    if (declared == -1) return null;
+    if (declared >= 1) return declared;
+    throw new IllegalStateException(
+        "@Job on " + beanType.getName() + " has invalid maxAttempts " + declared
+            + ": use a value >= 1 (total attempts including the first; 1 = single attempt, no retries)"
+            + " or -1 for the RetryInterceptor defaults");
+  }
+
+  private static RecurringSpec recurringSpecFor(Class<?> beanType, Recurring annotation) {
+    if (annotation == null) return null;
+    boolean hasInterval = !annotation.interval().isBlank();
+    boolean hasCron = !annotation.cron().isBlank();
+    if (!hasInterval && !hasCron) {
+      throw new IllegalStateException(
+          "@Recurring on " + beanType.getName() + " must set either interval or cron");
+    }
+    if (hasInterval && hasCron) {
+      throw new IllegalStateException(
+          "@Recurring on " + beanType.getName() + " sets both interval and cron; pick one");
+    }
+    String name =
+        annotation.recurringName().isBlank() ? beanType.getName() : annotation.recurringName();
+    if (hasInterval) {
+      Duration interval;
+      try {
+        interval = Duration.parse(annotation.interval());
+      } catch (RuntimeException e) {
+        throw new IllegalStateException(
+            "@Recurring on "
+                + beanType.getName()
+                + " has invalid interval '"
+                + annotation.interval()
+                + "' (expected ISO-8601 duration like PT10S)",
+            e);
+      }
+      if (interval.isZero() || interval.isNegative()) {
+        throw new IllegalStateException("@Recurring on "
+            + beanType.getName()
+            + " has non-positive interval '"
+            + annotation.interval()
+            + "'");
+      }
+      return new RecurringSpec(
+          name,
+          new CronTask.Trigger.Interval(interval),
+          annotation.missedRunPolicy(),
+          annotation.exclusive());
+    }
+    CronExpression expression;
+    try {
+      expression = CronExpression.parse(annotation.cron());
+    } catch (RuntimeException e) {
+      throw new IllegalStateException(
+          "@Recurring on " + beanType.getName() + " has invalid cron '" + annotation.cron() + "'",
+          e);
+    }
+    return new RecurringSpec(
+        name,
+        new CronTask.Trigger.CronExpr(expression),
+        annotation.missedRunPolicy(),
+        annotation.exclusive());
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Class<? extends JobPayload> payloadType(Class<?> handlerType) {
+    // Reject raw `implements JobHandler` up front: ResolvableType would resolve its
+    // missing type parameter to the upper bound (JobPayload), giving a misleading
+    // "use JobPayload" payload type. The right answer for a no-payload handler is
+    // to implement JobAction (a typed JobHandler<NoPayload>), so point users there.
+    if (implementsJobHandlerRaw(handlerType)) {
+      throw new IllegalStateException("Handler "
+          + handlerType.getName()
+          + " implements raw JobHandler. Implement JobAction for no-payload handlers, "
+          + "or JobHandler<P> for handlers that need a payload.");
+    }
+    Class<?> resolved =
+        ResolvableType.forClass(handlerType).as(JobHandler.class).getGeneric(0).resolve();
+    if (resolved == null || !JobPayload.class.isAssignableFrom(resolved)) {
+      throw new IllegalStateException(
+          "Cannot infer JobPayload type for handler " + handlerType.getName());
+    }
+    return (Class<? extends JobPayload>) resolved;
+  }
+
+  /**
+   * Returns {@code true} if the handler implements {@link JobHandler} raw — i.e. has
+   * a non-parameterised {@code implements JobHandler} somewhere in its type hierarchy.
+   * Walks the direct interfaces of the class and each superclass; for the library's
+   * intended usage one-level depth is enough, but the walk is cheap and future-proof.
+   */
+  private static boolean implementsJobHandlerRaw(Class<?> handlerType) {
+    Class<?> cursor = handlerType;
+    while (cursor != null && cursor != Object.class) {
+      for (Type iface : cursor.getGenericInterfaces()) {
+        if (iface == JobHandler.class) return true;
+        if (iface instanceof ParameterizedType pt && pt.getRawType() == JobHandler.class) {
+          return false;
         }
-        requireUniqueRecurringNames(handlerIndex.values());
-        this.byHandler = Map.copyOf(handlerIndex);
-        this.byPayload = copyOfPayloadIndex(payloadIndex);
+      }
+      cursor = cursor.getSuperclass();
+    }
+    return false;
+  }
+
+  /**
+   * A discovered handler registration. {@code maxAttempts} is the explicit
+   * {@code @Job(maxAttempts)} value, or {@code null} when the handler left
+   * the retry budget to the {@code RetryInterceptor} — enqueue and recurring
+   * paths only stamp per-job retry metadata for explicit values, so
+   * per-exception-type retry policies stay reachable.
+   */
+  public record Registration(
+      Class<? extends JobPayload> payloadType,
+      Class<?> handlerType,
+      String queue,
+      int priority,
+      Integer maxAttempts,
+      Duration timeout,
+      RecurringSpec recurring) {
+
+    public Registration {
+      if (maxAttempts != null && maxAttempts < 1) {
+        throw new IllegalArgumentException("maxAttempts must be at least one when set");
+      }
     }
 
-    public ThreadmillJobRegistry(ApplicationContext context, ThreadmillProperties properties) {
-        Objects.requireNonNull(context, "context");
-        Objects.requireNonNull(properties, "properties");
-        Map<Class<?>, Registration> handlerIndex = new LinkedHashMap<>();
-        Map<Class<? extends JobPayload>, List<Registration>> payloadIndex = new LinkedHashMap<>();
-        for (String beanName : context.getBeanNamesForAnnotation(Job.class)) {
-            // Inspect the bean definition WITHOUT triggering instantiation. Calling
-            // context.getBean(beanName) here would eagerly create every @Job
-            // handler, which deadlocks any handler that constructor-injects
-            // JobScheduler (which itself depends on this registry).
-            Class<?> rawBeanType = context.getType(beanName);
-            if (rawBeanType == null) continue;
-            Class<?> beanType = ClassUtils.getUserClass(rawBeanType);
-            Job annotation = context.findAnnotationOnBean(beanName, Job.class);
-            if (annotation == null) continue;
-            if (!JobHandler.class.isAssignableFrom(beanType)) {
-                throw new IllegalStateException("@Job bean does not implement JobHandler: " + beanType.getName());
-            }
-            Class<? extends JobPayload> payloadType = payloadType(beanType);
-            Names.requireName("queue", annotation.queue());
-            Recurring recurring = context.findAnnotationOnBean(beanName, Recurring.class);
-            var registration = new Registration(
-                    payloadType,
-                    beanType,
-                    annotation.queue(),
-                    annotation.priority(),
-                    maxAttemptsFor(beanType, annotation),
-                    annotation.timeout().isBlank() ? properties.getJobTimeout() : Duration.parse(annotation.timeout()),
-                    recurringSpecFor(beanType, recurring));
-            recordRegistration(handlerIndex, payloadIndex, registration);
-        }
-        requireUniqueRecurringNames(handlerIndex.values());
-        this.byHandler = Map.copyOf(handlerIndex);
-        this.byPayload = copyOfPayloadIndex(payloadIndex);
+    /** Whether this handler is registered as a recurring task. */
+    public boolean isRecurring() {
+      return recurring != null;
     }
+  }
 
-    /**
-     * Look up the registration for {@code handlerType}. The handler-class
-     * index is the primary route used by {@link JobScheduler#enqueue} and
-     * friends, which always have the handler class in hand.
-     */
-    public Registration registrationFor(Class<?> handlerType) {
-        Objects.requireNonNull(handlerType, "handlerType");
-        Registration registration = byHandler.get(handlerType);
-        if (registration == null) {
-            throw new IllegalStateException("No @Job handler registered for " + handlerType.getName());
-        }
-        return registration;
-    }
-
-    /**
-     * Look up the registration solely by payload type. Convenient when only
-     * the payload is in scope; rejects with a clear message if more than one
-     * handler shares the payload (today only happens for
-     * {@link com.hemju.threadmill.core.handler.JobAction}/{@code NoPayload}).
-     */
-    public Registration registrationFor(JobPayload payload) {
-        Objects.requireNonNull(payload, "payload");
-        List<Registration> matches = byPayload.get(payload.getClass());
-        if (matches == null || matches.isEmpty()) {
-            throw new IllegalStateException("No @Job handler registered for payload "
-                    + payload.getClass().getName());
-        }
-        if (matches.size() > 1) {
-            var names = new ArrayList<String>(matches.size());
-            for (Registration r : matches) names.add(r.handlerType().getName());
-            throw new IllegalStateException("Multiple @Job handlers registered for payload "
-                    + payload.getClass().getName()
-                    + " ("
-                    + String.join(", ", names)
-                    + "); resolve by handler class via registrationFor(Class).");
-        }
-        return matches.get(0);
-    }
-
-    /**
-     * Registrations whose declared payload type is exactly
-     * {@code payloadType} (possibly empty). Used by the enqueue-time
-     * dispatch-ambiguity check: a payload subtype with its own handler must
-     * not silently route to a supertype's handler.
-     */
-    public List<Registration> registrationsForExactPayloadType(Class<? extends JobPayload> payloadType) {
-        Objects.requireNonNull(payloadType, "payloadType");
-        return byPayload.getOrDefault(payloadType, List.of());
-    }
-
-    public List<Registration> registrations() {
-        var out = new ArrayList<>(byHandler.values());
-        out.sort(Comparator.comparing(r -> r.handlerType().getName()));
-        return List.copyOf(out);
-    }
-
-    private static void recordRegistration(
-            Map<Class<?>, Registration> handlerIndex,
-            Map<Class<? extends JobPayload>, List<Registration>> payloadIndex,
-            Registration r) {
-        Registration prior = handlerIndex.putIfAbsent(r.handlerType(), r);
-        if (prior != null) {
-            // Spring bean discovery should never see the same handler class twice,
-            // but the defensive check keeps the test-seam constructor honest too.
-            throw new IllegalStateException(
-                    "Duplicate @Job registration for handler " + r.handlerType().getName());
-        }
-        var existing = payloadIndex.computeIfAbsent(r.payloadType(), k -> new ArrayList<>());
-        if (!existing.isEmpty() && r.payloadType() != NoPayload.class) {
-            // Two handlers claiming the same non-NoPayload payload type is almost always
-            // a bug — pick-the-right-one is impossible from the payload alone. NoPayload
-            // is the deliberate exception: every JobAction shares it by construction,
-            // and JobScheduler routes by handler class so the ambiguity does not bite.
-            throw new IllegalStateException("Multiple Threadmill handlers for payload "
-                    + r.payloadType().getName()
-                    + ": "
-                    + existing.get(0).handlerType().getName()
-                    + " and "
-                    + r.handlerType().getName());
-        }
-        existing.add(r);
-    }
-
-    /**
-     * Recurring tasks are keyed by name in the store: a duplicate
-     * {@code recurringName} would silently last-win at registration and one
-     * schedule would never run. Fail startup naming both handler classes,
-     * mirroring the payload-collision check.
-     */
-    private static void requireUniqueRecurringNames(Collection<Registration> registrations) {
-        var byName = new LinkedHashMap<String, Registration>();
-        for (Registration r : registrations) {
-            if (!r.isRecurring()) continue;
-            Registration prior = byName.putIfAbsent(r.recurring().name(), r);
-            if (prior != null) {
-                throw new IllegalStateException("Duplicate @Recurring name '"
-                        + r.recurring().name()
-                        + "': "
-                        + prior.handlerType().getName()
-                        + " and "
-                        + r.handlerType().getName());
-            }
-        }
-    }
-
-    private static Map<Class<? extends JobPayload>, List<Registration>> copyOfPayloadIndex(
-            Map<Class<? extends JobPayload>, List<Registration>> src) {
-        var out = new LinkedHashMap<Class<? extends JobPayload>, List<Registration>>(src.size());
-        for (var e : src.entrySet()) out.put(e.getKey(), List.copyOf(e.getValue()));
-        return Map.copyOf(out);
-    }
-
-    /**
-     * Resolve {@code @Job(maxAttempts)} to the registration value: {@code null}
-     * for the {@code -1} sentinel (leave the retry budget to the
-     * {@code RetryInterceptor}), the value itself when {@code >= 1}. Anything
-     * else fails startup — the historical behaviour of silently substituting
-     * the engine default turned an explicit "don't retry" misspelling
-     * ({@code 0}) into five attempts.
-     */
-    private static Integer maxAttemptsFor(Class<?> beanType, Job annotation) {
-        int declared = annotation.maxAttempts();
-        if (declared == -1) return null;
-        if (declared >= 1) return declared;
-        throw new IllegalStateException("@Job on " + beanType.getName() + " has invalid maxAttempts " + declared
-                + ": use a value >= 1 (total attempts including the first; 1 = single attempt, no retries)"
-                + " or -1 for the RetryInterceptor defaults");
-    }
-
-    private static RecurringSpec recurringSpecFor(Class<?> beanType, Recurring annotation) {
-        if (annotation == null) return null;
-        boolean hasInterval = !annotation.interval().isBlank();
-        boolean hasCron = !annotation.cron().isBlank();
-        if (!hasInterval && !hasCron) {
-            throw new IllegalStateException(
-                    "@Recurring on " + beanType.getName() + " must set either interval or cron");
-        }
-        if (hasInterval && hasCron) {
-            throw new IllegalStateException(
-                    "@Recurring on " + beanType.getName() + " sets both interval and cron; pick one");
-        }
-        String name = annotation.recurringName().isBlank() ? beanType.getName() : annotation.recurringName();
-        if (hasInterval) {
-            Duration interval;
-            try {
-                interval = Duration.parse(annotation.interval());
-            } catch (RuntimeException e) {
-                throw new IllegalStateException(
-                        "@Recurring on "
-                                + beanType.getName()
-                                + " has invalid interval '"
-                                + annotation.interval()
-                                + "' (expected ISO-8601 duration like PT10S)",
-                        e);
-            }
-            if (interval.isZero() || interval.isNegative()) {
-                throw new IllegalStateException("@Recurring on "
-                        + beanType.getName()
-                        + " has non-positive interval '"
-                        + annotation.interval()
-                        + "'");
-            }
-            return new RecurringSpec(
-                    name,
-                    new CronTask.Trigger.Interval(interval),
-                    annotation.missedRunPolicy(),
-                    annotation.exclusive());
-        }
-        CronExpression expression;
-        try {
-            expression = CronExpression.parse(annotation.cron());
-        } catch (RuntimeException e) {
-            throw new IllegalStateException(
-                    "@Recurring on " + beanType.getName() + " has invalid cron '" + annotation.cron() + "'", e);
-        }
-        return new RecurringSpec(
-                name, new CronTask.Trigger.CronExpr(expression), annotation.missedRunPolicy(), annotation.exclusive());
-    }
-
-    @SuppressWarnings("unchecked")
-    private static Class<? extends JobPayload> payloadType(Class<?> handlerType) {
-        // Reject raw `implements JobHandler` up front: ResolvableType would resolve its
-        // missing type parameter to the upper bound (JobPayload), giving a misleading
-        // "use JobPayload" payload type. The right answer for a no-payload handler is
-        // to implement JobAction (a typed JobHandler<NoPayload>), so point users there.
-        if (implementsJobHandlerRaw(handlerType)) {
-            throw new IllegalStateException("Handler "
-                    + handlerType.getName()
-                    + " implements raw JobHandler. Implement JobAction for no-payload handlers, "
-                    + "or JobHandler<P> for handlers that need a payload.");
-        }
-        Class<?> resolved = ResolvableType.forClass(handlerType)
-                .as(JobHandler.class)
-                .getGeneric(0)
-                .resolve();
-        if (resolved == null || !JobPayload.class.isAssignableFrom(resolved)) {
-            throw new IllegalStateException("Cannot infer JobPayload type for handler " + handlerType.getName());
-        }
-        return (Class<? extends JobPayload>) resolved;
-    }
-
-    /**
-     * Returns {@code true} if the handler implements {@link JobHandler} raw — i.e. has
-     * a non-parameterised {@code implements JobHandler} somewhere in its type hierarchy.
-     * Walks the direct interfaces of the class and each superclass; for the library's
-     * intended usage one-level depth is enough, but the walk is cheap and future-proof.
-     */
-    private static boolean implementsJobHandlerRaw(Class<?> handlerType) {
-        Class<?> cursor = handlerType;
-        while (cursor != null && cursor != Object.class) {
-            for (Type iface : cursor.getGenericInterfaces()) {
-                if (iface == JobHandler.class) return true;
-                if (iface instanceof ParameterizedType pt && pt.getRawType() == JobHandler.class) {
-                    return false;
-                }
-            }
-            cursor = cursor.getSuperclass();
-        }
-        return false;
-    }
-
-    /**
-     * A discovered handler registration. {@code maxAttempts} is the explicit
-     * {@code @Job(maxAttempts)} value, or {@code null} when the handler left
-     * the retry budget to the {@code RetryInterceptor} — enqueue and recurring
-     * paths only stamp per-job retry metadata for explicit values, so
-     * per-exception-type retry policies stay reachable.
-     */
-    public record Registration(
-            Class<? extends JobPayload> payloadType,
-            Class<?> handlerType,
-            String queue,
-            int priority,
-            Integer maxAttempts,
-            Duration timeout,
-            RecurringSpec recurring) {
-
-        public Registration {
-            if (maxAttempts != null && maxAttempts < 1) {
-                throw new IllegalArgumentException("maxAttempts must be at least one when set");
-            }
-        }
-
-        /** Whether this handler is registered as a recurring task. */
-        public boolean isRecurring() {
-            return recurring != null;
-        }
-    }
-
-    /** Parsed recurring spec for handlers annotated with {@code @Recurring}. */
-    public record RecurringSpec(
-            String name, CronTask.Trigger trigger, CronTask.MissedRunPolicy missedRunPolicy, boolean exclusive) {}
+  /** Parsed recurring spec for handlers annotated with {@code @Recurring}. */
+  public record RecurringSpec(
+      String name,
+      CronTask.Trigger trigger,
+      CronTask.MissedRunPolicy missedRunPolicy,
+      boolean exclusive) {}
 }

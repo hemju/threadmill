@@ -9,20 +9,20 @@ package com.hemju.threadmill.core;
  */
 public class StaleJobException extends RuntimeException {
 
-    private final JobId jobId;
-    private final long expectedVersion;
+  private final JobId jobId;
+  private final long expectedVersion;
 
-    public StaleJobException(JobId jobId, long expectedVersion) {
-        super("Stale job: expected version " + expectedVersion + " for job " + jobId);
-        this.jobId = jobId;
-        this.expectedVersion = expectedVersion;
-    }
+  public StaleJobException(JobId jobId, long expectedVersion) {
+    super("Stale job: expected version " + expectedVersion + " for job " + jobId);
+    this.jobId = jobId;
+    this.expectedVersion = expectedVersion;
+  }
 
-    public JobId jobId() {
-        return jobId;
-    }
+  public JobId jobId() {
+    return jobId;
+  }
 
-    public long expectedVersion() {
-        return expectedVersion;
-    }
+  public long expectedVersion() {
+    return expectedVersion;
+  }
 }

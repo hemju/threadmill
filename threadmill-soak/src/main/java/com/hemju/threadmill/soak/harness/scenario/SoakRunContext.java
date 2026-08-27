@@ -30,90 +30,90 @@ import com.hemju.threadmill.soak.harness.SoakTraceWriter;
  */
 public final class SoakRunContext {
 
-    private final SoakHarnessConfig config;
-    private final JobStore store;
-    private final SoakTraceWriter trace;
-    private final Instant runStart;
-    private final Supplier<List<ProcessingNode>> nodesSupplier;
-    private final AtomicBoolean abortRequested;
+  private final SoakHarnessConfig config;
+  private final JobStore store;
+  private final SoakTraceWriter trace;
+  private final Instant runStart;
+  private final Supplier<List<ProcessingNode>> nodesSupplier;
+  private final AtomicBoolean abortRequested;
 
-    public SoakRunContext(
-            SoakHarnessConfig config,
-            JobStore store,
-            SoakTraceWriter trace,
-            Instant runStart,
-            Supplier<List<ProcessingNode>> nodesSupplier) {
-        this(config, store, trace, runStart, nodesSupplier, new AtomicBoolean());
-    }
+  public SoakRunContext(
+      SoakHarnessConfig config,
+      JobStore store,
+      SoakTraceWriter trace,
+      Instant runStart,
+      Supplier<List<ProcessingNode>> nodesSupplier) {
+    this(config, store, trace, runStart, nodesSupplier, new AtomicBoolean());
+  }
 
-    public SoakRunContext(
-            SoakHarnessConfig config,
-            JobStore store,
-            SoakTraceWriter trace,
-            Instant runStart,
-            Supplier<List<ProcessingNode>> nodesSupplier,
-            AtomicBoolean abortRequested) {
-        this.config = Objects.requireNonNull(config, "config");
-        this.store = Objects.requireNonNull(store, "store");
-        this.trace = Objects.requireNonNull(trace, "trace");
-        this.runStart = Objects.requireNonNull(runStart, "runStart");
-        this.nodesSupplier = Objects.requireNonNull(nodesSupplier, "nodesSupplier");
-        this.abortRequested = Objects.requireNonNull(abortRequested, "abortRequested");
-    }
+  public SoakRunContext(
+      SoakHarnessConfig config,
+      JobStore store,
+      SoakTraceWriter trace,
+      Instant runStart,
+      Supplier<List<ProcessingNode>> nodesSupplier,
+      AtomicBoolean abortRequested) {
+    this.config = Objects.requireNonNull(config, "config");
+    this.store = Objects.requireNonNull(store, "store");
+    this.trace = Objects.requireNonNull(trace, "trace");
+    this.runStart = Objects.requireNonNull(runStart, "runStart");
+    this.nodesSupplier = Objects.requireNonNull(nodesSupplier, "nodesSupplier");
+    this.abortRequested = Objects.requireNonNull(abortRequested, "abortRequested");
+  }
 
-    public SoakHarnessConfig config() {
-        return config;
-    }
+  public SoakHarnessConfig config() {
+    return config;
+  }
 
-    public JobStore store() {
-        return store;
-    }
+  public JobStore store() {
+    return store;
+  }
 
-    public SoakTraceWriter trace() {
-        return trace;
-    }
+  public SoakTraceWriter trace() {
+    return trace;
+  }
 
-    public Duration duration() {
-        return config.duration();
-    }
+  public Duration duration() {
+    return config.duration();
+  }
 
-    public Instant runStart() {
-        return runStart;
-    }
+  public Instant runStart() {
+    return runStart;
+  }
 
-    /**
-     * The instant the producer loop should stop. Once an abort is requested
-     * this returns {@link Instant#MIN}, so the loop's next
-     * {@code Instant.now().isBefore(...)} check exits immediately.
-     */
-    public Instant runDeadline() {
-        if (abortRequested.get()) return Instant.MIN;
-        return runStart.plus(config.duration());
-    }
+  /**
+   * The instant the producer loop should stop. Once an abort is requested
+   * this returns {@link Instant#MIN}, so the loop's next
+   * {@code Instant.now().isBefore(...)} check exits immediately.
+   */
+  public Instant runDeadline() {
+    if (abortRequested.get()) return Instant.MIN;
+    return runStart.plus(config.duration());
+  }
 
-    /** True once the harness has requested an early abort (fail-fast). */
-    public boolean aborted() {
-        return abortRequested.get();
-    }
+  /** True once the harness has requested an early abort (fail-fast). */
+  public boolean aborted() {
+    return abortRequested.get();
+  }
 
-    public List<ProcessingNode> nodes() {
-        return nodesSupplier.get();
-    }
+  public List<ProcessingNode> nodes() {
+    return nodesSupplier.get();
+  }
 
-    /** Pause a queue at the store level and emit a {@code queue_paused} trace event. */
-    public void pauseQueue(String queue, String reason) {
-        store.pauseQueue(queue, reason);
-        Map<String, Object> fields = new LinkedHashMap<>();
-        fields.put("queue", queue);
-        fields.put("reason", reason);
-        trace.emit("queue_paused", fields);
-    }
+  /** Pause a queue at the store level and emit a {@code queue_paused} trace event. */
+  public void pauseQueue(String queue, String reason) {
+    store.pauseQueue(queue, reason);
+    Map<String, Object> fields = new LinkedHashMap<>();
+    fields.put("queue", queue);
+    fields.put("reason", reason);
+    trace.emit("queue_paused", fields);
+  }
 
-    /** Resume a queue at the store level and emit a {@code queue_resumed} trace event. */
-    public void resumeQueue(String queue) {
-        store.resumeQueue(queue);
-        Map<String, Object> fields = new LinkedHashMap<>();
-        fields.put("queue", queue);
-        trace.emit("queue_resumed", fields);
-    }
+  /** Resume a queue at the store level and emit a {@code queue_resumed} trace event. */
+  public void resumeQueue(String queue) {
+    store.resumeQueue(queue);
+    Map<String, Object> fields = new LinkedHashMap<>();
+    fields.put("queue", queue);
+    trace.emit("queue_resumed", fields);
+  }
 }

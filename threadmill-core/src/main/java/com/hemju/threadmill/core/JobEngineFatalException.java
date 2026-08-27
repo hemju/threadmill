@@ -8,11 +8,11 @@ package com.hemju.threadmill.core;
  */
 public class JobEngineFatalException extends RuntimeException {
 
-    public JobEngineFatalException(String message) {
-        super(message);
-    }
+  public JobEngineFatalException(String message) {
+    super(message);
+  }
 
-    public JobEngineFatalException(String message, Throwable cause) {
-        super(message, cause);
-    }
+  public JobEngineFatalException(String message, Throwable cause) {
+    super(message, cause);
+  }
 }

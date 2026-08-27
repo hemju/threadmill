@@ -5,3 +5,6 @@
 
 # Mechanical Spotless reformat introducing Palantir Java Format + ktfmt.
 4107e3815d71f1d656deefb2752747d2b8d2482b
+
+# Mechanical Spotless reformat switching Palantir Java Format to GOOGLE style.
+dc57f92d91e1cae098aa2376452f89d1c180bdf1

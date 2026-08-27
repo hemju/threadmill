@@ -33,57 +33,59 @@ import com.hemju.threadmill.store.redis.RedisJobStore;
  */
 public final class RedisHarnessFixture implements BackendFixture {
 
-    @SuppressWarnings("resource")
-    private final GenericContainer<?> container;
+  @SuppressWarnings("resource")
+  private final GenericContainer<?> container;
 
-    private final RedisClient adminClient;
-    private final StatefulRedisConnection<String, String> adminConnection;
-    private final RedisJobStore store;
+  private final RedisClient adminClient;
+  private final StatefulRedisConnection<String, String> adminConnection;
+  private final RedisJobStore store;
 
-    public RedisHarnessFixture(String topology) {
-        this(topology, Optional.empty());
+  public RedisHarnessFixture(String topology) {
+    this(topology, Optional.empty());
+  }
+
+  @SuppressWarnings("resource")
+  public RedisHarnessFixture(String topology, Optional<String> externalUrl) {
+    if (!"standalone".equalsIgnoreCase(topology)) {
+      throw new IllegalArgumentException(
+          "Redis topology '" + topology + "' is not yet implemented in the soak harness. "
+              + "Only 'standalone' is supported in v1.");
     }
-
-    @SuppressWarnings("resource")
-    public RedisHarnessFixture(String topology, Optional<String> externalUrl) {
-        if (!"standalone".equalsIgnoreCase(topology)) {
-            throw new IllegalArgumentException("Redis topology '" + topology
-                    + "' is not yet implemented in the soak harness. " + "Only 'standalone' is supported in v1.");
-        }
-        if (externalUrl.isPresent()) {
-            this.container = null;
-            this.adminClient = null;
-            this.adminConnection = null;
-            this.store = new RedisJobStore(RedisURI.create(externalUrl.get()));
-            store.dropThreadmillKeys();
-        } else {
-            this.container = new GenericContainer<>(DockerImageName.parse("redis:7-alpine"))
-                    .withExposedPorts(6379)
-                    .withCommand("redis-server", "--appendonly", "yes")
-                    .waitingFor(Wait.forListeningPort());
-            container.start();
-            var uri = RedisURI.create("redis://" + container.getHost() + ":" + container.getMappedPort(6379));
-            this.adminClient = RedisClient.create(uri);
-            this.adminConnection = adminClient.connect();
-            adminConnection.sync().flushdb();
-            this.store = new RedisJobStore(uri);
-        }
+    if (externalUrl.isPresent()) {
+      this.container = null;
+      this.adminClient = null;
+      this.adminConnection = null;
+      this.store = new RedisJobStore(RedisURI.create(externalUrl.get()));
+      store.dropThreadmillKeys();
+    } else {
+      this.container = new GenericContainer<>(DockerImageName.parse("redis:7-alpine"))
+          .withExposedPorts(6379)
+          .withCommand("redis-server", "--appendonly", "yes")
+          .waitingFor(Wait.forListeningPort());
+      container.start();
+      var uri =
+          RedisURI.create("redis://" + container.getHost() + ":" + container.getMappedPort(6379));
+      this.adminClient = RedisClient.create(uri);
+      this.adminConnection = adminClient.connect();
+      adminConnection.sync().flushdb();
+      this.store = new RedisJobStore(uri);
     }
+  }
 
-    @Override
-    public JobStore store() {
-        return store;
-    }
+  @Override
+  public JobStore store() {
+    return store;
+  }
 
-    @Override
-    public void close() {
-        try {
-            store.close();
-        } catch (RuntimeException ignore) {
-            // best-effort cleanup
-        }
-        if (adminConnection != null) adminConnection.close();
-        if (adminClient != null) adminClient.shutdown();
-        if (container != null && container.isRunning()) container.stop();
+  @Override
+  public void close() {
+    try {
+      store.close();
+    } catch (RuntimeException ignore) {
+      // best-effort cleanup
     }
+    if (adminConnection != null) adminConnection.close();
+    if (adminClient != null) adminClient.shutdown();
+    if (container != null && container.isRunning()) container.stop();
+  }
 }

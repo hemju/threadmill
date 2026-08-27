@@ -11,5 +11,5 @@ import java.sql.SQLException;
 @FunctionalInterface
 public interface PostgresConnectionWork<T> {
 
-    T execute(Connection connection) throws SQLException;
+  T execute(Connection connection) throws SQLException;
 }

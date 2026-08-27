@@ -24,120 +24,121 @@ import com.hemju.threadmill.store.postgres.PostgresJobStore;
 @EnabledIf("com.hemju.threadmill.spring.DockerAvailable#check")
 class SpringPostgresSchemaAutoConfigurationTest {
 
-    @SuppressWarnings("resource")
-    private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(
-                    DockerImageName.parse("postgres:18-alpine"))
-            .withDatabaseName("threadmill")
-            .withUsername("threadmill")
-            .withPassword("threadmill");
+  @SuppressWarnings("resource")
+  private static final PostgreSQLContainer POSTGRES = new PostgreSQLContainer(
+          DockerImageName.parse("postgres:18-alpine"))
+      .withDatabaseName("threadmill")
+      .withUsername("threadmill")
+      .withPassword("threadmill");
 
-    private static DataSource dataSource;
+  private static DataSource dataSource;
 
-    private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
-            .withConfiguration(AutoConfigurations.of(
-                    ThreadmillRedisAutoConfiguration.class,
-                    ThreadmillPostgresAutoConfiguration.class,
-                    ThreadmillAutoConfiguration.class))
-            .withBean(DataSource.class, () -> dataSource)
-            .withPropertyValues("threadmill.enabled=false");
+  private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
+      .withConfiguration(AutoConfigurations.of(
+          ThreadmillRedisAutoConfiguration.class,
+          ThreadmillPostgresAutoConfiguration.class,
+          ThreadmillAutoConfiguration.class))
+      .withBean(DataSource.class, () -> dataSource)
+      .withPropertyValues("threadmill.enabled=false");
 
-    @BeforeAll
-    static void start() {
-        POSTGRES.start();
-        var ds = new PGSimpleDataSource();
-        ds.setUrl(POSTGRES.getJdbcUrl());
-        ds.setUser(POSTGRES.getUsername());
-        ds.setPassword(POSTGRES.getPassword());
-        dataSource = ds;
-    }
+  @BeforeAll
+  static void start() {
+    POSTGRES.start();
+    var ds = new PGSimpleDataSource();
+    ds.setUrl(POSTGRES.getJdbcUrl());
+    ds.setUser(POSTGRES.getUsername());
+    ds.setPassword(POSTGRES.getPassword());
+    dataSource = ds;
+  }
 
-    @AfterAll
-    static void stop() {
-        if (POSTGRES.isRunning()) POSTGRES.stop();
-    }
+  @AfterAll
+  static void stop() {
+    if (POSTGRES.isRunning()) POSTGRES.stop();
+  }
 
-    @BeforeEach
-    void dropSchema() {
-        new MigrationRunner(dataSource).dropThreadmillObjects();
-    }
+  @BeforeEach
+  void dropSchema() {
+    new MigrationRunner(dataSource).dropThreadmillObjects();
+  }
 
-    @Test
-    void defaultPostgresAutoConfigurationMigratesBeforeCreatingStore() {
-        contextRunner.run(context -> {
-            assertThat(context).hasNotFailed();
-            assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
+  @Test
+  void defaultPostgresAutoConfigurationMigratesBeforeCreatingStore() {
+    contextRunner.run(context -> {
+      assertThat(context).hasNotFailed();
+      assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
+    });
+
+    new MigrationRunner(dataSource).validate();
+  }
+
+  @Test
+  void validateSchemaModeFailsOnEmptySchema() {
+    contextRunner
+        .withPropertyValues("threadmill.store.postgres.schema-mode=validate")
+        .run(context -> {
+          assertThat(context).hasFailed();
+          assertThat(context.getStartupFailure()).hasMessageContaining("threadmill_schema_history");
+        });
+  }
+
+  @Test
+  void validateSchemaModePassesAfterMigration() {
+    new MigrationRunner(dataSource).migrate();
+
+    contextRunner
+        .withPropertyValues("threadmill.store.postgres.schema-mode=validate")
+        .run(context -> {
+          assertThat(context).hasNotFailed();
+          assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
+        });
+  }
+
+  @Test
+  void noneSchemaModeDoesNotCreateSchema() throws Exception {
+    contextRunner
+        .withPropertyValues("threadmill.store.postgres.schema-mode=none")
+        .run(context -> {
+          assertThat(context).hasNotFailed();
+          assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
         });
 
-        new MigrationRunner(dataSource).validate();
+    assertThat(tableExists("threadmill_schema_history")).isFalse();
+  }
+
+  @Test
+  void dropAndMigrateRequiresExplicitDestructiveResetFlag() {
+    contextRunner
+        .withPropertyValues("threadmill.store.postgres.schema-mode=drop-and-migrate")
+        .run(context -> {
+          assertThat(context).hasFailed();
+          assertThat(context.getStartupFailure())
+              .hasMessageContaining("allow-destructive-schema-reset=true");
+        });
+  }
+
+  @Test
+  void dropAndMigrateReinitializesWhenExplicitlyAllowed() {
+    new MigrationRunner(dataSource).migrate();
+
+    contextRunner
+        .withPropertyValues(
+            "threadmill.store.postgres.schema-mode=drop-and-migrate",
+            "threadmill.store.postgres.allow-destructive-schema-reset=true")
+        .run(context -> {
+          assertThat(context).hasNotFailed();
+          assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
+        });
+
+    new MigrationRunner(dataSource).validate();
+  }
+
+  private static boolean tableExists(String table) throws Exception {
+    try (var conn = dataSource.getConnection();
+        var ps = conn.prepareStatement("SELECT to_regclass(?)")) {
+      ps.setString(1, table);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() && rs.getString(1) != null;
+      }
     }
-
-    @Test
-    void validateSchemaModeFailsOnEmptySchema() {
-        contextRunner
-                .withPropertyValues("threadmill.store.postgres.schema-mode=validate")
-                .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure()).hasMessageContaining("threadmill_schema_history");
-                });
-    }
-
-    @Test
-    void validateSchemaModePassesAfterMigration() {
-        new MigrationRunner(dataSource).migrate();
-
-        contextRunner
-                .withPropertyValues("threadmill.store.postgres.schema-mode=validate")
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
-                });
-    }
-
-    @Test
-    void noneSchemaModeDoesNotCreateSchema() throws Exception {
-        contextRunner
-                .withPropertyValues("threadmill.store.postgres.schema-mode=none")
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
-                });
-
-        assertThat(tableExists("threadmill_schema_history")).isFalse();
-    }
-
-    @Test
-    void dropAndMigrateRequiresExplicitDestructiveResetFlag() {
-        contextRunner
-                .withPropertyValues("threadmill.store.postgres.schema-mode=drop-and-migrate")
-                .run(context -> {
-                    assertThat(context).hasFailed();
-                    assertThat(context.getStartupFailure()).hasMessageContaining("allow-destructive-schema-reset=true");
-                });
-    }
-
-    @Test
-    void dropAndMigrateReinitializesWhenExplicitlyAllowed() {
-        new MigrationRunner(dataSource).migrate();
-
-        contextRunner
-                .withPropertyValues(
-                        "threadmill.store.postgres.schema-mode=drop-and-migrate",
-                        "threadmill.store.postgres.allow-destructive-schema-reset=true")
-                .run(context -> {
-                    assertThat(context).hasNotFailed();
-                    assertThat(context.getBean(JobStore.class)).isInstanceOf(PostgresJobStore.class);
-                });
-
-        new MigrationRunner(dataSource).validate();
-    }
-
-    private static boolean tableExists(String table) throws Exception {
-        try (var conn = dataSource.getConnection();
-                var ps = conn.prepareStatement("SELECT to_regclass(?)")) {
-            ps.setString(1, table);
-            try (ResultSet rs = ps.executeQuery()) {
-                return rs.next() && rs.getString(1) != null;
-            }
-        }
-    }
+  }
 }

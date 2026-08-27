@@ -16,8 +16,8 @@ import java.util.Objects;
  */
 public record JobArgument(String typeTag, String serialized) {
 
-    public JobArgument {
-        Objects.requireNonNull(typeTag, "typeTag");
-        Objects.requireNonNull(serialized, "serialized");
-    }
+  public JobArgument {
+    Objects.requireNonNull(typeTag, "typeTag");
+    Objects.requireNonNull(serialized, "serialized");
+  }
 }

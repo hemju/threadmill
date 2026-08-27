@@ -39,148 +39,150 @@ import com.hemju.threadmill.core.store.JobStore;
  */
 public final class WorkflowInterceptor implements JobInterceptor {
 
-    private static final Logger LOG = LoggerFactory.getLogger(WorkflowInterceptor.class);
+  private static final Logger LOG = LoggerFactory.getLogger(WorkflowInterceptor.class);
 
-    private final JobStore store;
+  private final JobStore store;
 
-    public WorkflowInterceptor(JobStore store) {
-        this.store = Objects.requireNonNull(store, "store");
+  public WorkflowInterceptor(JobStore store) {
+    this.store = Objects.requireNonNull(store, "store");
+  }
+
+  @Override
+  public void onProcessingSucceeded(Job job, JobExecutionContext ctx) {
+    promoteAwaitingSuccessorsOf(job.id());
+  }
+
+  @Override
+  public void onProcessingFailed(
+      Job job, JobExecutionContext ctx, Throwable cause, FailureCause causeKind) {
+    if (job.currentState() != JobState.FAILED && job.currentState() != JobState.QUARANTINED) {
+      return;
     }
+    abandonAwaitingSuccessorsOf(job.id());
+  }
 
-    @Override
-    public void onProcessingSucceeded(Job job, JobExecutionContext ctx) {
-        promoteAwaitingSuccessorsOf(job.id());
+  /**
+   * Recovery sweep for AWAITING workflow children whose predecessor already
+   * reached a terminal state but whose promote/abandon never ran — e.g. the
+   * node crashed in the window between the predecessor's terminal save and
+   * this interceptor's hook. Without this, such children stay AWAITING
+   * forever and their workflow-root concurrency key is held forever. Promotes
+   * children of a SUCCEEDED predecessor, abandons children of a failed /
+   * quarantined / deleted / vanished predecessor, and leaves children of a
+   * still-active predecessor alone. Idempotent; safe to run on every node's
+   * maintenance leader periodically.
+   */
+  public void reconcileOrphanedAwaitingChildren(int max) {
+    if (store.capabilities().supportsExactCounts()
+        && store.countsByState().getOrDefault(JobState.AWAITING, 0L) == 0L) {
+      return;
     }
-
-    @Override
-    public void onProcessingFailed(Job job, JobExecutionContext ctx, Throwable cause, FailureCause causeKind) {
-        if (job.currentState() != JobState.FAILED && job.currentState() != JobState.QUARANTINED) {
-            return;
+    // Page through the WHOLE AWAITING population, not just the first
+    // window: stores return the search newest-first, and a stranded
+    // child's current_state_at never changes — a single fixed window
+    // would permanently shadow exactly the jobs this sweep exists to
+    // rescue once the live AWAITING population outgrows it. Pages keep
+    // memory flat; offset drift from concurrent promotions can skip or
+    // repeat entries within one sweep, which is fine — every decision is
+    // idempotent and the sweep reruns each retention tick.
+    var handledParents = new HashSet<JobId>();
+    int pageSize = Math.max(1, max);
+    for (int offset = 0; ; offset += pageSize) {
+      List<Job> awaiting =
+          store.searchJobs(new JobSearch(JobState.AWAITING, null, null, pageSize, offset));
+      for (Job child : awaiting) {
+        if (child.relationship().isEmpty()) continue;
+        JobRelationship rel = child.relationship().get();
+        if (rel.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
+        JobId parentId = rel.parentId();
+        if (!handledParents.add(parentId)) continue;
+        JobState parentState = store.findById(parentId).map(Job::currentState).orElse(null);
+        if (parentState == JobState.SUCCEEDED) {
+          promoteAwaitingSuccessorsOf(parentId);
+        } else if (parentState == null
+            || parentState == JobState.FAILED
+            || parentState == JobState.QUARANTINED
+            || parentState == JobState.DELETED) {
+          // Failed (no pending retry), quarantined, deleted, or hard-deleted
+          // by retention: the predecessor can never promote this child, so
+          // abandon the subtree. ENQUEUED/SCHEDULED/PROCESSING/AWAITING all
+          // mean the predecessor is still in flight — leave the child be.
+          // (FAILED is not state.isTerminal() because a retry can resurrect
+          // it, but a predecessor sitting in FAILED at this cadence is done.)
+          abandonAwaitingSuccessorsOf(parentId);
         }
-        abandonAwaitingSuccessorsOf(job.id());
+      }
+      if (awaiting.size() < pageSize) {
+        return;
+      }
     }
+  }
 
-    /**
-     * Recovery sweep for AWAITING workflow children whose predecessor already
-     * reached a terminal state but whose promote/abandon never ran — e.g. the
-     * node crashed in the window between the predecessor's terminal save and
-     * this interceptor's hook. Without this, such children stay AWAITING
-     * forever and their workflow-root concurrency key is held forever. Promotes
-     * children of a SUCCEEDED predecessor, abandons children of a failed /
-     * quarantined / deleted / vanished predecessor, and leaves children of a
-     * still-active predecessor alone. Idempotent; safe to run on every node's
-     * maintenance leader periodically.
-     */
-    public void reconcileOrphanedAwaitingChildren(int max) {
-        if (store.capabilities().supportsExactCounts()
-                && store.countsByState().getOrDefault(JobState.AWAITING, 0L) == 0L) {
-            return;
-        }
-        // Page through the WHOLE AWAITING population, not just the first
-        // window: stores return the search newest-first, and a stranded
-        // child's current_state_at never changes — a single fixed window
-        // would permanently shadow exactly the jobs this sweep exists to
-        // rescue once the live AWAITING population outgrows it. Pages keep
-        // memory flat; offset drift from concurrent promotions can skip or
-        // repeat entries within one sweep, which is fine — every decision is
-        // idempotent and the sweep reruns each retention tick.
-        var handledParents = new HashSet<JobId>();
-        int pageSize = Math.max(1, max);
-        for (int offset = 0; ; offset += pageSize) {
-            List<Job> awaiting = store.searchJobs(new JobSearch(JobState.AWAITING, null, null, pageSize, offset));
-            for (Job child : awaiting) {
-                if (child.relationship().isEmpty()) continue;
-                JobRelationship rel = child.relationship().get();
-                if (rel.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
-                JobId parentId = rel.parentId();
-                if (!handledParents.add(parentId)) continue;
-                JobState parentState =
-                        store.findById(parentId).map(Job::currentState).orElse(null);
-                if (parentState == JobState.SUCCEEDED) {
-                    promoteAwaitingSuccessorsOf(parentId);
-                } else if (parentState == null
-                        || parentState == JobState.FAILED
-                        || parentState == JobState.QUARANTINED
-                        || parentState == JobState.DELETED) {
-                    // Failed (no pending retry), quarantined, deleted, or hard-deleted
-                    // by retention: the predecessor can never promote this child, so
-                    // abandon the subtree. ENQUEUED/SCHEDULED/PROCESSING/AWAITING all
-                    // mean the predecessor is still in flight — leave the child be.
-                    // (FAILED is not state.isTerminal() because a retry can resurrect
-                    // it, but a predecessor sitting in FAILED at this cadence is done.)
-                    abandonAwaitingSuccessorsOf(parentId);
-                }
-            }
-            if (awaiting.size() < pageSize) {
-                return;
-            }
-        }
+  /** Children are drained in batches of this size until exhausted. */
+  private static final int CHILD_BATCH = 100;
+
+  private void promoteAwaitingSuccessorsOf(JobId predecessorId) {
+    drainAwaitingChildren(predecessorId, "promote", candidate -> {
+      long v = candidate.version();
+      candidate.transitionTo(JobState.ENQUEUED, Instant.now(), "engine.workflow-promote", null);
+      store.saveAtomic(candidate, v);
+    });
+  }
+
+  private void abandonAwaitingSuccessorsOf(JobId rootPredecessorId) {
+    // Explicit work queue instead of per-level recursion: a deep chain
+    // must not risk StackOverflowError inside an interceptor.
+    var pending = new ArrayDeque<JobId>();
+    pending.add(rootPredecessorId);
+    while (!pending.isEmpty()) {
+      JobId predecessorId = pending.poll();
+      drainAwaitingChildren(predecessorId, "abandon", candidate -> {
+        long v = candidate.version();
+        candidate.transitionTo(JobState.DELETED, Instant.now(), "engine.workflow-abandon", null);
+        store.saveAtomic(candidate, v);
+        pending.add(candidate.id());
+      });
     }
+  }
 
-    /** Children are drained in batches of this size until exhausted. */
-    private static final int CHILD_BATCH = 100;
-
-    private void promoteAwaitingSuccessorsOf(JobId predecessorId) {
-        drainAwaitingChildren(predecessorId, "promote", candidate -> {
-            long v = candidate.version();
-            candidate.transitionTo(JobState.ENQUEUED, Instant.now(), "engine.workflow-promote", null);
-            store.saveAtomic(candidate, v);
-        });
+  /**
+   * Apply {@code action} to every AWAITING workflow-step child of
+   * {@code predecessorId}, draining in batches until exhausted. Fan-out
+   * beyond one batch is handled by refetching: every promoted / abandoned
+   * child leaves {@code AWAITING}, so the loop terminates. An iteration
+   * that makes no progress (e.g. persistent save failures) stops the drain
+   * instead of spinning.
+   */
+  private void drainAwaitingChildren(JobId predecessorId, String what, Consumer<Job> action) {
+    // The count short-circuit is only sound when counts are exact; a
+    // store advertising approximate counts could report 0 while a
+    // successor exists, permanently stranding it.
+    if (store.capabilities().supportsExactCounts()
+        && store.countsByState().getOrDefault(JobState.AWAITING, 0L) == 0L) {
+      return;
     }
-
-    private void abandonAwaitingSuccessorsOf(JobId rootPredecessorId) {
-        // Explicit work queue instead of per-level recursion: a deep chain
-        // must not risk StackOverflowError inside an interceptor.
-        var pending = new ArrayDeque<JobId>();
-        pending.add(rootPredecessorId);
-        while (!pending.isEmpty()) {
-            JobId predecessorId = pending.poll();
-            drainAwaitingChildren(predecessorId, "abandon", candidate -> {
-                long v = candidate.version();
-                candidate.transitionTo(JobState.DELETED, Instant.now(), "engine.workflow-abandon", null);
-                store.saveAtomic(candidate, v);
-                pending.add(candidate.id());
-            });
+    while (true) {
+      List<Job> batch = store.findAwaitingByParent(predecessorId, CHILD_BATCH);
+      int progressed = 0;
+      for (Job candidate : batch) {
+        if (candidate.relationship().isEmpty()) continue;
+        JobRelationship rel = candidate.relationship().get();
+        if (rel.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
+        if (!rel.parentId().equals(predecessorId)) continue;
+        try {
+          action.accept(candidate);
+          progressed++;
+        } catch (StaleJobException ignored) {
+          // Another node beat us; the refetch sees the fresh state.
+          progressed++;
+        } catch (Throwable t) {
+          LOG.warn(
+              "Failed to {} workflow successor {} of {}", what, candidate.id(), predecessorId, t);
         }
+      }
+      if (batch.size() < CHILD_BATCH || progressed == 0) {
+        return;
+      }
     }
-
-    /**
-     * Apply {@code action} to every AWAITING workflow-step child of
-     * {@code predecessorId}, draining in batches until exhausted. Fan-out
-     * beyond one batch is handled by refetching: every promoted / abandoned
-     * child leaves {@code AWAITING}, so the loop terminates. An iteration
-     * that makes no progress (e.g. persistent save failures) stops the drain
-     * instead of spinning.
-     */
-    private void drainAwaitingChildren(JobId predecessorId, String what, Consumer<Job> action) {
-        // The count short-circuit is only sound when counts are exact; a
-        // store advertising approximate counts could report 0 while a
-        // successor exists, permanently stranding it.
-        if (store.capabilities().supportsExactCounts()
-                && store.countsByState().getOrDefault(JobState.AWAITING, 0L) == 0L) {
-            return;
-        }
-        while (true) {
-            List<Job> batch = store.findAwaitingByParent(predecessorId, CHILD_BATCH);
-            int progressed = 0;
-            for (Job candidate : batch) {
-                if (candidate.relationship().isEmpty()) continue;
-                JobRelationship rel = candidate.relationship().get();
-                if (rel.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
-                if (!rel.parentId().equals(predecessorId)) continue;
-                try {
-                    action.accept(candidate);
-                    progressed++;
-                } catch (StaleJobException ignored) {
-                    // Another node beat us; the refetch sees the fresh state.
-                    progressed++;
-                } catch (Throwable t) {
-                    LOG.warn("Failed to {} workflow successor {} of {}", what, candidate.id(), predecessorId, t);
-                }
-            }
-            if (batch.size() < CHILD_BATCH || progressed == 0) {
-                return;
-            }
-        }
-    }
+  }
 }

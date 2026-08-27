@@ -28,32 +28,32 @@ import io.lettuce.core.cluster.ClusterTopologyRefreshOptions;
  */
 final class RedisClusterOptions {
 
-    static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(10);
+  static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(10);
 
-    private RedisClusterOptions() {}
+  private RedisClusterOptions() {}
 
-    static TimeoutOptions timeoutOptions() {
-        return TimeoutOptions.builder()
-                .fixedTimeout(COMMAND_TIMEOUT)
-                .timeoutCommands(true)
-                .build();
-    }
+  static TimeoutOptions timeoutOptions() {
+    return TimeoutOptions.builder()
+        .fixedTimeout(COMMAND_TIMEOUT)
+        .timeoutCommands(true)
+        .build();
+  }
 
-    /** Options for an internally-created standalone / sentinel client. */
-    static ClientOptions standaloneOptions() {
-        return ClientOptions.builder().timeoutOptions(timeoutOptions()).build();
-    }
+  /** Options for an internally-created standalone / sentinel client. */
+  static ClientOptions standaloneOptions() {
+    return ClientOptions.builder().timeoutOptions(timeoutOptions()).build();
+  }
 
-    /** Options for an internally-created cluster client: timeout + topology refresh. */
-    static ClusterClientOptions topologyRefreshing() {
-        var refresh = ClusterTopologyRefreshOptions.builder()
-                .enablePeriodicRefresh(Duration.ofSeconds(30))
-                .enableAllAdaptiveRefreshTriggers()
-                .adaptiveRefreshTriggersTimeout(Duration.ofSeconds(30))
-                .build();
-        return ClusterClientOptions.builder()
-                .topologyRefreshOptions(refresh)
-                .timeoutOptions(timeoutOptions())
-                .build();
-    }
+  /** Options for an internally-created cluster client: timeout + topology refresh. */
+  static ClusterClientOptions topologyRefreshing() {
+    var refresh = ClusterTopologyRefreshOptions.builder()
+        .enablePeriodicRefresh(Duration.ofSeconds(30))
+        .enableAllAdaptiveRefreshTriggers()
+        .adaptiveRefreshTriggersTimeout(Duration.ofSeconds(30))
+        .build();
+    return ClusterClientOptions.builder()
+        .topologyRefreshOptions(refresh)
+        .timeoutOptions(timeoutOptions())
+        .build();
+  }
 }

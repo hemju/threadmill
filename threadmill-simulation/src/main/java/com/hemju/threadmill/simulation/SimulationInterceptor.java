@@ -26,110 +26,111 @@ import com.hemju.threadmill.core.handler.JobExecutionContext;
  */
 public final class SimulationInterceptor implements JobInterceptor {
 
-    private final TraceWriter trace;
-    private final ConcurrentHashMap<String, Integer> attemptsByJob = new ConcurrentHashMap<>();
-    private final AtomicLong succeededCount = new AtomicLong();
-    private final AtomicLong failedCount = new AtomicLong();
-    private final AtomicLong timedOutCount = new AtomicLong();
-    private final AtomicLong quarantinedCount = new AtomicLong();
+  private final TraceWriter trace;
+  private final ConcurrentHashMap<String, Integer> attemptsByJob = new ConcurrentHashMap<>();
+  private final AtomicLong succeededCount = new AtomicLong();
+  private final AtomicLong failedCount = new AtomicLong();
+  private final AtomicLong timedOutCount = new AtomicLong();
+  private final AtomicLong quarantinedCount = new AtomicLong();
 
-    public SimulationInterceptor(TraceWriter trace) {
-        this.trace = Objects.requireNonNull(trace, "trace");
-    }
+  public SimulationInterceptor(TraceWriter trace) {
+    this.trace = Objects.requireNonNull(trace, "trace");
+  }
 
-    @Override
-    public void onProcessingStarting(Job job, JobExecutionContext ctx) {
-        int attempt = attemptsByJob.merge(job.id().toString(), 1, Integer::sum);
-        var fields = new LinkedHashMap<String, Object>();
-        fields.put("jobId", job.id().toString());
-        fields.put("queue", job.queue());
-        fields.put("attempt", attempt);
-        trace.emit("claimed", fields);
-        job.concurrencyKey().ifPresent(key -> {
-            var lockFields = new LinkedHashMap<String, Object>();
-            lockFields.put("jobId", job.id().toString());
-            lockFields.put("lockKey", key);
-            lockFields.put("lockMode", job.concurrencyMode().map(Enum::name).orElse(""));
-            trace.emit("lock_acquired", lockFields);
-        });
-    }
+  @Override
+  public void onProcessingStarting(Job job, JobExecutionContext ctx) {
+    int attempt = attemptsByJob.merge(job.id().toString(), 1, Integer::sum);
+    var fields = new LinkedHashMap<String, Object>();
+    fields.put("jobId", job.id().toString());
+    fields.put("queue", job.queue());
+    fields.put("attempt", attempt);
+    trace.emit("claimed", fields);
+    job.concurrencyKey().ifPresent(key -> {
+      var lockFields = new LinkedHashMap<String, Object>();
+      lockFields.put("jobId", job.id().toString());
+      lockFields.put("lockKey", key);
+      lockFields.put("lockMode", job.concurrencyMode().map(Enum::name).orElse(""));
+      trace.emit("lock_acquired", lockFields);
+    });
+  }
 
-    @Override
-    public void onProcessingSucceeded(Job job, JobExecutionContext ctx) {
-        succeededCount.incrementAndGet();
-        var fields = new LinkedHashMap<String, Object>();
-        fields.put("jobId", job.id().toString());
-        fields.put("queue", job.queue());
-        fields.put("attempts", attemptsByJob.getOrDefault(job.id().toString(), 0));
-        fields.put("final", true);
-        trace.emit("succeeded", fields);
-        emitLockReleased(job);
-    }
+  @Override
+  public void onProcessingSucceeded(Job job, JobExecutionContext ctx) {
+    succeededCount.incrementAndGet();
+    var fields = new LinkedHashMap<String, Object>();
+    fields.put("jobId", job.id().toString());
+    fields.put("queue", job.queue());
+    fields.put("attempts", attemptsByJob.getOrDefault(job.id().toString(), 0));
+    fields.put("final", true);
+    trace.emit("succeeded", fields);
+    emitLockReleased(job);
+  }
 
-    @Override
-    public void onProcessingFailed(Job job, JobExecutionContext ctx, Throwable cause, FailureCause causeKind) {
-        var fields = new LinkedHashMap<String, Object>();
-        fields.put("jobId", job.id().toString());
-        fields.put("queue", job.queue());
-        fields.put("attempts", attemptsByJob.getOrDefault(job.id().toString(), 0));
-        fields.put("causeKind", causeKind.name());
-        fields.put("causeMessage", cause == null ? null : truncate(cause.getMessage()));
-        boolean finalState = job.currentState() != JobState.SCHEDULED;
-        fields.put("final", finalState);
-        String event =
-                switch (causeKind) {
-                    case TIMEOUT -> "timed_out";
-                    case QUARANTINE -> "quarantined";
-                    default -> "failed";
-                };
-        if (event.equals("timed_out")) timedOutCount.incrementAndGet();
-        else if (event.equals("quarantined")) quarantinedCount.incrementAndGet();
-        else failedCount.incrementAndGet();
-        trace.emit(event, fields);
-        // The lock release is what makes the next-in-line claim possible — emit
-        // it whether the failure is final or will retry.
-        emitLockReleased(job);
-    }
+  @Override
+  public void onProcessingFailed(
+      Job job, JobExecutionContext ctx, Throwable cause, FailureCause causeKind) {
+    var fields = new LinkedHashMap<String, Object>();
+    fields.put("jobId", job.id().toString());
+    fields.put("queue", job.queue());
+    fields.put("attempts", attemptsByJob.getOrDefault(job.id().toString(), 0));
+    fields.put("causeKind", causeKind.name());
+    fields.put("causeMessage", cause == null ? null : truncate(cause.getMessage()));
+    boolean finalState = job.currentState() != JobState.SCHEDULED;
+    fields.put("final", finalState);
+    String event =
+        switch (causeKind) {
+          case TIMEOUT -> "timed_out";
+          case QUARANTINE -> "quarantined";
+          default -> "failed";
+        };
+    if (event.equals("timed_out")) timedOutCount.incrementAndGet();
+    else if (event.equals("quarantined")) quarantinedCount.incrementAndGet();
+    else failedCount.incrementAndGet();
+    trace.emit(event, fields);
+    // The lock release is what makes the next-in-line claim possible — emit
+    // it whether the failure is final or will retry.
+    emitLockReleased(job);
+  }
 
-    @Override
-    public void onStateChange(Job job, JobState from, JobState to) {
-        // Captured indirectly through claimed / succeeded / failed events; emitting
-        // every transition would dwarf the signal we need.
-    }
+  @Override
+  public void onStateChange(Job job, JobState from, JobState to) {
+    // Captured indirectly through claimed / succeeded / failed events; emitting
+    // every transition would dwarf the signal we need.
+  }
 
-    private void emitLockReleased(Job job) {
-        job.concurrencyKey().ifPresent(key -> {
-            var lockFields = new LinkedHashMap<String, Object>();
-            lockFields.put("jobId", job.id().toString());
-            lockFields.put("lockKey", key);
-            lockFields.put("lockMode", job.concurrencyMode().map(Enum::name).orElse(""));
-            trace.emit("lock_released", lockFields);
-        });
-    }
+  private void emitLockReleased(Job job) {
+    job.concurrencyKey().ifPresent(key -> {
+      var lockFields = new LinkedHashMap<String, Object>();
+      lockFields.put("jobId", job.id().toString());
+      lockFields.put("lockKey", key);
+      lockFields.put("lockMode", job.concurrencyMode().map(Enum::name).orElse(""));
+      trace.emit("lock_released", lockFields);
+    });
+  }
 
-    private static String truncate(String s) {
-        if (s == null) return null;
-        return s.length() > 160 ? s.substring(0, 160) + "…" : s;
-    }
+  private static String truncate(String s) {
+    if (s == null) return null;
+    return s.length() > 160 ? s.substring(0, 160) + "…" : s;
+  }
 
-    /** For the summary report. */
-    public long succeeded() {
-        return succeededCount.get();
-    }
+  /** For the summary report. */
+  public long succeeded() {
+    return succeededCount.get();
+  }
 
-    public long failed() {
-        return failedCount.get();
-    }
+  public long failed() {
+    return failedCount.get();
+  }
 
-    public long timedOut() {
-        return timedOutCount.get();
-    }
+  public long timedOut() {
+    return timedOutCount.get();
+  }
 
-    public long quarantined() {
-        return quarantinedCount.get();
-    }
+  public long quarantined() {
+    return quarantinedCount.get();
+  }
 
-    public long startedAt() {
-        return Instant.now().toEpochMilli();
-    }
+  public long startedAt() {
+    return Instant.now().toEpochMilli();
+  }
 }

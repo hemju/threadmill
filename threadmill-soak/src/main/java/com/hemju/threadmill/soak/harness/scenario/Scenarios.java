@@ -10,27 +10,28 @@ import java.util.function.Supplier;
  */
 public final class Scenarios {
 
-    private static final Map<String, Supplier<SoakScenario>> REGISTRY = new LinkedHashMap<>();
+  private static final Map<String, Supplier<SoakScenario>> REGISTRY = new LinkedHashMap<>();
 
-    static {
-        REGISTRY.put("mixed-workload", MixedWorkloadScenario::new);
-        REGISTRY.put("rw-lock-stress", RwLockStressScenario::new);
-        REGISTRY.put("weighted-queues", WeightedQueuesScenario::new);
-        REGISTRY.put("retry-storm", RetryStormScenario::new);
-        REGISTRY.put("long-running", LongRunningScenario::new);
-        REGISTRY.put("pause-resume", PauseResumeScenario::new);
-        REGISTRY.put("bulk-enqueue", BulkEnqueueScenario::new);
-        REGISTRY.put("crash-recover", CrashRecoverScenario::new);
-        REGISTRY.put("nudge-pump", NudgePumpScenario::new);
+  static {
+    REGISTRY.put("mixed-workload", MixedWorkloadScenario::new);
+    REGISTRY.put("rw-lock-stress", RwLockStressScenario::new);
+    REGISTRY.put("weighted-queues", WeightedQueuesScenario::new);
+    REGISTRY.put("retry-storm", RetryStormScenario::new);
+    REGISTRY.put("long-running", LongRunningScenario::new);
+    REGISTRY.put("pause-resume", PauseResumeScenario::new);
+    REGISTRY.put("bulk-enqueue", BulkEnqueueScenario::new);
+    REGISTRY.put("crash-recover", CrashRecoverScenario::new);
+    REGISTRY.put("nudge-pump", NudgePumpScenario::new);
+  }
+
+  private Scenarios() {}
+
+  public static SoakScenario of(String name) {
+    var supplier = REGISTRY.get(name);
+    if (supplier == null) {
+      throw new IllegalArgumentException(
+          "unknown scenario: " + name + " — valid names: " + REGISTRY.keySet());
     }
-
-    private Scenarios() {}
-
-    public static SoakScenario of(String name) {
-        var supplier = REGISTRY.get(name);
-        if (supplier == null) {
-            throw new IllegalArgumentException("unknown scenario: " + name + " — valid names: " + REGISTRY.keySet());
-        }
-        return supplier.get();
-    }
+    return supplier.get();
+  }
 }

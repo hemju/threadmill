@@ -15,82 +15,83 @@ import java.util.concurrent.ThreadLocalRandom;
  */
 public final class DeadlockRetry {
 
-    /** PostgreSQL's deadlock_detected. */
-    public static final String SQLSTATE_DEADLOCK = "40P01";
+  /** PostgreSQL's deadlock_detected. */
+  public static final String SQLSTATE_DEADLOCK = "40P01";
 
-    /** PostgreSQL's serialization_failure. */
-    public static final String SQLSTATE_SERIALIZATION_FAILURE = "40001";
+  /** PostgreSQL's serialization_failure. */
+  public static final String SQLSTATE_SERIALIZATION_FAILURE = "40001";
 
-    private DeadlockRetry() {}
+  private DeadlockRetry() {}
 
-    @FunctionalInterface
-    public interface SqlAction<T> {
-        T run() throws SQLException;
-    }
+  @FunctionalInterface
+  public interface SqlAction<T> {
+    T run() throws SQLException;
+  }
 
-    public static <T> T run(SqlAction<T> action) throws SQLException {
-        return run(action, 5, 5, 50);
-    }
+  public static <T> T run(SqlAction<T> action) throws SQLException {
+    return run(action, 5, 5, 50);
+  }
 
-    /**
-     * Run {@code action}, retrying on {@code 40P01} / {@code 40001} up to
-     * {@code maxAttempts} times with an exponentially-backing-off, jittered
-     * sleep between {@code minBackoffMs} and {@code maxBackoffMs} milliseconds.
-     */
-    public static <T> T run(SqlAction<T> action, int maxAttempts, long minBackoffMs, long maxBackoffMs)
-            throws SQLException {
-        SQLException lastError = null;
-        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-            try {
-                return action.run();
-            } catch (SQLException e) {
-                if (!isRetryable(e) || attempt == maxAttempts) {
-                    throw e;
-                }
-                lastError = e;
-                sleepBackoff(attempt, minBackoffMs, maxBackoffMs);
-            }
+  /**
+   * Run {@code action}, retrying on {@code 40P01} / {@code 40001} up to
+   * {@code maxAttempts} times with an exponentially-backing-off, jittered
+   * sleep between {@code minBackoffMs} and {@code maxBackoffMs} milliseconds.
+   */
+  public static <T> T run(
+      SqlAction<T> action, int maxAttempts, long minBackoffMs, long maxBackoffMs)
+      throws SQLException {
+    SQLException lastError = null;
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        return action.run();
+      } catch (SQLException e) {
+        if (!isRetryable(e) || attempt == maxAttempts) {
+          throw e;
         }
-        throw lastError == null ? new SQLException("DeadlockRetry exhausted") : lastError;
+        lastError = e;
+        sleepBackoff(attempt, minBackoffMs, maxBackoffMs);
+      }
     }
+    throw lastError == null ? new SQLException("DeadlockRetry exhausted") : lastError;
+  }
 
-    public static boolean isRetryable(SQLException e) {
-        return hasSqlState(e, SQLSTATE_DEADLOCK) || hasSqlState(e, SQLSTATE_SERIALIZATION_FAILURE);
-    }
+  public static boolean isRetryable(SQLException e) {
+    return hasSqlState(e, SQLSTATE_DEADLOCK) || hasSqlState(e, SQLSTATE_SERIALIZATION_FAILURE);
+  }
 
-    /**
-     * Whether {@code e} or anything in its {@code getNextException()} /
-     * {@code getCause()} chains carries {@code sqlState}. Batch failures
-     * surface as {@code BatchUpdateException} where drivers report the state
-     * only on a chained exception, so a top-level check is not enough.
-     */
-    public static boolean hasSqlState(SQLException e, String sqlState) {
-        SQLException cur = e;
-        while (cur != null) {
-            if (sqlState.equals(cur.getSQLState())) {
-                return true;
-            }
-            cur = cur.getNextException();
-        }
-        // Some drivers surface the state through getCause() instead.
-        Throwable cause = e.getCause();
-        while (cause != null) {
-            if (cause instanceof SQLException sqlCause && sqlState.equals(sqlCause.getSQLState())) {
-                return true;
-            }
-            cause = cause.getCause();
-        }
-        return false;
+  /**
+   * Whether {@code e} or anything in its {@code getNextException()} /
+   * {@code getCause()} chains carries {@code sqlState}. Batch failures
+   * surface as {@code BatchUpdateException} where drivers report the state
+   * only on a chained exception, so a top-level check is not enough.
+   */
+  public static boolean hasSqlState(SQLException e, String sqlState) {
+    SQLException cur = e;
+    while (cur != null) {
+      if (sqlState.equals(cur.getSQLState())) {
+        return true;
+      }
+      cur = cur.getNextException();
     }
+    // Some drivers surface the state through getCause() instead.
+    Throwable cause = e.getCause();
+    while (cause != null) {
+      if (cause instanceof SQLException sqlCause && sqlState.equals(sqlCause.getSQLState())) {
+        return true;
+      }
+      cause = cause.getCause();
+    }
+    return false;
+  }
 
-    private static void sleepBackoff(int attempt, long minMs, long maxMs) {
-        long base = Math.min(maxMs, minMs << Math.min(attempt - 1, 6));
-        long jitter = ThreadLocalRandom.current().nextLong(base + 1);
-        try {
-            Thread.sleep(base + jitter);
-        } catch (InterruptedException ie) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("Interrupted while retrying a transient SQL conflict", ie);
-        }
+  private static void sleepBackoff(int attempt, long minMs, long maxMs) {
+    long base = Math.min(maxMs, minMs << Math.min(attempt - 1, 6));
+    long jitter = ThreadLocalRandom.current().nextLong(base + 1);
+    try {
+      Thread.sleep(base + jitter);
+    } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
+      throw new RuntimeException("Interrupted while retrying a transient SQL conflict", ie);
     }
+  }
 }

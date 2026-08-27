@@ -25,49 +25,49 @@ import com.hemju.threadmill.core.store.NodeHeartbeat;
  * scan of the full jobs table.
  */
 public record EngineSnapshot(
-        Instant takenAt,
-        Map<JobState, Long> countsByState,
-        Map<String, Long> queueDepths,
-        Map<String, Instant> oldestEnqueuedAt,
-        Instant oldestProcessingHeartbeat,
-        List<NodeHeartbeat> nodeHeartbeats,
-        List<CronTask> cronTasks,
-        Set<String> pausedQueues,
-        JobStoreCapabilities capabilities) {
+    Instant takenAt,
+    Map<JobState, Long> countsByState,
+    Map<String, Long> queueDepths,
+    Map<String, Instant> oldestEnqueuedAt,
+    Instant oldestProcessingHeartbeat,
+    List<NodeHeartbeat> nodeHeartbeats,
+    List<CronTask> cronTasks,
+    Set<String> pausedQueues,
+    JobStoreCapabilities capabilities) {
 
-    public EngineSnapshot {
-        Objects.requireNonNull(takenAt, "takenAt");
-        Objects.requireNonNull(countsByState, "countsByState");
-        Objects.requireNonNull(queueDepths, "queueDepths");
-        Objects.requireNonNull(oldestEnqueuedAt, "oldestEnqueuedAt");
-        Objects.requireNonNull(nodeHeartbeats, "nodeHeartbeats");
-        Objects.requireNonNull(cronTasks, "cronTasks");
-        Objects.requireNonNull(pausedQueues, "pausedQueues");
-        Objects.requireNonNull(capabilities, "capabilities");
-    }
+  public EngineSnapshot {
+    Objects.requireNonNull(takenAt, "takenAt");
+    Objects.requireNonNull(countsByState, "countsByState");
+    Objects.requireNonNull(queueDepths, "queueDepths");
+    Objects.requireNonNull(oldestEnqueuedAt, "oldestEnqueuedAt");
+    Objects.requireNonNull(nodeHeartbeats, "nodeHeartbeats");
+    Objects.requireNonNull(cronTasks, "cronTasks");
+    Objects.requireNonNull(pausedQueues, "pausedQueues");
+    Objects.requireNonNull(capabilities, "capabilities");
+  }
 
-    /** Sample the store. Never holds long-running locks; never scans the jobs table. */
-    public static EngineSnapshot of(JobStore store) {
-        Objects.requireNonNull(store, "store");
-        Map<String, Long> depths = store.queueDepths();
-        Map<String, Instant> oldest = new LinkedHashMap<>();
-        for (String queue : depths.keySet()) {
-            store.oldestEnqueuedAt(queue).ifPresent(at -> oldest.put(queue, at));
-        }
-        return new EngineSnapshot(
-                Instant.now(),
-                store.countsByState(),
-                depths,
-                Map.copyOf(oldest),
-                store.oldestProcessingHeartbeat().orElse(null),
-                store.listNodeHeartbeats(),
-                store.listCronTasks(),
-                store.listPausedQueues(),
-                store.capabilities());
+  /** Sample the store. Never holds long-running locks; never scans the jobs table. */
+  public static EngineSnapshot of(JobStore store) {
+    Objects.requireNonNull(store, "store");
+    Map<String, Long> depths = store.queueDepths();
+    Map<String, Instant> oldest = new LinkedHashMap<>();
+    for (String queue : depths.keySet()) {
+      store.oldestEnqueuedAt(queue).ifPresent(at -> oldest.put(queue, at));
     }
+    return new EngineSnapshot(
+        Instant.now(),
+        store.countsByState(),
+        depths,
+        Map.copyOf(oldest),
+        store.oldestProcessingHeartbeat().orElse(null),
+        store.listNodeHeartbeats(),
+        store.listCronTasks(),
+        store.listPausedQueues(),
+        store.capabilities());
+  }
 
-    /** Convenience: number of jobs currently in the given state. */
-    public long count(JobState state) {
-        return countsByState.getOrDefault(state, 0L);
-    }
+  /** Convenience: number of jobs currently in the given state. */
+  public long count(JobState state) {
+    return countsByState.getOrDefault(state, 0L);
+  }
 }

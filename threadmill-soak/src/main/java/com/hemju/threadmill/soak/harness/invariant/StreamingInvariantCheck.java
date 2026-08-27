@@ -36,80 +36,81 @@ import java.util.Objects;
  */
 public abstract class StreamingInvariantCheck {
 
-    static final int MAX_RECORDED_VIOLATIONS = 100;
-    static final int MAX_SAMPLE_CHAINS = 5;
+  static final int MAX_RECORDED_VIOLATIONS = 100;
+  static final int MAX_SAMPLE_CHAINS = 5;
 
-    private final String name;
-    private final List<String> recordedViolations = new ArrayList<>();
-    private final List<List<String>> sampleChains = new ArrayList<>();
-    private long violationCount;
-    private boolean finished;
+  private final String name;
+  private final List<String> recordedViolations = new ArrayList<>();
+  private final List<List<String>> sampleChains = new ArrayList<>();
+  private long violationCount;
+  private boolean finished;
 
-    protected StreamingInvariantCheck(String name) {
-        this.name = Objects.requireNonNull(name, "name");
+  protected StreamingInvariantCheck(String name) {
+    this.name = Objects.requireNonNull(name, "name");
+  }
+
+  public final String name() {
+    return name;
+  }
+
+  /** Consume the next trace event. Events arrive in trace-file order. */
+  public final synchronized void onEvent(TraceEvent event) {
+    if (finished) return;
+    observe(event);
+  }
+
+  /** Total violations seen so far, including ones past the recording cap. */
+  public final synchronized long violationCount() {
+    return violationCount;
+  }
+
+  /** Definite violations observed so far; safe to call mid-run. */
+  public final synchronized InvariantResult snapshot() {
+    return toResult();
+  }
+
+  /**
+   * End-of-run result: definite violations plus completeness violations
+   * contributed by {@link #onFinish()}. Idempotent — the first call runs
+   * {@code onFinish()}, later calls return the same outcome.
+   */
+  public final synchronized InvariantResult finish() {
+    if (!finished) {
+      finished = true;
+      onFinish();
     }
+    return toResult();
+  }
 
-    public final String name() {
-        return name;
+  /** Per-event state transition; report definite violations via {@link #recordViolation}. */
+  protected abstract void observe(TraceEvent event);
+
+  /** Hook for completeness checks; runs once, before the final result is built. */
+  protected void onFinish() {}
+
+  /**
+   * Record one violation. {@code sampleChain} holds the raw trace lines that
+   * prove it (may be empty); only the first {@value #MAX_SAMPLE_CHAINS}
+   * chains and {@value #MAX_RECORDED_VIOLATIONS} messages are retained.
+   */
+  protected final void recordViolation(String message, List<String> sampleChain) {
+    violationCount++;
+    if (recordedViolations.size() < MAX_RECORDED_VIOLATIONS) {
+      recordedViolations.add(message);
     }
-
-    /** Consume the next trace event. Events arrive in trace-file order. */
-    public final synchronized void onEvent(TraceEvent event) {
-        if (finished) return;
-        observe(event);
+    if (!sampleChain.isEmpty() && sampleChains.size() < MAX_SAMPLE_CHAINS) {
+      sampleChains.add(List.copyOf(sampleChain));
     }
+  }
 
-    /** Total violations seen so far, including ones past the recording cap. */
-    public final synchronized long violationCount() {
-        return violationCount;
+  private InvariantResult toResult() {
+    if (violationCount == 0) return InvariantResult.pass(name);
+    var messages = new ArrayList<>(recordedViolations);
+    long unrecorded = violationCount - recordedViolations.size();
+    if (unrecorded > 0) {
+      messages.add("(+" + unrecorded + " more violations not recorded — cap is "
+          + MAX_RECORDED_VIOLATIONS + ")");
     }
-
-    /** Definite violations observed so far; safe to call mid-run. */
-    public final synchronized InvariantResult snapshot() {
-        return toResult();
-    }
-
-    /**
-     * End-of-run result: definite violations plus completeness violations
-     * contributed by {@link #onFinish()}. Idempotent — the first call runs
-     * {@code onFinish()}, later calls return the same outcome.
-     */
-    public final synchronized InvariantResult finish() {
-        if (!finished) {
-            finished = true;
-            onFinish();
-        }
-        return toResult();
-    }
-
-    /** Per-event state transition; report definite violations via {@link #recordViolation}. */
-    protected abstract void observe(TraceEvent event);
-
-    /** Hook for completeness checks; runs once, before the final result is built. */
-    protected void onFinish() {}
-
-    /**
-     * Record one violation. {@code sampleChain} holds the raw trace lines that
-     * prove it (may be empty); only the first {@value #MAX_SAMPLE_CHAINS}
-     * chains and {@value #MAX_RECORDED_VIOLATIONS} messages are retained.
-     */
-    protected final void recordViolation(String message, List<String> sampleChain) {
-        violationCount++;
-        if (recordedViolations.size() < MAX_RECORDED_VIOLATIONS) {
-            recordedViolations.add(message);
-        }
-        if (!sampleChain.isEmpty() && sampleChains.size() < MAX_SAMPLE_CHAINS) {
-            sampleChains.add(List.copyOf(sampleChain));
-        }
-    }
-
-    private InvariantResult toResult() {
-        if (violationCount == 0) return InvariantResult.pass(name);
-        var messages = new ArrayList<>(recordedViolations);
-        long unrecorded = violationCount - recordedViolations.size();
-        if (unrecorded > 0) {
-            messages.add("(+" + unrecorded + " more violations not recorded — cap is " + MAX_RECORDED_VIOLATIONS + ")");
-        }
-        return InvariantResult.fail(name, messages, sampleChains);
-    }
+    return InvariantResult.fail(name, messages, sampleChains);
+  }
 }

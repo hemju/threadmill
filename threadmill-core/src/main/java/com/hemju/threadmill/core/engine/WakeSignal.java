@@ -20,40 +20,40 @@ import java.util.concurrent.atomic.AtomicBoolean;
  */
 final class WakeSignal {
 
-    private final Semaphore permits = new Semaphore(0);
-    private final AtomicBoolean pending = new AtomicBoolean(false);
+  private final Semaphore permits = new Semaphore(0);
+  private final AtomicBoolean pending = new AtomicBoolean(false);
 
-    /**
-     * Make at most one pending wake-up available. If a permit is already
-     * pending, this call is a no-op — many signals between awaits collapse
-     * to one wake-up by construction. The gate is a compare-and-set, so N
-     * concurrent signalers cannot accumulate N permits (which would cause
-     * N back-to-back spurious early polls).
-     */
-    void signal() {
-        if (pending.compareAndSet(false, true)) {
-            permits.release();
-        }
+  /**
+   * Make at most one pending wake-up available. If a permit is already
+   * pending, this call is a no-op — many signals between awaits collapse
+   * to one wake-up by construction. The gate is a compare-and-set, so N
+   * concurrent signalers cannot accumulate N permits (which would cause
+   * N back-to-back spurious early polls).
+   */
+  void signal() {
+    if (pending.compareAndSet(false, true)) {
+      permits.release();
     }
+  }
 
-    /**
-     * Sleep up to {@code timeout}, returning early if a signal arrives.
-     * Returns {@code true} if a signal was consumed, {@code false} if the
-     * timeout expired without a signal.
-     */
-    boolean awaitFor(Duration timeout) throws InterruptedException {
-        boolean acquired;
-        if (timeout == null || timeout.isZero() || timeout.isNegative()) {
-            acquired = permits.tryAcquire();
-        } else {
-            acquired = permits.tryAcquire(timeout.toNanos(), TimeUnit.NANOSECONDS);
-        }
-        if (acquired) {
-            pending.set(false);
-            // Self-heal the single-permit invariant if extra permits ever
-            // accumulate: one wake consumes everything pending.
-            permits.drainPermits();
-        }
-        return acquired;
+  /**
+   * Sleep up to {@code timeout}, returning early if a signal arrives.
+   * Returns {@code true} if a signal was consumed, {@code false} if the
+   * timeout expired without a signal.
+   */
+  boolean awaitFor(Duration timeout) throws InterruptedException {
+    boolean acquired;
+    if (timeout == null || timeout.isZero() || timeout.isNegative()) {
+      acquired = permits.tryAcquire();
+    } else {
+      acquired = permits.tryAcquire(timeout.toNanos(), TimeUnit.NANOSECONDS);
     }
+    if (acquired) {
+      pending.set(false);
+      // Self-heal the single-permit invariant if extra permits ever
+      // accumulate: one wake consumes everything pending.
+      permits.drainPermits();
+    }
+    return acquired;
+  }
 }

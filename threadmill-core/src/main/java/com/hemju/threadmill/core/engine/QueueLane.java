@@ -19,23 +19,23 @@ import com.hemju.threadmill.core.Names;
  */
 public record QueueLane(String queue, int workers, QueueFamily family) {
 
-    public QueueLane(String queue, int workers) {
-        this(queue, workers, null);
-    }
+  public QueueLane(String queue, int workers) {
+    this(queue, workers, null);
+  }
 
-    public QueueLane {
-        Names.requireName("queue", Objects.requireNonNull(queue, "queue"));
-        if (workers <= 0) throw new IllegalArgumentException("workers must be positive");
-        if (family != null && !queue.equals(family.pattern())) {
-            throw new IllegalArgumentException("queue-family lane queue must equal its pattern");
-        }
+  public QueueLane {
+    Names.requireName("queue", Objects.requireNonNull(queue, "queue"));
+    if (workers <= 0) throw new IllegalArgumentException("workers must be positive");
+    if (family != null && !queue.equals(family.pattern())) {
+      throw new IllegalArgumentException("queue-family lane queue must equal its pattern");
     }
+  }
 
-    static QueueLane family(String pattern, int workers, QueueWeights weights) {
-        return new QueueLane(pattern, workers, new QueueFamily(pattern, weights));
-    }
+  static QueueLane family(String pattern, int workers, QueueWeights weights) {
+    return new QueueLane(pattern, workers, new QueueFamily(pattern, weights));
+  }
 
-    boolean isFamily() {
-        return family != null;
-    }
+  boolean isFamily() {
+    return family != null;
+  }
 }
