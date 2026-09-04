@@ -1,5 +1,7 @@
 # Changelog
 
+## Unreleased
+
 ## 0.2.2
 
 - Process-fatal JVM errors are no longer swallowed as ordinary job or loop
