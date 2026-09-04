@@ -1883,8 +1883,7 @@ public abstract class AbstractJobStoreContractTest {
   }
 
   @Test
-  @DisplayName(
-      "cron-task schedule state round-trips its timing fingerprint; absent round-trips as null")
+  @DisplayName("cron-task schedule state round-trips its timing fingerprint")
   void cronTaskStateTimingFingerprintRoundTrips() {
     // Issue #105 hardening: Scheduler.upsertCron decides
     // preserve-vs-recompute for restart-missed firings from the state
@@ -1906,12 +1905,6 @@ public abstract class AbstractJobStoreContractTest {
     store.upsertCronTaskState(CronTaskScheduleState.initial("fingerprinted", next, fingerprint));
     assertThat(store.findCronTaskState("fingerprinted").orElseThrow().timingFingerprint())
         .isEqualTo(fingerprint);
-
-    // A fingerprint-less write (legacy rows) round-trips as null — the
-    // safe "recompute on the next registration" signal.
-    store.upsertCronTaskState(CronTaskScheduleState.initial("fingerprinted", next));
-    assertThat(store.findCronTaskState("fingerprinted").orElseThrow().timingFingerprint())
-        .isNull();
   }
 
   @Test
@@ -1960,8 +1953,8 @@ public abstract class AbstractJobStoreContractTest {
     // A nudge racing task removal must not bring the state back either.
     var task = nudgeContractTask("removed", true);
     store.upsertCronTask(task);
-    store.upsertCronTaskState(
-        CronTaskScheduleState.initial("removed", Instant.now().plusSeconds(60)));
+    store.upsertCronTaskState(CronTaskScheduleState.initial(
+        "removed", Instant.now().plusSeconds(60), CronTaskScheduleState.timingFingerprintOf(task)));
     store.deleteCronTask("removed");
     assertThat(store.requestCronNudge("removed", Instant.now()))
         .isEqualTo(NudgeOutcome.UNKNOWN_TASK);
@@ -1973,8 +1966,8 @@ public abstract class AbstractJobStoreContractTest {
   void nudgeOnDisabledTaskIsRejected() {
     var task = nudgeContractTask("paused", false);
     store.upsertCronTask(task);
-    store.upsertCronTaskState(
-        CronTaskScheduleState.initial("paused", Instant.now().plusSeconds(60)));
+    store.upsertCronTaskState(CronTaskScheduleState.initial(
+        "paused", Instant.now().plusSeconds(60), CronTaskScheduleState.timingFingerprintOf(task)));
     assertThat(store.requestCronNudge("paused", Instant.now())).isEqualTo(NudgeOutcome.DISABLED);
     assertThat(store.findCronTaskState("paused").orElseThrow().nudgeRequestedAt())
         .isNull();
@@ -1989,8 +1982,10 @@ public abstract class AbstractJobStoreContractTest {
     // revision and must survive to produce the follow-up run.
     var task = nudgeContractTask("cas-cleared", true);
     store.upsertCronTask(task);
-    store.upsertCronTaskState(
-        CronTaskScheduleState.initial("cas-cleared", Instant.now().plusSeconds(60)));
+    store.upsertCronTaskState(CronTaskScheduleState.initial(
+        "cas-cleared",
+        Instant.now().plusSeconds(60),
+        CronTaskScheduleState.timingFingerprintOf(task)));
 
     Instant first = Instant.parse("2026-08-10T10:00:00.111Z");
     Instant second = Instant.parse("2026-08-10T10:00:00.222Z");
@@ -2027,8 +2022,10 @@ public abstract class AbstractJobStoreContractTest {
     // the timestamp does not change at all.
     var task = nudgeContractTask("same-instant", true);
     store.upsertCronTask(task);
-    store.upsertCronTaskState(
-        CronTaskScheduleState.initial("same-instant", Instant.now().plusSeconds(60)));
+    store.upsertCronTaskState(CronTaskScheduleState.initial(
+        "same-instant",
+        Instant.now().plusSeconds(60),
+        CronTaskScheduleState.timingFingerprintOf(task)));
 
     Instant instant = Instant.parse("2026-08-10T10:00:00.500Z");
     assertThat(store.requestCronNudge("same-instant", instant)).isEqualTo(NudgeOutcome.ACCEPTED);

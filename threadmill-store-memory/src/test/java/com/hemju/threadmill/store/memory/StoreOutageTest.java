@@ -24,6 +24,7 @@ import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
+import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
@@ -119,6 +120,35 @@ class StoreOutageTest {
     public JobStoreCapabilities capabilities() {
       check();
       return delegate.capabilities();
+    }
+
+    @Override
+    public String describe() {
+      check();
+      return delegate.describe();
+    }
+
+    @Override
+    public JobStore delegate() {
+      return delegate;
+    }
+
+    @Override
+    public void verifyWritable() {
+      check();
+      delegate.verifyWritable();
+    }
+
+    @Override
+    public boolean supportsExternalTransactions() {
+      check();
+      return delegate.supportsExternalTransactions();
+    }
+
+    @Override
+    public Optional<RemoteWakeChannel> createRemoteWakeChannel(String channelName) {
+      check();
+      return delegate.createRemoteWakeChannel(channelName);
     }
 
     @Override

@@ -1115,8 +1115,13 @@ class PostgresJobStoreRegressionTest {
     var last = Instant.parse("2026-05-15T09:00:00Z");
 
     store.upsertCronTask(task);
-    store.upsertCronTaskState(
-        new CronTaskScheduleState(task.name(), last, UUID.randomUUID(), next, UUID.randomUUID()));
+    store.upsertCronTaskState(new CronTaskScheduleState(
+        task.name(),
+        last,
+        UUID.randomUUID(),
+        next,
+        UUID.randomUUID(),
+        CronTaskScheduleState.timingFingerprintOf(task)));
 
     assertThat(store.findCronTask(task.name())).contains(task);
     assertThat(store.listCronTasks()).containsExactly(task);

@@ -164,15 +164,12 @@ public final class RecurringMaterializer {
     boolean timingStateChanged = false;
     if (!fingerprint.equals(state.timingFingerprint())) {
       String previousFingerprint = state.timingFingerprint();
-      boolean legacyTiming = previousFingerprint == null && state.nextRunAt() != null;
-      // A non-null mismatch is the crash signature for a timing edit
-      // that wrote the definition before its schedule state. Finish it
-      // by scheduling forward from this tick: firing the stale timing
-      // would run a trigger the user already replaced. A legacy null
-      // fingerprint does not prove an edit, so adopt the fingerprint
-      // without dropping or moving an already-recorded firing.
-      Instant next = legacyTiming ? state.nextRunAt() : task.trigger().nextAfter(now, task.zone());
-      if (!legacyTiming) due = false;
+      // A mismatch is the crash signature for a timing edit that wrote the
+      // definition before its schedule state. Finish it by scheduling forward
+      // from this tick: firing the stale timing would run a trigger the user
+      // already replaced.
+      Instant next = task.trigger().nextAfter(now, task.zone());
+      due = false;
       state = new CronTaskScheduleState(
           task.name(),
           state.lastRunAt(),
@@ -185,14 +182,12 @@ public final class RecurringMaterializer {
           state.nudgeRequestedAt(),
           state.nudgeRevision());
       timingStateChanged = true;
-      if (previousFingerprint != null) {
-        LOG.warn(
-            "Repairing stale recurring timing for task {} from fingerprint {} to {}; next run at {}",
-            task.name(),
-            previousFingerprint,
-            fingerprint,
-            next);
-      }
+      LOG.warn(
+          "Repairing stale recurring timing for task {} from fingerprint {} to {}; next run at {}",
+          task.name(),
+          previousFingerprint,
+          fingerprint,
+          next);
       if (nudge == null && !due) {
         store.upsertCronTaskState(state);
         return;

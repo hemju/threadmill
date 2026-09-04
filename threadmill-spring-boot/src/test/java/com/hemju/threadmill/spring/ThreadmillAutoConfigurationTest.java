@@ -406,10 +406,6 @@ class ThreadmillAutoConfigurationTest {
 
   @Test
   void nonPositiveMaxAttemptsFailsStartupInsteadOfBecomingTheDefault() {
-    // Regression for github issue #104: @Job(maxRetries = 0) — the
-    // natural "disable retries" spelling — was silently replaced by the
-    // engine default of five attempts. Misconfiguration now fails
-    // startup loudly instead of degrading quietly.
     memoryContextRunner()
         .withConfiguration(AutoConfigurations.of(
             ThreadmillRedisAutoConfiguration.class,

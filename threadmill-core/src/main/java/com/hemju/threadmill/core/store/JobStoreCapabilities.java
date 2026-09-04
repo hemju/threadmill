@@ -80,32 +80,6 @@ public record JobStoreCapabilities(
   /** Default state-history entry budget (a retry adds ~3 entries). */
   public static final int DEFAULT_MAX_STATE_HISTORY_ENTRIES = 200;
 
-  /**
-   * Compatibility constructor deriving the metadata and state-history
-   * budgets from {@code maxSerializedJobBytes}.
-   */
-  public JobStoreCapabilities(
-      long maxSerializedJobBytes,
-      int maxJobLogBytes,
-      int maxFailureMetadataBytes,
-      int maxClaimBatch,
-      boolean supportsRichSearch,
-      boolean supportsExactCounts,
-      boolean supportsConcurrencyGroups,
-      boolean ordersByCreationTime) {
-    this(
-        maxSerializedJobBytes,
-        maxJobLogBytes,
-        maxFailureMetadataBytes,
-        maxClaimBatch,
-        supportsRichSearch,
-        supportsExactCounts,
-        supportsConcurrencyGroups,
-        ordersByCreationTime,
-        (int) Math.min(maxSerializedJobBytes / 4, DEFAULT_MAX_METADATA_BYTES),
-        DEFAULT_MAX_STATE_HISTORY_ENTRIES);
-  }
-
   /** Sensible defaults for an in-memory or fully-featured relational store. */
   public static JobStoreCapabilities defaults() {
     return new JobStoreCapabilities(
@@ -116,6 +90,8 @@ public record JobStoreCapabilities(
         true,
         true,
         true,
-        true);
+        true,
+        DEFAULT_MAX_METADATA_BYTES,
+        DEFAULT_MAX_STATE_HISTORY_ENTRIES);
   }
 }

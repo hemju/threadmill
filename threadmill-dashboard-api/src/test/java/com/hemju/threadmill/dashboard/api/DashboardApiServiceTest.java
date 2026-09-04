@@ -53,8 +53,11 @@ class DashboardApiServiceTest {
             false,
             true,
             true,
-            true));
-    var service = new DashboardApiService(store, new LocalWakeBus());
+            true,
+            JobStoreCapabilities.DEFAULT_MAX_METADATA_BYTES,
+            JobStoreCapabilities.DEFAULT_MAX_STATE_HISTORY_ENTRIES));
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
 
     assertThatThrownBy(() -> service.jobs(JobSearch.all()))
         .isInstanceOf(DashboardApiException.class)
@@ -69,7 +72,8 @@ class DashboardApiServiceTest {
   @Test
   void manualTriggerDoesNotStealThePileUpGuardFromARunningScheduledInstance() {
     var store = new InMemoryJobStore();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
     var task = new CronTask(
         "report",
         new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
@@ -117,7 +121,8 @@ class DashboardApiServiceTest {
   @Test
   void manualTriggerTakesTheGuardWhenNoPriorInstanceIsRunning() {
     var store = new InMemoryJobStore();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
     store.upsertCronTask(new CronTask(
         "report",
         new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
@@ -142,7 +147,8 @@ class DashboardApiServiceTest {
     // instances must be distinguishable. The dashboard's force lane
     // stamps `manual`.
     var store = new InMemoryJobStore();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
     store.upsertCronTask(new CronTask(
         "report",
         new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
@@ -168,7 +174,8 @@ class DashboardApiServiceTest {
     // to stay quiet, not to fire recorded-but-unserved demand — and
     // re-enabling must not fire demand from before the pause either.
     var store = new InMemoryJobStore();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
     var task = new CronTask(
         "report",
         new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
@@ -201,7 +208,8 @@ class DashboardApiServiceTest {
     // visible — otherwise nudged and scheduled runs would be
     // indistinguishable exactly where operators look for them.
     var store = new InMemoryJobStore();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
     store.upsertCronTask(new CronTask(
         "report",
         new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
@@ -227,7 +235,8 @@ class DashboardApiServiceTest {
     // edit — a priority change here — must not discard demand a producer
     // already recorded; that would silently lose the follow-up run.
     var store = new InMemoryJobStore();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
     var task = new CronTask(
         "report",
         new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
@@ -259,7 +268,8 @@ class DashboardApiServiceTest {
     // recurring task must run under the task's timeout and retry budget,
     // like a scheduled one.
     var store = new InMemoryJobStore();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
     store.upsertCronTask(timedCronTask("report", Duration.ofMinutes(30), 7));
 
     service.triggerRecurring("report");
@@ -276,7 +286,8 @@ class DashboardApiServiceTest {
     // timeout and retry budget are not operator-editable yet and must
     // survive unchanged.
     var store = new InMemoryJobStore();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
     store.upsertCronTask(timedCronTask("report", Duration.ofMinutes(30), 9));
 
     service.updateRecurring(
@@ -293,12 +304,15 @@ class DashboardApiServiceTest {
   @Test
   void recurringDeletionReturnsConflictInsteadOfProceedingWithoutTheTaskMutex() {
     var store = new InMemoryJobStore();
-    store.upsertCronTask(timedCronTask("report", Duration.ofMinutes(30), 9));
-    store.upsertCronTaskState(CronTaskScheduleState.initial("report", Instant.now()));
+    var task = timedCronTask("report", Duration.ofMinutes(30), 9);
+    store.upsertCronTask(task);
+    store.upsertCronTaskState(CronTaskScheduleState.initial(
+        "report", Instant.now(), CronTaskScheduleState.timingFingerprintOf(task)));
     assertThat(store.tryAcquireMutex(
             RecurringMaterializer.taskMutexName("report"), "materializer", Duration.ofMinutes(1)))
         .isTrue();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
 
     Thread.currentThread().interrupt();
     try {
@@ -322,10 +336,9 @@ class DashboardApiServiceTest {
     assertThat(store.tryAcquireMutex(
             RecurringMaterializer.taskMutexName("report"), "materializer", Duration.ofMinutes(1)))
         .isTrue();
-    var service =
-        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), replacement -> {
-          throw DashboardApiException.badRequest("definition rejected");
-        });
+    var service = new DashboardApiService(store, new LocalWakeBus(), replacement -> {
+      throw DashboardApiException.badRequest("definition rejected");
+    });
 
     Thread.currentThread().interrupt();
     try {
@@ -362,7 +375,8 @@ class DashboardApiServiceTest {
     // silently dropped. Dropping this one reverts an exclusive task to
     // overlapping execution the next time an operator edits anything.
     var store = new InMemoryJobStore();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
     store.upsertCronTask(exclusiveCronTask("sweep"));
 
     service.updateRecurring(
@@ -381,9 +395,12 @@ class DashboardApiServiceTest {
     // instances rather than overlap them; the pile-up guard cannot do
     // that, only claim-time admission under the same key can.
     var store = new InMemoryJobStore();
-    var service = new DashboardApiService(store, new LocalWakeBus());
-    store.upsertCronTask(exclusiveCronTask("sweep"));
-    store.upsertCronTaskState(CronTaskScheduleState.initial("sweep", Instant.now()));
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
+    var task = exclusiveCronTask("sweep");
+    store.upsertCronTask(task);
+    store.upsertCronTaskState(CronTaskScheduleState.initial(
+        "sweep", Instant.now(), CronTaskScheduleState.timingFingerprintOf(task)));
 
     var response = service.triggerRecurring("sweep");
 
@@ -398,9 +415,12 @@ class DashboardApiServiceTest {
   @Test
   void manualTriggerOfANonExclusiveTaskCarriesNoConcurrencyKey() {
     var store = new InMemoryJobStore();
-    var service = new DashboardApiService(store, new LocalWakeBus());
-    store.upsertCronTask(timedCronTask("report", null, null));
-    store.upsertCronTaskState(CronTaskScheduleState.initial("report", Instant.now()));
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
+    var task = timedCronTask("report", null, null);
+    store.upsertCronTask(task);
+    store.upsertCronTaskState(CronTaskScheduleState.initial(
+        "report", Instant.now(), CronTaskScheduleState.timingFingerprintOf(task)));
 
     service.triggerRecurring("report");
 
@@ -444,7 +464,8 @@ class DashboardApiServiceTest {
   @Test
   void nodesReadDoesNotBuildAFullEngineSnapshot() {
     var store = new CountingJobStore(new InMemoryJobStore());
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
 
     service.nodeHeartbeats();
 
@@ -461,7 +482,11 @@ class DashboardApiServiceTest {
     seedCronTask(inner, "report-a");
     seedCronTask(inner, "report-b");
     var store = new CountingJobStore(inner);
-    var service = new DashboardApiService(store, new LocalWakeBus(), Duration.ofMinutes(5));
+    var service = new DashboardApiService(
+        store,
+        new LocalWakeBus(),
+        DashboardJobDefinitionValidator.denyAll(),
+        Duration.ofMinutes(5));
 
     service.overview(false);
     service.queues();
@@ -488,7 +513,7 @@ class DashboardApiServiceTest {
     seedQueues(inner);
     var store = new CountingJobStore(inner);
     var validations = new AtomicInteger();
-    var service = DashboardApiService.withDefinitionValidator(
+    var service = new DashboardApiService(
         store, new LocalWakeBus(), replacement -> validations.incrementAndGet(), Duration.ZERO);
     var job = inner.findByHandlerSignature("com.example.Handler", 10).getFirst();
 
@@ -505,7 +530,8 @@ class DashboardApiServiceTest {
 
   @Test
   void searchOffsetBeyondTheCapIsABadRequest() {
-    var service = new DashboardApiService(new InMemoryJobStore(), new LocalWakeBus());
+    var service = new DashboardApiService(
+        new InMemoryJobStore(), new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
 
     assertThatThrownBy(() -> service.jobs(new JobSearch(
             JobState.ENQUEUED, null, null, 50, DashboardApiService.MAX_SEARCH_OFFSET + 1)))
@@ -524,8 +550,7 @@ class DashboardApiServiceTest {
         .build();
     store.insert(job);
     var validated = new ArrayList<JobSpec>();
-    var service =
-        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), validated::add);
+    var service = new DashboardApiService(store, new LocalWakeBus(), validated::add);
 
     service.replaceJob(
         job.id(),
@@ -546,8 +571,7 @@ class DashboardApiServiceTest {
         .withDedup("original-key", Duration.ofHours(1));
     var job = Job.builder().spec(originalSpec).build();
     store.insert(job);
-    var service =
-        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), replacement -> {});
+    var service = new DashboardApiService(store, new LocalWakeBus(), replacement -> {});
 
     service.replaceJob(
         job.id(),
@@ -566,7 +590,8 @@ class DashboardApiServiceTest {
     var originalSpec = JobSpec.of("example.RegisteredHandler");
     var job = Job.builder().spec(originalSpec).build();
     store.insert(job);
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
 
     assertThatThrownBy(() -> service.replaceJob(
             job.id(),
@@ -585,8 +610,7 @@ class DashboardApiServiceTest {
     seedCronTask(store, "report");
     var replacementArgument = new JobArgument("example.ReplacementPayload", "{\"value\":\"new\"}");
     var validated = new ArrayList<JobSpec>();
-    var service =
-        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), validated::add);
+    var service = new DashboardApiService(store, new LocalWakeBus(), validated::add);
 
     service.updateRecurring(
         "report",
@@ -614,7 +638,8 @@ class DashboardApiServiceTest {
     var store = new InMemoryJobStore();
     seedCronTask(store, "report");
     var original = store.findCronTask("report").orElseThrow();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
 
     assertThatThrownBy(() -> service.updateRecurring(
             "report",
@@ -645,7 +670,9 @@ class DashboardApiServiceTest {
         CronTask.MissedRunPolicy.DROP,
         ZoneId.of("UTC"),
         true));
-    store.upsertCronTaskState(CronTaskScheduleState.initial(name, Instant.now().plusSeconds(300)));
+    var task = store.findCronTask(name).orElseThrow();
+    store.upsertCronTaskState(CronTaskScheduleState.initial(
+        name, Instant.now().plusSeconds(300), CronTaskScheduleState.timingFingerprintOf(task)));
   }
 
   private static final class CountingJobStore extends ForwardingJobStore {
@@ -685,7 +712,8 @@ class DashboardApiServiceTest {
 
   @Test
   void validationFailuresStayFrameworkNeutral() {
-    var service = new DashboardApiService(new InMemoryJobStore(), new LocalWakeBus());
+    var service = new DashboardApiService(
+        new InMemoryJobStore(), new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
 
     assertThatThrownBy(() -> service.pauseQueue("default", "x".repeat(257)))
         .isInstanceOf(DashboardApiException.class)

@@ -2,20 +2,38 @@
 
 ## Unreleased
 
-- `JobStore` decorators now share one forwarding base (issue #131).
-  `com.hemju.threadmill.core.store.ForwardingJobStore` forwards every SPI
-  operation, including the interface's `default` methods, and both the
-  OpenTelemetry `TracingJobStore` and the Micrometer `MeteredJobStore` extend
-  it, overriding only the operations they instrument. This fixes the tracing
-  decorator silently answering the interface defaults for
-  `supportsExternalTransactions()` and `createRemoteWakeChannel(String)`: a
-  traced PostgreSQL store no longer loses `join_transaction` support or its
-  `LISTEN`/`NOTIFY` wake channel behind the decorator. The test-support
-  `com.hemju.threadmill.test.ForwardingJobStore` is deprecated in favour of the
-  core class, and `threadmill-test-support` gains
-  `JobStoreDecoratorContract.assertForwardsEveryOperation`, a reflective check
-  that fails by method name when a decorator lets any current or future
-  `JobStore` method fall through to a default.
+## 0.3.0
+
+- Removed runtime backward-compatibility layers. Persisted handler and payload
+  type tags now resolve exact current class names; `TypeNameAliases`,
+  `PayloadMigration`, `PayloadMigrations`, `JobSerializers`, and
+  `JobDefinitionMigrator` are gone. The JSON serializer no longer accepts
+  unknown payload fields. Drain or rewrite affected durable work before
+  renaming executable types or changing payload shapes.
+- Removed deprecated and transitional APIs: the test-support
+  `ForwardingJobStore` alias, `ThreadmillMetrics.recordClaimLatency`, the
+  timestamp-taking Redis queue-score overload, legacy Sentinel credential and
+  TLS verification properties/constructors, shortened
+  `JobStoreCapabilities` construction, and fingerprint-free recurring-state
+  factories. The duplicate engine-side scoped-value constant is also gone;
+  use `JobExecutionContexts.CURRENT`. `DashboardApiService` requires an explicit definition
+  validator. Spring dashboard validation now uses exact handler and payload
+  names.
+- Removed Redis v0.2.1 queue-score and per-queue-age-index upgrade machinery,
+  layout markers, node layout heartbeats, repair scripts, and mixed-version
+  detection. Redis deployments must already use the current priority score and
+  age index before starting 0.3.0; mixed-version rolling operation is not
+  supported.
+- Made the current contracts explicit instead of silently supplying fallback
+  behavior. Every `JobStore` capability, every PostgreSQL transaction-boundary
+  capability, and engine-backed `JobExecutionContext` deadline,
+  cancellation, check-in, and result operation must be implemented. A missing
+  operation is now a compile failure.
+- `JobStore` decorators now share the core `ForwardingJobStore` base (issue
+  #131). The OpenTelemetry and Micrometer decorators forward every SPI
+  operation, including external-transaction and remote-wake capabilities. The
+  reflective `JobStoreDecoratorContract` fails when any current or future
+  operation does not reach the delegate.
 
 ## 0.2.4
 

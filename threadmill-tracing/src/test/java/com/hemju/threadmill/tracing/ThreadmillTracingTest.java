@@ -146,6 +146,22 @@ class ThreadmillTracingTest {
       }
 
       @Override
+      public Instant deadline() {
+        return Instant.MAX;
+      }
+
+      @Override
+      public Optional<CancellationReason> cancellation() {
+        return Optional.empty();
+      }
+
+      @Override
+      public void checkIn() {}
+
+      @Override
+      public void setResult(Object value) {}
+
+      @Override
       public JobLog log() {
         return job.log();
       }

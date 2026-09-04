@@ -43,8 +43,7 @@ The data-node and Sentinel credentials are independent. Password-only
 authentication is also supported by omitting the corresponding username.
 Lettuce uses one TLS policy for Sentinel discovery and the discovered Redis
 data nodes, so `tls` and `verify-mode` apply to both connection planes. The
-legacy `sentinel.password` property remains a data-node password alias for
-compatibility; new configuration should use the explicit `data-node-*` names.
+explicit `data-node-*` properties configure the Redis data connection.
 
 ## Cluster
 
@@ -70,9 +69,8 @@ and TLS policy.
 
 ## TLS Trust and Custom Clients
 
-`verify-mode` accepts `full`, `ca`, or `none` and defaults to `full`. The older
-`verify-peer` boolean remains supported (`true` is `full`, `false` is `none`)
-when `verify-mode` is absent. Certificates must chain to the JVM's
+`verify-mode` accepts `full`, `ca`, or `none` and defaults to `full`.
+Certificates must chain to the JVM's
 trust material; use the standard `javax.net.ssl.trustStore`,
 `javax.net.ssl.trustStoreType`, and `javax.net.ssl.trustStorePassword` system
 properties when a private CA is not already trusted. Disabling peer

@@ -31,4 +31,14 @@ final class OwningPostgresTransactionBoundary implements PostgresTransactionBoun
       }
     }
   }
+
+  @Override
+  public boolean supportsExternalTransactions() {
+    return false;
+  }
+
+  @Override
+  public boolean externallyManagedTransactionActive() {
+    return false;
+  }
 }

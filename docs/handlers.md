@@ -24,7 +24,7 @@ public final class SendEmailHandler implements JobHandler<SendEmail> {
 Any exception thrown from `run` funnels through the engine's single failure
 path: a state transition to `FAILED` plus interceptor notification (which is
 where retry happens). For periodic work that needs no per-invocation payload,
-implement `JobAction` — a typed alias for `JobHandler<NoPayload>`.
+implement `JobAction` — a specialization of `JobHandler<NoPayload>`.
 
 **Handlers must be idempotent.** Threadmill delivers at-least-once: after a
 node crash, an expired heartbeat, or a retry, the same logical job runs again.
@@ -39,8 +39,8 @@ instance through the `JobHandlerResolver` SPI:
 
 - **`ReflectiveJobHandlerResolver`** (core) constructs handlers from a no-arg
   constructor via reflection and caches the instance. Adequate for tests and
-  small applications; it also accepts `TypeNameAliases` so a renamed handler
-  class can still resolve jobs persisted under the old name.
+  small applications. Persisted handler names must match the current class
+  name exactly.
 - **`SpringJobHandlerResolver`** (`threadmill-spring-boot`) first tries a bean
   lookup, then falls back to autowire-by-type — handlers can be `@Component`
   beans with constructor injection. With the `@Job` annotation, Spring

@@ -14,7 +14,6 @@ import org.springframework.util.ClassUtils;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.serialization.JobSerializer;
-import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.dashboard.api.DashboardJobDefinitionValidator;
@@ -24,13 +23,10 @@ final class SpringDashboardJobDefinitionValidator implements DashboardJobDefinit
 
   private final ClassLoader classLoader;
   private final JobSerializer serializer;
-  private final TypeNameAliases aliases;
 
-  SpringDashboardJobDefinitionValidator(
-      ClassLoader classLoader, JobSerializer serializer, TypeNameAliases aliases) {
+  SpringDashboardJobDefinitionValidator(ClassLoader classLoader, JobSerializer serializer) {
     this.classLoader = Objects.requireNonNull(classLoader, "classLoader");
     this.serializer = Objects.requireNonNull(serializer, "serializer");
-    this.aliases = Objects.requireNonNull(aliases, "aliases");
   }
 
   @Override
@@ -59,9 +55,8 @@ final class SpringDashboardJobDefinitionValidator implements DashboardJobDefinit
   }
 
   private Class<?> loadHandler(String handlerTypeName) {
-    String resolvedName = aliases.resolve(handlerTypeName);
     try {
-      Class<?> handlerType = ClassUtils.forName(resolvedName, classLoader);
+      Class<?> handlerType = ClassUtils.forName(handlerTypeName, classLoader);
       if (!JobHandler.class.isAssignableFrom(handlerType)) {
         throw badRequest("type " + handlerTypeName + " does not implement JobHandler");
       }
@@ -85,9 +80,7 @@ final class SpringDashboardJobDefinitionValidator implements DashboardJobDefinit
       throw badRequest("job definitions currently accept exactly one payload argument");
     }
     JobArgument argument = arguments.getFirst();
-    JobArgument migrated = serializer.migrateArgument(argument);
-    String resolvedType = serializer.resolveTypeTag(migrated.typeTag());
-    Class<?> argumentType = loadPayload(resolvedType);
+    Class<?> argumentType = loadPayload(argument.typeTag());
     if (!payloadType.isAssignableFrom(argumentType)) {
       throw badRequest("payload type "
           + argumentType.getName()

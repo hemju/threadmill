@@ -128,7 +128,9 @@ class JsonJobSerializerTest {
         true,
         true,
         true,
-        true);
+        true,
+        16 * 1024,
+        JobStoreCapabilities.DEFAULT_MAX_STATE_HISTORY_ENTRIES);
     String wire = serializer.serializeJob(j.snapshot(), caps);
     Job loaded = serializer.deserializeJob(wire);
 
@@ -146,7 +148,8 @@ class JsonJobSerializerTest {
     j.transitionTo(
         JobState.FAILED, Instant.now(), "engine.exception", "é".repeat(2) + "💥".repeat(100));
 
-    var caps = new JobStoreCapabilities(64L * 1024L, 16 * 1024, 64, 100, true, true, true, true);
+    var caps = new JobStoreCapabilities(
+        64L * 1024L, 16 * 1024, 64, 100, true, true, true, true, 16 * 1024, 200);
     var truncated = JsonJobSerializer.truncateForSerialization(j.snapshot(), caps);
     String message = truncated.stateHistory().stream()
         .filter(e -> e.state() == JobState.FAILED)
@@ -157,8 +160,8 @@ class JsonJobSerializerTest {
     assertNoLoneSurrogates(message);
 
     // A budget smaller than the sentinel suffix must still be respected.
-    var tinyCaps =
-        new JobStoreCapabilities(64L * 1024L, 16 * 1024, 10, 100, true, true, true, true);
+    var tinyCaps = new JobStoreCapabilities(
+        64L * 1024L, 16 * 1024, 10, 100, true, true, true, true, 16 * 1024, 200);
     String tinyMessage =
         JsonJobSerializer.truncateForSerialization(j.snapshot(), tinyCaps).stateHistory().stream()
             .filter(e -> e.state() == JobState.FAILED)
@@ -214,8 +217,8 @@ class JsonJobSerializerTest {
     j.transitionTo(JobState.PROCESSING, Instant.now(), "engine.claim", null);
     j.transitionTo(JobState.FAILED, Instant.now(), "engine.exception", "final failure");
 
-    var caps =
-        new JobStoreCapabilities(64L * 1024L, 16 * 1024, 8 * 1024, 100, true, true, true, true);
+    var caps = new JobStoreCapabilities(
+        64L * 1024L, 16 * 1024, 8 * 1024, 100, true, true, true, true, 16 * 1024, 200);
     String wire = serializer.serializeJob(j.snapshot(), caps);
     assertThat(wire.getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(64 * 1024);
 
@@ -250,8 +253,8 @@ class JsonJobSerializerTest {
     j.transitionTo(JobState.FAILED, Instant.now(), "engine.exception", "boom");
     j.transitionTo(JobState.SCHEDULED, Instant.now(), "engine.retry-after-failure", "retry 2 of 5");
 
-    var caps =
-        new JobStoreCapabilities(64L * 1024L, 16 * 1024, 8 * 1024, 100, true, true, true, true);
+    var caps = new JobStoreCapabilities(
+        64L * 1024L, 16 * 1024, 8 * 1024, 100, true, true, true, true, 16 * 1024, 200);
     String wire = serializer.serializeJob(j.snapshot(), caps);
     assertThat(wire.getBytes(StandardCharsets.UTF_8).length).isLessThanOrEqualTo(64 * 1024);
 
@@ -272,8 +275,8 @@ class JsonJobSerializerTest {
     String chunk = "x".repeat(2048);
     for (int i = 0; i < 500; i++) j.metadata().put("k" + i, chunk);
 
-    var caps =
-        new JobStoreCapabilities(64L * 1024L, 16 * 1024, 8 * 1024, 100, true, true, true, true);
+    var caps = new JobStoreCapabilities(
+        64L * 1024L, 16 * 1024, 8 * 1024, 100, true, true, true, true, 16 * 1024, 200);
     assertThatThrownBy(() -> serializer.serializeJob(j.snapshot(), caps))
         .isInstanceOf(OversizedJobException.class);
   }
@@ -328,39 +331,5 @@ class JsonJobSerializerTest {
     SamplePayload back = serializer.deserializePayload(arg, SamplePayload.class);
     assertThat(back.name).isEqualTo("widgets");
     assertThat(back.count).isEqualTo(7);
-  }
-
-  @Test
-  void payloadAliasDeserializesCompatibleOldTypeTag() {
-    var aliases = TypeNameAliases.builder()
-        .alias("com.example.OldPayload", SamplePayload.class.getName())
-        .build();
-    var aliased = new JsonJobSerializer(aliases);
-
-    Object back = aliased.deserializeArgument(
-        new JobArgument("com.example.OldPayload", "{\"name\":\"w\",\"count\":3}"));
-
-    assertThat(back).isInstanceOf(SamplePayload.class);
-    assertThat(((SamplePayload) back).name).isEqualTo("w");
-  }
-
-  @Test
-  void payloadMigrationRewritesOldJsonBeforeDeserialization() {
-    var migrations = PayloadMigrations.builder()
-        .migration(
-            "com.example.LegacyPayload",
-            old -> new JobArgument(
-                SamplePayload.class.getName(), "{\"name\":\"migrated\",\"count\":9}"))
-        .build();
-    var migrating = new JsonJobSerializer(
-        JsonJobSerializer.defaultMapper(), TypeNameAliases.empty(), migrations);
-
-    JobArgument migrated = migrating.migrateArgument(
-        new JobArgument("com.example.LegacyPayload", "{\"ignored\":true}"));
-    SamplePayload back = migrating.deserializePayload(migrated, SamplePayload.class);
-
-    assertThat(migrated.typeTag()).isEqualTo(SamplePayload.class.getName());
-    assertThat(back.name).isEqualTo("migrated");
-    assertThat(back.count).isEqualTo(9);
   }
 }

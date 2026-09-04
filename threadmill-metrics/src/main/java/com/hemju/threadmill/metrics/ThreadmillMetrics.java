@@ -367,17 +367,6 @@ public final class ThreadmillMetrics {
         .orElse(0d);
   }
 
-  /**
-   * Record an externally-observed claim latency.
-   *
-   * @deprecated Pass {@link #meteredStore()} to the processing node instead;
-   *     calling both paths double-counts claims.
-   */
-  @Deprecated(since = "0.2.4", forRemoval = false)
-  public void recordClaimLatency(Duration duration) {
-    recordClaimReadyLatency(duration);
-  }
-
   void recordClaimReadyLatency(Duration duration) {
     claimLatency.record(duration);
   }

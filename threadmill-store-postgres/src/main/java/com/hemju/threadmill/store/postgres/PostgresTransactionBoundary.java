@@ -29,18 +29,14 @@ public interface PostgresTransactionBoundary {
    * Whether this boundary can join an external transaction, such as a Spring
    * transaction bound to the same {@link DataSource}.
    */
-  default boolean supportsExternalTransactions() {
-    return false;
-  }
+  boolean supportsExternalTransactions();
 
   /**
    * Whether the current call is already inside an externally managed
    * transaction. Store-level deadlock retry is disabled in this case because a
    * failed PostgreSQL statement aborts the caller's transaction.
    */
-  default boolean externallyManagedTransactionActive() {
-    return false;
-  }
+  boolean externallyManagedTransactionActive();
 
   /** Return the default boundary that owns its own JDBC transactions. */
   static PostgresTransactionBoundary owning(DataSource dataSource) {

@@ -196,7 +196,7 @@ public final class JobStoreDecoratorContract {
           JobSpec.of("com.example.Replacement", new JobArgument("java.lang.String", "\"r\"")));
     }
     if (raw == JobStoreCapabilities.class) {
-      return new JobStoreCapabilities(1024, 128, 64, 5, false, false, false, false);
+      return new JobStoreCapabilities(1024, 128, 64, 5, false, false, false, false, 256, 200);
     }
     if (raw == EnqueueResult.class) return new EnqueueResult.Coalesced(JobId.newId());
     if (raw == NudgeOutcome.class) return NudgeOutcome.DISABLED;

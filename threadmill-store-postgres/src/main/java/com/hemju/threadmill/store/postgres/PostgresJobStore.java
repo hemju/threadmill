@@ -201,6 +201,11 @@ public final class PostgresJobStore implements JobStore {
   }
 
   @Override
+  public JobStore delegate() {
+    return this;
+  }
+
+  @Override
   public boolean supportsExternalTransactions() {
     return transactionBoundary.supportsExternalTransactions();
   }

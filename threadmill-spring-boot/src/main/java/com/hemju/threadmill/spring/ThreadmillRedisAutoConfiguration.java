@@ -77,7 +77,7 @@ public class ThreadmillRedisAutoConfiguration {
                 sentinel.getDataNodeUsername(), sentinel.getDataNodePassword()),
             new RedisStoreConfig.Credentials(
                 sentinel.getSentinelUsername(), sentinel.getSentinelPassword()),
-            redisTls(sentinel.isTls(), sentinel.isVerifyPeer(), sentinel.getVerifyMode()),
+            redisTls(sentinel.isTls(), sentinel.getVerifyMode()),
             safety);
       }
       case "cluster" -> {
@@ -86,7 +86,7 @@ public class ThreadmillRedisAutoConfiguration {
             parseRedisNodes(cluster.getNodes()),
             cluster.getReadPolicy(),
             new RedisStoreConfig.Credentials(cluster.getUsername(), cluster.getPassword()),
-            redisTls(cluster.isTls(), cluster.isVerifyPeer(), cluster.getVerifyMode()),
+            redisTls(cluster.isTls(), cluster.getVerifyMode()),
             safety);
       }
       default ->
@@ -95,18 +95,17 @@ public class ThreadmillRedisAutoConfiguration {
     };
   }
 
-  private static RedisStoreConfig.Tls redisTls(
-      boolean enabled, boolean verifyPeer, String verifyMode) {
-    if (verifyMode == null || verifyMode.isBlank()) {
-      return new RedisStoreConfig.Tls(enabled, verifyPeer);
-    }
+  private static RedisStoreConfig.Tls redisTls(boolean enabled, String verifyMode) {
+    if (verifyMode == null || verifyMode.isBlank())
+      return new RedisStoreConfig.Tls(enabled, SslVerifyMode.FULL);
+    SslVerifyMode parsedMode;
     try {
-      return new RedisStoreConfig.Tls(
-          enabled, SslVerifyMode.valueOf(verifyMode.strip().toUpperCase(Locale.ROOT)));
+      parsedMode = SslVerifyMode.valueOf(verifyMode.strip().toUpperCase(Locale.ROOT));
     } catch (IllegalArgumentException invalidMode) {
       throw new IllegalArgumentException(
           "Redis TLS verify-mode must be full, ca, or none", invalidMode);
     }
+    return new RedisStoreConfig.Tls(enabled, parsedMode);
   }
 
   private static List<RedisStoreConfig.HostAndPort> parseRedisNodes(List<String> nodes) {

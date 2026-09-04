@@ -29,6 +29,7 @@ import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.StaleJobException;
+import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JobSerializer;
@@ -149,6 +150,28 @@ public final class InMemoryJobStore implements JobStore {
   @Override
   public String describe() {
     return "In-Memory (volatile, single-JVM)";
+  }
+
+  @Override
+  public JobStore delegate() {
+    return this;
+  }
+
+  @Override
+  public void verifyWritable() {
+    synchronized (claimMutex) {
+      // Acquiring the store's write mutex is the in-memory writable probe.
+    }
+  }
+
+  @Override
+  public boolean supportsExternalTransactions() {
+    return false;
+  }
+
+  @Override
+  public Optional<RemoteWakeChannel> createRemoteWakeChannel(String channelName) {
+    return Optional.empty();
   }
 
   // ---------------------------------------------------------------- single-job

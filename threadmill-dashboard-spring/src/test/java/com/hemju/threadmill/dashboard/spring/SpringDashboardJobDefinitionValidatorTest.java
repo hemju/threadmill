@@ -14,7 +14,6 @@ import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
-import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.dashboard.api.DashboardApiException;
@@ -23,7 +22,7 @@ class SpringDashboardJobDefinitionValidatorTest {
 
   private final SpringDashboardJobDefinitionValidator validator =
       new SpringDashboardJobDefinitionValidator(
-          getClass().getClassLoader(), new JsonJobSerializer(), TypeNameAliases.empty());
+          getClass().getClassLoader(), new JsonJobSerializer());
 
   @Test
   void compatiblePayloadIsAccepted() {
@@ -76,20 +75,6 @@ class SpringDashboardJobDefinitionValidatorTest {
   }
 
   @Test
-  void handlerTypeAliasesAreResolvedLikeTheRuntimeResolver() {
-    var aliases = TypeNameAliases.builder()
-        .alias("example.LegacyReportHandler", ReportHandler.class.getName())
-        .build();
-    var aliasAwareValidator = new SpringDashboardJobDefinitionValidator(
-        getClass().getClassLoader(), new JsonJobSerializer(), aliases);
-    var spec = JobSpec.of(
-        "example.LegacyReportHandler",
-        new JobArgument(ReportPayload.class.getName(), "{\"name\":\"daily\"}"));
-
-    assertThatCode(() -> aliasAwareValidator.validate(spec)).doesNotThrowAnyException();
-  }
-
-  @Test
   void rawJobHandlerAndMissingPayloadAreRejected() {
     var rawSpec = JobSpec.of(
         RawHandler.class.getName(),
@@ -113,9 +98,7 @@ class SpringDashboardJobDefinitionValidatorTest {
     try (var context = new GenericApplicationContext()) {
       context.refresh();
       var disabled = config.threadmillDashboardJobDefinitionValidator(
-          context,
-          context.getBeanProvider(JobSerializer.class),
-          context.getBeanProvider(TypeNameAliases.class));
+          context, context.getBeanProvider(JobSerializer.class));
 
       assertUnsupported(() -> disabled.validate(spec));
     }
@@ -124,29 +107,7 @@ class SpringDashboardJobDefinitionValidatorTest {
       context.registerBean("secondSerializer", JobSerializer.class, () -> new JsonJobSerializer());
       context.refresh();
       var disabled = config.threadmillDashboardJobDefinitionValidator(
-          context,
-          context.getBeanProvider(JobSerializer.class),
-          context.getBeanProvider(TypeNameAliases.class));
-
-      assertUnsupported(() -> disabled.validate(spec));
-    }
-  }
-
-  @Test
-  void ambiguousTypeNameAliasesSecurelyDisableDefinitionReplacement() {
-    var config = new ThreadmillDashboardApiConfiguration();
-    var spec = JobSpec.of(
-        ReportHandler.class.getName(),
-        new JobArgument(ReportPayload.class.getName(), "{\"name\":\"daily\"}"));
-    try (var context = new GenericApplicationContext()) {
-      context.registerBean("serializer", JobSerializer.class, () -> new JsonJobSerializer());
-      context.registerBean("firstAliases", TypeNameAliases.class, TypeNameAliases::empty);
-      context.registerBean("secondAliases", TypeNameAliases.class, TypeNameAliases::empty);
-      context.refresh();
-      var disabled = config.threadmillDashboardJobDefinitionValidator(
-          context,
-          context.getBeanProvider(JobSerializer.class),
-          context.getBeanProvider(TypeNameAliases.class));
+          context, context.getBeanProvider(JobSerializer.class));
 
       assertUnsupported(() -> disabled.validate(spec));
     }

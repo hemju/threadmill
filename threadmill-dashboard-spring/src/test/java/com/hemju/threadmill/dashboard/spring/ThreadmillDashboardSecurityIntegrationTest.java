@@ -35,7 +35,6 @@ import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
-import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
@@ -200,7 +199,7 @@ class ThreadmillDashboardSecurityIntegrationTest {
   }
 
   @Test
-  void adminCanReplaceAJobDefinitionThroughAnAlias() throws Exception {
+  void adminCanReplaceAJobDefinition() throws Exception {
     var store = context.getBean(JobStore.class);
     var pending = Job.builder()
         .spec(JobSpec.of(
@@ -213,13 +212,13 @@ class ThreadmillDashboardSecurityIntegrationTest {
             .with(user("root").authorities(authority("THREADMILL_ADMIN")))
             .with(csrf())
             .contentType("application/json")
-            .content("{\"expectedVersion\":" + pending.version()
-                + ",\"handlerType\":\"example.LegacyOriginalHandler\"}"))
+            .content("{\"expectedVersion\":" + pending.version() + ",\"handlerType\":\""
+                + OriginalHandler.class.getName() + "\"}"))
         .andExpect(status().isOk())
         .andExpect(jsonPath("$.status").value("replaced"));
 
     assertThat(store.findById(pending.id()).orElseThrow().spec().handlerType())
-        .isEqualTo("example.LegacyOriginalHandler");
+        .isEqualTo(OriginalHandler.class.getName());
   }
 
   @Test
@@ -286,13 +285,6 @@ class ThreadmillDashboardSecurityIntegrationTest {
     @Bean
     JobSerializer jobSerializer() {
       return new JsonJobSerializer();
-    }
-
-    @Bean
-    TypeNameAliases typeNameAliases() {
-      return TypeNameAliases.builder()
-          .alias("example.LegacyOriginalHandler", OriginalHandler.class.getName())
-          .build();
     }
   }
 

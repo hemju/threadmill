@@ -22,9 +22,8 @@ import java.util.UUID;
  *                          this is set
  * @param timingFingerprint the {@link #timingFingerprintOf(CronTask)} of the
  *                          task definition {@code nextRunAt} was computed from,
- *                          or {@code null} for rows written before the
- *                          fingerprint existed. Written atomically with
- *                          {@code nextRunAt}, it lets {@code Scheduler.upsertCron}
+ *                          or {@code null} when timing has not been initialized.
+ *                          Written atomically with {@code nextRunAt}, it lets {@code Scheduler.upsertCron}
  *                          and {@link RecurringMaterializer} decide
  *                          preserve-vs-recompute from this record alone —
  *                          a crash between the separate task and state writes can
@@ -84,32 +83,9 @@ public record CronTaskScheduleState(
         taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, timingFingerprint, null, null);
   }
 
-  /**
-   * Convenience constructor with no timing fingerprint. A materializer tick
-   * adopts the current task's fingerprint without moving a non-null
-   * {@code nextRunAt}; if timing is also null, it initializes the next fire
-   * from that tick. Production writers that compute {@code nextRunAt} from a
-   * task should stamp
-   * {@link #timingFingerprintOf(CronTask)} so unchanged re-registrations
-   * can preserve overdue state.
-   */
-  public CronTaskScheduleState(
-      String taskName,
-      Instant lastRunAt,
-      UUID lastRunJobId,
-      Instant nextRunAt,
-      UUID inFlightJobId) {
-    this(taskName, lastRunAt, lastRunJobId, nextRunAt, inFlightJobId, null, null, null);
-  }
-
   public static CronTaskScheduleState initial(
       String taskName, Instant nextRunAt, String timingFingerprint) {
     return new CronTaskScheduleState(taskName, null, null, nextRunAt, null, timingFingerprint);
-  }
-
-  /** {@link #initial(String, Instant, String)} without a timing fingerprint. */
-  public static CronTaskScheduleState initial(String taskName, Instant nextRunAt) {
-    return initial(taskName, nextRunAt, null);
   }
 
   /**

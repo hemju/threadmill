@@ -3,6 +3,7 @@ package com.hemju.threadmill.core.engine;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Instant;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
@@ -16,6 +17,7 @@ import com.hemju.threadmill.core.JobMetadata;
 import com.hemju.threadmill.core.JobProgress;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.handler.JobExecutionContexts;
 
 /**
  * Pins the documented scoped-value contract: plain virtual-thread executors
@@ -31,10 +33,10 @@ class EngineScopedValuesTest {
     var observed = new AtomicReference<Boolean>();
     JobExecutionContext context = fakeContext();
 
-    ScopedValue.where(EngineScopedValues.CURRENT, context).run(() -> {
+    ScopedValue.where(JobExecutionContexts.CURRENT, context).run(() -> {
       try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
         executor
-            .submit(() -> observed.set(EngineScopedValues.CURRENT.isBound()))
+            .submit(() -> observed.set(JobExecutionContexts.CURRENT.isBound()))
             .get();
       } catch (Exception e) {
         throw new IllegalStateException(e);
@@ -50,9 +52,9 @@ class EngineScopedValuesTest {
     var observed = new AtomicReference<JobExecutionContext>();
     JobExecutionContext context = fakeContext();
 
-    ScopedValue.where(EngineScopedValues.CURRENT, context).run(() -> {
+    ScopedValue.where(JobExecutionContexts.CURRENT, context).run(() -> {
       Runnable task =
-          EngineScopedValues.capturing(() -> observed.set(EngineScopedValues.CURRENT.get()));
+          EngineScopedValues.capturing(() -> observed.set(JobExecutionContexts.CURRENT.get()));
       try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
         executor.submit(task).get();
       } catch (Exception e) {
@@ -89,6 +91,27 @@ class EngineScopedValuesTest {
       @Override
       public Instant claimedAt() {
         return Instant.now();
+      }
+
+      @Override
+      public Instant deadline() {
+        return Instant.MAX;
+      }
+
+      @Override
+      public Optional<CancellationReason> cancellation() {
+        return Optional.empty();
+      }
+
+      @Override
+      public void checkIn() {}
+
+      @Override
+      public void setResult(Object value) {}
+
+      @Override
+      public Optional<Object> readResult() {
+        return Optional.empty();
       }
 
       @Override

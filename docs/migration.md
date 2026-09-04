@@ -14,31 +14,22 @@ Before production, run the getting-started example, port one real job, then run
 the job twice manually to prove idempotency before enabling recurring or retry
 behavior.
 
-## Upgrading Metrics Wiring
+## Metrics Wiring
 
 Use `ThreadmillMetrics.meteredStore()` as the store passed to processing nodes
 and producers. It now records claim latency/failures and rejected-write
-attempts at the actual `JobStore` boundary. Remove host-side calls to
-`recordClaimLatency`; keeping both paths double-counts claims. A host-scheduled
-`metrics.refresh()` remains supported but is optional because gauge reads now
-refresh one shared snapshot after the configured interval, independently of
-job completion.
+attempts at the actual `JobStore` boundary. Gauge reads refresh one shared
+snapshot after the configured interval, independently of job completion.
 
 ## Renaming Handlers And Payloads
 
-Threadmill persists handler class names in `JobSpec.handlerType()` and payload
-type names in `JobArgument.typeTag()`. Renames are safe only when the deployed
-application tells Threadmill how to map the old names:
-
-- Use `TypeNameAliases` for handler and payload class/package moves.
-- Use `PayloadMigrations` when the old payload JSON shape cannot deserialize
-  into the new class directly.
-- Use `JobDefinitionMigrator` to rewrite already-persisted non-running jobs
-  (`ENQUEUED`, `SCHEDULED`, `AWAITING`) from an old handler signature to the
-  new `JobSpec`.
-
-Jobs already running are not rewritten. If a payload or handler cannot be
-resolved and no alias/migration exists, the normal quarantine path applies.
+Threadmill persists exact handler class names in `JobSpec.handlerType()` and
+exact payload type names in `JobArgument.typeTag()`. Runtime aliases and
+payload-shape migrations are intentionally unsupported. Drain or delete every
+job and recurring definition that uses the old names before deploying a class
+or payload rename, or rewrite the durable records with an application-owned
+offline migration. An unresolved handler or payload follows the normal
+quarantine path.
 
 For annotation-driven Spring recurring tasks, set
 `threadmill.spring.recurring-namespace` or `spring.application.name`. Threadmill

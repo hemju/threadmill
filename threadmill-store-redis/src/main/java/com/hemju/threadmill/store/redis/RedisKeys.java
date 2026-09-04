@@ -59,16 +59,6 @@ import com.hemju.threadmill.core.NodeId;
  *       millis. {@code oldestEnqueuedAt} reads its head, so the age gauge
  *       is one indexed read instead of a per-member scan of the
  *       priority-ordered queue ZSET.</li>
- *   <li>{@code {threadmill}:layout:queue_enqueued_at} — STRING upgrade state
- *       of the age index ({@code backfilled} / {@code complete}).</li>
- *   <li>{@code {threadmill}:layout:queue_priority} — STRING priority-score
- *       upgrade state ({@code rescored} / {@code priority_only_v1}).</li>
- *   <li>{@code {threadmill}:node:layout:{nodeId}} — STRING layout version with
- *       the heartbeat TTL. The integer increases monotonically as layouts are
- *       added: value {@code 1} identifies an age-index-aware node that still
- *       writes legacy priority scores; values {@code >= 2} maintain both
- *       current layouts; a missing or malformed value identifies an older
- *       release.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflows} — HASH workflow root
  *       id → active outstanding hold count.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflow_counts} — HASH workflow
@@ -94,24 +84,6 @@ public final class RedisKeys {
   public static final String NO_KEY = PREFIX + "no_key";
   /** HASH queue-name &rarr; pause-reason (empty string if no reason supplied). */
   public static final String QUEUE_PAUSES = PREFIX + "queue_pauses";
-
-  /**
-   * STRING recording the upgrade state of the per-queue {@code queue_enqueued_at}
-   * age index. Absent on stores written by releases before the index existed
-   * (v0.2.1 and earlier); {@code backfilled} once a new-release store has
-   * rebuilt it from the queue ZSETs while old-release writers may still be
-   * live; {@code complete} once no old-release node heartbeat remains and a
-   * final exact reconciliation has run.
-   */
-  public static final String QUEUE_ENQUEUED_AT_LAYOUT = PREFIX + "layout:queue_enqueued_at";
-
-  /**
-   * STRING recording the queue-score upgrade state. {@code rescored} means an
-   * exact pass ran while a legacy-scoring node may still be live;
-   * {@code priority_only_v1} means a final pass ran after those heartbeats
-   * disappeared.
-   */
-  public static final String QUEUE_PRIORITY_LAYOUT = PREFIX + "layout:queue_priority";
 
   private RedisKeys() {}
 
@@ -143,15 +115,6 @@ public final class RedisKeys {
   public static String nodeHeartbeat(NodeId node) {
     Objects.requireNonNull(node, "node");
     return PREFIX + "node:heartbeat:" + node;
-  }
-
-  /**
-   * Written alongside the heartbeat as a monotonically increasing integer
-   * advertising the node's maintained Redis layouts.
-   */
-  public static String nodeLayout(NodeId node) {
-    Objects.requireNonNull(node, "node");
-    return PREFIX + "node:layout:" + node;
   }
 
   public static String userKey(String prefix, String name) {
@@ -265,20 +228,5 @@ public final class RedisKeys {
     // Canonicalize zero: negation yields -0.0, while Redis returns +0.0 and
     // boxed Double equality distinguishes their raw representations.
     return priority == 0 ? 0d : -(double) priority;
-  }
-
-  /**
-   * Computes the exact queue score while accepting the legacy enqueue-time
-   * argument for source compatibility. Time no longer participates in queue
-   * ordering.
-   *
-   * @param priority job priority
-   * @param ignoredEnqueueMicros legacy enqueue-time argument, ignored
-   * @return the exact negated-priority score
-   * @deprecated use {@link #queueScore(int)}
-   */
-  @Deprecated(since = "0.2.4", forRemoval = true)
-  public static double queueScore(int priority, long ignoredEnqueueMicros) {
-    return queueScore(priority);
   }
 }

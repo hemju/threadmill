@@ -64,8 +64,10 @@ class EngineSnapshotTest {
         ZoneId.of("UTC"),
         true);
     store.upsertCronTask(task);
-    store.upsertCronTaskState(
-        CronTaskScheduleState.initial("daily-report", Instant.now().plus(Duration.ofMinutes(5))));
+    store.upsertCronTaskState(CronTaskScheduleState.initial(
+        "daily-report",
+        Instant.now().plus(Duration.ofMinutes(5)),
+        CronTaskScheduleState.timingFingerprintOf(task)));
 
     var snap = EngineSnapshot.of(store);
     assertThat(snap.cronTasks()).extracting(CronTask::name).containsExactly("daily-report");

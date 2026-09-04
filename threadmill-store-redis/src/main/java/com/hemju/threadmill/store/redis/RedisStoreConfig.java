@@ -57,10 +57,6 @@ public sealed interface RedisStoreConfig
   /** TLS transport settings. Full certificate and hostname verification remains the default. */
   record Tls(boolean enabled, SslVerifyMode verifyMode) {
 
-    public Tls(boolean enabled, boolean verifyPeer) {
-      this(enabled, verifyPeer ? SslVerifyMode.FULL : SslVerifyMode.NONE);
-    }
-
     public Tls {
       Objects.requireNonNull(verifyMode, "verifyMode");
       if (!enabled && verifyMode != SslVerifyMode.FULL) {
@@ -86,11 +82,6 @@ public sealed interface RedisStoreConfig
     public static Tls unverified() {
       return new Tls(true, SslVerifyMode.NONE);
     }
-
-    /** Compatibility view of whether any peer verification is enabled. */
-    public boolean verifyPeer() {
-      return verifyMode != SslVerifyMode.NONE;
-    }
   }
 
   record Standalone(RedisURI uri, RedisSafetyValidation safetyValidation)
@@ -113,24 +104,6 @@ public sealed interface RedisStoreConfig
       Tls tls,
       RedisSafetyValidation safetyValidation)
       implements RedisStoreConfig {
-    public Sentinel(String master, List<HostAndPort> nodes, String password) {
-      this(master, nodes, password, RedisSafetyValidation.strict());
-    }
-
-    public Sentinel(
-        String master,
-        List<HostAndPort> nodes,
-        String password,
-        RedisSafetyValidation safetyValidation) {
-      this(
-          master,
-          nodes,
-          Credentials.passwordOnly(password),
-          Credentials.none(),
-          Tls.disabled(),
-          safetyValidation);
-    }
-
     public Sentinel(
         String master,
         List<HostAndPort> nodes,
@@ -155,16 +128,6 @@ public sealed interface RedisStoreConfig
       if (master.isBlank()) throw new IllegalArgumentException("master must not be blank");
       nodes = List.copyOf(nodes);
       if (nodes.isEmpty()) throw new IllegalArgumentException("sentinel nodes must not be empty");
-    }
-
-    /**
-     * Returns the legacy password-only Redis data-node credential.
-     *
-     * @deprecated use {@link #dataNodeCredentials()} to access the complete ACL credential
-     */
-    @Deprecated(forRemoval = false)
-    public String password() {
-      return dataNodeCredentials.password();
     }
   }
 

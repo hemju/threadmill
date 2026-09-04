@@ -36,6 +36,7 @@ import com.hemju.threadmill.dashboard.api.DashboardApiException;
 import com.hemju.threadmill.dashboard.api.DashboardApiService;
 import com.hemju.threadmill.dashboard.api.DashboardAuditEvent;
 import com.hemju.threadmill.dashboard.api.DashboardAuditSink;
+import com.hemju.threadmill.dashboard.api.DashboardJobDefinitionValidator;
 import com.hemju.threadmill.dashboard.api.DashboardOptions;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads.ScheduleRetryRequest;
@@ -53,7 +54,8 @@ class ThreadmillDashboardApiControllerTest {
   void setUp() {
     store = new InMemoryJobStore();
     auditEvents = new ArrayList<>();
-    var service = new DashboardApiService(store, new LocalWakeBus());
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
     secureController = new ThreadmillDashboardApiController(
         service,
         new SpringSecurityDashboardAuthorizer(),
@@ -107,7 +109,8 @@ class ThreadmillDashboardApiControllerTest {
 
     // exposeSensitiveDetails + VIEW_SENSITIVE_DETAILS: payload present.
     var permissive = new ThreadmillDashboardApiController(
-        new DashboardApiService(store, new LocalWakeBus()),
+        new DashboardApiService(
+            store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll()),
         new SpringSecurityDashboardAuthorizer(),
         auditEvents::add,
         new DashboardOptions(false, true));
@@ -138,7 +141,8 @@ class ThreadmillDashboardApiControllerTest {
   void sensitiveDetailsRequirePermissionAndExplicitConfiguration() {
     var job = insertSensitiveJob();
     var controller = new ThreadmillDashboardApiController(
-        new DashboardApiService(store, new LocalWakeBus()),
+        new DashboardApiService(
+            store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll()),
         new SpringSecurityDashboardAuthorizer(),
         auditEvents::add,
         new DashboardOptions(false, true));
@@ -215,8 +219,11 @@ class ThreadmillDashboardApiControllerTest {
             false,
             true,
             true,
-            true));
-    var service = new DashboardApiService(limitedStore, new LocalWakeBus());
+            true,
+            JobStoreCapabilities.DEFAULT_MAX_METADATA_BYTES,
+            JobStoreCapabilities.DEFAULT_MAX_STATE_HISTORY_ENTRIES));
+    var service = new DashboardApiService(
+        limitedStore, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
 
     assertThatThrownBy(() -> service.jobs(JobSearch.all()))
         .isInstanceOf(DashboardApiException.class)
@@ -289,7 +296,7 @@ class ThreadmillDashboardApiControllerTest {
     });
 
     var adminController = new ThreadmillDashboardApiController(
-        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), replacement -> {}),
+        new DashboardApiService(store, new LocalWakeBus(), replacement -> {}),
         new SpringSecurityDashboardAuthorizer(),
         auditEvents::add,
         DashboardOptions.secureDefaults());
@@ -326,7 +333,7 @@ class ThreadmillDashboardApiControllerTest {
         ZoneId.of("UTC"),
         true));
     var controller = new ThreadmillDashboardApiController(
-        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), replacement -> {}),
+        new DashboardApiService(store, new LocalWakeBus(), replacement -> {}),
         new SpringSecurityDashboardAuthorizer(),
         auditEvents::add,
         DashboardOptions.secureDefaults());
@@ -381,7 +388,8 @@ class ThreadmillDashboardApiControllerTest {
   @Test
   void unsafeLocalModeAllowsReadOnlyWithoutAuthentication() {
     var controller = new ThreadmillDashboardApiController(
-        new DashboardApiService(store, new LocalWakeBus()),
+        new DashboardApiService(
+            store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll()),
         new SpringSecurityDashboardAuthorizer(),
         DashboardAuditSink.noop(),
         new DashboardOptions(true, false));
@@ -396,7 +404,8 @@ class ThreadmillDashboardApiControllerTest {
     // expanding it — ADMIN must be a superset for redaction too.
     DashboardAuthorizer adminOnly = authentication -> Set.of(DashboardPermission.ADMIN);
     var controller = new ThreadmillDashboardApiController(
-        new DashboardApiService(store, new LocalWakeBus()),
+        new DashboardApiService(
+            store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll()),
         adminOnly,
         auditEvents::add,
         new DashboardOptions(false, true));
@@ -428,7 +437,8 @@ class ThreadmillDashboardApiControllerTest {
   void sensitiveDetailViewsAreAudited() {
     var job = insertSensitiveJob();
     var controller = new ThreadmillDashboardApiController(
-        new DashboardApiService(store, new LocalWakeBus()),
+        new DashboardApiService(
+            store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll()),
         new SpringSecurityDashboardAuthorizer(),
         auditEvents::add,
         new DashboardOptions(false, true));
@@ -457,7 +467,8 @@ class ThreadmillDashboardApiControllerTest {
         ZoneId.of("UTC"),
         true));
     var controller = new ThreadmillDashboardApiController(
-        new DashboardApiService(store, new LocalWakeBus()),
+        new DashboardApiService(
+            store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll()),
         new SpringSecurityDashboardAuthorizer(),
         auditEvents::add,
         new DashboardOptions(false, true));
@@ -474,7 +485,8 @@ class ThreadmillDashboardApiControllerTest {
   @Test
   void deniedReadAttemptsAreAudited() {
     var controller = new ThreadmillDashboardApiController(
-        new DashboardApiService(store, new LocalWakeBus()),
+        new DashboardApiService(
+            store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll()),
         new SpringSecurityDashboardAuthorizer(),
         auditEvents::add,
         DashboardOptions.secureDefaults());
@@ -495,7 +507,8 @@ class ThreadmillDashboardApiControllerTest {
       throw new IllegalStateException("audit backend down");
     };
     var controller = new ThreadmillDashboardApiController(
-        new DashboardApiService(store, new LocalWakeBus()),
+        new DashboardApiService(
+            store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll()),
         new SpringSecurityDashboardAuthorizer(),
         throwingSink,
         DashboardOptions.secureDefaults());

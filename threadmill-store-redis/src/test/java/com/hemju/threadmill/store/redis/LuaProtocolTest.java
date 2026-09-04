@@ -55,19 +55,6 @@ class LuaProtocolTest {
   }
 
   @Test
-  void priorityRescorePageDeclaresTheJavaPackedPrefix() {
-    String lua = LuaScripts.rescoreQueuePriorityPage();
-    int prefix = RedisJobStore.RESCORE_QUEUE_PRIORITY_PREFIX_ARGS;
-
-    assertThat(lua)
-        .as("fixed argument prefix")
-        .contains("ARGV: " + prefix + " fixed args + member-id tail")
-        .contains("for i = " + (prefix + 1) + ", #ARGV do")
-        .doesNotContain("for i = " + prefix + ", #ARGV do")
-        .doesNotContain("for i = " + (prefix + 2) + ", #ARGV do");
-  }
-
-  @Test
   void sentinelConventionScriptsUseTheJavaProtocolValue() {
     var sentinelConventionScripts = List.of(
         LuaScripts.insert(),

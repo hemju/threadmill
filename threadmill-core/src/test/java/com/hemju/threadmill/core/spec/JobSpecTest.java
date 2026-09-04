@@ -11,7 +11,7 @@ import org.junit.jupiter.api.Test;
 class JobSpecTest {
 
   @Test
-  void legacyConstructorLeavesDedupUnset() {
+  void constructorAllowsDedupToBeUnset() {
     var spec = new JobSpec("com.example.Handler", List.of());
 
     assertThat(spec.dedupKeyValue()).isEmpty();

@@ -33,10 +33,6 @@ public @interface Job {
    * {@code RetryInterceptor}: per-exception-type policies apply, then
    * {@code threadmill.default-max-attempts}. Any other value below 1 fails
    * startup — misconfiguration is never silently replaced by a default.
-   *
-   * <p>This field was named {@code maxRetries} before v0.1.4, but its value
-   * always fed max <em>attempts</em>; the rename keeps every configured
-   * number meaning exactly what it meant before.
    */
   int maxAttempts() default -1;
 

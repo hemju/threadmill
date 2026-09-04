@@ -68,9 +68,8 @@ requires it to implement `JobHandler`, resolves its declared `JobPayload` type,
 and rejects missing, extra, or incompatible payload arguments before any store
 write. A host may provide a custom `DashboardJobDefinitionValidator` bean to add
 an application-specific handler allowlist. The default validator requires one
-unambiguous `JobSerializer` and at most one `TypeNameAliases` bean; if either
-collaborator is ambiguous, or no serializer is available, executable-definition
-edits return 501 and no write is attempted. Definition changes are emitted to the audit sink as
+unambiguous `JobSerializer`; if it is ambiguous or unavailable,
+executable-definition edits return 501 and no write is attempted. Definition changes are emitted to the audit sink as
 `replace_job_definition` with permission `ADMIN`; operational edits remain
 `replace_job` with permission `REPLACE_JOB`.
 

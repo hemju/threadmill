@@ -90,7 +90,7 @@ class RedisConnectionConfigTest {
 
   @Test
   void disablingPeerVerificationWithoutTlsIsRejected() {
-    assertThatThrownBy(() -> new RedisStoreConfig.Tls(false, false))
+    assertThatThrownBy(() -> new RedisStoreConfig.Tls(false, SslVerifyMode.NONE))
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessage("non-default TLS verification requires TLS to be enabled");
   }
@@ -122,16 +122,6 @@ class RedisConnectionConfigTest {
     assertThat(stackTrace(redacted))
         .contains("RedisConnectionException -> IllegalStateException")
         .doesNotContain("private-user", "private-password");
-  }
-
-  @Test
-  void legacySentinelPasswordConstructorStillAuthenticatesOnlyTheDataNode() {
-    var uri = RedisConnectionConfig.sentinelUri(
-        new RedisStoreConfig.Sentinel("threadmill-master", List.of(FIRST), "data-password"));
-
-    assertThat(credentials(uri).hasUsername()).isFalse();
-    assertThat(credentials(uri).getPassword()).containsExactly("data-password".toCharArray());
-    assertThat(credentials(uri.getSentinels().getFirst()).hasPassword()).isFalse();
   }
 
   private static RedisCredentials credentials(RedisURI uri) {

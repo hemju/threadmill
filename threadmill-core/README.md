@@ -51,15 +51,13 @@ are load-bearing — see `AGENTS.md` §6.
 4. **One failure code path.** `JobRunner.recordFailure(...)` is the only place
    "a job failed" is expressed. Exceptions, per-job timeouts, orphan reclaim,
    and quarantine all flow through it.
-5. **Scoped values, not `ThreadLocal`.** `EngineScopedValues.CURRENT` is bound
+5. **Scoped values, not `ThreadLocal`.** `JobExecutionContexts.CURRENT` is bound
    around `handler.run(...)`. The binding is inherited by structured-concurrency
    forks (a `StructuredTaskScope` opened in the handler), but **not** by virtual
    threads the handler spawns directly via an executor — use
    `EngineScopedValues.capturing(...)` to carry it across that boundary.
    `JobExecutionContext.current()` is the handler-facing accessor for the same
-   binding; the scoped value itself lives in the handler package
-   (`JobExecutionContexts.CURRENT`) so the handler API does not depend on the
-   engine.
+   binding.
 6. **The deadline rule lives on the context.** `ExecutionContext.watchdogDeadline()`
    is the one formula read by both the timeout watchdog and the handler-facing
    `deadline()` / `remaining()`, so the two can never disagree; `deadline()`

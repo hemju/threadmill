@@ -24,9 +24,7 @@ import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
 import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JobSerializer;
-import com.hemju.threadmill.core.serialization.JobSerializers;
-import com.hemju.threadmill.core.serialization.PayloadMigrations;
-import com.hemju.threadmill.core.serialization.TypeNameAliases;
+import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 
@@ -108,28 +106,14 @@ public class ThreadmillAutoConfiguration {
 
   @Bean
   @ConditionalOnMissingBean
-  public PayloadMigrations threadmillPayloadMigrations() {
-    return PayloadMigrations.empty();
+  public JobSerializer threadmillJobSerializer() {
+    return new JsonJobSerializer();
   }
 
   @Bean
   @ConditionalOnMissingBean
-  public TypeNameAliases threadmillTypeNameAliases() {
-    return TypeNameAliases.empty();
-  }
-
-  @Bean
-  @ConditionalOnMissingBean
-  public JobSerializer threadmillJobSerializer(
-      TypeNameAliases aliases, PayloadMigrations payloadMigrations) {
-    return JobSerializers.json(aliases, payloadMigrations);
-  }
-
-  @Bean
-  @ConditionalOnMissingBean
-  public JobHandlerResolver threadmillJobHandlerResolver(
-      ApplicationContext context, TypeNameAliases aliases) {
-    return new SpringJobHandlerResolver(context, aliases);
+  public JobHandlerResolver threadmillJobHandlerResolver(ApplicationContext context) {
+    return new SpringJobHandlerResolver(context);
   }
 
   @Bean

@@ -1520,33 +1520,6 @@ class SchedulingTest {
   }
 
   @Test
-  void materializerAdoptsLegacyNullFingerprintsWithoutDroppingOrMovingTiming() {
-    scheduler.defineIntervalTask(
-        "legacy-due", Duration.ofHours(1), new HelloPayload("due"), RecorderHandler.class);
-    scheduler.defineIntervalTask(
-        "legacy-future", Duration.ofHours(1), new HelloPayload("future"), RecorderHandler.class);
-    var now = Instant.parse("2026-08-12T09:00:00Z");
-    var dueAt = now.minus(Duration.ofMinutes(5));
-    var futureAt = now.plus(Duration.ofMinutes(30));
-    store.upsertCronTaskState(new CronTaskScheduleState("legacy-due", null, null, dueAt, null));
-    store.upsertCronTaskState(
-        new CronTaskScheduleState("legacy-future", null, null, futureAt, null));
-
-    new RecurringMaterializer(store).tick(now);
-
-    var instances = store.findByHandlerSignature(RecorderHandler.class.getName(), 10);
-    assertThat(instances).hasSize(1);
-    assertThat(instances.getFirst().metadata().get(JobExecutionContext.CRON_ORIGIN_META))
-        .contains(JobExecutionContext.CRON_ORIGIN_SCHEDULE);
-    assertThat(store.findCronTaskState("legacy-future").orElseThrow()).satisfies(adopted -> {
-      assertThat(adopted.nextRunAt()).isEqualTo(futureAt);
-      assertThat(adopted.timingFingerprint())
-          .isEqualTo(CronTaskScheduleState.timingFingerprintOf(
-              store.findCronTask("legacy-future").orElseThrow()));
-    });
-  }
-
-  @Test
   void materializerReloadsTheDefinitionUnderTheTaskMutexBeforeActing() {
     // tick() snapshots the task list BEFORE tickOne takes the per-task
     // mutex, so an edit can commit in between. Simulate exactly that

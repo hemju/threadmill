@@ -11,7 +11,7 @@ package com.hemju.threadmill.core.handler;
  *
  * <p>For handlers that do not need a per-invocation payload — periodic
  * housekeeping, heartbeats, sweeps — implement {@link JobAction} instead.
- * It is a typed alias for {@code JobHandler<NoPayload>} with a no-payload
+ * It is a specialization of {@code JobHandler<NoPayload>} with a no-payload
  * run signature, so neither the user nor the engine carries an unused
  * type parameter.
  *

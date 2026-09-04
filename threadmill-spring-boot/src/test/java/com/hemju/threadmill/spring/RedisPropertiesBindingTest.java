@@ -27,7 +27,7 @@ class RedisPropertiesBindingTest {
             "threadmill.store.redis.cluster.username=cluster-user",
             "threadmill.store.redis.cluster.password=cluster-password",
             "threadmill.store.redis.cluster.tls=true",
-            "threadmill.store.redis.cluster.verify-peer=false")
+            "threadmill.store.redis.cluster.verify-mode=none")
         .run(context -> {
           assertThat(context).hasNotFailed();
           var redis = context.getBean(ThreadmillProperties.class).getStore().getRedis();
@@ -37,7 +37,7 @@ class RedisPropertiesBindingTest {
                   List.of(new RedisStoreConfig.HostAndPort("redis.example", 6380)),
                   "master",
                   new RedisStoreConfig.Credentials("cluster-user", "cluster-password"),
-                  new RedisStoreConfig.Tls(true, false)));
+                  RedisStoreConfig.Tls.unverified()));
         });
   }
 
@@ -53,7 +53,7 @@ class RedisPropertiesBindingTest {
             "threadmill.store.redis.sentinel.sentinel-username=sentinel-user",
             "threadmill.store.redis.sentinel.sentinel-password=sentinel-password",
             "threadmill.store.redis.sentinel.tls=true",
-            "threadmill.store.redis.sentinel.verify-peer=true")
+            "threadmill.store.redis.sentinel.verify-mode=full")
         .run(context -> {
           assertThat(context).hasNotFailed();
           var redis = context.getBean(ThreadmillProperties.class).getStore().getRedis();
@@ -87,32 +87,12 @@ class RedisPropertiesBindingTest {
   }
 
   @Test
-  void legacySentinelPasswordStillTargetsTheDataNode() {
-    runner
-        .withPropertyValues(
-            "threadmill.store.redis.mode=sentinel",
-            "threadmill.store.redis.sentinel.master-name=threadmill-master",
-            "threadmill.store.redis.sentinel.nodes[0]=sentinel.example:26379",
-            "threadmill.store.redis.sentinel.password=legacy-data-password")
-        .run(context -> {
-          assertThat(context).hasNotFailed();
-          var redis = context.getBean(ThreadmillProperties.class).getStore().getRedis();
-          var config =
-              (RedisStoreConfig.Sentinel) ThreadmillRedisAutoConfiguration.redisStoreConfig(redis);
-
-          assertThat(config.dataNodeCredentials())
-              .isEqualTo(RedisStoreConfig.Credentials.passwordOnly("legacy-data-password"));
-          assertThat(config.sentinelCredentials()).isEqualTo(RedisStoreConfig.Credentials.none());
-        });
-  }
-
-  @Test
-  void disablingPeerVerificationWithoutEnablingTlsFailsValidation() {
+  void nonDefaultVerificationWithoutTlsFailsValidation() {
     runner
         .withPropertyValues(
             "threadmill.store.redis.mode=cluster",
             "threadmill.store.redis.cluster.nodes[0]=redis.example:6379",
-            "threadmill.store.redis.cluster.verify-peer=false")
+            "threadmill.store.redis.cluster.verify-mode=none")
         .run(context -> {
           var redis = context.getBean(ThreadmillProperties.class).getStore().getRedis();
           assertThatThrownBy(() -> ThreadmillRedisAutoConfiguration.redisStoreConfig(redis))

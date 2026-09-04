@@ -29,7 +29,6 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.serialization.JobSerializer;
-import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.dashboard.api.DashboardApiService;
 import com.hemju.threadmill.dashboard.api.DashboardAuditSink;
@@ -106,17 +105,10 @@ public class ThreadmillDashboardApiConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public DashboardJobDefinitionValidator threadmillDashboardJobDefinitionValidator(
-      ApplicationContext context,
-      ObjectProvider<JobSerializer> serializerProvider,
-      ObjectProvider<TypeNameAliases> aliasesProvider) {
+      ApplicationContext context, ObjectProvider<JobSerializer> serializerProvider) {
     var serializer = serializerProvider.getIfUnique();
     if (serializer == null) return DashboardJobDefinitionValidator.denyAll();
-    var aliases = aliasesProvider.orderedStream().toList();
-    if (aliases.size() > 1) return DashboardJobDefinitionValidator.denyAll();
-    return new SpringDashboardJobDefinitionValidator(
-        context.getClassLoader(),
-        serializer,
-        aliases.isEmpty() ? TypeNameAliases.empty() : aliases.getFirst());
+    return new SpringDashboardJobDefinitionValidator(context.getClassLoader(), serializer);
   }
 
   @Bean
@@ -125,7 +117,7 @@ public class ThreadmillDashboardApiConfiguration {
       JobStore store,
       LocalWakeBus wakeBus,
       DashboardJobDefinitionValidator jobDefinitionValidator) {
-    return DashboardApiService.withDefinitionValidator(store, wakeBus, jobDefinitionValidator);
+    return new DashboardApiService(store, wakeBus, jobDefinitionValidator);
   }
 
   @Bean
@@ -229,7 +221,7 @@ public class ThreadmillDashboardApiConfiguration {
                 + "threadmillDashboardSecurityFilterChain, or set "
                 + "threadmill.dashboard.security.auto-configure=false");
       }
-      if (auditSink.isNoop()) {
+      if (auditSink == DashboardAuditSink.noop()) {
         LOG.warn(
             "Threadmill dashboard API is using the default noop audit sink; operator actions will not be persisted");
       }

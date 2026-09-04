@@ -13,7 +13,6 @@ import java.util.Map;
 import java.util.Objects;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
-import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -52,11 +51,9 @@ import com.hemju.threadmill.core.store.JobStoreCapabilities;
 public final class JsonJobSerializer implements JobSerializer {
 
   private final ObjectMapper mapper;
-  private final TypeNameAliases typeNameAliases;
-  private final PayloadMigrations payloadMigrations;
 
   public JsonJobSerializer() {
-    this(defaultMapper(), TypeNameAliases.empty(), PayloadMigrations.empty());
+    this(defaultMapper());
   }
 
   /**
@@ -75,34 +72,10 @@ public final class JsonJobSerializer implements JobSerializer {
    * execution surface on the worker. Pass a mapper with default typing
    * disabled (the {@link #defaultMapper()} default), or a dedicated mapper.
    *
-   * <p><strong>Forward compatibility.</strong> If the mapper has
-   * {@code FAIL_ON_UNKNOWN_PROPERTIES} enabled (Jackson's default), a payload
-   * written by a newer binary with an extra field fails to deserialize on an
-   * older binary (e.g. after a rollback) and quarantines. {@link #defaultMapper()}
-   * disables it; a shared host mapper should too.
    */
   public JsonJobSerializer(ObjectMapper mapper) {
-    this(mapper, TypeNameAliases.empty(), PayloadMigrations.empty());
-  }
-
-  public JsonJobSerializer(TypeNameAliases typeNameAliases) {
-    this(defaultMapper(), typeNameAliases, PayloadMigrations.empty());
-  }
-
-  public JsonJobSerializer(TypeNameAliases typeNameAliases, PayloadMigrations payloadMigrations) {
-    this(defaultMapper(), typeNameAliases, payloadMigrations);
-  }
-
-  public JsonJobSerializer(ObjectMapper mapper, TypeNameAliases typeNameAliases) {
-    this(mapper, typeNameAliases, PayloadMigrations.empty());
-  }
-
-  public JsonJobSerializer(
-      ObjectMapper mapper, TypeNameAliases typeNameAliases, PayloadMigrations payloadMigrations) {
     this.mapper = Objects.requireNonNull(mapper, "mapper");
     rejectDefaultTyping(this.mapper);
-    this.typeNameAliases = Objects.requireNonNull(typeNameAliases, "typeNameAliases");
-    this.payloadMigrations = Objects.requireNonNull(payloadMigrations, "payloadMigrations");
   }
 
   /**
@@ -124,7 +97,6 @@ public final class JsonJobSerializer implements JobSerializer {
     return new ObjectMapper()
         .registerModule(new JavaTimeModule())
         .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
-        .disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES)
         .setDefaultPropertyInclusion(JsonInclude.Include.NON_NULL);
   }
 
@@ -548,29 +520,19 @@ public final class JsonJobSerializer implements JobSerializer {
   @Override
   public Object deserializeArgument(JobArgument argument) {
     Objects.requireNonNull(argument, "argument");
-    JobArgument migrated = migrateArgument(argument);
-    String resolvedType = resolveTypeTag(migrated.typeTag());
     try {
-      Class<?> type = Class.forName(resolvedType, false, JsonJobSerializer.class.getClassLoader());
+      Class<?> type =
+          Class.forName(argument.typeTag(), false, JsonJobSerializer.class.getClassLoader());
       if (!JobPayload.class.isAssignableFrom(type)) {
-        throw new SerializationException("Argument type is not a JobPayload: " + resolvedType);
+        throw new SerializationException(
+            "Argument type is not a JobPayload: " + argument.typeTag());
       }
-      return mapper.readValue(migrated.serialized(), type);
+      return mapper.readValue(argument.serialized(), type);
     } catch (ClassNotFoundException notFound) {
-      throw new SerializationException("Unknown argument type: " + migrated.typeTag(), notFound);
+      throw new SerializationException("Unknown argument type: " + argument.typeTag(), notFound);
     } catch (IOException io) {
       throw new SerializationException("Failed to deserialize argument", io);
     }
-  }
-
-  @Override
-  public String resolveTypeTag(String typeTag) {
-    return typeNameAliases.resolve(typeTag);
-  }
-
-  @Override
-  public JobArgument migrateArgument(JobArgument argument) {
-    return payloadMigrations.migrate(argument).orElse(argument);
   }
 
   @Override
@@ -583,9 +545,8 @@ public final class JsonJobSerializer implements JobSerializer {
   public <P extends JobPayload> P deserializePayload(JobArgument argument, Class<P> type) {
     Objects.requireNonNull(argument, "argument");
     Objects.requireNonNull(type, "type");
-    JobArgument migrated = migrateArgument(argument);
     try {
-      return mapper.readValue(migrated.serialized(), type);
+      return mapper.readValue(argument.serialized(), type);
     } catch (IOException io) {
       throw new SerializationException("Failed to deserialize payload", io);
     }

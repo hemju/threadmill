@@ -14,8 +14,7 @@ package com.hemju.threadmill.core.handler;
  *
  * <p>This class lives with the handler API rather than the engine so that the
  * handler-facing accessor does not depend on engine internals; the engine's
- * {@code EngineScopedValues.CURRENT} is the same scoped value under its
- * engine-side name.
+ * Engine code binds this value around every handler invocation.
  */
 public final class JobExecutionContexts {
 

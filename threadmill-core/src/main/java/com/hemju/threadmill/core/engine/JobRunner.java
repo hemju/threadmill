@@ -23,6 +23,7 @@ import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.handler.JobExecutionContext.CancellationReason;
+import com.hemju.threadmill.core.handler.JobExecutionContexts;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
 import com.hemju.threadmill.core.handler.JobPayload;
@@ -228,7 +229,7 @@ public final class JobRunner {
 
     try {
       try {
-        ScopedValue.where(EngineScopedValues.CURRENT, ctx).run(() -> {
+        ScopedValue.where(JobExecutionContexts.CURRENT, ctx).run(() -> {
           try {
             handler.run(payload, ctx);
           } catch (RuntimeException re) {
@@ -504,15 +505,14 @@ public final class JobRunner {
     if (job.spec().arguments().isEmpty()) {
       return new EmptyPayload();
     }
-    JobArgument first = serializer.migrateArgument(job.spec().arguments().get(0));
-    String resolvedType = serializer.resolveTypeTag(first.typeTag());
+    JobArgument first = job.spec().arguments().get(0);
     try {
       // Load without initialization: the assignability check must run
       // before any static initializer of a persisted, attacker-influenced
       // class name can execute.
-      Class<?> klass = Class.forName(resolvedType, false, JobRunner.class.getClassLoader());
+      Class<?> klass = Class.forName(first.typeTag(), false, JobRunner.class.getClassLoader());
       if (!JobPayload.class.isAssignableFrom(klass)) {
-        throw new SerializationException("Argument type is not a JobPayload: " + resolvedType);
+        throw new SerializationException("Argument type is not a JobPayload: " + first.typeTag());
       }
       return serializer.deserializePayload(first, (Class<JobPayload>) klass);
     } catch (ClassNotFoundException cnf) {

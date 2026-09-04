@@ -69,35 +69,18 @@ public final class DashboardApiService {
   private final long snapshotCacheTtlNanos;
   private volatile CachedSnapshot cachedSnapshot;
 
-  public DashboardApiService(JobStore store, LocalWakeBus wakeBus) {
-    this(store, wakeBus, DashboardJobDefinitionValidator.denyAll(), DEFAULT_SNAPSHOT_CACHE_TTL);
-  }
-
-  /** Create a service that permits executable-definition edits accepted by {@code validator}. */
-  public static DashboardApiService withDefinitionValidator(
+  /** Create a service with executable-definition validation. */
+  public DashboardApiService(
       JobStore store,
       LocalWakeBus wakeBus,
       DashboardJobDefinitionValidator jobDefinitionValidator) {
-    return withDefinitionValidator(
-        store, wakeBus, jobDefinitionValidator, DEFAULT_SNAPSHOT_CACHE_TTL);
+    this(store, wakeBus, jobDefinitionValidator, DEFAULT_SNAPSHOT_CACHE_TTL);
   }
 
   /**
    * Create a service with executable-definition validation and a custom snapshot-cache TTL.
    */
-  public static DashboardApiService withDefinitionValidator(
-      JobStore store,
-      LocalWakeBus wakeBus,
-      DashboardJobDefinitionValidator jobDefinitionValidator,
-      Duration snapshotCacheTtl) {
-    return new DashboardApiService(store, wakeBus, jobDefinitionValidator, snapshotCacheTtl);
-  }
-
-  public DashboardApiService(JobStore store, LocalWakeBus wakeBus, Duration snapshotCacheTtl) {
-    this(store, wakeBus, DashboardJobDefinitionValidator.denyAll(), snapshotCacheTtl);
-  }
-
-  private DashboardApiService(
+  public DashboardApiService(
       JobStore store,
       LocalWakeBus wakeBus,
       DashboardJobDefinitionValidator jobDefinitionValidator,
@@ -364,7 +347,8 @@ public final class DashboardApiService {
       store.insert(job);
       var prior = store
           .findCronTaskState(name)
-          .orElse(new CronTaskScheduleState(name, null, null, null, null));
+          .orElse(new CronTaskScheduleState(
+              name, null, null, null, null, CronTaskScheduleState.timingFingerprintOf(task)));
       // The materializer's pile-up guard tracks inFlightJobId. While a
       // scheduled instance is still running, the manual job runs but
       // must NOT take over the guard — otherwise the guard is released

@@ -13,9 +13,9 @@ run the same logical job more than once.
 Use Java 25 and add the Spring module plus one store:
 
 ```kotlin
-implementation("com.hemju.threadmill:threadmill-spring-boot:0.2.4")
-implementation("com.hemju.threadmill:threadmill-store-postgres:0.2.4")
-// or: implementation("com.hemju.threadmill:threadmill-store-redis:0.2.4")
+implementation("com.hemju.threadmill:threadmill-spring-boot:0.3.0")
+implementation("com.hemju.threadmill:threadmill-store-postgres:0.3.0")
+// or: implementation("com.hemju.threadmill:threadmill-store-redis:0.3.0")
 ```
 
 ## Handler

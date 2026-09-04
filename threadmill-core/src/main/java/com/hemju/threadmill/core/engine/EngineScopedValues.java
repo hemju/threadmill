@@ -14,20 +14,16 @@ import com.hemju.threadmill.core.handler.JobExecutionContexts;
  * {@code StructuredTaskScope} opened inside the bound scope — they are
  * <em>not</em> inherited by {@code Thread.ofVirtual().start(...)} or by
  * tasks submitted to {@code Executors.newVirtualThreadPerTaskExecutor()}.
- * On such threads {@code CURRENT.get()} throws
+ * On such threads {@code JobExecutionContexts.CURRENT.get()} throws
  * {@code NoSuchElementException}. A handler that fans out through a plain
  * executor must wrap each task with {@link #capturing(Runnable)} to carry
  * the {@link JobExecutionContext} across.
  *
  * <p>The scoped value itself is owned by the handler API
  * ({@link JobExecutionContexts#CURRENT}) so that
- * {@link JobExecutionContext#current()} does not depend on the engine;
- * {@link #CURRENT} is that same instance under its engine-side name.
+ * {@link JobExecutionContext#current()} does not depend on the engine.
  */
 public final class EngineScopedValues {
-
-  /** The currently-executing job's context; unbound when not inside a handler. */
-  public static final ScopedValue<JobExecutionContext> CURRENT = JobExecutionContexts.CURRENT;
 
   /**
    * Wrap {@code task} so the calling thread's current
@@ -41,9 +37,9 @@ public final class EngineScopedValues {
    */
   public static Runnable capturing(Runnable task) {
     Objects.requireNonNull(task, "task");
-    if (!CURRENT.isBound()) return task;
-    JobExecutionContext context = CURRENT.get();
-    return () -> ScopedValue.where(CURRENT, context).run(task);
+    if (!JobExecutionContexts.CURRENT.isBound()) return task;
+    JobExecutionContext context = JobExecutionContexts.CURRENT.get();
+    return () -> ScopedValue.where(JobExecutionContexts.CURRENT, context).run(task);
   }
 
   private EngineScopedValues() {}

@@ -6,10 +6,6 @@ public interface DashboardAuditSink {
 
   void record(DashboardAuditEvent event);
 
-  default boolean isNoop() {
-    return false;
-  }
-
   static DashboardAuditSink noop() {
     return NoopDashboardAuditSink.INSTANCE;
   }
@@ -20,9 +16,4 @@ enum NoopDashboardAuditSink implements DashboardAuditSink {
 
   @Override
   public void record(DashboardAuditEvent event) {}
-
-  @Override
-  public boolean isNoop() {
-    return true;
-  }
 }

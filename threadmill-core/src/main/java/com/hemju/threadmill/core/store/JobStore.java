@@ -65,12 +65,8 @@ public interface JobStore {
    * {@code "Redis standalone host=localhost port=6379"}). Implementations
    * must return this in constant time without any I/O against the store.
    *
-   * <p>The default returns the implementation's simple class name so
-   * existing third-party stores remain compilable.
    */
-  default String describe() {
-    return getClass().getSimpleName();
-  }
+  String describe();
 
   /**
    * Return the wrapped store when this instance is a decorator.
@@ -81,18 +77,13 @@ public interface JobStore {
    * stores return {@code this}; decorators should return their immediate
    * delegate.
    */
-  default JobStore delegate() {
-    return this;
-  }
+  JobStore delegate();
 
   /**
    * Lightweight writable probe used after capacity-related store failures.
-   * Implementations with a meaningful no-op write can override this method;
-   * the default preserves the historical read-only probe.
+   * Implementations must perform a meaningful no-op write.
    */
-  default void verifyWritable() {
-    capabilities();
-  }
+  void verifyWritable();
 
   /**
    * Whether this store can participate in an externally-managed transaction
@@ -104,13 +95,11 @@ public interface JobStore {
    * store-implementation class references in its constant pool, so it can
    * be loaded even when the implementation module is not on the classpath.
    *
-   * <p>Default is {@code false}. Stores that genuinely support external
-   * transactions (today: {@code PostgresJobStore} configured with an
-   * external transaction boundary) override to return {@code true}.
+   * <p>Stores that genuinely support external transactions (today:
+   * {@code PostgresJobStore} configured with an external transaction boundary)
+   * return {@code true}.
    */
-  default boolean supportsExternalTransactions() {
-    return false;
-  }
+  boolean supportsExternalTransactions();
 
   /**
    * Create a {@link com.hemju.threadmill.core.engine.RemoteWakeChannel} that
@@ -119,17 +108,15 @@ public interface JobStore {
    *
    * <p>Returned as an SPI hook so framework integrations can wire the
    * channel without instanceof-checking concrete store classes or
-   * referencing optional store-implementation types. The default returns
-   * {@link java.util.Optional#empty()}; backends that have a native
-   * notification path (today: {@code PostgresJobStore} via {@code LISTEN}/
-   * {@code NOTIFY} and {@code RedisJobStore} via Pub/Sub) override.
+   * referencing optional store-implementation types. Backends that have a
+   * native notification path (today: {@code PostgresJobStore} via
+   * {@code LISTEN}/{@code NOTIFY} and {@code RedisJobStore} via Pub/Sub)
+   * return a channel; others return {@link java.util.Optional#empty()}.
    *
    * @param channelName the name to use for the notification channel; if
    *                    {@code null} the store may pick a sensible default.
    */
-  default Optional<RemoteWakeChannel> createRemoteWakeChannel(String channelName) {
-    return Optional.empty();
-  }
+  Optional<RemoteWakeChannel> createRemoteWakeChannel(String channelName);
 
   // ---------------------------------------------------------------- single-job ops
 

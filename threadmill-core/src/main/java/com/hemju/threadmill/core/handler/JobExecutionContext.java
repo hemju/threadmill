@@ -174,12 +174,9 @@ public interface JobExecutionContext {
    * interrupt lands up to a second later. The value moves forward on every
    * {@link #checkIn()} and collapses to the end of the shutdown grace
    * period once the node begins closing — see the class documentation for
-   * the exact rule. Outside the engine (test doubles) there is no
-   * deadline and this returns {@link Instant#MAX}.
+   * the exact rule.
    */
-  default Instant deadline() {
-    return Instant.MAX;
-  }
+  Instant deadline();
 
   /**
    * Time left until {@link #deadline()}, never negative. A handler that
@@ -198,9 +195,7 @@ public interface JobExecutionContext {
    * interrupt can rely on it even if an intermediate layer swallowed the
    * interrupt.
    */
-  default Optional<CancellationReason> cancellation() {
-    return Optional.empty();
-  }
+  Optional<CancellationReason> cancellation();
 
   /** {@code true} once the engine has decided to abandon this attempt. */
   default boolean isCancelled() {
@@ -213,7 +208,7 @@ public interface JobExecutionContext {
    * {@link #claimedAt()} plus the job timeout but the most recent check-in
    * plus {@code noProgressTimeout}.
    */
-  default void checkIn() {}
+  void checkIn();
 
   /** Record a check-in and append a user-visible log message. */
   default void checkIn(String message) {
@@ -236,14 +231,10 @@ public interface JobExecutionContext {
    * the {@code SUCCEEDED} state transition. The result is bounded by the
    * same job size cap as the rest of the job body.
    */
-  default void setResult(Object value) {
-    // default no-op; the engine's ExecutionContext overrides this.
-  }
+  void setResult(Object value);
 
   /** Read the result previously set by this handler, if any. */
-  default Optional<Object> readResult() {
-    return Optional.empty();
-  }
+  Optional<Object> readResult();
 
   /**
    * The nominal fire time of this recurring instance — the schedule tick

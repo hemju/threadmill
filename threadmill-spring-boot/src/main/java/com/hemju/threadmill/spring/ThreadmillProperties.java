@@ -577,13 +577,9 @@ public class ThreadmillProperties {
     private List<String> nodes = new ArrayList<>();
     private String dataNodeUsername;
     private String dataNodePassword;
-    // Compatibility aliases: sentinel.password pre-dates separate control-plane credentials.
-    private String username;
-    private String password;
     private String sentinelUsername;
     private String sentinelPassword;
     private boolean tls;
-    private boolean verifyPeer = true;
     private String verifyMode;
 
     public String getMasterName() {
@@ -602,24 +598,8 @@ public class ThreadmillProperties {
       this.nodes = nodes;
     }
 
-    public String getPassword() {
-      return password;
-    }
-
-    public void setPassword(String password) {
-      this.password = password;
-    }
-
-    public String getUsername() {
-      return username;
-    }
-
-    public void setUsername(String username) {
-      this.username = username;
-    }
-
     public String getDataNodeUsername() {
-      return dataNodeUsername == null || dataNodeUsername.isBlank() ? username : dataNodeUsername;
+      return dataNodeUsername;
     }
 
     public void setDataNodeUsername(String dataNodeUsername) {
@@ -627,7 +607,7 @@ public class ThreadmillProperties {
     }
 
     public String getDataNodePassword() {
-      return dataNodePassword == null || dataNodePassword.isBlank() ? password : dataNodePassword;
+      return dataNodePassword;
     }
 
     public void setDataNodePassword(String dataNodePassword) {
@@ -658,14 +638,6 @@ public class ThreadmillProperties {
       this.tls = tls;
     }
 
-    public boolean isVerifyPeer() {
-      return verifyPeer;
-    }
-
-    public void setVerifyPeer(boolean verifyPeer) {
-      this.verifyPeer = verifyPeer;
-    }
-
     public String getVerifyMode() {
       return verifyMode;
     }
@@ -681,7 +653,6 @@ public class ThreadmillProperties {
     private String username;
     private String password;
     private boolean tls;
-    private boolean verifyPeer = true;
     private String verifyMode;
 
     public List<String> getNodes() {
@@ -722,14 +693,6 @@ public class ThreadmillProperties {
 
     public void setTls(boolean tls) {
       this.tls = tls;
-    }
-
-    public boolean isVerifyPeer() {
-      return verifyPeer;
-    }
-
-    public void setVerifyPeer(boolean verifyPeer) {
-      this.verifyPeer = verifyPeer;
     }
 
     public String getVerifyMode() {

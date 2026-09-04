@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 import org.junit.jupiter.api.Test;
@@ -15,15 +16,14 @@ import com.hemju.threadmill.core.JobProgress;
 import com.hemju.threadmill.core.NodeId;
 
 /**
- * Pins the handler-facing defaults of {@link JobExecutionContext}: a context
- * outside the engine has no deadline and no cancellation, so test doubles
- * and stubs keep compiling and behave as "unbounded", and
+ * Pins the handler-facing behavior of {@link JobExecutionContext}: this test
+ * context is unbounded and uncancelled, and
  * {@link JobExecutionContext#current()} resolves the scoped binding.
  */
 class JobExecutionContextTest {
 
   @Test
-  void defaultDeadlineIsUnboundedAndRemainingDoesNotOverflow() {
+  void stubDeadlineIsUnboundedAndRemainingDoesNotOverflow() {
     JobExecutionContext ctx = stub();
 
     assertThat(ctx.deadline()).isEqualTo(Instant.MAX);
@@ -85,6 +85,27 @@ class JobExecutionContextTest {
     @Override
     public Instant claimedAt() {
       return Instant.now();
+    }
+
+    @Override
+    public Instant deadline() {
+      return Instant.MAX;
+    }
+
+    @Override
+    public Optional<CancellationReason> cancellation() {
+      return Optional.empty();
+    }
+
+    @Override
+    public void checkIn() {}
+
+    @Override
+    public void setResult(Object value) {}
+
+    @Override
+    public Optional<Object> readResult() {
+      return Optional.empty();
     }
 
     @Override
