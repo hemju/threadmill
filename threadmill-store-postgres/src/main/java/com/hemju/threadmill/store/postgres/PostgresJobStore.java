@@ -673,7 +673,7 @@ public final class PostgresJobStore implements JobStore {
     return candidates.values().stream()
         .sorted(Comparator.comparingInt(PendingClaim::priority)
             .reversed()
-            .thenComparing(PendingClaim::id))
+            .thenComparing(PendingClaim::id, JobId::compareCanonical))
         .limit(narrowClaimPageSize(want))
         .toList();
   }
@@ -1074,7 +1074,7 @@ public final class PostgresJobStore implements JobStore {
     if (timeOrder != 0) {
       return timeOrder < 0;
     }
-    return possibleEarlier.id.compareTo(candidate.id) < 0;
+    return JobId.compareCanonical(possibleEarlier.id, candidate.id) < 0;
   }
 
   private record PendingClaim(

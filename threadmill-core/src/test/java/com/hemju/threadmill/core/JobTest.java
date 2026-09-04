@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.UUID;
 
 import org.junit.jupiter.api.Test;
 
@@ -195,5 +196,18 @@ class JobTest {
     // Version nibble is 7 (UUIDv7).
     assertThat(a.asUuid().version()).isEqualTo(7);
     assertThat(b.asUuid().version()).isEqualTo(7);
+  }
+
+  @Test
+  void jobIdNaturalOrderIsCanonicalUnsignedUuidOrder() {
+    var low = JobId.of(UUID.fromString("00000000-0000-0000-8000-000000000001"));
+    var highBitSet = JobId.of(UUID.fromString("80000000-0000-0000-8000-000000000001"));
+
+    assertThat(low.compareTo(highBitSet)).isNegative();
+    assertThat(highBitSet.compareTo(low)).isPositive();
+    assertThat(JobId.compareCanonical(low.asUuid(), highBitSet.asUuid())).isNegative();
+    assertThat(highBitSet.asUuid().compareTo(low.asUuid()))
+        .as("java.util.UUID uses a different signed-half order")
+        .isNegative();
   }
 }

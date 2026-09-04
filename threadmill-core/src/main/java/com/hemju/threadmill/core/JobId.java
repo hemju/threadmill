@@ -18,9 +18,15 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * locality on the relational store and for predictable iteration order on the
  * key-value store.
  *
+ * <p>Natural order compares the UUID as an unsigned 128-bit value. This is
+ * identical to PostgreSQL's {@code uuid} order and to lexicographic order of
+ * the canonical UUID string used as the Redis member. It deliberately does
+ * not delegate to {@link UUID#compareTo(UUID)}, which compares its two halves
+ * as signed longs and disagrees when the high bit differs.
+ *
  * <p>Equality and hashing are delegated to the wrapped {@link UUID}.
  */
-public final class JobId {
+public final class JobId implements Comparable<JobId> {
 
   private static final SecureRandom RNG = new SecureRandom();
 
@@ -61,6 +67,37 @@ public final class JobId {
 
   public UUID asUuid() {
     return value;
+  }
+
+  /**
+   * Compares job ids in canonical unsigned UUID order.
+   *
+   * @param other id to compare with
+   * @return a negative value, zero, or a positive value as this id is less
+   *     than, equal to, or greater than {@code other}
+   */
+  @Override
+  public int compareTo(JobId other) {
+    Objects.requireNonNull(other, "other");
+    return compareCanonical(value, other.value);
+  }
+
+  /**
+   * Compares two raw UUIDs in the same canonical unsigned order as
+   * {@link #compareTo(JobId)}, without wrapping or string allocation.
+   *
+   * @param left first UUID
+   * @param right second UUID
+   * @return a negative value, zero, or a positive value as {@code left} is
+   *     less than, equal to, or greater than {@code right}
+   */
+  public static int compareCanonical(UUID left, UUID right) {
+    Objects.requireNonNull(left, "left");
+    Objects.requireNonNull(right, "right");
+    int high = Long.compareUnsigned(left.getMostSignificantBits(), right.getMostSignificantBits());
+    return high != 0
+        ? high
+        : Long.compareUnsigned(left.getLeastSignificantBits(), right.getLeastSignificantBits());
   }
 
   @Override

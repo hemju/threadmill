@@ -44,6 +44,7 @@ class RedisKeysTest {
         RedisKeys.queueUnkeyed("default"),
         RedisKeys.queueEnqueuedAt("default"),
         RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT,
+        RedisKeys.QUEUE_PRIORITY_LAYOUT,
         RedisKeys.nodeLayout(NodeId.newId()));
 
     assertThat(keys).allSatisfy(key -> assertThat(SlotHash.getSlot(key)).as(key).isEqualTo(slot));
@@ -57,5 +58,18 @@ class RedisKeysTest {
     assertThat(RedisKeys.dedup("queue:one", "key/two"))
         .doesNotContain("queue:one")
         .doesNotContain("key/two");
+  }
+
+  @Test
+  @SuppressWarnings({"deprecation", "removal"})
+  void queueScoreExactlyRepresentsTheFullIntPriorityRange() {
+    assertThat(RedisKeys.queueScore(Integer.MAX_VALUE)).isEqualTo(-2_147_483_647d);
+    assertThat(RedisKeys.queueScore(0)).isZero();
+    assertThat(Double.doubleToRawLongBits(RedisKeys.queueScore(0)))
+        .as("canonical positive-zero score")
+        .isZero();
+    assertThat(RedisKeys.queueScore(Integer.MIN_VALUE)).isEqualTo(2_147_483_648d);
+    assertThat(RedisKeys.queueScore(7, Long.MIN_VALUE))
+        .isEqualTo(RedisKeys.queueScore(7, Long.MAX_VALUE));
   }
 }
