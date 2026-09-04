@@ -32,6 +32,14 @@ public record SimulationConfig(
         Duration.ofMillis(8), // exportDuration
         Duration.ofSeconds(2), // jobTimeout
         8, // workerCount
-        Duration.ofSeconds(45)); // runBudget — drain deadline
+        // runBudget — the drain deadline. This is a LIVENESS bound, not a
+        // throughput assertion: a correct engine drains these jobs in seconds,
+        // a wedged one never drains at all. Keep it generous. The former 45s
+        // was tight enough that a shared 4-core CI runner executing this
+        // simulation alongside the browser suite, the soak regression, and
+        // javadoc timed out with 227/400 jobs done and none failed — a slow
+        // machine reading as a hang. Throughput regressions belong to the soak
+        // suite, which measures them directly.
+        Duration.ofMinutes(4));
   }
 }
