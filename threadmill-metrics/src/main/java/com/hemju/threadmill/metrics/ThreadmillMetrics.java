@@ -373,7 +373,7 @@ public final class ThreadmillMetrics {
    * @deprecated Pass {@link #meteredStore()} to the processing node instead;
    *     calling both paths double-counts claims.
    */
-  @Deprecated(since = "0.2.3", forRemoval = false)
+  @Deprecated(since = "0.2.4", forRemoval = false)
   public void recordClaimLatency(Duration duration) {
     recordClaimReadyLatency(duration);
   }

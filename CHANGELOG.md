@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.2.3
+## 0.2.4
 
 - Process-fatal JVM errors are no longer swallowed as ordinary job or loop
   failures (issue #101). Every intentional `catch (Throwable)` now classifies
@@ -148,11 +148,13 @@
   ZSET and drops a stale head through an atomic compare-and-remove. Upgrade
   procedure and mixed-version guarantees are in the Redis README.
 
-## 0.2.2
+## 0.2.2 and 0.2.3
 
-Tagged but never published. The release build failed in the pre-publish
-gate, before any artifact was signed or uploaded, so no 0.2.2 exists on
-Maven Central. Its contents shipped as 0.2.3.
+Tagged but never published. Both release builds failed in the pre-publish
+gate — first on a missing browser in the release workflow, then on the
+correctness simulation's drain deadline expiring on a loaded CI runner —
+so no artifact was signed or uploaded for either version and neither
+exists on Maven Central. Their contents shipped as 0.2.4.
 
 ## 0.2.1
 

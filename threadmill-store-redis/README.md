@@ -146,14 +146,14 @@ or resurrect jobs, and claims remain atomic. Stop old producer-only processes
 before completion as described above.
 
 **API compatibility.** The deprecated `RedisKeys.queueScore(int, long)`
-overload remains for the v0.2.3 patch release and is marked for removal. Its
+overload remains for the v0.2.4 patch release and is marked for removal. Its
 enqueue-time argument is ignored, so callers compile with the new priority-only
 ordering semantics; migrate to `queueScore(int)`.
 
 ### Per-queue age index
 
 The age index `{threadmill}:queue_enqueued_at:{queue}` did not exist before
-v0.2.3. The `{threadmill}:layout:queue_enqueued_at` STRING records how far
+v0.2.4. The `{threadmill}:layout:queue_enqueued_at` STRING records how far
 the upgrade has progressed, and every store construction advances it before
 serving a read:
 
