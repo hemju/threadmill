@@ -250,11 +250,10 @@ public final class ThreadmillDashboardApiController {
       Authentication authentication,
       @PathVariable("id") String id,
       @RequestBody ReplaceJobRequest request) {
-    boolean replacesDefinition = request.replacesDefinition();
     return action(
         authentication,
         request.requiredPermission(),
-        replacesDefinition ? "replace_job_definition" : "replace_job",
+        request.auditAction(),
         id,
         () -> service.replaceJob(JobId.parse(id), request));
   }
@@ -275,11 +274,10 @@ public final class ThreadmillDashboardApiController {
       Authentication authentication,
       @PathVariable("name") String name,
       @RequestBody UpdateRecurringRequest request) {
-    boolean replacesDefinition = request.replacesDefinition();
     return action(
         authentication,
         request.requiredPermission(),
-        replacesDefinition ? "update_recurring_definition" : "update_recurring",
+        request.auditAction(),
         name,
         () -> service.updateRecurring(name, request));
   }

@@ -315,6 +315,47 @@ class DashboardApiServiceTest {
   }
 
   @Test
+  void fullySpecifiedRecurringDefinitionIsValidatedBeforeMutexContention() {
+    var store = new InMemoryJobStore();
+    var original = timedCronTask("report", Duration.ofMinutes(30), 9);
+    store.upsertCronTask(original);
+    assertThat(store.tryAcquireMutex(
+            RecurringMaterializer.taskMutexName("report"), "materializer", Duration.ofMinutes(1)))
+        .isTrue();
+    var service =
+        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), replacement -> {
+          throw DashboardApiException.badRequest("definition rejected");
+        });
+
+    Thread.currentThread().interrupt();
+    try {
+      assertThatThrownBy(() -> service.updateRecurring(
+              "report",
+              new UpdateRecurringRequest(
+                  null,
+                  null,
+                  "example.ReplacementHandler",
+                  new JobArgument("example.ReplacementPayload", "{}"),
+                  null,
+                  null,
+                  null,
+                  null,
+                  null)))
+          .isInstanceOf(DashboardApiException.class)
+          .satisfies(error -> {
+            var failure = (DashboardApiException) error;
+            assertThat(failure.code()).isEqualTo(DashboardApiException.Code.BAD_REQUEST);
+            assertThat(failure.getMessage()).isEqualTo("definition rejected");
+          });
+    } finally {
+      Thread.interrupted();
+      store.releaseMutex(RecurringMaterializer.taskMutexName("report"), "materializer");
+    }
+
+    assertThat(store.findCronTask("report")).contains(original);
+  }
+
+  @Test
   void updateRecurringPreservesTheExclusiveFlag() {
     // Same trap as the timeout and retry budget before it: updateRecurring
     // rebuilds the CronTask field-by-field, so a field it forgets is
@@ -439,6 +480,27 @@ class DashboardApiServiceTest {
     assertThat(store.queueDepthReads.get()).isEqualTo(2);
     assertThat(queues.stream().filter(view -> view.queue().equals("alpha")).findFirst())
         .hasValueSatisfying(view -> assertThat(view.paused()).isTrue());
+  }
+
+  @Test
+  void definitionValidatorCanBeCombinedWithACustomSnapshotCacheTtl() {
+    var inner = new InMemoryJobStore();
+    seedQueues(inner);
+    var store = new CountingJobStore(inner);
+    var validations = new AtomicInteger();
+    var service = DashboardApiService.withDefinitionValidator(
+        store, new LocalWakeBus(), replacement -> validations.incrementAndGet(), Duration.ZERO);
+    var job = inner.findByHandlerSignature("com.example.Handler", 10).getFirst();
+
+    service.replaceJob(
+        job.id(),
+        new ReplaceJobRequest(
+            job.version(), null, null, null, "com.example.ReplacementHandler", null));
+    service.overview(false);
+    service.overview(false);
+
+    assertThat(validations).hasValue(1);
+    assertThat(store.queueDepthReads).hasValue(2);
   }
 
   @Test

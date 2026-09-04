@@ -132,6 +132,11 @@ public final class DashboardPayloads {
     public DashboardPermission requiredPermission() {
       return replacesDefinition() ? DashboardPermission.ADMIN : DashboardPermission.REPLACE_JOB;
     }
+
+    /** Stable audit action for the fields present in this request. */
+    public String auditAction() {
+      return replacesDefinition() ? "replace_job_definition" : "replace_job";
+    }
   }
 
   /** Recurring-task update; omitted fields preserve the current definition. */
@@ -155,6 +160,11 @@ public final class DashboardPayloads {
       return replacesDefinition()
           ? DashboardPermission.ADMIN
           : DashboardPermission.UPDATE_RECURRING;
+    }
+
+    /** Stable audit action for the fields present in this request. */
+    public String auditAction() {
+      return replacesDefinition() ? "update_recurring_definition" : "update_recurring";
     }
   }
 

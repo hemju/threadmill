@@ -39,7 +39,7 @@ const responses: Record<string, unknown> = {
         id: "018f0000-0000-7000-8000-000000000001",
         state: "ENQUEUED",
         queue: "default",
-        priority: 0,
+        priority: 5,
         handlerType: "com.example.ImportHandler",
         attempts: 0,
         version: 1,
@@ -68,7 +68,7 @@ const responses: Record<string, unknown> = {
       id: "018f0000-0000-7000-8000-000000000001",
       state: "ENQUEUED",
       queue: "default",
-      priority: 0,
+      priority: 5,
       handlerType: "com.example.ImportHandler",
       attempts: 0,
       version: 1,
@@ -143,7 +143,7 @@ it("lets a REPLACE_JOB-only session change queue and priority without selecting 
   const requests: Array<{ url: string; init?: RequestInit }> = [];
   vi.spyOn(window, "prompt")
     .mockReturnValueOnce("critical")
-    .mockReturnValueOnce("5")
+    .mockReturnValueOnce("7")
     .mockReturnValueOnce("");
   vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
     const url = input.toString();
@@ -170,9 +170,43 @@ it("lets a REPLACE_JOB-only session change queue and priority without selecting 
   expect(JSON.parse(request?.init?.body as string)).toEqual({
     expectedVersion: 1,
     queue: "critical",
-    priority: 5
+    priority: 7
   });
   expect(window.prompt).toHaveBeenCalledTimes(3);
+});
+
+it("treats a blank priority as no change", async () => {
+  const requests: Array<{ url: string; init?: RequestInit }> = [];
+  vi.spyOn(window, "prompt")
+    .mockReturnValueOnce("critical")
+    .mockReturnValueOnce("")
+    .mockReturnValueOnce("");
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = input.toString();
+    requests.push({ url, init });
+    const value =
+      url === "/threadmill/api/session"
+        ? { ...(responses[url] as object), permissions: ["READ", "REPLACE_JOB"] }
+        : init?.method === "PATCH"
+          ? { status: "replaced", target: "018f0000-0000-7000-8000-000000000001" }
+          : responses[url] ??
+            responses[url.replace(/state=[^&]+/, "").replace(/handlerType=[^&]+/, "")];
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(value)
+    });
+  });
+
+  render(<App />);
+  await waitFor(() => expect(screen.getByText("com.example.ImportHandler")).toBeInTheDocument());
+  fireEvent.click(screen.getByLabelText("Replace"));
+
+  await waitFor(() => expect(requests.some(({ init }) => init?.method === "PATCH")).toBe(true));
+  const request = requests.find(({ init }) => init?.method === "PATCH");
+  expect(JSON.parse(request?.init?.body as string)).toEqual({
+    expectedVersion: 1,
+    queue: "critical"
+  });
 });
 
 it("uses the runtime API base path override", async () => {

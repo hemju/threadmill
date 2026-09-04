@@ -4,7 +4,9 @@ import static com.hemju.threadmill.dashboard.api.DashboardApiException.badReques
 
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import java.util.HashSet;
 import java.util.Objects;
+import java.util.Set;
 
 import org.springframework.core.ResolvableType;
 import org.springframework.util.ClassUtils;
@@ -129,17 +131,26 @@ final class SpringDashboardJobDefinitionValidator implements DashboardJobDefinit
   }
 
   private static boolean implementsJobHandlerRaw(Class<?> handlerType) {
-    Class<?> cursor = handlerType;
-    while (cursor != null && cursor != Object.class) {
-      for (Type iface : cursor.getGenericInterfaces()) {
-        if (iface == JobHandler.class) return true;
-        if (iface instanceof ParameterizedType parameterized
-            && parameterized.getRawType() == JobHandler.class) {
-          return false;
-        }
+    return implementsJobHandlerRaw(handlerType, new HashSet<>());
+  }
+
+  private static boolean implementsJobHandlerRaw(Class<?> type, Set<Class<?>> visited) {
+    if (type == null || type == Object.class || !visited.add(type)) return false;
+    for (Type genericInterface : type.getGenericInterfaces()) {
+      if (genericInterface == JobHandler.class) return true;
+      if (genericInterface instanceof ParameterizedType parameterized
+          && parameterized.getRawType() == JobHandler.class) {
+        continue;
       }
-      cursor = cursor.getSuperclass();
+      Class<?> interfaceType =
+          switch (genericInterface) {
+            case Class<?> rawInterface -> rawInterface;
+            case ParameterizedType parameterized
+            when parameterized.getRawType() instanceof Class<?> rawInterface -> rawInterface;
+            default -> null;
+          };
+      if (implementsJobHandlerRaw(interfaceType, visited)) return true;
     }
-    return false;
+    return implementsJobHandlerRaw(type.getSuperclass(), visited);
   }
 }

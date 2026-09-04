@@ -78,8 +78,19 @@ public final class DashboardApiService {
       JobStore store,
       LocalWakeBus wakeBus,
       DashboardJobDefinitionValidator jobDefinitionValidator) {
-    return new DashboardApiService(
+    return withDefinitionValidator(
         store, wakeBus, jobDefinitionValidator, DEFAULT_SNAPSHOT_CACHE_TTL);
+  }
+
+  /**
+   * Create a service with executable-definition validation and a custom snapshot-cache TTL.
+   */
+  public static DashboardApiService withDefinitionValidator(
+      JobStore store,
+      LocalWakeBus wakeBus,
+      DashboardJobDefinitionValidator jobDefinitionValidator,
+      Duration snapshotCacheTtl) {
+    return new DashboardApiService(store, wakeBus, jobDefinitionValidator, snapshotCacheTtl);
   }
 
   public DashboardApiService(JobStore store, LocalWakeBus wakeBus, Duration snapshotCacheTtl) {
@@ -397,6 +408,14 @@ public final class DashboardApiService {
             ? null
             : trigger(request.triggerKind(), request.triggerValue(), preMutex.trigger());
     ZoneId requestedZone = request.zone() == null ? null : parseZone(request.zone());
+    boolean completeDefinition = request.handlerType() != null && request.payloadArgument() != null;
+    if (completeDefinition) {
+      // A fully supplied definition does not depend on the under-mutex
+      // reload. Reject it before contending for the task mutex; partial
+      // edits stay inside because their omitted half must come from the
+      // latest definition, not the pre-mutex snapshot.
+      jobDefinitionValidator.validate(JobSpec.of(request.handlerType(), request.payloadArgument()));
+    }
     withTaskMutex(name, () -> {
       CronTask existing =
           store.findCronTask(name).orElseThrow(() -> notFound("recurring task not found"));
@@ -417,7 +436,7 @@ public final class DashboardApiService {
               : request.missedRunPolicy(),
           requestedZone == null ? existing.zone() : requestedZone,
           request.enabled() == null ? existing.enabled() : request.enabled());
-      if (request.replacesDefinition()) {
+      if (request.replacesDefinition() && !completeDefinition) {
         jobDefinitionValidator.validate(
             new JobSpec(task.handlerType(), List.of(task.payloadArgument())));
       }

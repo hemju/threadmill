@@ -92,9 +92,12 @@ public class ThreadmillDashboardApiConfiguration {
       ObjectProvider<TypeNameAliases> aliasesProvider) {
     var serializer = serializerProvider.getIfUnique();
     if (serializer == null) return DashboardJobDefinitionValidator.denyAll();
-    var aliases = aliasesProvider.getIfUnique();
+    var aliases = aliasesProvider.orderedStream().toList();
+    if (aliases.size() > 1) return DashboardJobDefinitionValidator.denyAll();
     return new SpringDashboardJobDefinitionValidator(
-        context.getClassLoader(), serializer, aliases == null ? TypeNameAliases.empty() : aliases);
+        context.getClassLoader(),
+        serializer,
+        aliases.isEmpty() ? TypeNameAliases.empty() : aliases.getFirst());
   }
 
   @Bean

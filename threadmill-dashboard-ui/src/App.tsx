@@ -135,7 +135,7 @@ export default function App() {
     if (queue === null) return;
     const priorityText = window.prompt("Priority", String(job.priority));
     if (priorityText === null) return;
-    const priority = Number(priorityText);
+    const priority = priorityText.trim() === "" ? job.priority : Number(priorityText);
     if (!Number.isInteger(priority)) {
       setError("Priority must be an integer");
       return;

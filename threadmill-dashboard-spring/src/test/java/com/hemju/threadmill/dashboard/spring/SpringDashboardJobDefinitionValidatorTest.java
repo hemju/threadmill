@@ -94,9 +94,13 @@ class SpringDashboardJobDefinitionValidatorTest {
     var rawSpec = JobSpec.of(
         RawHandler.class.getName(),
         new JobArgument(ReportPayload.class.getName(), "{\"name\":\"daily\"}"));
+    var indirectRawSpec = JobSpec.of(
+        IndirectRawHandler.class.getName(),
+        new JobArgument(ReportPayload.class.getName(), "{\"name\":\"daily\"}"));
     var missingPayload = new JobSpec(ReportHandler.class.getName(), List.of());
 
     assertBadRequest(() -> validator.validate(rawSpec), "implements raw JobHandler");
+    assertBadRequest(() -> validator.validate(indirectRawSpec), "implements raw JobHandler");
     assertBadRequest(() -> validator.validate(missingPayload), "requires exactly one payload");
   }
 
@@ -118,6 +122,26 @@ class SpringDashboardJobDefinitionValidatorTest {
     try (var context = new GenericApplicationContext()) {
       context.registerBean("firstSerializer", JobSerializer.class, () -> new JsonJobSerializer());
       context.registerBean("secondSerializer", JobSerializer.class, () -> new JsonJobSerializer());
+      context.refresh();
+      var disabled = config.threadmillDashboardJobDefinitionValidator(
+          context,
+          context.getBeanProvider(JobSerializer.class),
+          context.getBeanProvider(TypeNameAliases.class));
+
+      assertUnsupported(() -> disabled.validate(spec));
+    }
+  }
+
+  @Test
+  void ambiguousTypeNameAliasesSecurelyDisableDefinitionReplacement() {
+    var config = new ThreadmillDashboardApiConfiguration();
+    var spec = JobSpec.of(
+        ReportHandler.class.getName(),
+        new JobArgument(ReportPayload.class.getName(), "{\"name\":\"daily\"}"));
+    try (var context = new GenericApplicationContext()) {
+      context.registerBean("serializer", JobSerializer.class, () -> new JsonJobSerializer());
+      context.registerBean("firstAliases", TypeNameAliases.class, TypeNameAliases::empty);
+      context.registerBean("secondAliases", TypeNameAliases.class, TypeNameAliases::empty);
       context.refresh();
       var disabled = config.threadmillDashboardJobDefinitionValidator(
           context,
@@ -163,6 +187,14 @@ class SpringDashboardJobDefinitionValidatorTest {
 
   @SuppressWarnings("rawtypes")
   private static final class RawHandler implements JobHandler {
+    @Override
+    public void run(JobPayload payload, JobExecutionContext ctx) {}
+  }
+
+  @SuppressWarnings("rawtypes")
+  private interface RawHandlerBase extends JobHandler {}
+
+  private static final class IndirectRawHandler implements RawHandlerBase {
     @Override
     public void run(JobPayload payload, JobExecutionContext ctx) {}
   }
