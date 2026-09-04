@@ -1239,6 +1239,81 @@ class RedisJobStoreRegressionTest {
   }
 
   @Test
+  void startupRepairsAnIndexOldReleaseNodesDriftedAfterTheMarkerExists() throws Exception {
+    // Guard for the PR #120 review (mixed-version data). Once the marker is
+    // set, a node still on the old release can enqueue without adding to
+    // the index and claim without removing from it. A new-release node's
+    // start must repair both; otherwise a low-priority job enqueued by an
+    // old node during the rollout stays invisible to the age gauge for as
+    // long as it starves — exactly what the gauge exists to show.
+    JobStore writer = store(); // sets the marker on the empty layout
+    // Build each job right before its insert: the queue score and the age
+    // index both derive from the state-entry time stamped at build(), so
+    // the sleeps must separate the builds, not just the inserts.
+    Job oldMissingA = Job.builder()
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+        .priority(-5)
+        .build();
+    writer.insert(oldMissingA);
+    Thread.sleep(5);
+    Job oldMissingB = Job.builder()
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+        .priority(-5)
+        .build();
+    writer.insert(oldMissingB);
+    Thread.sleep(5);
+    Job claimedStale = sample();
+    writer.insert(claimedStale);
+    Thread.sleep(5);
+    Job visible = sample();
+    writer.insert(visible);
+    RedisCommands<String, String> r = adminConnection.sync();
+    String index = RedisKeys.queueEnqueuedAt("default");
+    Instant oldMissingAAt = Instant.ofEpochMilli(
+        Long.parseLong(r.hget(RedisKeys.job(oldMissingA.id()), "current_state_at")));
+    Instant visibleAt = Instant.ofEpochMilli(
+        Long.parseLong(r.hget(RedisKeys.job(visible.id()), "current_state_at")));
+    double claimedStaleAt =
+        Double.parseDouble(r.hget(RedisKeys.job(claimedStale.id()), "current_state_at"));
+
+    // Old-release enqueues: in the queue ZSET, never in the index.
+    r.zrem(index, oldMissingA.id().toString(), oldMissingB.id().toString());
+    // Old-release claim: leaves the queue ZSET, stays in the index. The
+    // oldest priority-0 job is claimed; the -5 jobs sort behind it.
+    assertThat(writer.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(claimedStale.id());
+    r.zadd(index, claimedStaleAt, claimedStale.id().toString());
+
+    // Before repair the gauge under-reports: the stale head is dropped and
+    // the two missing old jobs are invisible. Re-seed the stale member so
+    // the start has both shapes to repair.
+    assertThat(writer.oldestEnqueuedAt("default")).contains(visibleAt);
+    r.zadd(index, claimedStaleAt, claimedStale.id().toString());
+    assertThat(r.zcard(index)).isEqualTo(2L);
+    assertThat(r.zcard(RedisKeys.queue("default"))).isEqualTo(3L);
+
+    // The marker is present, yet the cardinalities disagree: this start
+    // re-walks the queue, adds the missing members, and prunes the stale one.
+    r.configResetstat();
+    JobStore restarted = store();
+    assertThat(commandCalls(r, "zscan")).as("mismatch triggered a re-walk").isPositive();
+    assertThat(r.zrange(index, 0, -1))
+        .containsExactlyInAnyOrder(
+            oldMissingA.id().toString(),
+            oldMissingB.id().toString(),
+            visible.id().toString());
+    assertThat(restarted.oldestEnqueuedAt("default")).contains(oldMissingAAt);
+    assertRedisIndexesConsistent();
+
+    // Consistent again, so the next start is back to two ZCARDs per queue.
+    r.configResetstat();
+    store();
+    assertThat(commandCalls(r, "zscan")).as("consistent index re-walked").isZero();
+    assertThat(commandCalls(r, "zcard")).as("cardinality check").isEqualTo(2L);
+  }
+
+  @Test
   void oldestEnqueuedAtDropsStaleHeadsLeftByPreUpgradeClaims() throws Exception {
     JobStore store = store();
     Job first = sample();

@@ -76,15 +76,24 @@ members with pipelined `HGET`s, `ZADD`s them, and then sets the
 The walk runs from Java, never as one Lua call, so it does not hold the
 server. It is idempotent; several new nodes starting together may all run it.
 
+With the marker present, a start still compares each queue's index
+cardinality with its queue ZSET — two `ZCARD`s per queue, no scan — and
+re-walks only a queue where the two differ, adding missing members and
+pruning stale ones (each pruned page is a compare-and-remove Lua call, so a
+concurrent promotion cannot lose a valid member).
+
 During a rolling upgrade, nodes on the old release keep writing without the
-index. Jobs they enqueue are young and drain through normal claims (a new
-node's claim removes a missing member harmlessly). Members they claim,
-delete, or move without removing them from the index are dropped lazily:
-`oldestEnqueuedAt` checks its head against the queue ZSET, which is the
-authority for "ENQUEUED in this queue", and removes a head that has left it
-before looking again. Until the last old node is gone, the age gauge may
-briefly under-report for a queue whose oldest job was enqueued by an old
-node; it never reports a job that is no longer ENQUEUED.
+index. Members they claim, delete, or move without removing them from the
+index are dropped lazily: `oldestEnqueuedAt` checks its head against the
+queue ZSET, which is the authority for "ENQUEUED in this queue", and removes
+a head that has left it before looking again. Jobs they enqueue are missing
+from the index until they drain through normal claims or until any
+new-release node starts and finds the cardinalities disagree; in a rolling
+deploy the last node's own start completes the index. Stale and missing
+members in equal numbers cancel in that comparison; the stale heads are
+dropped by reads, after which the next start sees the shortfall. Job
+processing is never affected — the claim path does not read this index — and
+the gauge never reports a job that is no longer ENQUEUED.
 
 ## Development reset
 

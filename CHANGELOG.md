@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- Redis `oldestEnqueuedAt` — the `threadmill.queue.oldest.enqueued.age`
+  gauge and the dashboard queue view — is now one head read of a per-queue
+  age index (`{threadmill}:queue_enqueued_at:{queue}`, scored by
+  `current_state_at`) instead of a Lua scan that did one `HGET` per ENQUEUED
+  member inside one atomic call on every metrics scrape. The index is
+  maintained inside the same atomic scripts as queue membership. A store
+  started against data written by v0.2.1 or earlier backfills it once from
+  the queue ZSETs (bounded ZSCAN pages from Java) and records the
+  `{threadmill}:layout:queue_enqueued_at` marker; later starts re-walk only
+  a queue whose index cardinality disagrees with its queue ZSET, which is
+  how members enqueued by old-release nodes during a rolling upgrade are
+  picked up. The read drops a stale head that has left the queue before
+  answering. Mixed-version behaviour is documented in the Redis README.
+
 ## 0.2.1
 
 - Fixed Postgres self-owned writes being silently rolled back when the host

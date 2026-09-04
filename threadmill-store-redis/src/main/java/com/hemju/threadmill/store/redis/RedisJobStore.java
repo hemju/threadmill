@@ -1503,25 +1503,58 @@ public final class RedisJobStore implements JobStore {
    * never holds the server the way a single Lua walk would, and ZSCAN's
    * guarantee (every member present for the whole scan is returned at least
    * once) survives concurrent claims that a rank-based page would skip.
-   * ZADD is idempotent, so concurrent new nodes may both run it. During a
-   * rolling upgrade, nodes still on the old release keep writing without
-   * this index: jobs they enqueue are young and drain through normal claims
-   * (a new node's claim removes a missing member harmlessly), and members
-   * they claim without removing are dropped by {@link #oldestEnqueuedAt} on
-   * read. The marker is deliberately not per node — once any new node has
-   * backfilled, the pre-upgrade backlog is indexed for everyone.
+   * ZADD is idempotent, so concurrent new nodes may both run it. The marker
+   * is deliberately not per node — once any new node has backfilled, the
+   * pre-upgrade backlog is indexed for everyone.
+   *
+   * <p>During a rolling upgrade, nodes still on the old release keep writing
+   * without this index: members they claim without removing are dropped by
+   * {@link #oldestEnqueuedAt} on read, and jobs they enqueue are missing from
+   * the index until they drain through normal claims or until any
+   * new-release node starts. With the marker present, a start still compares
+   * each queue's index cardinality with its queue ZSET — two ZCARDs per
+   * queue, no scan — and re-walks only a queue where the two differ, adding
+   * the missing members and pruning the stale ones, so in a rolling deploy
+   * the last node's own start completes the index. Stale and missing members
+   * in equal numbers cancel in that comparison; the stale heads are dropped
+   * by reads, after which the next start sees the shortfall.
    */
   private void backfillQueueEnqueuedAtIndex() {
     RedisClusterCommands<String, String> r = sync();
-    if (r.exists(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT) > 0) return;
+    boolean markerPresent = r.exists(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT) > 0;
     Set<String> queues = r.smembers(RedisKeys.QUEUES);
     if (queues != null) {
       for (String queue : queues) {
+        long indexed = markerPresent ? r.zcard(RedisKeys.queueEnqueuedAt(queue)) : -1L;
+        long depth = markerPresent ? r.zcard(RedisKeys.queue(queue)) : -1L;
+        if (markerPresent && indexed == depth) {
+          // Both hold exactly the queue's ENQUEUED ids in steady state; a
+          // dangling queue member (no job hash) keeps them apart until the
+          // claim path removes it, which costs a bounded re-walk per start,
+          // never a wrong answer.
+          continue;
+        }
         backfillQueueEnqueuedAt(r, queue);
       }
     }
-    r.set(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT, "1");
+    if (!markerPresent) r.set(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT, "1");
   }
+
+  /**
+   * Compare-and-remove for one page of age-index members: a member the queue
+   * ZSET no longer holds is not ENQUEUED in this queue and is dropped. Atomic
+   * per page so a promotion landing between a Java-side ZSCORE and ZREM
+   * cannot lose a freshly re-added valid member.
+   */
+  private static final String PRUNE_STALE_AGE_INDEX_MEMBERS_LUA = """
+      local removed = 0
+      for i = 1, #ARGV do
+        if redis.call('ZSCORE', KEYS[2], ARGV[i]) == false then
+          removed = removed + redis.call('ZREM', KEYS[1], ARGV[i])
+        end
+      end
+      return removed
+      """;
 
   private void backfillQueueEnqueuedAt(RedisClusterCommands<String, String> r, String queue) {
     String queueKey = RedisKeys.queue(queue);
@@ -1549,6 +1582,26 @@ public final class RedisJobStore implements JobStore {
           scoresAndIds.add(members.get(i).getValue());
         }
         if (!scoresAndIds.isEmpty()) r.zadd(indexKey, scoresAndIds.toArray());
+      }
+      cursor = page;
+    } while (!page.isFinished());
+
+    // Second pass: drop members the queue ZSET no longer holds. Empty on a
+    // first-time backfill; during a rolling upgrade it removes members that
+    // old-release nodes claimed, deleted, or moved without touching this
+    // index, which the read path would otherwise drop one head at a time.
+    cursor = ScanCursor.INITIAL;
+    do {
+      page = r.zscan(indexKey, cursor, ScanArgs.Builder.limit(LAYOUT_BACKFILL_PAGE));
+      List<ScoredValue<String>> members = page.getValues();
+      if (members != null && !members.isEmpty()) {
+        var ids = new ArrayList<String>(members.size());
+        for (ScoredValue<String> member : members) ids.add(member.getValue());
+        evalScript(
+            PRUNE_STALE_AGE_INDEX_MEMBERS_LUA,
+            ScriptOutputType.INTEGER,
+            new String[] {indexKey, queueKey},
+            ids.toArray(new String[0]));
       }
       cursor = page;
     } while (!page.isFinished());
