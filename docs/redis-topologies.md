@@ -67,10 +67,10 @@ managed Redis products that block `CONFIG GET`, set
 `threadmill.store.redis.no-eviction-externally-validated=true` only after
 verifying the policy externally.
 
-Monitor `evicted_keys`, `current_eviction_exceeded_time`, and rejected write
-commands. If Redis runs out of memory under `noeviction`, Threadmill treats the
-write failure as a store outage and dispatcher recovery probes perform a small
-write before processing resumes.
+Monitor `evicted_keys`, `current_eviction_exceeded_time`, and
+`threadmill.store.writes.rejected`. If Redis runs out of memory under
+`noeviction`, Threadmill treats the write failure as a store outage and
+dispatcher recovery probes perform a small write before processing resumes.
 
 For managed Redis products that block `CONFIG GET`, document the external
 validation in the application's runbook before setting the override. The
@@ -89,5 +89,8 @@ script leaves the job `ENQUEUED`; a crash after the script leaves a complete
 
 Threadmill treats Redis as first-class durable storage, but only with the
 production constraints above: AOF enabled, `noeviction`, and alerts on oldest
-processing heartbeat, reclaim count, claim failures, rejected writes, and
-queue depth.
+processing heartbeat (`threadmill.processing.oldest.heartbeat.age`), reclaim
+count (`threadmill.jobs.orphan.reclaimed`), claim failures
+(`threadmill.claim.failures`), rejected writes
+(`threadmill.store.writes.rejected`), and queue depth
+(`threadmill.queue.depth`).

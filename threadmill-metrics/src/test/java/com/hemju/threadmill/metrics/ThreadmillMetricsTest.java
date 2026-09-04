@@ -1,10 +1,14 @@
 package com.hemju.threadmill.metrics;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
@@ -22,9 +26,13 @@ import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
+import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
+import com.hemju.threadmill.test.ForwardingJobStore;
 
 class ThreadmillMetricsTest {
+
+  private static final Duration TEST_REFRESH_INTERVAL = Duration.ofMillis(5);
 
   public static final class P implements JobPayload {
     public String s;
@@ -53,14 +61,15 @@ class ThreadmillMetricsTest {
   }
 
   @Test
-  void recordsCountsTimerAndFailureCounter() {
+  void recordsCountsTimersAndFailureCountersThroughTheMeteredStore() {
     OkHandler.COUNT.set(0);
-    var store = new InMemoryJobStore();
+    var backingStore = new InMemoryJobStore();
     var registry = new SimpleMeterRegistry();
-    var metrics = new ThreadmillMetrics(registry, store);
+    var metrics = new ThreadmillMetrics(registry, backingStore);
+    var store = metrics.meteredStore();
     var scheduler = new Scheduler(store, new JsonJobSerializer());
 
-    ProcessingNode node = ProcessingNode.builder(store)
+    var node = ProcessingNode.builder(store)
         .config(ProcessingNodeConfig.builder()
             .workerCount(2)
             .pollInterval(Duration.ofMillis(30))
@@ -79,8 +88,6 @@ class ThreadmillMetricsTest {
       scheduler.enqueue(new P("oops"), FailHandler.class);
 
       await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
-        // The per-completion refresh is coalesced (1s TTL); force a fresh
-        // read so the gauges reflect the final state within the window.
         metrics.refresh();
         assertThat(registry.counter("threadmill.jobs.processed").count()).isEqualTo(1.0);
         assertThat(
@@ -88,19 +95,187 @@ class ThreadmillMetricsTest {
             .isGreaterThanOrEqualTo(1.0);
         assertThat(registry.timer("threadmill.jobs.processing.time").count())
             .isGreaterThanOrEqualTo(2L);
-        // State gauges: SUCCEEDED >= 1, FAILED >= 1.
-        Double succeededCount = registry
-            .find("threadmill.jobs.count")
-            .tag("state", JobState.SUCCEEDED.name())
-            .gauge()
-            .value();
-        Double failedCount = registry
-            .find("threadmill.jobs.count")
-            .tag("state", JobState.FAILED.name())
-            .gauge()
-            .value();
-        assertThat(succeededCount).isGreaterThanOrEqualTo(1.0);
-        assertThat(failedCount).isGreaterThanOrEqualTo(1.0);
+        assertThat(registry.timer("threadmill.claim.latency").count()).isPositive();
+        assertThat(stateGauge(registry, JobState.SUCCEEDED)).isGreaterThanOrEqualTo(1.0);
+        assertThat(stateGauge(registry, JobState.FAILED)).isGreaterThanOrEqualTo(1.0);
+      });
+    } finally {
+      node.close();
+    }
+  }
+
+  @Test
+  void pullRefreshTracksStalledProcessingWithoutACompletion() {
+    var store = new InMemoryJobStore();
+    var registry = new SimpleMeterRegistry();
+    new ThreadmillMetrics(registry, store, TEST_REFRESH_INTERVAL, 10);
+    var job = newJob("stalled");
+    store.insert(job);
+    store.claimReady(NodeId.newId(), "stalled", 1, Instant.now().minusSeconds(2));
+
+    await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+      assertThat(stateGauge(registry, JobState.PROCESSING)).isEqualTo(1d);
+      assertThat(
+              registry.get("threadmill.processing.oldest.heartbeat.age").gauge().value())
+          .isGreaterThanOrEqualTo(1_000d);
+    });
+  }
+
+  @Test
+  void pullRefreshReportsPausedQueueDepthWithoutACompletion() {
+    var store = new InMemoryJobStore();
+    var registry = new SimpleMeterRegistry();
+    new ThreadmillMetrics(registry, store, TEST_REFRESH_INTERVAL, 10);
+    store.pauseQueue("paused", "maintenance");
+    store.insert(newJob("paused"));
+
+    await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+      assertThat(stateGauge(registry, JobState.ENQUEUED)).isEqualTo(1d);
+      assertThat(registry
+              .get("threadmill.queue.depth")
+              .tag("queue", "paused")
+              .gauge()
+              .value())
+          .isEqualTo(1d);
+    });
+  }
+
+  @Test
+  void pullRefreshRegistersANewlyAppearingQueue() {
+    var store = new InMemoryJobStore();
+    var registry = new SimpleMeterRegistry();
+    new ThreadmillMetrics(registry, store, TEST_REFRESH_INTERVAL, 10);
+    store.insert(newJob("new-queue"));
+
+    await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+      assertThat(stateGauge(registry, JobState.ENQUEUED)).isEqualTo(1d);
+      assertThat(
+              registry.find("threadmill.queue.depth").tag("queue", "new-queue").gauge())
+          .isNotNull();
+    });
+  }
+
+  @Test
+  void failedPullRefreshRetainsTheLastSnapshotAndMarksItStaleUntilRecovery() {
+    var backingStore = new InMemoryJobStore();
+    backingStore.insert(newJob("q"));
+    var failingStore = new SnapshotFailureStore(backingStore);
+    var registry = new SimpleMeterRegistry();
+    new ThreadmillMetrics(registry, failingStore, TEST_REFRESH_INTERVAL, 10);
+    backingStore.insert(newJob("q"));
+    failingStore.failRefresh.set(true);
+
+    await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+      assertThat(stateGauge(registry, JobState.ENQUEUED))
+          .as("last successful snapshot stays visible")
+          .isEqualTo(1d);
+      assertThat(registry.get("threadmill.metrics.snapshot.stale").gauge().value())
+          .isEqualTo(1d);
+      assertThat(registry.counter("threadmill.metrics.refresh.errors").count()).isPositive();
+      assertThat(registry.get("threadmill.metrics.snapshot.age").gauge().value())
+          .isNotNegative();
+    });
+
+    failingStore.failRefresh.set(false);
+    await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+      assertThat(stateGauge(registry, JobState.ENQUEUED)).isEqualTo(2d);
+      assertThat(registry.get("threadmill.metrics.snapshot.stale").gauge().value())
+          .isZero();
+    });
+  }
+
+  @Test
+  void queueTagCardinalityIsCappedAndAReleasedSlotAdmitsANewQueue() {
+    var store = new InMemoryJobStore();
+    var registry = new SimpleMeterRegistry();
+    var metrics = new ThreadmillMetrics(registry, store, Duration.ofHours(1), 2);
+    store.insert(newJob("q1"));
+    store.insert(newJob("q2"));
+    store.insert(newJob("q3"));
+
+    metrics.refresh();
+
+    assertThat(registry.find("threadmill.queue.depth").gauges()).hasSize(2);
+    assertThat(registry.find("threadmill.queue.depth").tag("queue", "q1").gauge())
+        .isNotNull();
+    assertThat(registry.find("threadmill.queue.depth").tag("queue", "q2").gauge())
+        .isNotNull();
+    assertThat(registry.find("threadmill.queue.depth").tag("queue", "q3").gauge())
+        .isNull();
+    assertThat(registry.get("threadmill.metrics.queue.tags.omitted").gauge().value())
+        .isEqualTo(1d);
+
+    finishQueue(store, "q1");
+    metrics.refresh();
+
+    assertThat(registry.find("threadmill.queue.depth").gauges()).hasSize(2);
+    assertThat(registry.find("threadmill.queue.depth").tag("queue", "q1").gauge())
+        .isNull();
+    assertThat(registry.find("threadmill.queue.depth").tag("queue", "q3").gauge())
+        .isNotNull();
+    assertThat(registry.get("threadmill.metrics.queue.tags.omitted").gauge().value())
+        .isZero();
+  }
+
+  @Test
+  void meteredStoreRecordsClaimFailuresAndRejectedWritesAtTheirBoundaries() {
+    var backingStore = new InMemoryJobStore();
+    var failingStore = new BoundaryFailureStore(backingStore);
+    var registry = new SimpleMeterRegistry();
+    var metrics = new ThreadmillMetrics(registry, failingStore);
+    var store = metrics.meteredStore();
+
+    store.claimReady(NodeId.newId(), "q", 1, Instant.now());
+    failingStore.failClaim.set(true);
+    assertThatThrownBy(() -> store.claimReady(NodeId.newId(), "q", 1, Instant.now()))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("claim unavailable");
+    failingStore.failInsert.set(true);
+    assertThatThrownBy(() -> store.insert(newJob("q")))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessage("write rejected");
+
+    assertThat(registry.timer("threadmill.claim.latency").count()).isEqualTo(2L);
+    assertThat(registry.timer("threadmill.claim.latency").getId().getTags()).isEmpty();
+    assertThat(registry.counter("threadmill.claim.failures").count()).isEqualTo(1d);
+    assertThat(registry.counter("threadmill.claim.failures").getId().getTags()).isEmpty();
+    assertThat(registry
+            .counter("threadmill.store.writes.rejected", "operation", "insert")
+            .count())
+        .isEqualTo(1d);
+  }
+
+  @Test
+  void orphanReclaimHasADedicatedCounterAtThePersistedFailureBoundary() {
+    var backingStore = new InMemoryJobStore();
+    var registry = new SimpleMeterRegistry();
+    var metrics = new ThreadmillMetrics(registry, backingStore);
+    var orphan = newJob("orphan");
+    backingStore.insert(orphan);
+    backingStore.claimReady(
+        NodeId.newId(), "orphan", 1, Instant.now().minus(Duration.ofSeconds(2)));
+    var node = ProcessingNode.builder(metrics.meteredStore())
+        .config(ProcessingNodeConfig.builder()
+            .workerCount(1)
+            .pollInterval(Duration.ofMillis(20))
+            .maintenancePollInterval(Duration.ofMillis(10))
+            .claimHeartbeat(Duration.ofMillis(40))
+            .heartbeatTimeout(Duration.ofMillis(100))
+            .defaultMaxAttempts(1)
+            .build())
+        .interceptor(metrics.asInterceptor())
+        .build();
+
+    try {
+      node.start();
+      await().atMost(Duration.ofSeconds(2)).untilAsserted(() -> {
+        assertThat(registry.counter("threadmill.jobs.orphan.reclaimed").count()).isEqualTo(1d);
+        assertThat(registry
+                .counter("threadmill.jobs.failed", "cause", "ORPHAN_RECLAIM")
+                .count())
+            .isEqualTo(1d);
+        assertThat(backingStore.findById(orphan.id()).orElseThrow().currentState())
+            .isEqualTo(JobState.FAILED);
       });
     } finally {
       node.close();
@@ -113,23 +288,14 @@ class ThreadmillMetricsTest {
     var registry = new SimpleMeterRegistry();
     var metrics = new ThreadmillMetrics(registry, store);
 
-    var job = Job.builder()
-        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
-        .queue("q1")
-        .build();
-    store.insert(job);
+    store.insert(newJob("q1"));
     metrics.refresh();
     assertThat(registry.find("threadmill.queue.depth").tag("queue", "q1").gauge())
         .isNotNull();
 
-    // Drain q1 so it has no ENQUEUED work and drops out of queueDepths().
-    var node = NodeId.newId();
-    Job claimed = store.claimReady(node, "q1", 1, Instant.now()).get(0);
-    claimed.transitionTo(JobState.SUCCEEDED, Instant.now());
-    claimed.clearOwner();
-    store.saveAtomic(claimed, claimed.version());
-
+    finishQueue(store, "q1");
     metrics.refresh();
+
     assertThat(registry.find("threadmill.queue.depth").tag("queue", "q1").gauge())
         .isNull();
     assertThat(registry
@@ -141,41 +307,20 @@ class ThreadmillMetricsTest {
 
   @Test
   void refreshIsCoalescedNotRunOnEveryCompletion() {
-    var real = new InMemoryJobStore();
-    var countsCalls = new AtomicInteger();
-    var counting =
-        (com.hemju.threadmill.core.store.JobStore) java.lang.reflect.Proxy.newProxyInstance(
-            getClass().getClassLoader(),
-            new Class<?>[] {com.hemju.threadmill.core.store.JobStore.class},
-            (proxy, method, args) -> {
-              if (method.getName().equals("countsByState")) {
-                countsCalls.incrementAndGet();
-              }
-              try {
-                return method.invoke(real, args);
-              } catch (java.lang.reflect.InvocationTargetException e) {
-                throw e.getCause();
-              }
-            });
-    var metrics =
-        new ThreadmillMetrics(new SimpleMeterRegistry(), counting); // constructor refresh -> 1
+    var countingStore = new CountingStore(new InMemoryJobStore());
+    var metrics = new ThreadmillMetrics(new SimpleMeterRegistry(), countingStore);
     var interceptor = metrics.asInterceptor();
-    var job = Job.builder()
-        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
-        .build();
+    var job = newJob("default");
 
     for (int i = 0; i < 5; i++) {
       interceptor.onProcessingSucceeded(job, null);
     }
 
-    // The 1s TTL coalesces: constructor (1) + at most one throttled refresh.
-    assertThat(countsCalls.get()).isLessThanOrEqualTo(2);
+    assertThat(countingStore.countsCalls.get()).isEqualTo(1);
   }
 
   @Test
   void recurringRunsCounterTagsTheTriggerOriginWithBoundedCardinality() {
-    // Issue #108 observability: schedule-fired, nudged, and operator
-    // force-triggered instances must be distinguishable in metrics.
     var registry = new SimpleMeterRegistry();
     var metrics = new ThreadmillMetrics(registry, new InMemoryJobStore());
     var interceptor = metrics.asInterceptor();
@@ -184,15 +329,8 @@ class ThreadmillMetricsTest {
     interceptor.onProcessingStarting(jobWithOrigin(JobExecutionContext.CRON_ORIGIN_NUDGE), null);
     interceptor.onProcessingStarting(jobWithOrigin(JobExecutionContext.CRON_ORIGIN_NUDGE), null);
     interceptor.onProcessingStarting(jobWithOrigin(JobExecutionContext.CRON_ORIGIN_MANUAL), null);
-    // Arbitrary metadata values are clamped so user-controlled strings
-    // can never explode the tag cardinality.
     interceptor.onProcessingStarting(jobWithOrigin("attacker-controlled"), null);
-    // Non-recurring jobs record nothing.
-    interceptor.onProcessingStarting(
-        Job.builder()
-            .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
-            .build(),
-        null);
+    interceptor.onProcessingStarting(newJob("default"), null);
 
     assertThat(recurringRuns(registry, JobExecutionContext.CRON_ORIGIN_NUDGE)).isEqualTo(2.0);
     assertThat(recurringRuns(registry, JobExecutionContext.CRON_ORIGIN_SCHEDULE))
@@ -204,9 +342,6 @@ class ThreadmillMetricsTest {
 
   @Test
   void recurringRunsCounterCountsInstancesNotRetryAttempts() {
-    // The hook fires per attempt, but operators read the
-    // nudge-versus-schedule ratio off this meter — a retry-storming task
-    // would inflate both origins and make that reading meaningless.
     var registry = new SimpleMeterRegistry();
     var interceptor = new ThreadmillMetrics(registry, new InMemoryJobStore()).asInterceptor();
 
@@ -218,6 +353,28 @@ class ThreadmillMetricsTest {
     assertThat(recurringRuns(registry, JobExecutionContext.CRON_ORIGIN_NUDGE))
         .as("one instance that was retried four times is still one instance")
         .isEqualTo(1.0);
+  }
+
+  private static Job newJob(String queue) {
+    return Job.builder()
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+        .queue(queue)
+        .build();
+  }
+
+  private static void finishQueue(InMemoryJobStore store, String queue) {
+    var claimed = store.claimReady(NodeId.newId(), queue, 1, Instant.now()).getFirst();
+    claimed.transitionTo(JobState.SUCCEEDED, Instant.now());
+    claimed.clearOwner();
+    store.saveAtomic(claimed, claimed.version());
+  }
+
+  private static double stateGauge(SimpleMeterRegistry registry, JobState state) {
+    return registry
+        .get("threadmill.jobs.count")
+        .tag("state", state.name())
+        .gauge()
+        .value();
   }
 
   private static Job nudgedJobOnAttempt(int attempt) {
@@ -241,5 +398,60 @@ class ThreadmillMetricsTest {
         .tag("origin", origin)
         .counter()
         .count();
+  }
+
+  private static final class CountingStore extends ForwardingJobStore {
+    private final AtomicInteger countsCalls = new AtomicInteger();
+
+    private CountingStore(JobStore delegate) {
+      super(delegate);
+    }
+
+    @Override
+    public Map<JobState, Long> countsByState() {
+      countsCalls.incrementAndGet();
+      return super.countsByState();
+    }
+  }
+
+  private static final class SnapshotFailureStore extends ForwardingJobStore {
+    private final AtomicBoolean failRefresh = new AtomicBoolean();
+
+    private SnapshotFailureStore(JobStore delegate) {
+      super(delegate);
+    }
+
+    @Override
+    public Map<JobState, Long> countsByState() {
+      if (failRefresh.get()) {
+        throw new IllegalStateException("store unavailable");
+      }
+      return super.countsByState();
+    }
+  }
+
+  private static final class BoundaryFailureStore extends ForwardingJobStore {
+    private final AtomicBoolean failClaim = new AtomicBoolean();
+    private final AtomicBoolean failInsert = new AtomicBoolean();
+
+    private BoundaryFailureStore(JobStore delegate) {
+      super(delegate);
+    }
+
+    @Override
+    public List<Job> claimReady(NodeId nodeId, String queue, int max, Instant heartbeatAt) {
+      if (failClaim.get()) {
+        throw new IllegalStateException("claim unavailable");
+      }
+      return super.claimReady(nodeId, queue, max, heartbeatAt);
+    }
+
+    @Override
+    public void insert(Job job) {
+      if (failInsert.get()) {
+        throw new IllegalStateException("write rejected");
+      }
+      super.insert(job);
+    }
   }
 }

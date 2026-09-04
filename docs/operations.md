@@ -28,8 +28,26 @@ and heartbeats stop; the maintenance leader then reclaims the job after
 
 Use `ThreadmillMetrics` with a Micrometer registry. Key meters include job
 counts by state, queue depths, oldest enqueued age by queue, oldest processing
-heartbeat age, processed/failed counters, processing time, claim latency, and
-metric refresh errors.
+heartbeat age, processed/failed counters, orphan reclaim, processing time,
+claim latency/failures, rejected writes, and metric refresh health.
+
+Wire `metrics.meteredStore()` into both processing nodes and producers, plus
+`metrics.asInterceptor()` into each processing node. Claims and rejected
+writes are observed at that store boundary; the interceptor records lifecycle
+signals only after their state transition commits.
+
+Store gauges refresh on pull at most once per second by default, even when no
+job completes. A failed refresh retains the last successful counts/depths,
+keeps age gauges advancing from the last known timestamps, sets
+`threadmill.metrics.snapshot.stale` to `1`, and increments
+`threadmill.metrics.refresh.errors`. Treat those values as last-known data
+until stale clears; use `threadmill.metrics.snapshot.age` to judge their age.
+
+Queue tags are capped at 100 active queues per metrics instance by default.
+`threadmill.metrics.queue.tags.omitted` reports how many active queues did not
+receive a tag slot. Drained queues release slots for newly appearing queues.
+The constructor overload accepts a different refresh interval and queue cap;
+zero disables per-queue meters.
 
 ## Datastores
 
