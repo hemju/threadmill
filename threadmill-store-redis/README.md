@@ -48,6 +48,8 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:queues` | SET | Active queue names (membership maintained by `claim_commit`). |
 | `{threadmill}:queue_keys:{queue}` | HASH | Concurrency key → count of ENQUEUED keyed jobs of that key in the queue. The claim path uses a rotating bounded HSCAN cursor, so one pass stays bounded even at high key cardinality. |
 | `{threadmill}:queue_unkeyed:{queue}` | ZSET | ENQUEUED unkeyed job ids, scored like the queue ZSET. The unkeyed claim lane never pages past keyed work. |
+| `{threadmill}:queue_enqueued_at:{queue}` | ZSET | Every ENQUEUED job id in the queue, scored by `current_state_at` millis. `oldestEnqueuedAt` (the `threadmill.queue.oldest.enqueued.age` gauge and the dashboard queue view) reads its head with one `ZRANGE 0 0 WITHSCORES`, so the age gauge never scans the priority-ordered queue ZSET. Maintained inside the same atomic scripts as queue membership. |
+| `{threadmill}:layout:queue_enqueued_at` | STRING | Marker that the age index has been backfilled from a pre-index layout (v0.2.1 and earlier). See *Layout upgrades*. |
 | `{threadmill}:queue_pauses` | HASH | Paused queue → reason. |
 | `{threadmill}:cron_task_namespace:{namespace}` | SET | Cron task names owned by one reconciliation namespace. |
 | `{threadmill}:cron_task_namespaces` | SET | Known recurring reconciliation namespaces. |
@@ -62,6 +64,50 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:concurrency:{key}:workflows` | HASH | Workflow root id → active outstanding hold count. Presence means the workflow currently owns the key. |
 | `{threadmill}:concurrency:{key}:workflow_counts` | HASH | Workflow root id → total non-terminal job count. Maintained incrementally so claim does not scan active jobs. |
 | `{threadmill}:concurrency:{key}:claim_lock` | STRING | Short-lived mutex around per-key claim bookkeeping. |
+
+## Layout upgrades
+
+The age index `{threadmill}:queue_enqueued_at:{queue}` did not exist before
+v0.2.2. The `{threadmill}:layout:queue_enqueued_at` STRING records how far
+the upgrade has progressed, and every store construction advances it before
+serving a read:
+
+- **Absent** (data written by v0.2.1 or earlier) or **`backfilled`** (a
+  rolling upgrade in progress): every registered queue is reconciled exactly.
+  The registry is paged with `SSCAN`, each queue ZSET with `ZSCAN`; members
+  get their `current_state_at` through pipelined `HGET`s and are `ZADD`ed;
+  a second pass prunes index members the queue ZSET no longer holds through a
+  per-page compare-and-remove Lua call. The walk runs from Java, never as one
+  Lua call, so it does not hold the server, and it is idempotent, so several
+  new nodes starting together may all run it. The state becomes
+  `backfilled`.
+- **`backfilled` → `complete`** as soon as no old-release node is live.
+  New-release nodes write `{threadmill}:node:layout:{nodeId}` next to their
+  heartbeat with the same TTL, so a live heartbeat without it identifies an
+  old-release node. The transition is attempted at every start and, so the
+  last old node's exit needs no restart, from `oldestEnqueuedAt` once that
+  node's heartbeat has expired: a final exact reconciliation in a background
+  virtual thread, then the state write. Until then the read pays one `GET`
+  and a node-registry probe; afterwards nothing.
+- **`complete`**: two `ZCARD`s per queue at start, no scan, and a re-walk only
+  where the index and queue cardinalities disagree.
+
+**Upgrade procedure.** Roll the new release out node by node as usual. Stop
+any producer-only process still on the old release (a Spring application
+that enqueues but runs no `ProcessingNode`) before the rollout completes:
+such a process has no heartbeat, so the store cannot see it, and a job it
+enqueues after the layout is `complete` is missing from the index until it
+drains or until a start finds the cardinalities disagree.
+
+**Mixed-version guarantees.** Job processing is never affected — the claim
+path does not read this index. The gauge never reports a job that is no
+longer ENQUEUED: `oldestEnqueuedAt` verifies its head against the queue ZSET,
+the authority for "ENQUEUED in this queue", and drops a head that has left it
+through the same compare-and-remove call, so a retry or promotion that
+re-enqueues the job in between cannot lose the valid member. It may
+under-report a queue whose oldest job was enqueued by an old-release node
+until that job drains, any new-release node starts, or the layout finalizes,
+whichever comes first.
 
 ## Development reset
 

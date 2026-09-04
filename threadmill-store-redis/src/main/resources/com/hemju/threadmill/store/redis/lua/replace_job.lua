@@ -16,6 +16,8 @@
 --   [12] old queue_unkeyed ZSET
 --   [13] new queue_unkeyed ZSET
 --   [14] concurrency pending_root ZSET, or empty (key/mode/root are preserved)
+--   [15] old queue_enqueued_at ZSET (ENQUEUED ids scored by current_state_at millis)
+--   [16] new queue_enqueued_at ZSET
 --
 -- ARGV:
 --   [1] job id (string member of zsets)
@@ -51,6 +53,8 @@ local new_queue_keys_key = KEYS[11]
 local old_unkeyed_key    = KEYS[12]
 local new_unkeyed_key    = KEYS[13]
 local pending_root_key   = KEYS[14]
+local old_enqueued_at_key = KEYS[15]
+local new_enqueued_at_key = KEYS[16]
 
 local job_id        = ARGV[1]
 local expected_ver  = tonumber(ARGV[2])
@@ -118,6 +122,9 @@ if old_handler_k ~= new_handler_k then
 end
 if state == 'ENQUEUED' then
     redis.call('SADD', queues_key, new_queue)
+    -- Age index follows the queue move and the rescored state time.
+    redis.call('ZREM', old_enqueued_at_key, job_id)
+    redis.call('ZADD', new_enqueued_at_key, new_state_at, job_id)
 end
 -- Rescore in the by_state_time index too (state is unchanged).
 redis.call('ZADD', state_time_k, new_state_at, job_id)

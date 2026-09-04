@@ -15,6 +15,7 @@ local queues_key          = KEYS[12]
 local queue_keys_key      = KEYS[13]
 local unkeyed_key         = KEYS[14]
 local pending_root_key    = KEYS[15]
+local enqueued_at_key     = KEYS[16]
 
 local job_id           = ARGV[1]
 local body             = ARGV[2]
@@ -107,6 +108,7 @@ if awaiting_parent_key ~= '' and state == 'AWAITING' then
 end
 if state == 'ENQUEUED' then
     redis.call('SADD', queues_key, queue)
+    redis.call('ZADD', enqueued_at_key, state_time, job_id)
     if concurrency_key ~= '' then
         redis.call('HINCRBY', queue_keys_key, concurrency_key, 1)
     else

@@ -37,6 +37,22 @@
   `ProcessingNodeConfig.MAX_TIMEOUT` (one hundred years) degrades to the global
   timeout instead of overflowing before the handler runs. The config rejects
   `jobTimeout`, `noProgressTimeout`, and `shutdownGracePeriod` above that bound.
+- Redis `oldestEnqueuedAt` — the `threadmill.queue.oldest.enqueued.age`
+  gauge and the dashboard queue view — is now one head read of a per-queue
+  age index (`{threadmill}:queue_enqueued_at:{queue}`, scored by
+  `current_state_at`) instead of a Lua scan that did one `HGET` per ENQUEUED
+  member inside one atomic call on every metrics scrape. The index is
+  maintained inside the same atomic scripts as queue membership. A store
+  started against data written by v0.2.1 or earlier backfills it once from
+  the queue ZSETs (bounded SSCAN / ZSCAN pages from Java) and records the
+  `{threadmill}:layout:queue_enqueued_at` state: `backfilled` while any
+  old-release node heartbeat is live (every start reconciles exactly),
+  `complete` once none remains (finalized from a read, so the last old
+  node's exit needs no restart; later starts check two ZCARDs per queue).
+  New-release nodes write `{threadmill}:node:layout:{nodeId}` next to their
+  heartbeat for that detection. The read verifies its head against the queue
+  ZSET and drops a stale head through an atomic compare-and-remove. Upgrade
+  procedure and mixed-version guarantees are in the Redis README.
 
 ## 0.2.1
 
