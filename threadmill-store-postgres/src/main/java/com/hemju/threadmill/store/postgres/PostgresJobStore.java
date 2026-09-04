@@ -23,6 +23,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import javax.sql.DataSource;
 
@@ -94,6 +95,7 @@ public final class PostgresJobStore implements JobStore {
   private final JobStoreCapabilities capabilities;
   private final String serverVersion;
   private final String databaseName;
+  private final Map<String, String> pendingKeyCursors = new ConcurrentHashMap<>();
 
   public PostgresJobStore(DataSource dataSource) {
     this(dataSource, new JsonJobSerializer(), JobStoreCapabilities.defaults());
@@ -622,7 +624,7 @@ public final class PostgresJobStore implements JobStore {
     }
   }
 
-  /** Keys enumerated per gathering pass; beyond this, later passes / polls pick up the rest. */
+  /** Keys enumerated per gathering pass; a per-queue cursor rotates later polls through the rest. */
   private static final int MAX_PENDING_KEYS_PER_PASS = 512;
 
   /**
@@ -769,6 +771,9 @@ public final class PostgresJobStore implements JobStore {
    * Distinct concurrency keys with ENQUEUED members in this queue, via a
    * recursive-CTE loose scan over the queue-scoped pending index —
    * one index probe per key, independent of how many rows each key holds.
+   * Each queue keeps a process-local keyset cursor so a page of blocked
+   * early keys cannot permanently hide later claimable keys; reaching the
+   * end wraps the next scan to the first key.
    * (Chosen over {@code SELECT DISTINCT}, whose plan may degrade to a full
    * index scan.) Claims are per-queue, so keys whose pending work lives
    * only in other queues must not be probed at all: a cross-queue key
@@ -776,9 +781,36 @@ public final class PostgresJobStore implements JobStore {
    * 415k backlog.
    */
   private List<String> distinctEnqueuedKeys(Connection conn, String queue) throws SQLException {
+    var after = pendingKeyCursors.get(queue);
+    var keys = distinctEnqueuedKeysAfter(conn, queue, after);
+    if (keys.isEmpty() && after != null) {
+      if (!pendingKeyCursors.remove(queue, after)) {
+        // Another claimer advanced this queue while our query ran. Do not
+        // overwrite its newer cursor with a wrap based on stale state.
+        return List.of();
+      }
+      after = null;
+      keys = distinctEnqueuedKeysAfter(conn, queue, null);
+    }
+    if (!keys.isEmpty()) {
+      if (after == null) {
+        pendingKeyCursors.putIfAbsent(queue, keys.getLast());
+      } else {
+        // A slow poll must never move the cursor behind a faster poll that
+        // already advanced it from the same starting point.
+        pendingKeyCursors.replace(queue, after, keys.getLast());
+      }
+    }
+    return keys;
+  }
+
+  private List<String> distinctEnqueuedKeysAfter(Connection conn, String queue, String after)
+      throws SQLException {
+    var cursorPredicate = after == null ? "" : " AND concurrency_key > ?";
     try (PreparedStatement ps = conn.prepareStatement("WITH RECURSIVE keys(k) AS ("
         + "  (SELECT concurrency_key FROM threadmill_jobs "
         + "   WHERE queue = ? AND concurrency_key IS NOT NULL AND state = 'ENQUEUED' "
+        + cursorPredicate
         + "   ORDER BY concurrency_key LIMIT 1) "
         + "  UNION ALL "
         + "  SELECT (SELECT j.concurrency_key FROM threadmill_jobs j "
@@ -786,11 +818,15 @@ public final class PostgresJobStore implements JobStore {
         + "          ORDER BY j.concurrency_key LIMIT 1) "
         + "  FROM keys WHERE keys.k IS NOT NULL) "
         + "SELECT k FROM keys WHERE k IS NOT NULL LIMIT ?")) {
-      ps.setString(1, queue);
-      ps.setString(2, queue);
-      ps.setInt(3, MAX_PENDING_KEYS_PER_PASS);
+      var parameter = 1;
+      ps.setString(parameter++, queue);
+      if (after != null) {
+        ps.setString(parameter++, after);
+      }
+      ps.setString(parameter++, queue);
+      ps.setInt(parameter, MAX_PENDING_KEYS_PER_PASS);
       try (ResultSet rs = ps.executeQuery()) {
-        var keys = new ArrayList<String>();
+        var keys = new ArrayList<String>(MAX_PENDING_KEYS_PER_PASS);
         while (rs.next()) {
           keys.add(rs.getString(1));
         }

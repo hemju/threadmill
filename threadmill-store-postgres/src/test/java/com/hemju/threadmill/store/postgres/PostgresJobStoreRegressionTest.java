@@ -334,6 +334,37 @@ class PostgresJobStoreRegressionTest {
   }
 
   @Test
+  void keyedClaimRotationReachesClaimableWorkBeyondTheFirstBlockedPage() {
+    var setupStore = store();
+    var blockedKeyCount = 512;
+    var blockers = new ArrayList<Job>(blockedKeyCount);
+    for (int i = 0; i < blockedKeyCount; i++) {
+      blockers.add(keyedJob("blocked:%04d".formatted(i)));
+    }
+    setupStore.insertAll(blockers);
+    assertThat(setupStore.claimReady(NodeId.newId(), "default", blockedKeyCount, Instant.now()))
+        .hasSize(blockedKeyCount);
+
+    var blockedWaiters = new ArrayList<Job>(blockedKeyCount);
+    for (int i = 0; i < blockedKeyCount; i++) {
+      blockedWaiters.add(keyedJob("blocked:%04d".formatted(i)));
+    }
+    setupStore.insertAll(blockedWaiters);
+    var laterClaimable = keyedJob("claimable:after-blocked-page");
+    setupStore.insert(laterClaimable);
+
+    // A fresh store starts at the lexicographically first key. The first
+    // page contains exactly the 512 blocked keys; subsequent polls must
+    // rotate beyond that page instead of inspecting it forever.
+    var claimingStore = store();
+    var claimed = new ArrayList<Job>();
+    for (int poll = 0; poll < 3 && claimed.isEmpty(); poll++) {
+      claimed.addAll(claimingStore.claimReady(NodeId.newId(), "default", 1, Instant.now()));
+    }
+    assertThat(claimed).extracting(Job::id).containsExactly(laterClaimable.id());
+  }
+
+  @Test
   void claimReadyIsAtomicAcrossManyConcurrentVirtualThreads() throws Exception {
     JobStore store = store();
     int total = 200;
