@@ -2,6 +2,41 @@
 
 ## Unreleased
 
+- Handlers can see the engine's deadline coming (issue #119).
+  `JobExecutionContext` gains `deadline()` and `remaining()`, computed by the
+  same rule the timeout watchdog uses — `claimedAt` plus the effective timeout
+  before the first check-in, the most recent check-in plus
+  `noProgressTimeout` after it — and capped at the end of the node's
+  `shutdownGracePeriod` once `close()` begins, so a handler that runs a loop
+  of costly steps can stop before the interrupt instead of being cut off
+  mid-step by a timeout or a rolling deploy. `cancellation()` /
+  `isCancelled()` report why the engine abandoned an attempt (`TIMEOUT` or
+  `SHUTDOWN`); the record is written immediately before the worker thread is
+  interrupted and never cleared. `JobExecutionContext.current()` resolves the
+  running context from code below the handler that has no `ctx` parameter.
+  All additions are default methods; existing implementations keep compiling.
+- The failure path now classifies a shutdown interrupt from the engine's own
+  cancellation record rather than from the exception type. A handler
+  interrupted inside socket I/O on a virtual thread surfaces
+  `SocketException: Closed by interrupt`, not `InterruptedException`, and was
+  previously billed as a handler fault — an attempt burned and the retry
+  delayed by backoff. It is now `SHUTDOWN`: rescheduled immediately, no
+  attempt consumed.
+- Documented the interrupt contract on `@Job(timeout)`,
+  `threadmill.jobTimeout`, `threadmill.noProgressTimeout`, and in the handler
+  and long-running-job guides: the worker thread is interrupted; on virtual
+  threads that can abort in-flight socket I/O (guaranteed for `java.net.Socket`
+  and interruptible channels) and leaves the interrupt flag set; a timeout
+  interrupt is re-asserted every watchdog tick until the handler returns while
+  a shutdown interrupt is delivered once; a handler must treat it as
+  cancellation.
+- Hardened the timeout path around the new API: the watchdog keeps
+  interrupting a cancelled attempt even if cleanup code calls `checkIn()`, a
+  worker that registers during the shutdown sweep still classifies its
+  interrupt as `SHUTDOWN`, and a per-job timeout override beyond
+  `ProcessingNodeConfig.MAX_TIMEOUT` (one hundred years) degrades to the global
+  timeout instead of overflowing before the handler runs. The config rejects
+  `jobTimeout`, `noProgressTimeout`, and `shutdownGracePeriod` above that bound.
 - Redis `oldestEnqueuedAt` — the `threadmill.queue.oldest.enqueued.age`
   gauge and the dashboard queue view — is now one head read of a per-queue
   age index (`{threadmill}:queue_enqueued_at:{queue}`, scored by

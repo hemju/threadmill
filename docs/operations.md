@@ -82,7 +82,9 @@ removed by maintenance after the job is terminal or gone.
 Handlers can call `checkIn`, `updateProgress`, and `log` through
 `JobExecutionContext`. Once a handler checks in, `noProgressTimeout` replaces
 the wall-clock `jobTimeout`: a job can run for a long time as long as it keeps
-making progress.
+making progress. `ctx.deadline()` and `ctx.remaining()` expose the resulting
+deadline so a handler can wind down before the engine interrupts it; see
+[Handlers → Timeouts](handlers.md#timeouts).
 
 ## Pausing a Queue
 
@@ -105,9 +107,20 @@ the performance win.
 
 ## Shutdown
 
-`ProcessingNode.close()` stops dispatchers, stops maintenance and registry,
-waits for in-flight jobs up to `shutdownGracePeriod`, then interrupts remaining
-work. Unfinished jobs are recovered through orphan recovery.
+`ProcessingNode.close()` stops the dispatchers, publishes a shutdown deadline
+(`now + shutdownGracePeriod`) that every in-flight handler sees through
+`ctx.deadline()` / `ctx.remaining()`, and waits for in-flight jobs up to that
+deadline. Whatever is still running is then marked `SHUTDOWN` and interrupted;
+the interrupted attempt is rescheduled immediately without consuming a retry
+attempt, and a surviving node picks it up at the next promotion. Maintenance
+and the owner-heartbeat loop stay alive through the drain so peers do not
+orphan-reclaim jobs that are merely draining.
+
+A handler that checks `ctx.remaining()` between steps winds down inside the
+grace period and is never interrupted. One whose steps are longer than the
+grace period is cut mid-step regardless — lengthen `shutdownGracePeriod` for
+such workloads. See [Handlers → Timeouts](handlers.md#timeouts) for what the
+interrupt does on a virtual thread.
 
 ## Diagnosing under load
 

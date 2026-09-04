@@ -1,5 +1,6 @@
 package com.hemju.threadmill.core.engine;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -187,13 +188,17 @@ public final class ProcessingNode implements AutoCloseable {
     // the drain keeps the draining jobs' heartbeats fresh.
     for (Dispatcher d : dispatchers) d.stop();
     workerPool.shutdown();
+    // Publish the shutdown deadline before draining: in-flight handlers see
+    // ctx.deadline() collapse to the end of the grace period and can wind
+    // down cooperatively instead of being interrupted mid-step.
+    runner.beginShutdown(Instant.now().plus(config.shutdownGracePeriod()));
     try {
       if (!workerPool.awaitTermination(
           config.shutdownGracePeriod().toMillis(), TimeUnit.MILLISECONDS)) {
-        workerPool.shutdownNow();
+        interruptInFlight();
       }
     } catch (InterruptedException ie) {
-      workerPool.shutdownNow();
+      interruptInFlight();
       Thread.currentThread().interrupt();
     } finally {
       maintenance.stop();
@@ -201,6 +206,17 @@ public final class ProcessingNode implements AutoCloseable {
       registry.stop();
       runner.shutdown();
     }
+  }
+
+  /**
+   * Record {@code SHUTDOWN} on every in-flight attempt, then interrupt the
+   * pool. The record must be the fact before the interrupt lands so the
+   * failure path classifies the attempt as a shutdown whatever exception the
+   * interrupt surfaces as inside the handler.
+   */
+  private void interruptInFlight() {
+    runner.cancelInFlightForShutdown();
+    workerPool.shutdownNow();
   }
 
   /** Returns the set of tags this node advertises. */

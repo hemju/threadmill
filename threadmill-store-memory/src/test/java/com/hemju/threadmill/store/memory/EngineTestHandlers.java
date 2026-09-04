@@ -1,8 +1,12 @@
 package com.hemju.threadmill.store.memory;
 
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
@@ -153,6 +157,152 @@ public final class EngineTestHandlers {
     }
   }
 
+  /** Records the attempt deadline at start and around a check-in. */
+  public static final class DeadlineRecordingHandler implements JobHandler<HelloPayload> {
+    public static final AtomicReference<Instant> CLAIMED_AT = new AtomicReference<>();
+    public static final AtomicReference<Instant> START_DEADLINE = new AtomicReference<>();
+    public static final AtomicReference<Instant> BEFORE_CHECK_IN = new AtomicReference<>();
+    public static final AtomicReference<Instant> AFTER_CHECK_IN = new AtomicReference<>();
+    public static final AtomicReference<Instant> CHECK_IN_DEADLINE = new AtomicReference<>();
+
+    @Override
+    public void run(HelloPayload payload, JobExecutionContext ctx) {
+      CLAIMED_AT.set(ctx.claimedAt());
+      START_DEADLINE.set(ctx.deadline());
+      BEFORE_CHECK_IN.set(Instant.now());
+      ctx.checkIn();
+      AFTER_CHECK_IN.set(Instant.now());
+      CHECK_IN_DEADLINE.set(ctx.deadline());
+    }
+  }
+
+  /**
+   * Takes fixed-cost steps only while the remaining budget covers one more.
+   * Left to itself it would overshoot a one-second timeout by a step; a
+   * cooperative stop must let it succeed without ever being interrupted.
+   */
+  public static final class CooperativeStepHandler implements JobHandler<HelloPayload> {
+    public static final Duration STEP = Duration.ofMillis(250);
+    public static final Duration STEP_BUDGET = Duration.ofMillis(400);
+    public static final AtomicInteger STEPS = new AtomicInteger();
+    public static final AtomicInteger INTERRUPTS = new AtomicInteger();
+
+    @Override
+    public void run(HelloPayload payload, JobExecutionContext ctx) throws Exception {
+      try {
+        while (ctx.remaining().compareTo(STEP_BUDGET) >= 0) {
+          Thread.sleep(STEP.toMillis());
+          STEPS.incrementAndGet();
+        }
+      } catch (InterruptedException e) {
+        INTERRUPTS.incrementAndGet();
+        throw e;
+      }
+    }
+  }
+
+  /**
+   * Blocks until interrupted, records the engine's cancellation reason, and
+   * surfaces the interrupt as a plain runtime exception — the shape an aborted
+   * socket read produces on a virtual thread.
+   */
+  public static final class SocketLikeBlockingHandler implements JobHandler<HelloPayload> {
+    public static final AtomicReference<Optional<JobExecutionContext.CancellationReason>>
+        CANCELLATION = new AtomicReference<>();
+
+    @Override
+    public void run(HelloPayload payload, JobExecutionContext ctx) {
+      try {
+        Thread.sleep(60_000);
+      } catch (InterruptedException e) {
+        CANCELLATION.set(ctx.cancellation());
+        throw new IllegalStateException("Closed by interrupt");
+      }
+    }
+  }
+
+  /**
+   * Waits until the deadline collapses below five seconds — the node began
+   * closing — then records what it sees and returns cleanly.
+   */
+  public static final class ShutdownDeadlineObservingHandler implements JobHandler<HelloPayload> {
+    public static final AtomicReference<Instant> INITIAL_DEADLINE = new AtomicReference<>();
+    public static final AtomicReference<Instant> COLLAPSED_DEADLINE = new AtomicReference<>();
+    public static final AtomicBoolean CANCELLED_AT_COLLAPSE = new AtomicBoolean();
+
+    @Override
+    public void run(HelloPayload payload, JobExecutionContext ctx) throws Exception {
+      INITIAL_DEADLINE.set(ctx.deadline());
+      while (ctx.remaining().compareTo(Duration.ofSeconds(5)) > 0) {
+        Thread.sleep(10);
+      }
+      COLLAPSED_DEADLINE.set(ctx.deadline());
+      CANCELLED_AT_COLLAPSE.set(ctx.isCancelled());
+    }
+  }
+
+  /** Resolves the current context from a helper two calls below {@code run}. */
+  public static final class CurrentContextHandler implements JobHandler<HelloPayload> {
+    public static final AtomicBoolean CURRENT_IS_THIS_CONTEXT = new AtomicBoolean();
+
+    @Override
+    public void run(HelloPayload payload, JobExecutionContext ctx) {
+      CURRENT_IS_THIS_CONTEXT.set(serviceLayer() == ctx);
+    }
+
+    private static JobExecutionContext serviceLayer() {
+      return repository();
+    }
+
+    private static JobExecutionContext repository() {
+      return JobExecutionContext.current().orElseThrow();
+    }
+  }
+
+  /**
+   * Blocks until the timeout interrupt, then checks in from its cleanup path
+   * and blocks again. The watchdog must interrupt it a second time: a
+   * check-in moves the deadline forward but must not lift a cancellation.
+   */
+  public static final class CheckInDuringCleanupHandler implements JobHandler<HelloPayload> {
+    public static final AtomicInteger INTERRUPTS = new AtomicInteger();
+    public static final AtomicReference<Instant> FIRST_INTERRUPT_AT = new AtomicReference<>();
+    public static final AtomicReference<Instant> SECOND_INTERRUPT_AT = new AtomicReference<>();
+
+    @Override
+    public void run(HelloPayload payload, JobExecutionContext ctx) throws Exception {
+      try {
+        Thread.sleep(60_000);
+      } catch (InterruptedException first) {
+        INTERRUPTS.incrementAndGet();
+        FIRST_INTERRUPT_AT.set(Instant.now());
+        ctx.checkIn("cleaning up");
+        try {
+          Thread.sleep(60_000);
+        } catch (InterruptedException second) {
+          INTERRUPTS.incrementAndGet();
+          SECOND_INTERRUPT_AT.set(Instant.now());
+          throw second;
+        }
+      }
+    }
+  }
+
+  /**
+   * Records the cancellation the engine had already recorded when the
+   * handler started, then fails with a socket-shaped runtime exception.
+   */
+  public static final class CancellationRecordingHandler implements JobHandler<HelloPayload> {
+    public static final AtomicReference<Optional<JobExecutionContext.CancellationReason>>
+        CANCELLATION_AT_START = new AtomicReference<>();
+
+    @Override
+    public void run(HelloPayload payload, JobExecutionContext ctx) {
+      CANCELLATION_AT_START.set(ctx.cancellation());
+      throw new IllegalStateException("Closed by interrupt");
+    }
+  }
+
   /** Simple payload used by every test handler. */
   public static final class HelloPayload implements JobPayload {
     public String name;
@@ -174,5 +324,21 @@ public final class EngineTestHandlers {
     StalledAfterCheckInHandler.INTERRUPTS.set(0);
     BigErrorMessageHandler.ATTEMPTS.set(0);
     BigResultHandler.COMPLETIONS.set(0);
+    DeadlineRecordingHandler.CLAIMED_AT.set(null);
+    DeadlineRecordingHandler.START_DEADLINE.set(null);
+    DeadlineRecordingHandler.BEFORE_CHECK_IN.set(null);
+    DeadlineRecordingHandler.AFTER_CHECK_IN.set(null);
+    DeadlineRecordingHandler.CHECK_IN_DEADLINE.set(null);
+    CooperativeStepHandler.STEPS.set(0);
+    CooperativeStepHandler.INTERRUPTS.set(0);
+    SocketLikeBlockingHandler.CANCELLATION.set(null);
+    ShutdownDeadlineObservingHandler.INITIAL_DEADLINE.set(null);
+    ShutdownDeadlineObservingHandler.COLLAPSED_DEADLINE.set(null);
+    ShutdownDeadlineObservingHandler.CANCELLED_AT_COLLAPSE.set(false);
+    CurrentContextHandler.CURRENT_IS_THIS_CONTEXT.set(false);
+    CheckInDuringCleanupHandler.INTERRUPTS.set(0);
+    CheckInDuringCleanupHandler.FIRST_INTERRUPT_AT.set(null);
+    CheckInDuringCleanupHandler.SECOND_INTERRUPT_AT.set(null);
+    CancellationRecordingHandler.CANCELLATION_AT_START.set(null);
   }
 }

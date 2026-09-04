@@ -19,9 +19,35 @@ final class ImportHandler implements JobHandler<ImportFile> {
 
 ## Timeout Rules
 
-- If a job never checks in, the normal `jobTimeout` applies.
+- If a job never checks in, `jobTimeout` (or the per-job override) applies
+  from `claimedAt()`.
 - Once a job checks in, wall-clock `jobTimeout` no longer kills it.
 - If progress stops, `noProgressTimeout` applies from the most recent check-in.
+- While the node is shutting down, the deadline is never later than the end
+  of `shutdownGracePeriod`.
+
+`ctx.deadline()` is that instant, computed by the same rule the engine's
+watchdog uses, and `ctx.remaining()` is the time left. When the deadline
+passes the engine **interrupts the worker thread**; on a virtual thread that
+can abort in-flight socket I/O and leaves the interrupt flag set — see
+[Handlers → Timeouts](handlers.md#timeouts) for the full contract. A
+long-running handler therefore checks its budget before each step rather than
+relying on the interrupt:
+
+```java
+for (int i = savedCursor(payload); i < payload.parts(); i++) {
+    if (ctx.remaining().compareTo(PART_BUDGET) < 0) {
+        saveCursor(payload, i);            // the next attempt resumes here
+        throw new OutOfTimeException();    // FAILED → retried under the retry policy
+    }
+    importPart(payload, i);
+    ctx.updateProgress((i + 1) / (double) payload.parts());
+    ctx.checkIn("imported part " + (i + 1));
+}
+```
+
+Cleanup that runs after an interrupt reads `ctx.cancellation()` (`TIMEOUT` or
+`SHUTDOWN`) rather than the interrupt flag or the exception it caught.
 
 The engine coalesces check-in, progress, and log persistence to at most one
 write per `checkInMinInterval`, plus a final flush before success or failure.
