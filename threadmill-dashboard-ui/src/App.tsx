@@ -64,16 +64,19 @@ export default function App() {
   const [selected, setSelected] = useState<JobDetail | null>(null);
   const [state, setState] = useState<string>("ENQUEUED");
   const [filter, setFilter] = useState("");
+  const [offset, setOffset] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function load() {
+  async function load(requestedOffset = offset) {
     try {
       const nextSession = await api<Session>("/session");
       setSession(nextSession);
       const query = new URLSearchParams();
       if (state) query.set("state", state);
       if (overview?.capabilities.supportsRichSearch && filter) query.set("handlerType", filter);
+      query.set("limit", "50");
+      query.set("offset", requestedOffset.toString());
       const [nextOverview, nextJobs, nextQueues] = await Promise.all([
         api<Overview>("/overview", {}, nextSession),
         api<JobList>(`/jobs?${query}`, {}, nextSession),
@@ -93,18 +96,25 @@ export default function App() {
     try {
       const response = await api<ActionResponse>(path, init, session);
       setMessage(`${success}: ${response.target}`);
-      await load();
+      setError(null);
+      await load(offset);
       if (selected) {
         setSelected(await api<JobDetail>(`/jobs/${selected.summary.id}`, {}, session));
       }
     } catch (e) {
+      setMessage(null);
       setError(e instanceof Error ? e.message : "Mutation failed");
     }
   }
 
   async function openJob(job: JobSummary) {
     if (!session) return;
-    setSelected(await api<JobDetail>(`/jobs/${job.id}`, {}, session));
+    try {
+      setSelected(await api<JobDetail>(`/jobs/${job.id}`, {}, session));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Job detail request failed");
+    }
   }
 
   async function requeue(job: JobSummary) {
@@ -175,8 +185,8 @@ export default function App() {
   }
 
   useEffect(() => {
-    void load();
-  }, [state]);
+    void load(offset);
+  }, [state, offset]);
 
   const total = useMemo(
     () => Object.values(overview?.countsByState ?? {}).reduce((sum, value) => sum + value, 0),
@@ -294,12 +304,26 @@ export default function App() {
         <aside className="min-h-[calc(100vh-3rem)] border-r border-border bg-panel p-3">
           <div className="mb-4 text-xs font-semibold uppercase text-muted-foreground">States</div>
           <div className="space-y-1">
-            <button className="state-filter" disabled={!richSearch} onClick={() => setState("")}>
+            <button
+              className="state-filter"
+              disabled={!richSearch}
+              onClick={() => {
+                setOffset(0);
+                setState("");
+              }}
+            >
               <span>All</span>
               <span className="font-mono">{total}</span>
             </button>
             {states.map((s) => (
-              <button className="state-filter" key={s} onClick={() => setState(s)}>
+              <button
+                className="state-filter"
+                key={s}
+                onClick={() => {
+                  setOffset(0);
+                  setState(s);
+                }}
+              >
                 <span>{s}</span>
                 <span className="font-mono">{overview?.countsByState?.[s] ?? 0}</span>
               </button>
@@ -326,7 +350,10 @@ export default function App() {
               value={filter}
               onChange={(event) => setFilter(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter") void load();
+                if (event.key === "Enter") {
+                  if (offset === 0) void load(0);
+                  else setOffset(0);
+                }
               }}
             />
           </div>
@@ -369,6 +396,34 @@ export default function App() {
                 ))}
               </tbody>
             </Table>
+          </div>
+
+          <div className="mt-3 flex items-center justify-end gap-2 text-xs text-muted-foreground">
+            <span>
+              {jobs.jobs.length === 0 ? 0 : jobs.offset + 1}–{jobs.offset + jobs.jobs.length}
+            </span>
+            <Button
+              variant="secondary"
+              disabled={jobs.offset === 0}
+              aria-label="Previous page"
+              onClick={() => {
+                setSelected(null);
+                setOffset(Math.max(0, jobs.offset - jobs.limit));
+              }}
+            >
+              Previous
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={jobs.jobs.length === 0 || jobs.jobs.length < jobs.limit}
+              aria-label="Next page"
+              onClick={() => {
+                setSelected(null);
+                setOffset(jobs.offset + jobs.limit);
+              }}
+            >
+              Next
+            </Button>
           </div>
 
           <div className="mt-4 grid grid-cols-2 gap-3">

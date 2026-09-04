@@ -33,7 +33,7 @@ const responses: Record<string, unknown> = {
       maxClaimBatch: 1000
     }
   },
-  "/threadmill/api/jobs?state=ENQUEUED": {
+  "/threadmill/api/jobs?state=ENQUEUED&limit=50&offset=0": {
     jobs: [
       {
         id: "018f0000-0000-7000-8000-000000000001",
@@ -148,4 +148,50 @@ it("opens job details when the job row is clicked", async () => {
 
   await waitFor(() => expect(screen.getByText("Sensitive details redacted.")).toBeInTheDocument());
   expect(row).toHaveAttribute("aria-selected", "true");
+});
+
+it("requests the next and previous job pages", async () => {
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+    const url = input.toString();
+    calls.push(url);
+    if (url.includes("/jobs?")) {
+      const secondPage = url.includes("offset=1");
+      const first = responses["/threadmill/api/jobs?state=ENQUEUED&limit=50&offset=0"] as {
+        jobs: Array<Record<string, unknown>>;
+      };
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            jobs: [
+              {
+                ...first.jobs[0],
+                id: secondPage
+                  ? "018f0000-0000-7000-8000-000000000002"
+                  : "018f0000-0000-7000-8000-000000000001",
+                handlerType: secondPage ? "com.example.SecondHandler" : "com.example.ImportHandler"
+              }
+            ],
+            limit: 1,
+            offset: secondPage ? 1 : 0
+          })
+      });
+    }
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(responses[url])
+    });
+  });
+
+  render(<App />);
+
+  await screen.findByText("com.example.ImportHandler");
+  fireEvent.click(screen.getByLabelText("Next page"));
+  await screen.findByText("com.example.SecondHandler");
+  expect(calls).toContain("/threadmill/api/jobs?state=ENQUEUED&limit=50&offset=1");
+
+  fireEvent.click(screen.getByLabelText("Previous page"));
+  await screen.findByText("com.example.ImportHandler");
+  expect(calls.filter((url) => url.endsWith("offset=0"))).toHaveLength(2);
 });

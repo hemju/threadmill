@@ -30,6 +30,21 @@ npm run build
 
 Gradle also wires the static build into `:threadmill-dashboard-ui:check`.
 
+## Browser smoke tests
+
+The Playwright suite starts a real Spring Boot dashboard with the packaged UI,
+HTTP Basic authentication, cookie CSRF, seeded operator data, and a non-default
+API base path. Install Chromium once, then run the Gradle-owned suite:
+
+```bash
+npx playwright install chromium
+./gradlew :threadmill-dashboard-spring:browserTest
+```
+
+Failures retain screenshots, video, traces, and an HTML report under
+`threadmill-dashboard-ui/build/`. CI uploads those files as the
+`dashboard-browser-failure` artifact.
+
 ## Layout
 
 The console is intentionally dense: state filters, job table, queue controls,
