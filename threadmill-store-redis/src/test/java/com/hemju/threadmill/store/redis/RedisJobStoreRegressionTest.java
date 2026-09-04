@@ -23,6 +23,7 @@ import java.util.concurrent.TimeUnit;
 
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
+import io.lettuce.core.ScoredValue;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.SetArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
@@ -1117,6 +1118,66 @@ class RedisJobStoreRegressionTest {
     // The age gauge must see the starving low-priority job, not the
     // queue head.
     assertThat(store.oldestEnqueuedAt("default")).contains(oldLowAt);
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void oldestEnqueuedAtIsOneIndexedReadRegardlessOfBacklogDepth() throws Exception {
+    JobStore store = store();
+    // The starving job: oldest AND lowest priority, so it sorts LAST in the
+    // priority-ordered queue ZSET — a member scan reaches it only after
+    // touching every other job in the queue.
+    Job oldest = Job.builder()
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+        .priority(-5)
+        .build();
+    store.insert(oldest);
+    Thread.sleep(20);
+    int backlog = 2_000;
+    var batch = new ArrayList<Job>();
+    for (int i = 0; i < backlog; i++) {
+      batch.add(
+          i % 2 == 0
+              ? sample()
+              : keyedJob("com.example.Export", "project:" + (i % 8), ConcurrencyMode.SHARED));
+      if (batch.size() == 500) {
+        store.insertAll(batch);
+        batch.clear();
+      }
+    }
+    RedisCommands<String, String> r = adminConnection.sync();
+    Instant oldestAt = Instant.ofEpochMilli(
+        Long.parseLong(r.hget(RedisKeys.job(oldest.id()), "current_state_at")));
+
+    r.configResetstat();
+    assertThat(store.oldestEnqueuedAt("default")).contains(oldestAt);
+    // The historical oldest_enqueued.lua did ZRANGE 0 -1 plus one HGET per
+    // member inside a single atomic call — O(backlog) on the single-threaded
+    // server, on every metrics scrape, per queue with work. The gauge must
+    // stay one indexed head read: no script, no per-job reads. (Each stats
+    // read below is itself one INFO command, so read the total first: it
+    // covers exactly the ZRANGE plus that INFO.)
+    assertThat(totalCommandCalls(r))
+        .as("total commands for one oldestEnqueuedAt call over a %s-deep queue", backlog)
+        .isLessThanOrEqualTo(2L);
+    assertThat(commandCalls(r, "zrange")).as("head reads").isEqualTo(1L);
+    assertThat(commandCalls(r, "hget")).as("per-member reads").isZero();
+    assertThat(commandCalls(r, "eval") + commandCalls(r, "evalsha"))
+        .as("scripted scan")
+        .isZero();
+
+    // Once the starving job leaves ENQUEUED the gauge moves to the next
+    // oldest member; the global by_state_time index (all work is in one
+    // queue here) is the independent oracle for that value.
+    store.softDelete(oldest.id());
+    double nextOldest = r.zrangeWithScores(RedisKeys.byStateTime(JobState.ENQUEUED), 0, 0)
+        .get(0)
+        .getScore();
+    assertThat(store.oldestEnqueuedAt("default"))
+        .contains(Instant.ofEpochMilli((long) nextOldest))
+        .get()
+        .satisfies(at -> assertThat(at).isAfter(oldestAt));
+    assertRedisIndexesConsistent();
   }
 
   @Test
@@ -1249,6 +1310,7 @@ class RedisJobStoreRegressionTest {
     var expectedUnkeyed = new HashMap<String, Set<String>>();
     var expectedQueueKeys = new HashMap<String, Map<String, Long>>();
     var expectedPendingRoots = new HashMap<String, Set<String>>();
+    var expectedEnqueuedAt = new HashMap<String, Map<String, Double>>();
 
     for (String jobKey : r.keys(RedisKeys.PREFIX + "job:*")) {
       Map<String, String> hash = r.hgetall(jobKey);
@@ -1293,6 +1355,9 @@ class RedisJobStoreRegressionTest {
       String concurrencyKey = hash.get("concurrency_key");
       boolean keyed = concurrencyKey != null && !concurrencyKey.isBlank();
       if (state == JobState.ENQUEUED) {
+        expectedEnqueuedAt
+            .computeIfAbsent(queue, ignored -> new HashMap<>())
+            .put(id.toString(), (double) Long.parseLong(hash.get("current_state_at")));
         if (keyed) {
           expectedQueueKeys
               .computeIfAbsent(queue, ignored -> new HashMap<>())
@@ -1328,6 +1393,23 @@ class RedisJobStoreRegressionTest {
       strayUnkeyed.remove(RedisKeys.queueUnkeyed(entry.getKey()));
     }
     assertThat(strayUnkeyed).as("stray unkeyed ready indexes").isEmpty();
+
+    // The per-queue age index must mirror the ENQUEUED population of every
+    // queue exactly, keyed and unkeyed alike, with current_state_at scores —
+    // oldestEnqueuedAt reads only its head.
+    var strayEnqueuedAt = new HashSet<>(r.keys(RedisKeys.PREFIX + "queue_enqueued_at:*"));
+    for (var entry : expectedEnqueuedAt.entrySet()) {
+      var actual = new HashMap<String, Double>();
+      for (ScoredValue<String> member :
+          r.zrangeWithScores(RedisKeys.queueEnqueuedAt(entry.getKey()), 0, -1)) {
+        actual.put(member.getValue(), member.getScore());
+      }
+      assertThat(actual)
+          .as("enqueued-at age index for queue " + entry.getKey())
+          .containsExactlyInAnyOrderEntriesOf(entry.getValue());
+      strayEnqueuedAt.remove(RedisKeys.queueEnqueuedAt(entry.getKey()));
+    }
+    assertThat(strayEnqueuedAt).as("stray enqueued-at age indexes").isEmpty();
 
     var strayQueueKeys = new HashSet<>(r.keys(RedisKeys.PREFIX + "queue_keys:*"));
     for (var entry : expectedQueueKeys.entrySet()) {

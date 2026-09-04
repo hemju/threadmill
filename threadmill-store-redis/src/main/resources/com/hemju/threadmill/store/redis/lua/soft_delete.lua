@@ -16,6 +16,7 @@
 --   [12] old queue_keys HASH (key -> ENQUEUED count in old queue)
 --   [13] old queue_unkeyed ZSET
 --   [14] old concurrency pending_root ZSET, or empty
+--   [15] old queue_enqueued_at ZSET (ENQUEUED ids scored by current_state_at millis)
 --
 -- ARGV:
 --   [1] job id
@@ -45,6 +46,7 @@ local awaiting_parent_key = KEYS[11]
 local old_queue_keys_key = KEYS[12]
 local old_unkeyed_key = KEYS[13]
 local old_pending_root_key = KEYS[14]
+local old_enqueued_at_key = KEYS[15]
 
 local job_id   = ARGV[1]
 local new_body = ARGV[2]
@@ -93,6 +95,7 @@ if old_pending_key ~= '' and old_pending_member ~= '' then
     end
 end
 if old_state == 'ENQUEUED' then
+    redis.call('ZREM', old_enqueued_at_key, job_id)
     if old_concurrency_key ~= '' then
         local remaining = redis.call('HINCRBY', old_queue_keys_key, old_concurrency_key, -1)
         if remaining <= 0 then

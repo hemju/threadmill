@@ -18,6 +18,7 @@
 --   [12] queue_keys HASH (key -> ENQUEUED count in this queue)
 --   [13] queue_unkeyed ZSET
 --   [14] concurrency pending_root ZSET, or empty
+--   [15] queue_enqueued_at ZSET (ENQUEUED ids scored by current_state_at millis)
 
 -- ARGV:
 --   [1] job id
@@ -46,6 +47,7 @@ local workflow_counts_key = KEYS[11]
 local queue_keys_key = KEYS[12]
 local unkeyed_key = KEYS[13]
 local pending_root_key = KEYS[14]
+local enqueued_at_key = KEYS[15]
 
 local job_id = ARGV[1]
 local expected_version = tonumber(ARGV[2])
@@ -149,6 +151,7 @@ else
     redis.call('ZREM', unkeyed_key, job_id)
 end
 redis.call('ZREM', queue_key, job_id)
+redis.call('ZREM', enqueued_at_key, job_id)
 redis.call('ZREM', enqueued_state_time, job_id)
 redis.call('ZADD', processing_all, heartbeat_ms, job_id)
 redis.call('ZADD', processing_node, heartbeat_ms, job_id)

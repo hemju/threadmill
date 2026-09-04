@@ -14,6 +14,7 @@
 --   [11] queue_keys HASH (key -> ENQUEUED count in this queue)
 --   [12] queue_unkeyed ZSET
 --   [13] concurrency pending_root ZSET, or empty (only for workflow members)
+--   [14] queue_enqueued_at ZSET (ENQUEUED ids scored by current_state_at millis)
 --
 -- ARGV:
 --   [1] job id (string)
@@ -50,6 +51,7 @@ local queues_key          = KEYS[10]
 local queue_keys_key      = KEYS[11]
 local unkeyed_key         = KEYS[12]
 local pending_root_key    = KEYS[13]
+local enqueued_at_key     = KEYS[14]
 
 local job_id           = ARGV[1]
 local body             = ARGV[2]
@@ -119,6 +121,9 @@ if state == 'ENQUEUED' then
     -- crash between the two would otherwise leave a durably ENQUEUED job in
     -- a queue the discovery paths cannot see.
     redis.call('SADD', queues_key, queue)
+    -- Age index: oldestEnqueuedAt reads its head, so it must move with
+    -- queue membership inside the same atomic call.
+    redis.call('ZADD', enqueued_at_key, state_time, job_id)
     if concurrency_key ~= '' then
         redis.call('HINCRBY', queue_keys_key, concurrency_key, 1)
     else

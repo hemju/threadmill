@@ -53,6 +53,11 @@ import com.hemju.threadmill.core.NodeId;
  *   <li>{@code {threadmill}:queue_unkeyed:{queue}} — ZSET of ENQUEUED
  *       unkeyed job ids, scored like the queue ZSET, so the unkeyed claim
  *       lane never pages past keyed work.</li>
+ *   <li>{@code {threadmill}:queue_enqueued_at:{queue}} — ZSET of every
+ *       ENQUEUED job id in the queue scored by {@code current_state_at}
+ *       millis. {@code oldestEnqueuedAt} reads its head, so the age gauge
+ *       is one indexed read instead of a per-member scan of the
+ *       priority-ordered queue ZSET.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflows} — HASH workflow root
  *       id → active outstanding hold count.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflow_counts} — HASH workflow
@@ -175,6 +180,15 @@ public final class RedisKeys {
   public static String queueUnkeyed(String queue) {
     Objects.requireNonNull(queue, "queue");
     return PREFIX + "queue_unkeyed:" + userSegment(queue);
+  }
+
+  /**
+   * ZSET of ENQUEUED job ids in the queue scored by {@code current_state_at}
+   * millis; the head is the queue's oldest enqueued job.
+   */
+  public static String queueEnqueuedAt(String queue) {
+    Objects.requireNonNull(queue, "queue");
+    return PREFIX + "queue_enqueued_at:" + userSegment(queue);
   }
 
   public static String concurrencyWorkflows(String key) {

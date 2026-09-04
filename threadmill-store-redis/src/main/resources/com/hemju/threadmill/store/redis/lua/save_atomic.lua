@@ -26,6 +26,8 @@
 --   [20] new queue_unkeyed ZSET
 --   [21] old concurrency pending_root ZSET, or empty
 --   [22] new concurrency pending_root ZSET, or empty
+--   [23] old queue_enqueued_at ZSET (ENQUEUED ids scored by current_state_at millis)
+--   [24] new queue_enqueued_at ZSET
 --
 -- ARGV:
 --   [1] job id
@@ -77,6 +79,8 @@ local old_unkeyed_key         = KEYS[19]
 local new_unkeyed_key         = KEYS[20]
 local old_pending_root_key    = KEYS[21]
 local new_pending_root_key    = KEYS[22]
+local old_enqueued_at_key     = KEYS[23]
+local new_enqueued_at_key     = KEYS[24]
 
 local job_id              = ARGV[1]
 local expected_version    = tonumber(ARGV[2])
@@ -140,6 +144,7 @@ if old_pending_key ~= '' and old_pending_member ~= '' then
     end
 end
 if old_state == 'ENQUEUED' then
+    redis.call('ZREM', old_enqueued_at_key, job_id)
     if old_concurrency_key ~= '' then
         local remaining = redis.call('HINCRBY', old_queue_keys_key, old_concurrency_key, -1)
         if remaining <= 0 then
@@ -227,6 +232,7 @@ if new_active_key ~= '' and new_active_score ~= nil then
 end
 if new_state == 'ENQUEUED' then
     redis.call('SADD', queues_key, new_queue)
+    redis.call('ZADD', new_enqueued_at_key, new_state_time, job_id)
     if concurrency_key ~= '' then
         redis.call('HINCRBY', new_queue_keys_key, concurrency_key, 1)
     else

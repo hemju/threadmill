@@ -390,7 +390,8 @@ public final class RedisJobStore implements JobStore {
       RedisKeys.QUEUES,
       RedisKeys.queueKeys(snapshot.queue()),
       RedisKeys.queueUnkeyed(snapshot.queue()),
-      pendingRootKey(snapshot)
+      pendingRootKey(snapshot),
+      RedisKeys.queueEnqueuedAt(snapshot.queue())
     };
     var args = new String[] {
       snapshot.id().toString(),
@@ -488,7 +489,7 @@ public final class RedisJobStore implements JobStore {
     try {
       // Pack 13 keys + 18 args per job for the batched Lua script.
       int n = snapshots.size();
-      var keyList = new ArrayList<String>(n * 13);
+      var keyList = new ArrayList<String>(n * 14);
       var argList = new ArrayList<String>(1 + n * 18);
       argList.add(Integer.toString(n));
       for (int i = 0; i < n; i++) {
@@ -509,6 +510,7 @@ public final class RedisJobStore implements JobStore {
         keyList.add(RedisKeys.queueKeys(snap.queue()));
         keyList.add(RedisKeys.queueUnkeyed(snap.queue()));
         keyList.add(pendingRootKey(snap));
+        keyList.add(RedisKeys.queueEnqueuedAt(snap.queue()));
 
         argList.add(snap.id().toString());
         argList.add(bodies.get(i));
@@ -625,7 +627,8 @@ public final class RedisJobStore implements JobStore {
             RedisKeys.QUEUES,
             RedisKeys.queueKeys(snapshot.queue()),
             RedisKeys.queueUnkeyed(snapshot.queue()),
-            pendingRootKey(snapshot)
+            pendingRootKey(snapshot),
+            RedisKeys.queueEnqueuedAt(snapshot.queue())
           },
           snapshot.id().toString(),
           body,
@@ -737,7 +740,9 @@ public final class RedisJobStore implements JobStore {
       RedisKeys.queueUnkeyed(oldQueue),
       RedisKeys.queueUnkeyed(snapshot.queue()),
       pendingRootKey(oldConcurrencyKey, oldWorkflowRoot, snapshot.id()),
-      pendingRootKey(snapshot)
+      pendingRootKey(snapshot),
+      RedisKeys.queueEnqueuedAt(oldQueue),
+      RedisKeys.queueEnqueuedAt(snapshot.queue())
     };
     var args = new String[] {
       snapshot.id().toString(),
@@ -836,7 +841,8 @@ public final class RedisJobStore implements JobStore {
         awaitingParentKey(snapshot),
         RedisKeys.queueKeys(oldQueue),
         RedisKeys.queueUnkeyed(oldQueue),
-        pendingRootKey(oldConcurrencyKey, oldWorkflowRoot, id)
+        pendingRootKey(oldConcurrencyKey, oldWorkflowRoot, id),
+        RedisKeys.queueEnqueuedAt(oldQueue)
       };
       var args = new String[] {
         id.toString(),
@@ -1153,7 +1159,8 @@ public final class RedisJobStore implements JobStore {
             concurrencyWorkflowCountsKey(concurrencyKey),
             RedisKeys.queueKeys(queue),
             RedisKeys.queueUnkeyed(queue),
-            pendingRootKey(snap)
+            pendingRootKey(snap),
+            RedisKeys.queueEnqueuedAt(queue)
           },
           idStr,
           oldVersion,
@@ -1439,17 +1446,19 @@ public final class RedisJobStore implements JobStore {
   @Override
   public Optional<Instant> oldestEnqueuedAt(String queue) {
     Names.requireName("queue", queue);
-    // The queue ZSET is priority-ordered, so index 0 is the oldest
-    // highest-priority job — not the oldest enqueued. Scan for the true
-    // minimum current_state_at in one Lua call (fine for the moderate
-    // depths a dashboard gauge covers; Postgres uses MIN(current_state_at)).
-    String value = evalScript(
-        LuaScripts.oldestEnqueued(),
-        ScriptOutputType.VALUE,
-        new String[] {RedisKeys.queue(queue)},
-        RedisKeys.PREFIX + "job:");
-    if (value == null || value.isEmpty()) return Optional.empty();
-    return Optional.of(Instant.ofEpochMilli(Long.parseLong(value)));
+    // The queue ZSET is priority-ordered, so its head is the oldest
+    // HIGHEST-PRIORITY job, not the oldest enqueued. The per-queue age
+    // index is scored by current_state_at and maintained inside the same
+    // atomic scripts as queue membership, so this is one O(log N) head
+    // read regardless of backlog depth. The Micrometer age gauge calls
+    // this on every scrape for every queue with work; the historical
+    // per-member Lua scan (one HGET per ENQUEUED job inside one atomic
+    // call) would block the single-threaded server for seconds at
+    // endurance-scale backlogs.
+    List<ScoredValue<String>> head =
+        sync().zrangeWithScores(RedisKeys.queueEnqueuedAt(queue), 0, 0);
+    if (head == null || head.isEmpty()) return Optional.empty();
+    return Optional.of(Instant.ofEpochMilli((long) head.get(0).getScore()));
   }
 
   @Override
@@ -1686,7 +1695,9 @@ public final class RedisJobStore implements JobStore {
       RedisKeys.queueKeys(snap.queue()),
       RedisKeys.queueUnkeyed(oldQueue),
       RedisKeys.queueUnkeyed(snap.queue()),
-      pendingRootKey(snap)
+      pendingRootKey(snap),
+      RedisKeys.queueEnqueuedAt(oldQueue),
+      RedisKeys.queueEnqueuedAt(snap.queue())
     };
     var args = new String[] {
       id.toString(),
@@ -2242,6 +2253,7 @@ public final class RedisJobStore implements JobStore {
                   'version', tostring(tonumber(ARGV[3]) + 1))
                 redis.call('ZREM', KEYS[2], ARGV[1])
                 redis.call('ZREM', KEYS[3], ARGV[1])
+                redis.call('ZREM', KEYS[13], ARGV[1])
                 redis.call('ZADD', KEYS[4], tonumber(ARGV[2]), ARGV[1])
                 redis.call('HINCRBY', KEYS[5], 'ENQUEUED', -1)
                 redis.call('HINCRBY', KEYS[5], 'QUARANTINED', 1)
@@ -2291,7 +2303,8 @@ public final class RedisJobStore implements JobStore {
           concurrencyCountersKey(concurrencyKey),
           RedisKeys.queueKeys(queue),
           RedisKeys.queueUnkeyed(queue),
-          pendingRootKey(concurrencyKey, workflowRootId, id)
+          pendingRootKey(concurrencyKey, workflowRootId, id),
+          RedisKeys.queueEnqueuedAt(queue)
         },
         id.toString(),
         Long.toString(now.toEpochMilli()),
