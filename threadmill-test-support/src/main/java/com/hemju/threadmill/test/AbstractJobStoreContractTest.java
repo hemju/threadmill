@@ -239,17 +239,24 @@ public abstract class AbstractJobStoreContractTest {
         ignored -> handler,
         new JsonJobSerializer(),
         new JobInterceptors(),
-        ProcessingNodeConfig.builder().jobTimeout(Duration.ofSeconds(10)).build());
+        // Deliberately shorter than the outage held below, so the watchdog deadline
+        // falls INSIDE the outage window. With a timeout that outlives the outage this
+        // assertion cannot observe a watchdog left armed across the terminal-save retry
+        // loop — which aborts finalization at its Thread.sleep and fails a succeeded job.
+        // The handler is a no-op, so a full second is ample for the attempt itself.
+        ProcessingNodeConfig.builder().jobTimeout(Duration.ofSeconds(1)).build());
     Thread execution = Thread.ofVirtual()
         .name("threadmill-contract-terminal-finalizer")
         .start(() -> runner.run(claimed));
     try {
       assertThat(terminalSaveAttempted.await(5, TimeUnit.SECONDS)).isTrue();
 
-      // This is four times longer than the historical three-attempt
-      // retry budget. The runner must still own finalization rather than
-      // return and leave a heartbeat-shielded PROCESSING row behind.
-      Thread.sleep(600);
+      // Many times longer than the historical three-attempt retry budget, and
+      // longer than the per-job timeout above so the watchdog deadline passes
+      // while finalization is still retrying. The runner must still own
+      // finalization rather than return and leave a heartbeat-shielded
+      // PROCESSING row behind.
+      Thread.sleep(1_500);
       assertThat(execution.isAlive())
           .as("terminal finalizer remains active during outage")
           .isTrue();

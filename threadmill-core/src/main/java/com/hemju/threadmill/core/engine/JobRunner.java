@@ -239,18 +239,27 @@ public final class JobRunner {
             throw new HandlerInvocationException(e);
           }
         });
-        if (ctx.cancellation().orElse(null) == CancellationReason.TIMEOUT) {
-          throw new HandlerTimeoutException();
-        }
-        ctx.flushBestEffort();
-        markSucceeded(job, ctx);
       } finally {
-        // A fatal must escape, but not before its periodic task releases the captured ctx -> Job
-        // graph. The JVM does not necessarily terminate when an error kills one worker thread.
+        // The watchdog is disarmed the moment the handler returns or throws, and this
+        // finally is what guarantees it: a fatal must escape, but not before its periodic
+        // task releases the captured ctx -> Job graph, because the JVM does not
+        // necessarily terminate when an error kills one worker thread.
+        //
+        // Scoping this to the handler call is load-bearing on the success path too.
+        // saveTerminalWithRetry retains finalization responsibility for as long as the
+        // store is unavailable, so a watchdog still armed across markSucceeded would
+        // interrupt that retry once the deadline passed, abort the loop at its
+        // Thread.sleep, and convert a handler that already succeeded into a FAILED job
+        // that RetryInterceptor then runs a second time.
         watchdog.cancel(false);
         // Clear any straggler interrupt the watchdog may have raised after the handler returned.
         Thread.interrupted();
       }
+      if (ctx.cancellation().orElse(null) == CancellationReason.TIMEOUT) {
+        throw new HandlerTimeoutException();
+      }
+      ctx.flushBestEffort();
+      markSucceeded(job, ctx);
     } catch (Throwable t) {
       FatalErrors.rethrowIfFatal(t);
       ctx.flushBestEffort();
