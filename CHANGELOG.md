@@ -1,8 +1,6 @@
 # Changelog
 
-## Unreleased
-
-## 0.2.2
+## 0.2.3
 
 - Process-fatal JVM errors are no longer swallowed as ordinary job or loop
   failures (issue #101). Every intentional `catch (Throwable)` now classifies
@@ -149,6 +147,12 @@
   heartbeat for that detection. The read verifies its head against the queue
   ZSET and drops a stale head through an atomic compare-and-remove. Upgrade
   procedure and mixed-version guarantees are in the Redis README.
+
+## 0.2.2
+
+Tagged but never published. The release build failed in the pre-publish
+gate, before any artifact was signed or uploaded, so no 0.2.2 exists on
+Maven Central. Its contents shipped as 0.2.3.
 
 ## 0.2.1
 

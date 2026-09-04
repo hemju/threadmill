@@ -1615,7 +1615,7 @@ public final class RedisJobStore implements JobStore {
 
   /**
    * Age-index layout upgrade, run before this store serves any read. The
-   * index did not exist before v0.2.2, so a store started against older data
+   * index did not exist before v0.2.3, so a store started against older data
    * must build it, and during a rolling upgrade nodes on the old release keep
    * writing without it. The {@code {threadmill}:layout:queue_enqueued_at}
    * state records where that process stands:

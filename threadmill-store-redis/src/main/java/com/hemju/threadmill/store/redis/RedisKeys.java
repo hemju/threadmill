@@ -277,7 +277,7 @@ public final class RedisKeys {
    * @return the exact negated-priority score
    * @deprecated use {@link #queueScore(int)}
    */
-  @Deprecated(since = "0.2.2", forRemoval = true)
+  @Deprecated(since = "0.2.3", forRemoval = true)
   public static double queueScore(int priority, long ignoredEnqueueMicros) {
     return queueScore(priority);
   }
