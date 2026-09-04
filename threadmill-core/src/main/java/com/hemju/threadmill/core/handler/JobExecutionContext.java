@@ -41,9 +41,13 @@ import com.hemju.threadmill.core.NodeId;
  * clients that use their own transports may translate the interrupt
  * differently or observe it only at their next interruptible call. The
  * interrupt flag stays set afterwards — only methods that throw
- * {@code InterruptedException} clear it — and the engine re-asserts it every
- * watchdog tick until the handler returns, including after a check-in made
- * from cleanup code. A handler must therefore treat an interrupt as
+ * {@code InterruptedException} clear it — and for a {@code TIMEOUT}
+ * cancellation the watchdog re-asserts it every tick until the handler
+ * returns, including after a check-in made from cleanup code. A
+ * {@code SHUTDOWN} cancellation is delivered once, when the grace period
+ * expires: the node is closing and stops its watchdog, so a handler that
+ * swallows that interrupt is not interrupted again. A handler must therefore
+ * treat an interrupt as
  * cancellation: stop issuing blocking calls, do not blame the external system
  * it was talking to, and return or rethrow promptly. Cleanup that keeps
  * borrowing pooled connections after the interrupt may destroy each one on

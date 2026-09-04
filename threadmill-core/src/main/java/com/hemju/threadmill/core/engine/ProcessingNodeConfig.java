@@ -40,10 +40,12 @@ public record ProcessingNodeConfig(
     Duration quarantinedRetention) {
 
   /**
-   * Upper bound for {@link #jobTimeout()}, {@link #noProgressTimeout()}, and the per-job
+   * Upper bound for {@link #jobTimeout()}, {@link #noProgressTimeout()},
+   * {@link #shutdownGracePeriod()}, and the per-job
    * {@code threadmill.job.timeoutSeconds} override: one hundred years. Anything larger
    * overflows the millisecond arithmetic the watchdog and {@code JobExecutionContext.deadline()}
-   * perform on it; the override degrades to {@link #jobTimeout()}, the config fails fast.
+   * perform on it (the shutdown deadline
+   * {@code ProcessingNode.close()} publishes uses the same arithmetic); the override degrades to {@link #jobTimeout()}, the config fails fast.
    */
   public static final Duration MAX_TIMEOUT = Duration.ofDays(36_500L);
 
@@ -91,6 +93,7 @@ public record ProcessingNodeConfig(
     requirePositive("noProgressTimeout", noProgressTimeout);
     requireAtMost("jobTimeout", jobTimeout, MAX_TIMEOUT);
     requireAtMost("noProgressTimeout", noProgressTimeout, MAX_TIMEOUT);
+    requireAtMost("shutdownGracePeriod", shutdownGracePeriod, MAX_TIMEOUT);
     requirePositive("queueFamilyDiscoveryInterval", queueFamilyDiscoveryInterval);
     requirePositive("queueFamilyRetentionAfterEmpty", queueFamilyRetentionAfterEmpty);
     requirePositive("maxDedupTtl", maxDedupTtl);

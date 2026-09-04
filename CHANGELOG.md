@@ -26,15 +26,17 @@
   `threadmill.jobTimeout`, `threadmill.noProgressTimeout`, and in the handler
   and long-running-job guides: the worker thread is interrupted; on virtual
   threads that can abort in-flight socket I/O (guaranteed for `java.net.Socket`
-  and interruptible channels) and leaves the interrupt flag set, re-asserted
-  every watchdog tick until the handler returns; a handler must treat it as
+  and interruptible channels) and leaves the interrupt flag set; a timeout
+  interrupt is re-asserted every watchdog tick until the handler returns while
+  a shutdown interrupt is delivered once; a handler must treat it as
   cancellation.
 - Hardened the timeout path around the new API: the watchdog keeps
   interrupting a cancelled attempt even if cleanup code calls `checkIn()`, a
   worker that registers during the shutdown sweep still classifies its
   interrupt as `SHUTDOWN`, and a per-job timeout override beyond
   `ProcessingNodeConfig.MAX_TIMEOUT` (one hundred years) degrades to the global
-  timeout instead of overflowing before the handler runs.
+  timeout instead of overflowing before the handler runs. The config rejects
+  `jobTimeout`, `noProgressTimeout`, and `shutdownGracePeriod` above that bound.
 
 ## 0.2.1
 

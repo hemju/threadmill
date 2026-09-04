@@ -156,8 +156,12 @@ polite flag:
   next interruptible call.
 - The interrupt flag **stays set**. Only methods that throw
   `InterruptedException` clear it; a `SocketException` does not, and the
-  engine re-asserts the interrupt every watchdog tick until the handler
-  returns — a `checkIn()` from cleanup code does not lift it. Every later
+  for a `TIMEOUT` cancellation the watchdog re-asserts the interrupt every
+  tick until the handler returns — a `checkIn()` from cleanup code does not
+  lift it. A `SHUTDOWN` cancellation is delivered once, when the grace period
+  expires: the node is closing and stops its watchdog, so a handler that
+  swallows that interrupt runs on unobserved until the process exits. Every
+  later
   blocking call on the thread can fail the same way, and each pooled
   connection the handler borrows for cleanup may be destroyed on first use.
 

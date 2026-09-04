@@ -100,6 +100,11 @@ class ProcessingNodeConfigTest {
             .build())
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("noProgressTimeout");
+    assertThatThrownBy(() -> ProcessingNodeConfig.builder()
+            .shutdownGracePeriod(Duration.ofSeconds(Long.MAX_VALUE))
+            .build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("shutdownGracePeriod");
     // The bound itself is accepted.
     var config = ProcessingNodeConfig.builder()
         .jobTimeout(ProcessingNodeConfig.MAX_TIMEOUT)

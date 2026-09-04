@@ -201,7 +201,11 @@ public final class JobRunner {
             // Once cancelled, keep interrupting every tick until the handler
             // returns: a check-in from cleanup code moves watchdogDeadline()
             // forward, and without the latch repeated check-ins could keep a
-            // timed-out attempt alive indefinitely.
+            // timed-out attempt alive indefinitely. This is the TIMEOUT
+            // guarantee only — a SHUTDOWN cancellation is delivered once,
+            // because ProcessingNode.close() stops this executor right after
+            // shutdownNow(); the branch merely re-asserts it for the few
+            // ticks the executor may still run.
             if (ctx.isCancelled() || !ctx.watchdogDeadline().isAfter(Instant.now())) {
               // Record the reason BEFORE interrupting, so ctx.cancellation()
               // is already the fact when the handler observes the interrupt.
