@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.LockSupport;
 
 import io.lettuce.core.AbstractRedisClient;
@@ -36,6 +37,7 @@ import io.lettuce.core.ScoredValue;
 import io.lettuce.core.ScoredValueScanCursor;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.SetArgs;
+import io.lettuce.core.ValueScanCursor;
 import io.lettuce.core.ZAddArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.cluster.RedisClusterClient;
@@ -123,6 +125,11 @@ public final class RedisJobStore implements JobStore {
   private final JobStoreCapabilities capabilities;
   private final boolean ownsClient;
   private final RedisStoreConfig.RedisSafetyValidation safetyValidation;
+
+  /** Cached observation that the age-index layout reached {@code complete}. */
+  private volatile boolean ageIndexLayoutComplete;
+
+  private final AtomicBoolean ageIndexFinalizing = new AtomicBoolean();
   private final String topologyDescription;
   private final Map<String, String> claimKeyScanCursors = new LinkedHashMap<>();
 
@@ -245,7 +252,7 @@ public final class RedisJobStore implements JobStore {
     this.topologyDescription = Objects.requireNonNull(topologyDescription, "topologyDescription");
     try {
       validateRedisSafety();
-      backfillQueueEnqueuedAtIndex();
+      upgradeQueueEnqueuedAtLayout();
     } catch (RuntimeException validationFailure) {
       // A wrong eviction policy is the EXPECTED failure mode on
       // misconfigured Redis (and apps retry startup): the connection
@@ -920,8 +927,17 @@ public final class RedisJobStore implements JobStore {
 
   static final int INSERT_ARGS_PER_JOB = 18;
 
-  /** ZSCAN page size for the one-time age-index backfill. */
+  /** SSCAN / ZSCAN page size for the age-index backfill and reconciliation walks. */
   private static final int LAYOUT_BACKFILL_PAGE = 1_000;
+
+  /** Age-index layout state: backfilled while old-release writers may still be live. */
+  private static final String LAYOUT_BACKFILLED = "backfilled";
+
+  /** Age-index layout state: no old-release node remains and the index is exact. */
+  private static final String LAYOUT_COMPLETE = "complete";
+
+  /** Node heartbeat and node layout keys share this TTL. */
+  private static final long NODE_HEARTBEAT_TTL_SECONDS = 60;
 
   /** Stale age-index heads dropped per {@code oldestEnqueuedAt} read before giving up. */
   private static final int MAX_STALE_AGE_HEADS_PER_READ = 1_000;
@@ -1282,7 +1298,10 @@ public final class RedisJobStore implements JobStore {
       r.set(
           RedisKeys.nodeHeartbeat(nodeId),
           Long.toString(now.toEpochMilli()),
-          SetArgs.Builder.ex(60));
+          SetArgs.Builder.ex(NODE_HEARTBEAT_TTL_SECONDS));
+      // Same TTL as the heartbeat: a live heartbeat without this key is a
+      // node on a release that does not maintain the age index.
+      r.set(RedisKeys.nodeLayout(nodeId), "1", SetArgs.Builder.ex(NODE_HEARTBEAT_TTL_SECONDS));
       r.sadd(RedisKeys.NODES, nodeId.toString());
     } catch (RuntimeException e) {
       throw translateCapacity(e);
@@ -1475,6 +1494,7 @@ public final class RedisJobStore implements JobStore {
     String indexKey = RedisKeys.queueEnqueuedAt(queue);
     String queueKey = RedisKeys.queue(queue);
     RedisClusterCommands<String, String> r = sync();
+    if (!ageIndexLayoutComplete) maybeFinalizeAgeIndexLayout(r);
     for (int dropped = 0; dropped < MAX_STALE_AGE_HEADS_PER_READ; dropped++) {
       List<ScoredValue<String>> head = r.zrangeWithScores(indexKey, 0, 0);
       if (head == null || head.isEmpty()) return Optional.empty();
@@ -1487,57 +1507,146 @@ public final class RedisJobStore implements JobStore {
       if (r.zscore(queueKey, oldest.getValue()) != null) {
         return Optional.of(Instant.ofEpochMilli((long) oldest.getScore()));
       }
-      r.zrem(indexKey, oldest.getValue());
+      // Compare-and-remove in one atomic call: a retry or promotion that
+      // re-enqueues this very job between the ZSCORE above and the removal
+      // re-adds the member to both ZSETs atomically, and a plain ZREM here
+      // would then delete a valid member for good.
+      evalScript(
+          PRUNE_STALE_AGE_INDEX_MEMBERS_LUA,
+          ScriptOutputType.INTEGER,
+          new String[] {indexKey, queueKey},
+          oldest.getValue());
     }
     // Pathological stale run: the next read continues the cleanup.
     return Optional.empty();
   }
 
   /**
-   * One-time layout upgrade from stores written before the per-queue age
-   * index existed (v0.2.1 and earlier): rebuild every
-   * {@code queue_enqueued_at} ZSET from the queue ZSETs, then record the
-   * layout marker so later starts skip the walk.
+   * Age-index layout upgrade, run before this store serves any read. The
+   * index did not exist before v0.2.2, so a store started against older data
+   * must build it, and during a rolling upgrade nodes on the old release keep
+   * writing without it. The {@code {threadmill}:layout:queue_enqueued_at}
+   * state records where that process stands:
    *
-   * <p>Runs from Java over ZSCAN pages with pipelined per-member reads, so it
-   * never holds the server the way a single Lua walk would, and ZSCAN's
-   * guarantee (every member present for the whole scan is returned at least
-   * once) survives concurrent claims that a rank-based page would skip.
-   * ZADD is idempotent, so concurrent new nodes may both run it. The marker
-   * is deliberately not per node — once any new node has backfilled, the
-   * pre-upgrade backlog is indexed for everyone.
+   * <ul>
+   *   <li><b>absent</b> (v0.2.1 data) or <b>backfilled</b> (a rollout in
+   *       progress): every registered queue is reconciled exactly — missing
+   *       members added, stale members pruned — and the state becomes
+   *       {@code backfilled}. The walk is ZSCAN pages with pipelined per-member
+   *       reads from Java, never one Lua call, so it does not hold the server;
+   *       ZSCAN's at-least-once guarantee survives concurrent claims that rank
+   *       paging would skip; ZADD and the compare-and-remove prune are
+   *       idempotent, so concurrent new nodes may all run it.</li>
+   *   <li>{@code backfilled} becomes <b>complete</b> as soon as no old-release
+   *       node is live: new-release nodes write {@code node:layout:{nodeId}}
+   *       next to their heartbeat, so a live heartbeat without it identifies
+   *       an old-release node. The transition is attempted here and, so a
+   *       restart is not required after the last old node exits, from
+   *       {@link #oldestEnqueuedAt} once its heartbeat has expired — a final
+   *       exact reconciliation in a background virtual thread, then the state
+   *       write.</li>
+   *   <li><b>complete</b>: two ZCARDs per queue, no scan, and a re-walk only
+   *       where the index and queue cardinalities disagree. That is defence in
+   *       depth for writers this store cannot see — a producer-only process
+   *       still on the old release has no heartbeat — which the upgrade
+   *       procedure documents as needing to be stopped before the rollout
+   *       completes.</li>
+   * </ul>
    *
-   * <p>During a rolling upgrade, nodes still on the old release keep writing
-   * without this index: members they claim without removing are dropped by
-   * {@link #oldestEnqueuedAt} on read, and jobs they enqueue are missing from
-   * the index until they drain through normal claims or until any
-   * new-release node starts. With the marker present, a start still compares
-   * each queue's index cardinality with its queue ZSET — two ZCARDs per
-   * queue, no scan — and re-walks only a queue where the two differ, adding
-   * the missing members and pruning the stale ones, so in a rolling deploy
-   * the last node's own start completes the index. Stale and missing members
-   * in equal numbers cancel in that comparison; the stale heads are dropped
-   * by reads, after which the next start sees the shortfall.
+   * <p>Mixed-version guarantees: job processing is never affected (the claim
+   * path does not read this index); the gauge never reports a job that is no
+   * longer ENQUEUED (reads verify the head against the queue ZSET); it may
+   * under-report a queue whose oldest job was enqueued by an old-release node
+   * until that job drains, any new-release node starts, or the layout
+   * finalizes — whichever comes first.
    */
-  private void backfillQueueEnqueuedAtIndex() {
+  private void upgradeQueueEnqueuedAtLayout() {
     RedisClusterCommands<String, String> r = sync();
-    boolean markerPresent = r.exists(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT) > 0;
-    Set<String> queues = r.smembers(RedisKeys.QUEUES);
-    if (queues != null) {
-      for (String queue : queues) {
-        long indexed = markerPresent ? r.zcard(RedisKeys.queueEnqueuedAt(queue)) : -1L;
-        long depth = markerPresent ? r.zcard(RedisKeys.queue(queue)) : -1L;
-        if (markerPresent && indexed == depth) {
-          // Both hold exactly the queue's ENQUEUED ids in steady state; a
-          // dangling queue member (no job hash) keeps them apart until the
+    String state = r.get(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT);
+    if (LAYOUT_COMPLETE.equals(state)) {
+      ageIndexLayoutComplete = true;
+      for (String queue : scanQueues(r)) {
+        long indexed = r.zcard(RedisKeys.queueEnqueuedAt(queue));
+        long depth = r.zcard(RedisKeys.queue(queue));
+        if (indexed != depth) {
+          // A dangling queue member (no job hash) keeps them apart until the
           // claim path removes it, which costs a bounded re-walk per start,
           // never a wrong answer.
-          continue;
+          reconcileQueueEnqueuedAt(r, queue);
         }
-        backfillQueueEnqueuedAt(r, queue);
+      }
+      return;
+    }
+    for (String queue : scanQueues(r)) {
+      reconcileQueueEnqueuedAt(r, queue);
+    }
+    if (!LAYOUT_BACKFILLED.equals(state)) {
+      r.set(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT, LAYOUT_BACKFILLED);
+    }
+    finalizeAgeIndexLayoutIfNoLegacyNodeIsLive(r);
+  }
+
+  /**
+   * Read-path half of the {@code backfilled → complete} transition: once no
+   * old-release node heartbeat remains, reconcile every queue exactly in the
+   * background and mark the layout complete. Bounded by one GET plus the
+   * node-registry probe per read while the state is not yet complete; nothing
+   * afterwards.
+   */
+  private void maybeFinalizeAgeIndexLayout(RedisClusterCommands<String, String> r) {
+    if (LAYOUT_COMPLETE.equals(r.get(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT))) {
+      ageIndexLayoutComplete = true;
+      return;
+    }
+    if (legacyNodeIsLive(r) || !ageIndexFinalizing.compareAndSet(false, true)) return;
+    Thread.ofVirtual().name("threadmill-redis-age-index-finalize").start(() -> {
+      try {
+        for (String queue : scanQueues(r)) {
+          reconcileQueueEnqueuedAt(r, queue);
+        }
+        finalizeAgeIndexLayoutIfNoLegacyNodeIsLive(r);
+      } catch (RuntimeException e) {
+        // Store closed or Redis unavailable: the state stays backfilled and
+        // a later read retries.
+      } finally {
+        ageIndexFinalizing.set(false);
+      }
+    });
+  }
+
+  private boolean finalizeAgeIndexLayoutIfNoLegacyNodeIsLive(
+      RedisClusterCommands<String, String> r) {
+    if (legacyNodeIsLive(r)) return false;
+    r.set(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT, LAYOUT_COMPLETE);
+    ageIndexLayoutComplete = true;
+    return true;
+  }
+
+  /** A live node heartbeat without the layout key its release would have written. */
+  private static boolean legacyNodeIsLive(RedisClusterCommands<String, String> r) {
+    Set<String> nodes = r.smembers(RedisKeys.NODES);
+    if (nodes == null) return false;
+    for (String node : nodes) {
+      var nodeId = NodeId.parse(node);
+      if (r.exists(RedisKeys.nodeHeartbeat(nodeId)) > 0
+          && r.exists(RedisKeys.nodeLayout(nodeId)) == 0) {
+        return true;
       }
     }
-    if (!markerPresent) r.set(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT, "1");
+    return false;
+  }
+
+  /** The queue registry, paged with SSCAN so a high-cardinality registry never blocks the server. */
+  private static List<String> scanQueues(RedisClusterCommands<String, String> r) {
+    var queues = new LinkedHashSet<String>();
+    ScanCursor cursor = ScanCursor.INITIAL;
+    ValueScanCursor<String> page;
+    do {
+      page = r.sscan(RedisKeys.QUEUES, cursor, ScanArgs.Builder.limit(LAYOUT_BACKFILL_PAGE));
+      if (page.getValues() != null) queues.addAll(page.getValues());
+      cursor = page;
+    } while (!page.isFinished());
+    return List.copyOf(queues);
   }
 
   /**
@@ -1546,7 +1655,7 @@ public final class RedisJobStore implements JobStore {
    * per page so a promotion landing between a Java-side ZSCORE and ZREM
    * cannot lose a freshly re-added valid member.
    */
-  private static final String PRUNE_STALE_AGE_INDEX_MEMBERS_LUA = """
+  static final String PRUNE_STALE_AGE_INDEX_MEMBERS_LUA = """
       local removed = 0
       for i = 1, #ARGV do
         if redis.call('ZSCORE', KEYS[2], ARGV[i]) == false then
@@ -1556,7 +1665,7 @@ public final class RedisJobStore implements JobStore {
       return removed
       """;
 
-  private void backfillQueueEnqueuedAt(RedisClusterCommands<String, String> r, String queue) {
+  private void reconcileQueueEnqueuedAt(RedisClusterCommands<String, String> r, String queue) {
     String queueKey = RedisKeys.queue(queue);
     String indexKey = RedisKeys.queueEnqueuedAt(queue);
     ScanCursor cursor = ScanCursor.INITIAL;

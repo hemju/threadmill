@@ -1227,7 +1227,8 @@ class RedisJobStoreRegressionTest {
     r.configResetstat();
     JobStore upgraded = store();
     assertThat(commandCalls(r, "zscan")).as("backfill walked the queues").isPositive();
-    assertThat(r.get(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT)).isEqualTo("1");
+    // No old-release node is live, so the layout finalizes in the same start.
+    assertThat(r.get(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT)).isEqualTo("complete");
     assertThat(upgraded.oldestEnqueuedAt("default")).contains(oldLowAt);
     assertThat(upgraded.oldestEnqueuedAt("reports")).contains(reportAt);
     assertRedisIndexesConsistent();
@@ -1340,6 +1341,132 @@ class RedisJobStoreRegressionTest {
     assertThat(r.zscore(RedisKeys.queueEnqueuedAt("default"), first.id().toString()))
         .isNull();
     assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void legacyEnqueueAfterTheMarkerIsRepairedWithoutARestartOnceNoLegacyNodeIsLive()
+      throws Exception {
+    // Re-review of PR #120: once the marker exists, an old-release node can
+    // still enqueue into the queue ZSET without the age index. If nothing
+    // reconciles after that node is gone, a starving low-priority job stays
+    // invisible to the gauge for good. The layout therefore stays
+    // `backfilled` while any old-release node heartbeat is live and is
+    // finalized — one exact reconciliation, then `complete` — from a read
+    // once none remains, so no restart is needed.
+    store(); // fresh layout: complete
+    RedisCommands<String, String> r = adminConnection.sync();
+    r.set(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT, "backfilled");
+    NodeId legacy = NodeId.newId();
+    r.sadd(RedisKeys.NODES, legacy.toString());
+    // An old-release heartbeat: present, but without the node layout key.
+    r.set(
+        RedisKeys.nodeHeartbeat(legacy),
+        Long.toString(System.currentTimeMillis()),
+        SetArgs.Builder.ex(60));
+
+    JobStore upgraded = store();
+    assertThat(r.get(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT))
+        .as("a live old-release node keeps the layout open")
+        .isEqualTo("backfilled");
+    // A new-release node's own heartbeat carries the layout key and must not
+    // hold the layout open.
+    upgraded.recordNodeHeartbeat(NodeId.newId(), Instant.now());
+
+    Job oldLow = Job.builder()
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+        .priority(-5)
+        .build();
+    upgraded.insert(oldLow);
+    Thread.sleep(20);
+    Job visible = sample();
+    upgraded.insert(visible);
+    String index = RedisKeys.queueEnqueuedAt("default");
+    Instant oldLowAt = Instant.ofEpochMilli(
+        Long.parseLong(r.hget(RedisKeys.job(oldLow.id()), "current_state_at")));
+    Instant visibleAt = Instant.ofEpochMilli(
+        Long.parseLong(r.hget(RedisKeys.job(visible.id()), "current_state_at")));
+    // The old-release enqueue shape: queue ZSET and every v0.2.1 index, never
+    // the age index.
+    r.zrem(index, oldLow.id().toString());
+
+    // While the old node is live the hole is visible as under-reporting and
+    // the layout does not finalize.
+    assertThat(upgraded.oldestEnqueuedAt("default")).contains(visibleAt);
+    assertThat(r.get(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT)).isEqualTo("backfilled");
+
+    // The old node exits and its heartbeat expires. The next read finalizes
+    // the layout in the background: exact reconciliation, then `complete`.
+    r.del(RedisKeys.nodeHeartbeat(legacy));
+    upgraded.oldestEnqueuedAt("default");
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    while (!"complete".equals(r.get(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT))) {
+      assertThat(System.nanoTime()).as("layout finalized within 10s").isLessThan(deadline);
+      Thread.sleep(20);
+    }
+    assertThat(upgraded.oldestEnqueuedAt("default")).contains(oldLowAt);
+    assertRedisIndexesConsistent();
+
+    // Complete is cached in the store: later reads carry no layout probe.
+    r.configResetstat();
+    upgraded.oldestEnqueuedAt("default");
+    assertThat(commandCalls(r, "get") + commandCalls(r, "smembers"))
+        .as("layout probe after completion")
+        .isZero();
+  }
+
+  @Test
+  void staleHeadRemovalIsAtomicWithAReEnqueueOfTheSameJob() throws Exception {
+    // Re-review of PR #120: the read path checks queue membership and then
+    // removes a stale age-index head. A retry or promotion that re-enqueues
+    // the same job between the two atomically re-adds the member to both
+    // ZSETs, so a plain ZREM would delete a valid member. The interleaving
+    // cannot be forced through the public API, so this pins the primitive the
+    // read path uses, in exactly the state the world is in when the
+    // re-enqueue commits first: the member is back in the queue ZSET, and the
+    // compare-and-remove must leave it alone.
+    JobStore store = store();
+    Job job = sample();
+    store.insert(job);
+    Thread.sleep(20);
+    Job other = sample();
+    store.insert(other);
+    RedisCommands<String, String> r = adminConnection.sync();
+    String index = RedisKeys.queueEnqueuedAt("default");
+    String queue = RedisKeys.queue("default");
+    String id = job.id().toString();
+    double at = Double.parseDouble(r.hget(RedisKeys.job(job.id()), "current_state_at"));
+
+    // Stale head: an old-release claim left the member in the index only.
+    assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(job.id());
+    r.zadd(index, at, id);
+    // The reader observed the stale head and found it absent from the queue;
+    // then the re-enqueue lands before the reader's removal.
+    r.zadd(queue, RedisKeys.queueScore(0, System.currentTimeMillis() * 1_000L), id);
+    r.zadd(index, at + 1_000d, id);
+    Long removedWhileEnqueued = r.eval(
+        RedisJobStore.PRUNE_STALE_AGE_INDEX_MEMBERS_LUA,
+        ScriptOutputType.INTEGER,
+        new String[] {index, queue},
+        id);
+    assertThat(removedWhileEnqueued)
+        .as("a member the queue holds again is never removed")
+        .isEqualTo(0L);
+    assertThat(r.zscore(index, id)).isEqualTo(at + 1_000d);
+
+    // Without the re-enqueue the same call removes the stale member.
+    r.zrem(queue, id);
+    Long removedWhenStale = r.eval(
+        RedisJobStore.PRUNE_STALE_AGE_INDEX_MEMBERS_LUA,
+        ScriptOutputType.INTEGER,
+        new String[] {index, queue},
+        id);
+    assertThat(removedWhenStale).isEqualTo(1L);
+    assertThat(r.zscore(index, id)).isNull();
+    assertThat(store.oldestEnqueuedAt("default"))
+        .contains(Instant.ofEpochMilli(
+            Long.parseLong(r.hget(RedisKeys.job(other.id()), "current_state_at"))));
   }
 
   @Test

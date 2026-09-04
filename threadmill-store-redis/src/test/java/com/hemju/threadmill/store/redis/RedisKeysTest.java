@@ -43,7 +43,8 @@ class RedisKeysTest {
         RedisKeys.queueKeys("default"),
         RedisKeys.queueUnkeyed("default"),
         RedisKeys.queueEnqueuedAt("default"),
-        RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT);
+        RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT,
+        RedisKeys.nodeLayout(NodeId.newId()));
 
     assertThat(keys).allSatisfy(key -> assertThat(SlotHash.getSlot(key)).as(key).isEqualTo(slot));
   }

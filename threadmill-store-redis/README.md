@@ -68,32 +68,46 @@ queue / handler / dedup-key user input cannot escape the namespace.
 ## Layout upgrades
 
 The age index `{threadmill}:queue_enqueued_at:{queue}` did not exist before
-v0.2.2. A store constructed against data written by an earlier release
-rebuilds it once on startup, before serving any read: it ZSCANs each
-registered queue ZSET in bounded pages, reads `current_state_at` for the
-members with pipelined `HGET`s, `ZADD`s them, and then sets the
-`{threadmill}:layout:queue_enqueued_at` marker so later starts skip the walk.
-The walk runs from Java, never as one Lua call, so it does not hold the
-server. It is idempotent; several new nodes starting together may all run it.
+v0.2.2. The `{threadmill}:layout:queue_enqueued_at` STRING records how far
+the upgrade has progressed, and every store construction advances it before
+serving a read:
 
-With the marker present, a start still compares each queue's index
-cardinality with its queue ZSET — two `ZCARD`s per queue, no scan — and
-re-walks only a queue where the two differ, adding missing members and
-pruning stale ones (each pruned page is a compare-and-remove Lua call, so a
-concurrent promotion cannot lose a valid member).
+- **Absent** (data written by v0.2.1 or earlier) or **`backfilled`** (a
+  rolling upgrade in progress): every registered queue is reconciled exactly.
+  The registry is paged with `SSCAN`, each queue ZSET with `ZSCAN`; members
+  get their `current_state_at` through pipelined `HGET`s and are `ZADD`ed;
+  a second pass prunes index members the queue ZSET no longer holds through a
+  per-page compare-and-remove Lua call. The walk runs from Java, never as one
+  Lua call, so it does not hold the server, and it is idempotent, so several
+  new nodes starting together may all run it. The state becomes
+  `backfilled`.
+- **`backfilled` → `complete`** as soon as no old-release node is live.
+  New-release nodes write `{threadmill}:node:layout:{nodeId}` next to their
+  heartbeat with the same TTL, so a live heartbeat without it identifies an
+  old-release node. The transition is attempted at every start and, so the
+  last old node's exit needs no restart, from `oldestEnqueuedAt` once that
+  node's heartbeat has expired: a final exact reconciliation in a background
+  virtual thread, then the state write. Until then the read pays one `GET`
+  and a node-registry probe; afterwards nothing.
+- **`complete`**: two `ZCARD`s per queue at start, no scan, and a re-walk only
+  where the index and queue cardinalities disagree.
 
-During a rolling upgrade, nodes on the old release keep writing without the
-index. Members they claim, delete, or move without removing them from the
-index are dropped lazily: `oldestEnqueuedAt` checks its head against the
-queue ZSET, which is the authority for "ENQUEUED in this queue", and removes
-a head that has left it before looking again. Jobs they enqueue are missing
-from the index until they drain through normal claims or until any
-new-release node starts and finds the cardinalities disagree; in a rolling
-deploy the last node's own start completes the index. Stale and missing
-members in equal numbers cancel in that comparison; the stale heads are
-dropped by reads, after which the next start sees the shortfall. Job
-processing is never affected — the claim path does not read this index — and
-the gauge never reports a job that is no longer ENQUEUED.
+**Upgrade procedure.** Roll the new release out node by node as usual. Stop
+any producer-only process still on the old release (a Spring application
+that enqueues but runs no `ProcessingNode`) before the rollout completes:
+such a process has no heartbeat, so the store cannot see it, and a job it
+enqueues after the layout is `complete` is missing from the index until it
+drains or until a start finds the cardinalities disagree.
+
+**Mixed-version guarantees.** Job processing is never affected — the claim
+path does not read this index. The gauge never reports a job that is no
+longer ENQUEUED: `oldestEnqueuedAt` verifies its head against the queue ZSET,
+the authority for "ENQUEUED in this queue", and drops a head that has left it
+through the same compare-and-remove call, so a retry or promotion that
+re-enqueues the job in between cannot lose the valid member. It may
+under-report a queue whose oldest job was enqueued by an old-release node
+until that job drains, any new-release node starts, or the layout finalizes,
+whichever comes first.
 
 ## Development reset
 

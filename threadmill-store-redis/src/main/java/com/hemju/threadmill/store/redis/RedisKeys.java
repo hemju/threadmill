@@ -58,8 +58,11 @@ import com.hemju.threadmill.core.NodeId;
  *       millis. {@code oldestEnqueuedAt} reads its head, so the age gauge
  *       is one indexed read instead of a per-member scan of the
  *       priority-ordered queue ZSET.</li>
- *   <li>{@code {threadmill}:layout:queue_enqueued_at} — STRING marker set
- *       once the age index has been backfilled from a pre-index layout.</li>
+ *   <li>{@code {threadmill}:layout:queue_enqueued_at} — STRING upgrade state
+ *       of the age index ({@code backfilled} / {@code complete}).</li>
+ *   <li>{@code {threadmill}:node:layout:{nodeId}} — STRING with the heartbeat
+ *       TTL, written by nodes that maintain the age index; a live heartbeat
+ *       without it identifies an old-release node during a rolling upgrade.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflows} — HASH workflow root
  *       id → active outstanding hold count.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflow_counts} — HASH workflow
@@ -85,10 +88,12 @@ public final class RedisKeys {
   public static final String QUEUE_PAUSES = PREFIX + "queue_pauses";
 
   /**
-   * STRING marker recording that the per-queue {@code queue_enqueued_at} age
-   * index has been backfilled from the queue ZSETs. Absent on stores written
-   * by releases before the index existed (v0.2.1 and earlier); the store
-   * rebuilds the index once on startup and then sets it.
+   * STRING recording the upgrade state of the per-queue {@code queue_enqueued_at}
+   * age index. Absent on stores written by releases before the index existed
+   * (v0.2.1 and earlier); {@code backfilled} once a new-release store has
+   * rebuilt it from the queue ZSETs while old-release writers may still be
+   * live; {@code complete} once no old-release node heartbeat remains and a
+   * final exact reconciliation has run.
    */
   public static final String QUEUE_ENQUEUED_AT_LAYOUT = PREFIX + "layout:queue_enqueued_at";
 
@@ -122,6 +127,12 @@ public final class RedisKeys {
   public static String nodeHeartbeat(NodeId node) {
     Objects.requireNonNull(node, "node");
     return PREFIX + "node:heartbeat:" + node;
+  }
+
+  /** Written alongside the heartbeat by nodes whose release maintains the age index. */
+  public static String nodeLayout(NodeId node) {
+    Objects.requireNonNull(node, "node");
+    return PREFIX + "node:layout:" + node;
   }
 
   public static String userKey(String prefix, String name) {
