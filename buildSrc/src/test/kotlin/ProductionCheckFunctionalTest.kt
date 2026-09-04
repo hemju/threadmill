@@ -43,7 +43,6 @@ class ProductionCheckFunctionalTest {
         val taskPaths =
             dryRun(
                 *publicationTaskPaths.toTypedArray(),
-                "-PreleaseTag=v-test",
                 "-PcentralPortalUsername=dummy",
                 "-PcentralPortalPassword=dummy",
             )
