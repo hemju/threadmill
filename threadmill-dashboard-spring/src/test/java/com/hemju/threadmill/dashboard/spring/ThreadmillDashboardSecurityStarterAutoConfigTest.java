@@ -22,11 +22,10 @@ import com.hemju.threadmill.store.memory.InMemoryJobStore;
 /**
  * Regression for the silently-skipped dashboard security chain: the test app
  * deliberately does NOT declare {@code @EnableWebSecurity} and relies on the
- * Spring Security starter's auto-configuration alone. Without the explicit
- * after-edges to the security auto-configurations, auto-configs sort
- * alphabetically ({@code com.hemju...} first), the {@code HttpSecurity} bean
- * definition does not exist when {@code @ConditionalOnBean} is evaluated, and
- * the documented dashboard chain is never created.
+ * Spring Security starter's auto-configuration alone. The dashboard must run
+ * after the infrastructure that exposes {@code HttpSecurity}, but before
+ * Boot's catch-all servlet chain, so the scoped dashboard chain is both
+ * created and selected for dashboard requests.
  */
 @SpringBootTest(
     classes = ThreadmillDashboardSecurityStarterAutoConfigTest.TestApp.class,

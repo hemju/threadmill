@@ -43,6 +43,7 @@ const states: JobState[] = [
   "DELETED",
   "QUARANTINED"
 ];
+const PAGE_SIZE = 50;
 
 function has(session: Session | null, permission: Permission) {
   return !!session && (session.permissions.includes("ADMIN") || session.permissions.includes(permission));
@@ -59,23 +60,30 @@ function canReplace(job: JobSummary) {
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
-  const [jobs, setJobs] = useState<JobList>({ jobs: [], limit: 50, offset: 0 });
+  const [jobs, setJobs] = useState<JobList>({ jobs: [], limit: PAGE_SIZE, offset: 0 });
   const [queues, setQueues] = useState<QueueView[]>([]);
   const [selected, setSelected] = useState<JobDetail | null>(null);
   const [state, setState] = useState<string>("ENQUEUED");
   const [filter, setFilter] = useState("");
+  const [submittedFilter, setSubmittedFilter] = useState("");
   const [offset, setOffset] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function load(requestedOffset = offset) {
+  async function load(
+    requestedOffset = offset,
+    requestedFilter = submittedFilter,
+    requestedState = state
+  ) {
     try {
       const nextSession = await api<Session>("/session");
       setSession(nextSession);
       const query = new URLSearchParams();
-      if (state) query.set("state", state);
-      if (overview?.capabilities.supportsRichSearch && filter) query.set("handlerType", filter);
-      query.set("limit", "50");
+      if (requestedState) query.set("state", requestedState);
+      if (overview?.capabilities.supportsRichSearch && requestedFilter) {
+        query.set("handlerType", requestedFilter);
+      }
+      query.set("limit", PAGE_SIZE.toString());
       query.set("offset", requestedOffset.toString());
       const [nextOverview, nextJobs, nextQueues] = await Promise.all([
         api<Overview>("/overview", {}, nextSession),
@@ -85,6 +93,8 @@ export default function App() {
       setOverview(nextOverview);
       setJobs(nextJobs);
       setQueues(nextQueues);
+      setOffset(nextJobs.offset);
+      setSubmittedFilter(requestedFilter);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Dashboard request failed");
@@ -97,7 +107,7 @@ export default function App() {
       const response = await api<ActionResponse>(path, init, session);
       setMessage(`${success}: ${response.target}`);
       setError(null);
-      await load(offset);
+      await load(offset, submittedFilter);
       if (selected) {
         setSelected(await api<JobDetail>(`/jobs/${selected.summary.id}`, {}, session));
       }
@@ -185,8 +195,8 @@ export default function App() {
   }
 
   useEffect(() => {
-    void load(offset);
-  }, [state, offset]);
+    void load(0, submittedFilter, state);
+  }, []);
 
   const total = useMemo(
     () => Object.values(overview?.countsByState ?? {}).reduce((sum, value) => sum + value, 0),
@@ -276,10 +286,11 @@ export default function App() {
         }
       }
     ],
-    [session, selected]
+    [session, selected, offset, submittedFilter, state]
   );
 
   const table = useReactTable({ data: jobs.jobs, columns, getCoreRowModel: getCoreRowModel() });
+  const pageSize = jobs.limit > 0 ? jobs.limit : PAGE_SIZE;
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -308,8 +319,9 @@ export default function App() {
               className="state-filter"
               disabled={!richSearch}
               onClick={() => {
-                setOffset(0);
                 setState("");
+                setSelected(null);
+                void load(0, submittedFilter, "");
               }}
             >
               <span>All</span>
@@ -320,8 +332,9 @@ export default function App() {
                 className="state-filter"
                 key={s}
                 onClick={() => {
-                  setOffset(0);
                   setState(s);
+                  setSelected(null);
+                  void load(0, submittedFilter, s);
                 }}
               >
                 <span>{s}</span>
@@ -351,8 +364,8 @@ export default function App() {
               onChange={(event) => setFilter(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
-                  if (offset === 0) void load(0);
-                  else setOffset(0);
+                  setSelected(null);
+                  void load(0, filter);
                 }
               }}
             />
@@ -404,22 +417,22 @@ export default function App() {
             </span>
             <Button
               variant="secondary"
-              disabled={jobs.offset === 0}
+              disabled={offset === 0}
               aria-label="Previous page"
               onClick={() => {
                 setSelected(null);
-                setOffset(Math.max(0, jobs.offset - jobs.limit));
+                void load(Math.max(0, offset - pageSize), submittedFilter);
               }}
             >
               Previous
             </Button>
             <Button
               variant="secondary"
-              disabled={jobs.jobs.length === 0 || jobs.jobs.length < jobs.limit}
+              disabled={jobs.jobs.length === 0 || jobs.jobs.length < pageSize}
               aria-label="Next page"
               onClick={() => {
                 setSelected(null);
-                setOffset(jobs.offset + jobs.limit);
+                void load(offset + pageSize, submittedFilter);
               }}
             >
               Next
@@ -459,7 +472,12 @@ export default function App() {
             </div>
             <div className="divide-y divide-border">
               {(overview?.cronTasks ?? []).map(({ task, state: taskState }) => (
-                <div className="grid grid-cols-[1fr_auto] gap-3 p-3" key={task.name}>
+                <div
+                  aria-label={`Recurring task ${task.name}`}
+                  className="grid grid-cols-[1fr_auto] gap-3 p-3"
+                  key={task.name}
+                  role="group"
+                >
                   <div>
                     <div className="font-mono text-sm">{task.name}</div>
                     <div className="mt-1 text-xs text-muted-foreground">

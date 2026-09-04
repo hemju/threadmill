@@ -3,19 +3,17 @@ import { expect, test, type Browser, type BrowserContext, type Page } from "@pla
 const dashboardPath = "/threadmill/";
 const apiBasePath = "/ops/threadmill/api";
 
+// These scenarios intentionally exercise one store lifecycle: later cases
+// observe mutations committed by the mounted application. Keep the contract
+// explicit and leave retries disabled in the Playwright configuration.
+test.describe.configure({ mode: "serial" });
+
 async function openDashboard(
   browser: Browser,
   username = "admin",
   password = username
 ): Promise<{ context: BrowserContext; page: Page }> {
   const context = await browser.newContext({ httpCredentials: { username, password } });
-  await context.addInitScript((configuredApiBasePath) => {
-    (
-      window as Window & {
-        __THREADMILL_DASHBOARD_CONFIG__?: { apiBasePath?: string };
-      }
-    ).__THREADMILL_DASHBOARD_CONFIG__ = { apiBasePath: configuredApiBasePath };
-  }, apiBasePath);
   const page = await context.newPage();
   await page.goto(dashboardPath);
   await expect(page.getByRole("heading", { name: "Threadmill" })).toBeVisible();
@@ -27,7 +25,7 @@ function jobRow(page: Page, handlerType: string) {
 }
 
 function recurringRow(page: Page, name: string) {
-  return page.getByText(name, { exact: true }).locator("..").locator("..");
+  return page.getByRole("group", { name: `Recurring task ${name}` });
 }
 
 test("requires authentication and honors the configured API base path", async ({

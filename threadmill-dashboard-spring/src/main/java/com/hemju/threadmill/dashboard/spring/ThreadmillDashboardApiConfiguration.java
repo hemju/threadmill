@@ -12,11 +12,13 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnResource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
 import org.springframework.core.env.Environment;
 import org.springframework.security.config.Customizer;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.web.SecurityFilterChain;
 import org.springframework.security.web.csrf.CookieCsrfTokenRepository;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
@@ -32,18 +34,19 @@ import com.hemju.threadmill.dashboard.api.DashboardOptions;
 /**
  * Minimal Spring configuration for the Threadmill dashboard API.
  *
- * <p>The after-edges to the Spring Security auto-configurations are
- * load-bearing: auto-configs sort alphabetically absent explicit edges
- * ({@code com.hemju...} before {@code org.springframework.boot...}), so in a
- * host that relies on the security starter's auto-configured
- * {@code @EnableWebSecurity} the {@code HttpSecurity} bean definition would
- * not exist yet when {@code @ConditionalOnBean(HttpSecurity.class)} is
- * evaluated — the documented dashboard chain would silently never be created.
+ * <p>The security ordering edges are load-bearing. The dashboard runs after
+ * Spring Security's core auto-configuration and before Boot's catch-all
+ * servlet chain. The nested security configuration exposes
+ * {@link HttpSecurity} early enough to build the scoped dashboard chain, which
+ * then makes Boot's default chain back off instead of leaving a login-page
+ * chain to intercept dashboard requests first.
  */
 @AutoConfiguration(
     afterName = {
       "com.hemju.threadmill.spring.ThreadmillAutoConfiguration",
-      "org.springframework.boot.security.autoconfigure.SecurityAutoConfiguration",
+      "org.springframework.boot.security.autoconfigure.SecurityAutoConfiguration"
+    },
+    beforeName = {
       "org.springframework.boot.security.autoconfigure.web.servlet.ServletWebSecurityAutoConfiguration"
     })
 @ConditionalOnBean(JobStore.class)
@@ -54,6 +57,15 @@ public class ThreadmillDashboardApiConfiguration {
   private static final Logger LOG =
       LoggerFactory.getLogger(ThreadmillDashboardApiConfiguration.class);
   static final String UI_INDEX_RESOURCE = "classpath:/META-INF/resources/threadmill/index.html";
+
+  @Configuration(proxyBeanMethods = false)
+  @ConditionalOnProperty(
+      prefix = "threadmill.dashboard.security",
+      name = "auto-configure",
+      havingValue = "true",
+      matchIfMissing = true)
+  @EnableWebSecurity
+  static class ThreadmillDashboardWebSecurityConfiguration {}
 
   @Bean
   @ConditionalOnMissingBean
@@ -102,7 +114,6 @@ public class ThreadmillDashboardApiConfiguration {
    * — asset disclosure of an admin surface even though data calls 401.
    */
   @Bean
-  @ConditionalOnBean(HttpSecurity.class)
   @ConditionalOnMissingBean(name = "threadmillDashboardSecurityFilterChain")
   @ConditionalOnProperty(
       prefix = "threadmill.dashboard.security",
@@ -138,6 +149,14 @@ public class ThreadmillDashboardApiConfiguration {
         registry.addViewController("/threadmill/").setViewName("forward:/threadmill/index.html");
       }
     };
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  @ConditionalOnResource(resources = UI_INDEX_RESOURCE)
+  ThreadmillDashboardUiConfigurationController threadmillDashboardUiConfigurationController(
+      DashboardOptions options) {
+    return new ThreadmillDashboardUiConfigurationController(options);
   }
 
   @Bean

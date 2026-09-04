@@ -9,12 +9,9 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.SpringBootConfiguration;
 import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.context.annotation.Bean;
-import org.springframework.security.config.annotation.web.builders.HttpSecurity;
-import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
 import org.springframework.security.core.userdetails.User;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.provisioning.InMemoryUserDetailsManager;
-import org.springframework.security.web.SecurityFilterChain;
 
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
@@ -23,21 +20,23 @@ import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
-import com.hemju.threadmill.dashboard.api.DashboardOptions;
-import com.hemju.threadmill.dashboard.spring.ThreadmillDashboardApiConfiguration;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 
 /** Real mounted Spring dashboard used only by the Playwright browser suite. */
 @SpringBootConfiguration(proxyBeanMethods = false)
 @EnableAutoConfiguration
-@EnableWebSecurity
 public final class DashboardBrowserTestApplication {
 
   static void main(String[] args) {
+    var browserPort = System.getenv("THREADMILL_BROWSER_PORT");
+    if (browserPort == null || browserPort.isBlank()) {
+      throw new IllegalStateException(
+          "THREADMILL_BROWSER_PORT is required; run the Gradle browserTest task");
+    }
     var application = new SpringApplication(DashboardBrowserTestApplication.class);
     application.setDefaultProperties(Map.of(
         "server.address", "127.0.0.1",
-        "server.port", System.getenv().getOrDefault("THREADMILL_BROWSER_PORT", "9876"),
+        "server.port", browserPort,
         "spring.main.banner-mode", "off",
         "logging.level.root", "WARN",
         "threadmill.dashboard.api.base-path", "/ops/threadmill/api",
@@ -93,18 +92,6 @@ public final class DashboardBrowserTestApplication {
         .authorities("THREADMILL_READ")
         .build();
     return new InMemoryUserDetailsManager(admin, viewer);
-  }
-
-  @Bean
-  DashboardOptions dashboardOptions() {
-    return new DashboardOptions(false, true, "/ops/threadmill/api", true);
-  }
-
-  @Bean(name = "threadmillDashboardSecurityFilterChain")
-  SecurityFilterChain threadmillDashboardSecurityFilterChain(
-      HttpSecurity http, DashboardOptions options) throws Exception {
-    return new ThreadmillDashboardApiConfiguration()
-        .threadmillDashboardSecurityFilterChain(http, options);
   }
 
   private static void insertJob(

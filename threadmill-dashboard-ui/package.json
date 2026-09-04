@@ -5,9 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && npm run typecheck:browser && vite build",
     "test": "vitest run",
-    "test:browser": "playwright test"
+    "test:browser": "playwright test",
+    "typecheck:browser": "tsc -p tsconfig.browser-tests.json"
   },
   "dependencies": {
     "@radix-ui/react-slot": "^1.2.4",

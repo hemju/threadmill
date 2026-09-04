@@ -1,3 +1,5 @@
+import java.net.ServerSocket
+
 plugins {
     id("threadmill.java-module")
     id("threadmill.publish")
@@ -68,6 +70,8 @@ val browserTest by
         inputs.files(browserTestSourceSet.runtimeClasspath)
         outputs.dir(rootProject.file("threadmill-dashboard-ui/build/playwright-report"))
         doFirst {
+            val browserPort = ServerSocket(0).use { it.localPort.toString() }
+            environment("THREADMILL_BROWSER_PORT", browserPort)
             environment(
                 "THREADMILL_BROWSER_SERVER_CLASSPATH",
                 browserTestSourceSet.runtimeClasspath.asPath,
@@ -75,3 +79,5 @@ val browserTest by
         }
         commandLine("npm", "run", "test:browser")
     }
+
+tasks.named("check") { dependsOn(browserTestSourceSet.classesTaskName) }

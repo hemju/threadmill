@@ -237,6 +237,7 @@ const actions: OperatorAction[] = [
 
 afterEach(() => {
   cleanup();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
   window.__THREADMILL_DASHBOARD_CONFIG__ = undefined;
 });
@@ -319,6 +320,19 @@ it("does not invent a CSRF header when the session does not provide one", async 
   await waitFor(() => expect(requests.some(({ init }) => init.method === "POST")).toBe(true));
   const request = requests.find(({ init }) => init.method === "POST");
   expect(new Headers(request?.init.headers).has("X-THREADMILL-CSRF")).toBe(false);
+});
+
+it("does not send the session CSRF header on read requests", async () => {
+  const requests = installApiMock();
+  render(<App />);
+
+  await screen.findByRole("button", { name: "Pause" });
+
+  const reads = requests.filter(({ init }) => (init.method ?? "GET") === "GET");
+  expect(reads.length).toBeGreaterThan(0);
+  for (const request of reads) {
+    expect(new Headers(request.init.headers).has("X-THREADMILL-CSRF")).toBe(false);
+  }
 });
 
 it("surfaces a non-2xx initial dashboard response", async () => {

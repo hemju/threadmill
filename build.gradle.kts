@@ -224,6 +224,7 @@ tasks.register("productionCheck") {
     dependsOn(
         ":threadmill-store-postgres:test",
         ":threadmill-store-redis:test",
+        ":threadmill-dashboard-spring:browserTest",
         ":threadmill-soak:soakRegression",
         // The correctness simulation is the gate that caught the C1
         // in-memory concurrency bypass — a release candidate must run it.
@@ -244,7 +245,7 @@ tasks
 subprojects {
     tasks
         .matching {
-            it.name in setOf("jar", "test", "javadoc", "soak", "run") ||
+            it.name in setOf("jar", "test", "javadoc", "soak", "run", "browserTest") ||
                 it.name.startsWith("simulate")
         }
         .configureEach { mustRunAfter(cleanTask) }

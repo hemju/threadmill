@@ -12,7 +12,10 @@ The Gradle jar packages the built app under
 `META-INF/resources/threadmill/`. Framework adapters can serve that same jar;
 the Spring adapter mounts it automatically when present.
 
-The API base path can be overridden before the app loads:
+The Spring adapter emits `/threadmill/config.js` from
+`threadmill.dashboard.api.base-path`, so a mounted console follows a custom API
+path without host-page changes. Other adapters can provide the same runtime
+value before the app loads:
 
 ```html
 <script>
@@ -37,7 +40,8 @@ HTTP Basic authentication, cookie CSRF, seeded operator data, and a non-default
 API base path. Install Chromium once, then run the Gradle-owned suite:
 
 ```bash
-npx playwright install chromium
+./gradlew :threadmill-dashboard-ui:npmInstall
+cd threadmill-dashboard-ui && npx playwright install chromium && cd ..
 ./gradlew :threadmill-dashboard-spring:browserTest
 ```
 
@@ -47,7 +51,7 @@ Failures retain screenshots, video, traces, and an HTML report under
 
 ## Layout
 
-The console is intentionally dense: state filters, job table, queue controls,
-recurring task controls, node heartbeats, and a job detail drawer are all visible
-without a landing page. Permission-gated actions are hidden or disabled in the UI,
-but the API remains authoritative.
+The console is intentionally dense: state filters, a 50-job paged table with
+previous/next controls, queue controls, recurring task controls, node heartbeats,
+and a job detail drawer are all visible without a landing page. Permission-gated
+actions are hidden or disabled in the UI, but the API remains authoritative.

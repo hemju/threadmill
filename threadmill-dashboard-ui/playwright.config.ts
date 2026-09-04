@@ -1,11 +1,12 @@
 import { defineConfig } from "@playwright/test";
 
-const port = process.env.THREADMILL_BROWSER_PORT ?? "9876";
+const port = process.env.THREADMILL_BROWSER_PORT;
 const serverClasspath = process.env.THREADMILL_BROWSER_SERVER_CLASSPATH;
 
-if (!serverClasspath) {
+if (!port || !serverClasspath) {
   throw new Error(
-    "THREADMILL_BROWSER_SERVER_CLASSPATH is required; run the Gradle browserTest task"
+    "THREADMILL_BROWSER_PORT and THREADMILL_BROWSER_SERVER_CLASSPATH are required; "
+      + "run the Gradle browserTest task"
   );
 }
 
@@ -13,6 +14,8 @@ export default defineConfig({
   testDir: "./browser-tests",
   fullyParallel: false,
   workers: 1,
+  retries: 0,
+  forbidOnly: !!process.env.CI,
   timeout: 30_000,
   expect: { timeout: 10_000 },
   outputDir: "build/playwright-results",
