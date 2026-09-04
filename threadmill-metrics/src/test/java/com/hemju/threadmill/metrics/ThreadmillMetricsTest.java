@@ -338,6 +338,7 @@ class ThreadmillMetricsTest {
     var registry = new SimpleMeterRegistry();
     var metrics = new ThreadmillMetrics(registry, store, Duration.ofNanos(1), 10);
     store.blockRefresh.set(true);
+    store.gateLaterRefreshes.set(true);
 
     try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
       var pullRefresh = executor.submit(() -> stateGauge(registry, JobState.ENQUEUED));
@@ -348,12 +349,19 @@ class ThreadmillMetricsTest {
       assertThat(forcedRefresh.isDone()).isFalse();
       store.releaseRefresh.countDown();
 
+      // The forced pass takes the lock the moment the pull releases it, and a
+      // gauge read publishes its value only after that release. Hold the
+      // forced pass inside its own store read until the pull has returned, so
+      // the assertion below observes the snapshot the pull actually built.
       assertThat(pullRefresh.get(1, TimeUnit.SECONDS)).isZero();
+      store.releaseLaterRefreshes.countDown();
+
       forcedRefresh.get(1, TimeUnit.SECONDS);
       assertThat(store.countsCalls.get()).isEqualTo(3);
       assertThat(stateGauge(registry, JobState.ENQUEUED)).isEqualTo(1d);
     } finally {
       store.releaseRefresh.countDown();
+      store.releaseLaterRefreshes.countDown();
     }
   }
 
@@ -636,8 +644,15 @@ class ThreadmillMetricsTest {
   private static final class BlockingSnapshotStore extends ForwardingJobStore {
     private final AtomicBoolean blockRefresh = new AtomicBoolean();
     private final AtomicInteger countsCalls = new AtomicInteger();
+    private final AtomicInteger blockedCalls = new AtomicInteger();
     private final CountDownLatch refreshEntered = new CountDownLatch(1);
     private final CountDownLatch releaseRefresh = new CountDownLatch(1);
+    // Opt-in second gate. A gauge read publishes its value after releasing the
+    // refresh lock, so a refresh waiting on that lock can install a newer
+    // snapshot before the first reader returns. A test that needs to observe
+    // the earlier snapshot holds later refreshes here until it has read it.
+    private final AtomicBoolean gateLaterRefreshes = new AtomicBoolean();
+    private final CountDownLatch releaseLaterRefreshes = new CountDownLatch(1);
 
     private BlockingSnapshotStore(JobStore delegate) {
       super(delegate);
@@ -648,18 +663,25 @@ class ThreadmillMetricsTest {
       countsCalls.incrementAndGet();
       var counts = super.countsByState();
       if (blockRefresh.get()) {
-        refreshEntered.countDown();
-        try {
-          if (!releaseRefresh.await(1, TimeUnit.SECONDS)) {
-            throw new IllegalStateException("timed out waiting to release metrics refresh");
-          }
-        } catch (InterruptedException e) {
-          Thread.currentThread().interrupt();
-          throw new IllegalStateException(
-              "interrupted while waiting to release metrics refresh", e);
+        if (blockedCalls.incrementAndGet() > 1 && gateLaterRefreshes.get()) {
+          awaitGate(releaseLaterRefreshes, "release later metrics refreshes");
+        } else {
+          refreshEntered.countDown();
+          awaitGate(releaseRefresh, "release metrics refresh");
         }
       }
       return counts;
+    }
+
+    private static void awaitGate(CountDownLatch gate, String what) {
+      try {
+        if (!gate.await(1, TimeUnit.SECONDS)) {
+          throw new IllegalStateException("timed out waiting to " + what);
+        }
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException("interrupted while waiting to " + what, e);
+      }
     }
   }
 }
