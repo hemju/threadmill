@@ -1,8 +1,10 @@
 # Dependency Security
 
-Threadmill fails closed on known dependency vulnerabilities in pull requests,
-nightly scans of `main`, and tagged releases. The Gradle
-`dependencySecurityScan` task is the single entry point for this gate.
+Threadmill's dependency-security job fails when it finds a known vulnerability
+in a pull request, a nightly scan of `main`, or a tagged release. Repository
+branch protection is configured separately and determines whether a failing
+pull-request check blocks a merge. The Gradle `dependencySecurityScan` task is
+the single entry point for the scan.
 
 ## Scan inputs and thresholds
 
@@ -62,7 +64,7 @@ dependency graph or the relevant code paths change.
 
 | Dependency surface | Advisories assessed | Reachability and decision |
 | --- | --- | --- |
-| Lettuce and Netty | `GHSA-4g8c-wm8x-jfhw` (`CVE-2025-24970`), `GHSA-389x-839f-4rhx` (`CVE-2025-25193`), `GHSA-fccg-mwvh-qqg4`, `GHSA-c4c3-7fpv-j4q5` | Lettuce is the Redis backend's runtime client. Netty transport, buffer, resolver, handler, and TLS code are therefore runtime-reachable. In particular, `SslHandler` is reachable for TLS Redis connections, so a malicious or compromised endpoint could exercise TLS parser defects. Windows-local environment-file defects may also be reachable when running on Windows. Server-only SNI, HTTP, CORS, MQTT, SOCKS, and SCTP entry points are not used by Threadmill, but the Netty BOM is still upgraded globally instead of ignoring those advisories. The resolved floor is Lettuce 6.8.2.RELEASE plus Netty 4.1.137.Final. |
+| Lettuce and Netty | `GHSA-5pvg-856g-cp85`, `GHSA-676x-f7gg-47vc`, `GHSA-xmv7-r254-6q78`, `GHSA-c653-97m9-rcg9`, `GHSA-cm33-6792-r9fm`, `GHSA-mfg7-5gfp-c4w3`, `GHSA-x4gw-5cx5-pgmh`, `GHSA-3qp7-7mw8-wx86`, `GHSA-558v-64gr-wgg4`, `GHSA-mj4r-2hfc-f8p6` | Lettuce 6.8.2.RELEASE declares Netty 4.1.125.Final, where these ten advisories affect the resolved Redis graph. Hostname-based Redis connections may exercise `netty-resolver-dns` and `netty-codec-dns`: three advisories permit DNS cache poisoning, while two concern DNS validation or decoder resource handling. TLS connections may exercise the `netty-handler` hostname-verification defect. Five of the ten findings are in the two DNS artifacts newly added by Lettuce 6.8. Threadmill does not use the affected server-side SNI/subnet-filter or compression-decoder paths, but upgrades the complete Netty graph rather than suppressing them. The resolved security floor is Netty 4.1.137.Final; remove the explicit BOM only when Lettuce's own transitive floor reaches that version. |
 | Dashboard JavaScript toolchain | `GHSA-73wf-gq98-2v4g`, `GHSA-c83g-rgw3-j3cx`, `GHSA-w9m9-85wc-3x92` | Vite 7.3.6, Babel 7.29.7, and esbuild 0.28.1 were already patched on `main` before this change. This change removes the remaining audit findings by moving Browserslist to 4.28.9 and PostCSS Selector Parser to 6.1.4. These packages run only during local or CI dashboard builds; the published JAR contains compiled static assets, not the toolchain. Build-time execution is still trusted code execution, so vulnerable transitives are upgraded rather than ignored. |
 | Spring test stack | `GHSA-qv9r-c865-cp47`, `GHSA-9xv2-5v5q-p794`, `GHSA-gcx9-497g-6cp6`, `GHSA-h3x4-894j-xpx5`, `GHSA-5gvw-p9qm-jgwh` | Embedded Tomcat, Log4j, and Logback appear only in test compile/runtime lock entries and are not shipped in Threadmill artifacts. They still execute during CI integration tests. Spring Boot is upgraded to 4.0.8, its Spring Framework/Security pins are aligned, the catalog's Logback pin now matches Boot's resolved 1.5.38, and Tomcat is constrained to the patched 11.0.25 floor rather than treating test scope as an exception. Boot 4.0.8 now resolves Jackson 3.1.5 itself, so the earlier explicit Jackson constraint is removed. |
 
