@@ -31,6 +31,7 @@ import io.lettuce.core.SetArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -91,6 +92,7 @@ class RedisJobStoreRegressionTest {
   private static RedisURI uri;
   private static RedisClient adminClient;
   private static StatefulRedisConnection<String, String> adminConnection;
+  private final List<RedisJobStore> openedStores = new ArrayList<>();
 
   @BeforeAll
   static void start() {
@@ -114,8 +116,16 @@ class RedisJobStoreRegressionTest {
     adminConnection.sync().flushdb();
   }
 
+  @AfterEach
+  void closeOpenedStores() {
+    for (RedisJobStore store : openedStores.reversed()) store.close();
+    openedStores.clear();
+  }
+
   private JobStore store() {
-    return new RedisJobStore(uri);
+    var store = new RedisJobStore(uri);
+    openedStores.add(store);
+    return store;
   }
 
   private static Job sample() {
@@ -264,7 +274,7 @@ class RedisJobStoreRegressionTest {
         .extracting(Job::id)
         .containsExactly(job.id());
     String result = r.eval(
-        RedisJobStore.RESCORE_QUEUE_PRIORITY_PAGE_LUA,
+        LuaScripts.rescoreQueuePriorityPage(),
         ScriptOutputType.VALUE,
         new String[] {queue},
         RedisKeys.PREFIX + "job:",
@@ -274,6 +284,51 @@ class RedisJobStoreRegressionTest {
 
     assertThat(result).isEqualTo("OK");
     assertThat(r.zscore(queue, job.id().toString())).isNull();
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void priorityRescorePageUsesTheCurrentReplacementPriority() {
+    JobStore store = store();
+    Job job = Job.builder()
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+        .priority(0)
+        .build();
+    store.insert(job);
+    RedisCommands<String, String> r = adminConnection.sync();
+    String queue = RedisKeys.queue("default");
+    String unkeyed = RedisKeys.queueUnkeyed("default");
+    String scannedId = r.zrange(queue, 0, 0).getFirst();
+
+    assertThat(store.replaceJob(
+            job.id(), job.version(), JobReplacement.builder().priority(5).build()))
+        .isTrue();
+    // Model a Java-side rescorer overwriting the replacement with the stale
+    // priority it read before replaceJob committed.
+    r.zadd(queue, RedisKeys.queueScore(0), scannedId);
+    r.zadd(unkeyed, RedisKeys.queueScore(0), scannedId);
+
+    String queueResult = r.eval(
+        LuaScripts.rescoreQueuePriorityPage(),
+        ScriptOutputType.VALUE,
+        new String[] {queue},
+        RedisKeys.PREFIX + "job:",
+        "default",
+        "0",
+        scannedId);
+    String unkeyedResult = r.eval(
+        LuaScripts.rescoreQueuePriorityPage(),
+        ScriptOutputType.VALUE,
+        new String[] {unkeyed},
+        RedisKeys.PREFIX + "job:",
+        "default",
+        "1",
+        scannedId);
+
+    assertThat(queueResult).isEqualTo("OK");
+    assertThat(unkeyedResult).isEqualTo("OK");
+    assertThat(r.zscore(queue, scannedId)).isEqualTo(RedisKeys.queueScore(5));
+    assertThat(r.zscore(unkeyed, scannedId)).isEqualTo(RedisKeys.queueScore(5));
     assertRedisIndexesConsistent();
   }
 
@@ -327,6 +382,57 @@ class RedisJobStoreRegressionTest {
     assertThat(r.zscore(queue, higher.id().toString())).isEqualTo(RedisKeys.queueScore(1));
     assertThat(r.zscore(unkeyed, lower.id().toString())).isEqualTo(RedisKeys.queueScore(0));
     assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void futureNodeLayoutVersionsRemainPriorityAware() {
+    store();
+    RedisCommands<String, String> r = adminConnection.sync();
+    NodeId future = NodeId.newId();
+    r.sadd(RedisKeys.NODES, future.toString());
+    r.set(
+        RedisKeys.nodeHeartbeat(future),
+        Long.toString(System.currentTimeMillis()),
+        SetArgs.Builder.ex(60));
+    r.set(RedisKeys.nodeLayout(future), "3", SetArgs.Builder.ex(60));
+
+    store();
+
+    assertThat(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT)).isEqualTo("priority_only_v1");
+  }
+
+  @Test
+  void priorityLayoutFinalizerUsesAClusterWideMutex() throws Exception {
+    store();
+    RedisCommands<String, String> r = adminConnection.sync();
+    r.set(RedisKeys.QUEUE_PRIORITY_LAYOUT, "rescored");
+    NodeId legacy = NodeId.newId();
+    r.sadd(RedisKeys.NODES, legacy.toString());
+    r.set(
+        RedisKeys.nodeHeartbeat(legacy),
+        Long.toString(System.currentTimeMillis()),
+        SetArgs.Builder.ex(60));
+    r.set(RedisKeys.nodeLayout(legacy), "1", SetArgs.Builder.ex(60));
+    JobStore first = store();
+    JobStore second = store();
+    r.del(RedisKeys.nodeHeartbeat(legacy));
+
+    String blocker = "review-test-blocker";
+    assertThat(first.tryAcquireMutex(
+            RedisJobStore.QUEUE_PRIORITY_LAYOUT_FINALIZER_MUTEX, blocker, Duration.ofMinutes(1)))
+        .isTrue();
+    first.recordNodeHeartbeat(NodeId.newId(), Instant.now());
+    assertThat(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT))
+        .as("a node that does not own the cluster mutex must not finalize")
+        .isEqualTo("rescored");
+
+    first.releaseMutex(RedisJobStore.QUEUE_PRIORITY_LAYOUT_FINALIZER_MUTEX, blocker);
+    second.recordNodeHeartbeat(NodeId.newId(), Instant.now());
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    while (!"priority_only_v1".equals(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT))) {
+      assertThat(System.nanoTime()).as("mutex owner finalized within 10s").isLessThan(deadline);
+      Thread.sleep(20);
+    }
   }
 
   @Test
@@ -1701,7 +1807,7 @@ class RedisJobStoreRegressionTest {
     r.zadd(queue, RedisKeys.queueScore(0), id);
     r.zadd(index, at + 1_000d, id);
     Long removedWhileEnqueued = r.eval(
-        RedisJobStore.PRUNE_STALE_AGE_INDEX_MEMBERS_LUA,
+        LuaScripts.pruneStaleAgeIndexMembers(),
         ScriptOutputType.INTEGER,
         new String[] {index, queue},
         id);
@@ -1713,7 +1819,7 @@ class RedisJobStoreRegressionTest {
     // Without the re-enqueue the same call removes the stale member.
     r.zrem(queue, id);
     Long removedWhenStale = r.eval(
-        RedisJobStore.PRUNE_STALE_AGE_INDEX_MEMBERS_LUA,
+        LuaScripts.pruneStaleAgeIndexMembers(),
         ScriptOutputType.INTEGER,
         new String[] {index, queue},
         id);

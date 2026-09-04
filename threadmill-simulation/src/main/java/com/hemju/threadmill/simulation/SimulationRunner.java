@@ -234,7 +234,7 @@ public final class SimulationRunner {
     collectActiveJobs(jobsById, ExportHandler.class.getName());
     return jobsById.values().stream()
         .filter(j -> ACTIVE_STATES.contains(j.currentState()))
-        .sorted(Comparator.comparing(Job::queue).thenComparing(j -> j.id().toString()))
+        .sorted(Comparator.comparing(Job::queue).thenComparing(Job::id))
         .limit(limit)
         .map(ActiveJobDiagnostic::from)
         .toList();

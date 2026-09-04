@@ -56,7 +56,7 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:cron_task_namespaces` | SET | Known recurring reconciliation namespaces. |
 | `{threadmill}:nodes` | SET | Known NodeIds. |
 | `{threadmill}:node:heartbeat:{node}` | STRING with TTL | Key existence is the heartbeat; TTL is the timeout. |
-| `{threadmill}:node:layout:{node}` | STRING with heartbeat TTL | Redis layout version maintained by a live node: `1` knows the age index but writes legacy priority scores; `2` maintains both current layouts. Missing means v0.2.1 or earlier. |
+| `{threadmill}:node:layout:{node}` | STRING with heartbeat TTL | Monotonic Redis layout version maintained by a live node: `1` knows the age index but writes legacy priority scores; `>=2` maintains both current layouts. Missing or malformed means v0.2.1 or earlier. |
 | `{threadmill}:lease:maintenance` | STRING | Maintenance-lease holder; refreshed via `lease_acquire.lua`. |
 | `{threadmill}:dedup:{queue}:{dedupKey}` | STRING | Dedup record. |
 | `{threadmill}:dedup_expiry` | ZSET | Dedup record expiries; maintenance cleanup reads this. |
@@ -70,7 +70,8 @@ queue / handler / dedup-key user input cannot escape the namespace.
 ## Layout upgrades
 
 When upgrading from v0.2.1, roll workers out normally. Current nodes advertise
-layout version `2` next to their heartbeat; the layout markers remain
+monotonic layout version `2` next to their heartbeat (future higher versions
+remain compatible); the layout markers remain
 intermediate until every live legacy-node heartbeat is gone and a final exact
 pass completes. Stop any producer-only process on the old release before the
 rollout completes because it has no node heartbeat and therefore cannot be
@@ -99,9 +100,13 @@ stale Java-side read. Malformed priority data fails startup with the job id.
 The marker becomes `rescored` after the first exact pass. It stays there while
 any live node advertises an older layout version. After the last such heartbeat
 expires, a current node performs one final exact pass in the background and
-writes `priority_only_v1`; no restart is needed. Later starts use two bounded
-score-range checks per queue and repair obvious legacy-score drift, a defence
-for old producer-only processes that cannot be observed through heartbeats.
+writes `priority_only_v1`; a cluster-wide, lease-backed mutex ensures only one
+node performs that pass, and no restart is needed. Later starts use two bounded
+score-range checks per queue and repair legacy-score drift outside the valid
+integer score range. The probe misses only the one priority whose legacy
+priority and timestamp terms cancel into that range (priority 177 around 2026)
+for a roughly 71.6-minute enqueue window; it is defence for old producer-only
+processes that cannot be observed through heartbeats, not proof of exactness.
 
 **Mixed-version guarantees.** Old nodes may temporarily reintroduce legacy
 scores while the marker is `rescored`, so strict priority ordering is restored
@@ -109,6 +114,11 @@ by each new-node start and finally guaranteed after the terminal pass. The
 score layout never controls job state: mixed versions do not lose, duplicate,
 or resurrect jobs, and claims remain atomic. Stop old producer-only processes
 before completion as described above.
+
+**API compatibility.** The deprecated `RedisKeys.queueScore(int, long)`
+overload remains for the v0.2.2 patch release and is marked for removal. Its
+enqueue-time argument is ignored, so callers compile with the new priority-only
+ordering semantics; migrate to `queueScore(int)`.
 
 ### Per-queue age index
 
@@ -191,10 +201,15 @@ server (single-threaded execution).
 | `claim_commit.lua` | The reliable-fetch claim. Java prepares the PROCESSING body first, then this script verifies version / state / queue membership and commits body, scalars, indexes (queue → processing + per-node), attempts, owner heartbeat, and counts together. Consults concurrency counters, pending members, workflow counts, and workflow holds before committing. A crash before this script leaves the job ENQUEUED; a crash after leaves a complete PROCESSING record for orphan recovery. |
 | `touch_heartbeat.lua` | Rescore every owned PROCESSING id in the per-node ZSET. Does not bump optimistic-lock version. |
 | `replace_job.lua` | Atomic in-place definition swap for non-running jobs. Moves the row between queue ZSETs if the queue changes. |
+| `rescore_queue_priority_page.lua` | Atomically rescore one bounded migration page from current job hashes, with membership/state rechecks, stale-member pruning, and optional age-index maintenance. |
+| `prune_stale_age_index_members.lua` | Compare-and-remove a bounded age-index page against authoritative queue membership. |
 | `soft_delete.lua` | Move a job to DELETED, removing it from active indexes and per-handler set, decrementing counts. |
 | `mutex_acquire.lua` | Acquire-or-refresh a named mutex with a millisecond-precision lease. One Lua call removes the race window that `SET NX` + `PEXPIRE` would have. |
 | `lease_acquire.lua` | Compare-and-renew for the maintenance lease. |
 | `lease_release.lua` | Compare-and-delete for the maintenance lease. |
+| `dedup_delete.lua` | Compare-and-delete an expired dedup record without erasing a concurrent replacement. |
+| `retention_delete.lua` | State-checked hard deletion with atomic index and count cleanup. |
+| `queue_prune.lua` | Remove an empty queue from the registry without racing a concurrent insert. |
 
 ## Reliable-fetch claim
 

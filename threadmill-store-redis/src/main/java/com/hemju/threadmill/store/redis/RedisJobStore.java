@@ -123,49 +123,6 @@ public final class RedisJobStore implements JobStore {
             return 0
             """;
 
-  /**
-   * Rescores one bounded ZSCAN page atomically from the current job hashes.
-   * Membership is rechecked before every update, so a concurrent claim cannot
-   * be resurrected; a concurrent replacement cannot be overwritten with a
-   * stale priority; and dangling/non-ENQUEUED members are pruned.
-   */
-  static final String RESCORE_QUEUE_PRIORITY_PAGE_LUA = """
-      local job_prefix = ARGV[1]
-      local expected_queue = ARGV[2]
-      local require_unkeyed = ARGV[3] == '1'
-      for i = 4, #ARGV do
-        local id = ARGV[i]
-        if redis.call('ZSCORE', KEYS[1], id) then
-          local job_key = job_prefix .. id
-          local state = redis.call('HGET', job_key, 'state')
-          local queue = redis.call('HGET', job_key, 'queue')
-          local concurrency_key = redis.call('HGET', job_key, 'concurrency_key')
-          if state ~= 'ENQUEUED'
-              or queue ~= expected_queue
-              or (require_unkeyed and concurrency_key and concurrency_key ~= '') then
-            redis.call('ZREM', KEYS[1], id)
-            if #KEYS == 2 then redis.call('ZREM', KEYS[2], id) end
-          else
-            local priority = redis.call('HGET', job_key, 'priority')
-            local numeric_priority = tonumber(priority)
-            if not numeric_priority
-                or numeric_priority ~= math.floor(numeric_priority)
-                or numeric_priority < -2147483648
-                or numeric_priority > 2147483647 then
-              return 'MALFORMED_PRIORITY:' .. id
-            end
-            redis.call('ZADD', KEYS[1], 'XX', -numeric_priority, id)
-            if #KEYS == 2 then
-              local state_at = redis.call('HGET', job_key, 'current_state_at')
-              if not tonumber(state_at) then return 'MALFORMED_STATE_TIME:' .. id end
-              redis.call('ZADD', KEYS[2], state_at, id)
-            end
-          end
-        end
-      end
-      return 'OK'
-      """;
-
   private final AbstractRedisClient client;
   private final AutoCloseable connection;
   private final RedisClusterCommands<String, String> commands;
@@ -981,6 +938,9 @@ public final class RedisJobStore implements JobStore {
 
   static final int INSERT_ARGS_PER_JOB = 18;
 
+  /** Fixed ARGV prefix before the member-id tail in the priority rescore script. */
+  static final int RESCORE_QUEUE_PRIORITY_PREFIX_ARGS = 3;
+
   /** SSCAN / ZSCAN page size for the age-index backfill and reconciliation walks. */
   private static final int LAYOUT_BACKFILL_PAGE = 1_000;
 
@@ -996,8 +956,18 @@ public final class RedisJobStore implements JobStore {
   /** Queue score layout state after a pass while legacy-priority nodes remain live. */
   private static final String QUEUE_PRIORITY_LAYOUT_RESCORED = "rescored";
 
-  /** Node layout written by releases that maintain age indexes and exact priority scores. */
-  private static final String NODE_LAYOUT_VERSION = "2";
+  /** Monotonic node-layout version written by this release. */
+  private static final int NODE_LAYOUT_VERSION = 2;
+
+  /** Lowest node-layout version that writes exact priority-only queue scores. */
+  private static final int MIN_PRIORITY_AWARE_LAYOUT = 2;
+
+  /** Cluster-wide mutex preventing an N-node final priority-rescore herd. */
+  static final String QUEUE_PRIORITY_LAYOUT_FINALIZER_MUTEX =
+      "redis.queue-priority-layout-finalizer";
+
+  /** Crash-recovery lease for the cluster-wide priority-layout finalizer. */
+  private static final Duration QUEUE_PRIORITY_LAYOUT_FINALIZER_LEASE = Duration.ofMinutes(10);
 
   /** Node heartbeat and node layout keys share this TTL. */
   private static final long NODE_HEARTBEAT_TTL_SECONDS = 60;
@@ -1369,10 +1339,10 @@ public final class RedisJobStore implements JobStore {
       // timestamp-bearing queue scores.
       r.set(
           RedisKeys.nodeLayout(nodeId),
-          NODE_LAYOUT_VERSION,
+          Integer.toString(NODE_LAYOUT_VERSION),
           SetArgs.Builder.ex(NODE_HEARTBEAT_TTL_SECONDS));
       r.sadd(RedisKeys.NODES, nodeId.toString());
-      if (!priorityLayoutComplete) maybeFinalizeQueuePriorityLayout(r);
+      if (!priorityLayoutComplete) maybeFinalizeQueuePriorityLayout(r, nodeId);
     } catch (RuntimeException e) {
       throw translateCapacity(e);
     }
@@ -1582,7 +1552,7 @@ public final class RedisJobStore implements JobStore {
       // re-adds the member to both ZSETs atomically, and a plain ZREM here
       // would then delete a valid member for good.
       evalScript(
-          PRUNE_STALE_AGE_INDEX_MEMBERS_LUA,
+          LuaScripts.pruneStaleAgeIndexMembers(),
           ScriptOutputType.INTEGER,
           new String[] {indexKey, queueKey},
           oldest.getValue());
@@ -1715,11 +1685,21 @@ public final class RedisJobStore implements JobStore {
     for (String node : nodes) {
       var nodeId = NodeId.parse(node);
       if (r.exists(RedisKeys.nodeHeartbeat(nodeId)) > 0
-          && !NODE_LAYOUT_VERSION.equals(r.get(RedisKeys.nodeLayout(nodeId)))) {
+          && advertisedLayoutVersion(r.get(RedisKeys.nodeLayout(nodeId)))
+              < MIN_PRIORITY_AWARE_LAYOUT) {
         return true;
       }
     }
     return false;
+  }
+
+  private static int advertisedLayoutVersion(String value) {
+    if (value == null) return 0;
+    try {
+      return Math.max(0, Integer.parseInt(value));
+    } catch (NumberFormatException malformed) {
+      return 0;
+    }
   }
 
   /** The queue registry, paged with SSCAN so a high-cardinality registry never blocks the server. */
@@ -1745,10 +1725,12 @@ public final class RedisJobStore implements JobStore {
    * and prunes stale members. A concurrent claim therefore cannot be
    * resurrected and a concurrent replacement cannot be overwritten.
    *
-   * <p>The marker remains {@code rescored} while a live node advertises an
-   * older layout version. Once the last such heartbeat expires, a final exact
-   * pass runs before the terminal version is written. If the age-index layout
-   * also needs backfilling, the primary queue is walked once for both layouts.
+   * <p>The marker remains {@code rescored} while a live node advertises a
+   * lower layout version. Once the last such heartbeat expires, a cluster-wide
+   * lease elects one node for the final exact pass before the terminal version
+   * is written. Future higher layout versions remain priority-aware. If the
+   * age-index layout also needs backfilling, the primary queue is walked once
+   * for both layouts.
    * A bounded score-range probe repairs obvious drift even after the terminal
    * marker, as defence against producer-only old writers that have no node
    * heartbeat.
@@ -1779,15 +1761,43 @@ public final class RedisJobStore implements JobStore {
     return reconcileAge;
   }
 
-  private void maybeFinalizeQueuePriorityLayout(RedisClusterCommands<String, String> r) {
+  private void maybeFinalizeQueuePriorityLayout(
+      RedisClusterCommands<String, String> r, NodeId nodeId) {
     if (QUEUE_PRIORITY_LAYOUT_VERSION.equals(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT))) {
       priorityLayoutComplete = true;
       return;
     }
     if (legacyPriorityNodeIsLive(r) || !priorityLayoutFinalizing.compareAndSet(false, true)) return;
+    String holder = nodeId.toString();
+    boolean acquired;
+    try {
+      acquired = tryAcquireMutex(
+          QUEUE_PRIORITY_LAYOUT_FINALIZER_MUTEX, holder, QUEUE_PRIORITY_LAYOUT_FINALIZER_LEASE);
+    } catch (RuntimeException e) {
+      priorityLayoutFinalizing.set(false);
+      throw e;
+    }
+    if (!acquired) {
+      priorityLayoutFinalizing.set(false);
+      return;
+    }
     Thread.ofVirtual().name("threadmill-redis-priority-layout-finalize").start(() -> {
       try {
         for (String queue : scanQueues(r)) {
+          // A constructor may have completed its own exact pass after this
+          // finalizer acquired the mutex. Stop before walking another queue.
+          if (QUEUE_PRIORITY_LAYOUT_VERSION.equals(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT))) {
+            priorityLayoutComplete = true;
+            return;
+          }
+          // Refresh the crash-recovery lease between queues. A node that loses
+          // ownership stops rather than overlapping the replacement finalizer.
+          if (!tryAcquireMutex(
+              QUEUE_PRIORITY_LAYOUT_FINALIZER_MUTEX,
+              holder,
+              QUEUE_PRIORITY_LAYOUT_FINALIZER_LEASE)) {
+            return;
+          }
           rescoreQueueIndex(r, RedisKeys.queue(queue), queue, false, null);
           rescoreQueueIndex(r, RedisKeys.queueUnkeyed(queue), queue, true, null);
         }
@@ -1795,8 +1805,15 @@ public final class RedisJobStore implements JobStore {
       } catch (RuntimeException e) {
         // Store closed or Redis unavailable: keep the intermediate marker so
         // startup or a later heartbeat performs another exact pass.
+        LOG.warn("Threadmill Redis priority-layout finalization failed; it will be retried", e);
       } finally {
-        priorityLayoutFinalizing.set(false);
+        try {
+          releaseMutex(QUEUE_PRIORITY_LAYOUT_FINALIZER_MUTEX, holder);
+        } catch (RuntimeException ignored) {
+          // Store closed or lease already expired: no cleanup remains.
+        } finally {
+          priorityLayoutFinalizing.set(false);
+        }
       }
     });
   }
@@ -1826,7 +1843,7 @@ public final class RedisJobStore implements JobStore {
       page = r.zscan(indexKey, cursor, ScanArgs.Builder.limit(LAYOUT_BACKFILL_PAGE));
       List<ScoredValue<String>> members = page.getValues();
       if (members != null && !members.isEmpty()) {
-        var args = new ArrayList<String>(members.size() + 3);
+        var args = new ArrayList<String>(members.size() + RESCORE_QUEUE_PRIORITY_PREFIX_ARGS);
         args.add(RedisKeys.PREFIX + "job:");
         args.add(queue);
         args.add(requireUnkeyed ? "1" : "0");
@@ -1834,13 +1851,15 @@ public final class RedisJobStore implements JobStore {
         String[] keys =
             ageIndexKey == null ? new String[] {indexKey} : new String[] {indexKey, ageIndexKey};
         String result = evalScript(
-            RESCORE_QUEUE_PRIORITY_PAGE_LUA,
+            LuaScripts.rescoreQueuePriorityPage(),
             ScriptOutputType.VALUE,
             keys,
             args.toArray(new String[0]));
         if (!"OK".equals(result)) {
-          throw new JobEngineFatalException(
-              "Redis queue layout upgrade found malformed job data: " + result);
+          throw new JobEngineFatalException("Redis queue layout upgrade found malformed job data: "
+              + result
+              + ". Inspect the named {threadmill}:job:<id> hash and repair it or remove its"
+              + " queue member before restarting.");
         }
       }
       cursor = page;
@@ -1876,28 +1895,19 @@ public final class RedisJobStore implements JobStore {
 
   private static boolean priorityScoreDrifted(
       RedisClusterCommands<String, String> r, String indexKey) {
-    var belowMinimum = Range.from(
+    // A legacy score (-priority * 1e13 + enqueue_micros) is outside the
+    // current int-score range except for one priority value at a time (about
+    // 177 for 2026 timestamps) and a roughly 71.6-minute enqueue window where
+    // the terms cancel. That value advances every ~115.74 days, so this is a
+    // strong defence for producer-only old writers, not a proof of exactness.
+    // Negation flips the priority endpoints used for the two score ranges.
+    var belowHighestPriorityScore = Range.from(
         Boundary.unbounded(), Boundary.excluding(RedisKeys.queueScore(Integer.MAX_VALUE)));
-    var aboveMaximum = Range.from(
+    var aboveLowestPriorityScore = Range.from(
         Boundary.excluding(RedisKeys.queueScore(Integer.MIN_VALUE)), Boundary.unbounded());
-    return r.zcount(indexKey, belowMinimum) > 0 || r.zcount(indexKey, aboveMaximum) > 0;
+    return r.zcount(indexKey, belowHighestPriorityScore) > 0
+        || r.zcount(indexKey, aboveLowestPriorityScore) > 0;
   }
-
-  /**
-   * Compare-and-remove for one page of age-index members: a member the queue
-   * ZSET no longer holds is not ENQUEUED in this queue and is dropped. Atomic
-   * per page so a promotion landing between a Java-side ZSCORE and ZREM
-   * cannot lose a freshly re-added valid member.
-   */
-  static final String PRUNE_STALE_AGE_INDEX_MEMBERS_LUA = """
-      local removed = 0
-      for i = 1, #ARGV do
-        if redis.call('ZSCORE', KEYS[2], ARGV[i]) == false then
-          removed = removed + redis.call('ZREM', KEYS[1], ARGV[i])
-        end
-      end
-      return removed
-      """;
 
   private void reconcileQueueEnqueuedAt(RedisClusterCommands<String, String> r, String queue) {
     String queueKey = RedisKeys.queue(queue);
@@ -1957,7 +1967,7 @@ public final class RedisJobStore implements JobStore {
         var ids = new ArrayList<String>(members.size());
         for (ScoredValue<String> member : members) ids.add(member.getValue());
         evalScript(
-            PRUNE_STALE_AGE_INDEX_MEMBERS_LUA,
+            LuaScripts.pruneStaleAgeIndexMembers(),
             ScriptOutputType.INTEGER,
             new String[] {indexKey, queueKey},
             ids.toArray(new String[0]));

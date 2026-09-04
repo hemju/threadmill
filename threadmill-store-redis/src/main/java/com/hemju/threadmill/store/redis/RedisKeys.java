@@ -64,9 +64,11 @@ import com.hemju.threadmill.core.NodeId;
  *   <li>{@code {threadmill}:layout:queue_priority} — STRING priority-score
  *       upgrade state ({@code rescored} / {@code priority_only_v1}).</li>
  *   <li>{@code {threadmill}:node:layout:{nodeId}} — STRING layout version with
- *       the heartbeat TTL. Value {@code 1} identifies an age-index-aware node
- *       that still writes legacy priority scores; value {@code 2} maintains
- *       both current layouts; a missing value identifies an older release.</li>
+ *       the heartbeat TTL. The integer increases monotonically as layouts are
+ *       added: value {@code 1} identifies an age-index-aware node that still
+ *       writes legacy priority scores; values {@code >= 2} maintain both
+ *       current layouts; a missing or malformed value identifies an older
+ *       release.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflows} — HASH workflow root
  *       id → active outstanding hold count.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflow_counts} — HASH workflow
@@ -141,7 +143,10 @@ public final class RedisKeys {
     return PREFIX + "node:heartbeat:" + node;
   }
 
-  /** Written alongside the heartbeat to advertise the node's maintained Redis layouts. */
+  /**
+   * Written alongside the heartbeat as a monotonically increasing integer
+   * advertising the node's maintained Redis layouts.
+   */
   public static String nodeLayout(NodeId node) {
     Objects.requireNonNull(node, "node");
     return PREFIX + "node:layout:" + node;
