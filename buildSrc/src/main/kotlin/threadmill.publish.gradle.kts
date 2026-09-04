@@ -10,6 +10,19 @@ plugins {
     id("com.gradleup.nmcp")
 }
 
+// Configure Nmcp's direct per-module Central tasks even though the root build
+// disables them in favor of the atomic aggregation. Nmcp validates credentials
+// as soon as one of those task lanes enters the graph; sharing the root
+// properties lets the build-logic regression test prove the lanes stay gated.
+@Suppress("DEPRECATION")
+nmcp {
+    publishAllPublicationsToCentralPortal {
+        username = rootProject.providers.gradleProperty("centralPortalUsername")
+        password = rootProject.providers.gradleProperty("centralPortalPassword")
+        publishingType = "AUTOMATIC"
+    }
+}
+
 // A stable JPMS module name so a later jar rename cannot break downstream
 // `requires` clauses. Derived deterministically from the artifact id.
 tasks.named<Jar>("jar") {

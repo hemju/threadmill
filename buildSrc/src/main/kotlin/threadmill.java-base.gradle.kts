@@ -1,8 +1,10 @@
+import com.hemju.threadmill.gradle.ThreadmillVersion
+
 plugins { `java-library` }
 
 group = "com.hemju.threadmill"
 
-version = "0.2.2-SNAPSHOT"
+version = ThreadmillVersion.CURRENT
 
 java {
     toolchain { languageVersion.set(JavaLanguageVersion.of(25)) }

@@ -20,6 +20,7 @@ jobs:
   publish:
     name: Publish to Maven Central
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     environment: release
     steps:
       - name: Checkout

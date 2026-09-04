@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Release publication is now fail-closed (issue #99): `productionCheck` cleans
+  and checks every subproject from one ordered task graph, every Central Portal
+  publication entry point requires that gate, and a tag is rejected before the
+  expensive build unless it exactly matches the non-SNAPSHOT project version.
 - Handlers can see the engine's deadline coming (issue #119).
   `JobExecutionContext` gains `deadline()` and `remaining()`, computed by the
   same rule the timeout watchdog uses — `claimedAt` plus the effective timeout

@@ -13,17 +13,13 @@ Before publishing the repository:
 Run from a clean git tree:
 
 ```bash
-./gradlew clean check
-./gradlew :threadmill-store-postgres:test :threadmill-store-redis:test --rerun-tasks
-./gradlew :threadmill-soak:soakRegression
-./gradlew :threadmill-example:run
-./gradlew javadoc
 ./gradlew productionCheck
 ```
 
-If `productionCheck` (or any step above) fails, fix the cause and re-run the
-whole sequence from a clean tree — no failure is acceptable for a release
-build.
+`productionCheck` owns the clean-all-projects boundary, every subproject check,
+real-store tests, soak and correctness simulations, Javadoc, the example,
+dependency scanning, and artifact inspection. If it fails, fix the cause and
+re-run it from a clean tree — no failure is acceptable for a release build.
 
 Then inspect artifacts:
 
@@ -47,8 +43,10 @@ permanent policy.
 1. Set and commit the release version.
 2. Tag that exact commit with the matching `v<version>` tag.
 3. Push `main` and the tag.
-4. The GitHub Release workflow signs all 11 public modules, runs
-   `publishAggregationToCentralPortal`, and submits one aggregated bundle.
+4. The GitHub Release workflow validates the tag against the project version,
+   runs `productionCheck`, signs the same verified artifacts from that task
+   graph, and submits one aggregated bundle through
+   `publishAggregationToCentralPortal`.
 5. Central Portal validates and publishes the bundle automatically because
    `publishingType` is `AUTOMATIC`.
 

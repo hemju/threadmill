@@ -1,3 +1,6 @@
+import com.hemju.threadmill.gradle.ThreadmillVersion
+import com.hemju.threadmill.gradle.VerifyReleaseTag
+
 plugins {
     base
     alias(libs.plugins.spotless)
@@ -29,27 +32,30 @@ nmcpAggregation {
     }
 }
 
-dependencies {
-    nmcpAggregation(project(":threadmill-core"))
-    nmcpAggregation(project(":threadmill-store-memory"))
-    nmcpAggregation(project(":threadmill-store-postgres"))
-    nmcpAggregation(project(":threadmill-store-redis"))
-    nmcpAggregation(project(":threadmill-spring-boot"))
-    nmcpAggregation(project(":threadmill-test-support"))
-    nmcpAggregation(project(":threadmill-metrics"))
-    nmcpAggregation(project(":threadmill-tracing"))
-    nmcpAggregation(project(":threadmill-dashboard-api"))
-    nmcpAggregation(project(":threadmill-dashboard-ui"))
-    nmcpAggregation(project(":threadmill-dashboard-spring"))
-}
+val publishedProjects =
+    listOf(
+        project(":threadmill-core"),
+        project(":threadmill-store-memory"),
+        project(":threadmill-store-postgres"),
+        project(":threadmill-store-redis"),
+        project(":threadmill-spring-boot"),
+        project(":threadmill-test-support"),
+        project(":threadmill-metrics"),
+        project(":threadmill-tracing"),
+        project(":threadmill-dashboard-api"),
+        project(":threadmill-dashboard-ui"),
+        project(":threadmill-dashboard-spring"),
+    )
+
+dependencies { publishedProjects.forEach { add("nmcpAggregation", it) } }
 
 allprojects { tasks.withType<Test>().configureEach { systemProperty("file.encoding", "UTF-8") } }
 
 // --------------------------------------------------------- Aggregate lifecycle
 //
-// The root Base plugin's `clean` and `check` tasks do not aggregate the same
-// tasks from subprojects. Keep explicit all-project lifecycle tasks so the
-// documented root checks cannot silently omit a module.
+// An unqualified task name on the command line fans out to every project, but
+// dependsOn("clean") / dependsOn("check") resolves only the root task. Keep
+// explicit aggregates so lifecycle dependencies cannot silently omit modules.
 
 val cleanAll by
     tasks.registering {
@@ -64,14 +70,37 @@ val buildLogicTest by
         group = "verification"
         description = "Run the buildSrc build-logic regression tests."
         val wrapper =
-            if (System.getProperty("os.name").startsWith("Windows")) "gradlew.bat" else "gradlew"
-        commandLine(
-            rootProject.file(wrapper).absolutePath,
-            "-p",
-            rootProject.file("buildSrc").absolutePath,
-            "test",
-            "--no-configuration-cache",
+            providers.systemProperty("os.name").map {
+                if (it.startsWith("Windows")) "gradlew.bat" else "gradlew"
+            }
+        executable(wrapper.map { rootProject.file(it).absolutePath }.get())
+        args("-p", rootProject.file("buildSrc").absolutePath, "test", "--no-configuration-cache")
+        inputs.property("operatingSystem", providers.systemProperty("os.name"))
+        inputs.files(
+            fileTree("buildSrc") {
+                include(
+                    "build.gradle.kts",
+                    "settings.gradle.kts",
+                    "gradle.lockfile",
+                    "settings-gradle.lockfile",
+                    "src/**",
+                )
+            },
+            file("build.gradle.kts"),
+            file("settings.gradle.kts"),
+            file("gradle.properties"),
+            fileTree(rootDir) { include("threadmill-*/build.gradle.kts") },
         )
+        // cleanAll deliberately cleans project outputs, not Gradle's separate
+        // buildSrc build. Keep the success marker with buildSrc so an unchanged
+        // productionCheck does not pay for a redundant nested build each time.
+        val marker = layout.projectDirectory.file("buildSrc/build/build-logic-test/success.marker")
+        outputs.file(marker)
+        doLast {
+            val markerFile = marker.asFile
+            markerFile.parentFile.mkdirs()
+            markerFile.writeText("verified\n")
+        }
     }
 
 tasks.named("check") {
@@ -84,7 +113,7 @@ tasks.named("check") {
 // cannot consume stale outputs before a later clean deletes them.
 allprojects {
     tasks.configureEach {
-        if (path != ":cleanAll" && name != "clean") {
+        if (name !in setOf("clean", "cleanAll", "verifyReleaseTag")) {
             mustRunAfter(cleanAll)
         }
     }
@@ -281,62 +310,65 @@ val productionCheck by
         dependsOn(":threadmill-example:run")
     }
 
+val requestedReleaseTag =
+    providers.gradleProperty("releaseTag").orElse(providers.environmentVariable("GITHUB_REF_NAME"))
 val verifyReleaseTag by
-    tasks.registering {
-        group = "verification"
-        description = "Require the release tag to exactly match the project version."
-        doLast {
-            val projectVersions = subprojects.map { it.version.toString() }.distinct()
-            if (projectVersions.size != 1 || projectVersions.single() == "unspecified") {
-                throw GradleException(
-                    "Expected one consistent release version across all subprojects, found " +
-                        projectVersions.joinToString(prefix = "[", postfix = "]")
-                )
-            }
-            val projectVersion = projectVersions.single()
-            val expectedTag = "v$projectVersion"
-            val actualTag =
-                providers
-                    .gradleProperty("releaseTag")
-                    .orElse(providers.environmentVariable("GITHUB_REF_NAME"))
-                    .orNull
-                    ?: throw GradleException(
-                        "Release tag is unavailable; pass -PreleaseTag=$expectedTag."
-                    )
-            if (actualTag != expectedTag) {
-                throw GradleException(
-                    "Release tag '$actualTag' does not match project version '$projectVersion'; " +
-                        "expected '$expectedTag'."
-                )
-            }
-            if (projectVersion.endsWith("-SNAPSHOT")) {
-                throw GradleException("Refusing to publish snapshot version '$projectVersion'.")
-            }
-        }
+    tasks.registering(VerifyReleaseTag::class) {
+        publishedVersions.set(publishedProjects.map { ThreadmillVersion.CURRENT })
+        releaseTag.set(requestedReleaseTag)
     }
+
+// A release tag is cheap to validate. Run it before cleanAll, which in turn is
+// ordered before every build and verification task in the publication graph.
+cleanAll.configure { mustRunAfter(verifyReleaseTag) }
 
 // One task graph builds, tests, inspects, signs, and uploads the same artifacts.
 // Nmcp's non-prefixed task is a lifecycle alias; gate the real prefixed upload
 // task as well, then stage and zip the already-verified artifacts afterwards.
-allprojects {
-    tasks
-        .matching { it.name.endsWith("ToNmcpRepository") }
-        .configureEach { mustRunAfter(productionCheck, verifyReleaseTag) }
+
+listOf("nmcpCheckAggregationFiles", "nmcpZipAggregation").forEach {
+    tasks.named(it) { mustRunAfter(productionCheck, verifyReleaseTag) }
 }
 
-tasks
-    .matching {
-        it.name in
-            setOf(
-                "nmcpCheckAggregationFiles",
-                "nmcpZipAggregation",
-                "nmcpPublishAggregationToCentralPortal",
-            )
+val aggregationPublicationTasks =
+    listOf(
+        "publishAggregationToCentralPortal",
+        "publishAggregationToCentralPortalSnapshots",
+        "publishAggregationToCentralSnapshots",
+        "nmcpPublishAggregationToCentralPortal",
+        "nmcpPublishAggregationToCentralPortalSnapshots",
+    )
+
+aggregationPublicationTasks.forEach {
+    tasks.named(it) { dependsOn(productionCheck, verifyReleaseTag) }
+}
+
+val modulePublicationTasks =
+    listOf(
+        "publishAllPublicationsToCentralPortal",
+        "publishAllPublicationsToCentralPortalSnapshots",
+        "publishAllPublicationsToCentralSnapshots",
+        "nmcpPublishAllPublicationsToCentralPortal",
+        "nmcpPublishAllPublicationsToCentralPortalSnapshots",
+    )
+val nmcpStagingTasks =
+    setOf("publishMavenJavaPublicationToNmcpRepository", "publishAllPublicationsToNmcpRepository")
+
+publishedProjects.forEach { publishedProject ->
+    publishedProject.pluginManager.withPlugin("com.gradleup.nmcp") {
+        modulePublicationTasks.forEach {
+            publishedProject.tasks.named(it) {
+                dependsOn(productionCheck, verifyReleaseTag)
+                // Threadmill releases one atomic multi-module aggregation. A
+                // direct module upload could publish an incomplete release.
+                enabled = false
+            }
+        }
+        // Nmcp creates repository staging tasks after its plugin callback starts.
+        // An exact lazy match catches those later registrations without the
+        // fail-open suffix matching that previously hid new/renamed task lanes.
+        publishedProject.tasks
+            .matching { it.name in nmcpStagingTasks }
+            .configureEach { mustRunAfter(productionCheck, verifyReleaseTag) }
     }
-    .configureEach { mustRunAfter(productionCheck, verifyReleaseTag) }
-
-tasks.named("nmcpPublishAggregationToCentralPortal") {
-    dependsOn(productionCheck, verifyReleaseTag)
 }
-
-tasks.named("publishAggregationToCentralPortal") { dependsOn(productionCheck, verifyReleaseTag) }

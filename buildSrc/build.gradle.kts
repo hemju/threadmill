@@ -21,4 +21,7 @@ dependencies {
     testImplementation(libs.assertj.core)
 }
 
-tasks.withType<Test>().configureEach { useJUnitPlatform() }
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
+    systemProperty("threadmill.repositoryRoot", rootDir.parentFile.absolutePath)
+}

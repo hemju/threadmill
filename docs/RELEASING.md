@@ -76,9 +76,9 @@ GitHub Environment named `release` with required reviewers for an approval gate.
 
 1. Make sure `main` is green (the `CI` workflow runs `./gradlew check` on every
    push and PR) and `CHANGELOG.md` is updated.
-2. Set the version in
-   `buildSrc/src/main/kotlin/threadmill.java-base.gradle.kts`
-   (e.g. `version = "0.1.0"`). Releases must not be `-SNAPSHOT`.
+2. Set `ThreadmillVersion.CURRENT` in
+   `buildSrc/src/main/kotlin/com/hemju/threadmill/gradle/ThreadmillVersion.kt`
+   (e.g. `"0.1.0"`). Releases must not be `-SNAPSHOT`.
 3. Commit, tag, and push the tag:
    ```sh
    git commit -am "release: v0.1.0"

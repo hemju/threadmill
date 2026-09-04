@@ -141,6 +141,8 @@ The build uses Gradle (≥ 9.5) and the project's Java 25 toolchain.
 
 - `./gradlew build` — compile + test + assemble all modules.
 - `./gradlew check` — every subproject's tests/checks, the build-logic regression tests, and Spotless formatting.
+- `./gradlew cleanAll` — delete root and every subproject build output; `productionCheck` orders all compilation and verification after this aggregate.
+- `./gradlew verifyReleaseTag -PreleaseTag=vX` — require one shared, non-SNAPSHOT published-module version and an exact `v<version>` tag; Central Portal publication invokes this automatically before the expensive gate.
 - `./gradlew test` — run the test suite.
 - `./gradlew :threadmill-core:test` — test a single module.
 - `./gradlew :threadmill-store-memory:test` — run the contract suite against the in-memory store.
@@ -342,6 +344,7 @@ Every hard-won failure mode that has come up during development, and the test th
 
 | Failure mode | Test |
 |---|---|
+| `productionCheck` resolves root `clean` / `check` only, leaving subproject outputs and tests outside the gate; a Central Portal entry point uploads without the full gate or exact tag validation | `ProductionCheckFunctionalTest.production check cleans and checks every subproject from a clean graph` + `every central publication entry point runs only after the production and tag gates` + `ReleaseTagValidationTest` |
 | Optimistic-lock version desync (in-memory increment before save confirmed) | `AbstractJobStoreContractTest.saveAtomicThrowsOnStaleVersion` + `failedSaveLeavesJobReusable` |
 | Oversize-job corrupting in-memory version | `AbstractJobStoreContractTest.oversizeInsertIsRejectedCleanly` + `failedSaveLeavesJobReusable` |
 | Vanished-job tolerance | `AbstractJobStoreContractTest.findVanishedJobIsEmpty` + `softDeleteOfVanishedIsNoOp` |
@@ -553,6 +556,7 @@ A standing piece of operability work: a per-backend, per-scenario stress harness
 ### Build & module-layout decisions worth remembering
 
 - **`buildSrc/` is kept, not inlined.** The convention plugin `threadmill.java-base` holds the Java 25 toolchain config, `-Xlint:all -Werror`, Javadoc strictness, and JUnit Platform wiring. Keeping that in one place avoids duplicating the same compile / test policy across every module and preserves a single point of truth. Convention plugins also avoid `buildSrc` re-evaluation surprises that earlier Gradle classpath plumbing had. Don't inline.
+- **The production lifecycle uses explicit all-project aggregates and fail-closed publication task names.** An unqualified CLI `check` fans out to matching tasks in every project, but `dependsOn("check")` resolves only `:check`; `productionCheck` therefore depends on explicit root aggregates and orders every non-clean task after `cleanAll`. `verifyReleaseTag` is a typed `buildSrc` task with pure unit-tested validation, scheduled before `cleanAll`. Every Nmcp Central Portal / snapshot entry point is named explicitly so an Nmcp upgrade that renames one fails configuration instead of silently dropping the gate; the functional task-graph test covers every exposed publication lane. Build-logic functional tests stay under `buildSrc`, and the root `buildLogicTest` wrapper declares its inputs plus a `buildSrc`-scoped success marker so unchanged tests stay up-to-date even when `productionCheck` cleans root and subproject outputs.
 - **`MigrationRunner.SHIPPED_MIGRATIONS` is an explicit list, not a classpath scan.** The list is what makes the migration runner native-image friendly and what makes the order deterministic. New migrations go on the end of the list; do not collapse the list into a directory scan.
 - **The convention plugin's `-Werror` is intentional.** A warning is a defect; promoting it to a build break catches it at the cheapest possible moment.
 
