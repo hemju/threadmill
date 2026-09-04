@@ -60,6 +60,25 @@ pending-job replacement, recurring trigger/update/delete, and node/queue/job
 read endpoints. Actions always re-check permissions server-side and reject
 illegal state transitions.
 
+`REPLACE_JOB` covers operational edits to a pending job's queue, priority, or
+scheduled time. Supplying `handlerType` or `arguments` crosses an executable-code
+boundary and requires `ADMIN`, even when the supplied value matches the current
+definition. The Spring adapter loads the named class without initialization,
+requires it to implement `JobHandler`, resolves its declared `JobPayload` type,
+and rejects missing, extra, or incompatible payload arguments before any store
+write. A host may provide a custom `DashboardJobDefinitionValidator` bean to add
+an application-specific handler allowlist. The default validator requires one
+unambiguous `JobSerializer` and at most one `TypeNameAliases` bean; if either
+collaborator is ambiguous, or no serializer is available, executable-definition
+edits return 501 and no write is attempted. Definition changes are emitted to the audit sink as
+`replace_job_definition` with permission `ADMIN`; operational edits remain
+`replace_job` with permission `REPLACE_JOB`.
+
+The same boundary applies to recurring tasks. Trigger, queue, priority, missed-run
+policy, zone, and enabled-state edits require `UPDATE_RECURRING`; supplying
+`handlerType` or `payloadArgument` requires `ADMIN`, uses the same validator, and
+is audited as `update_recurring_definition`.
+
 Recurring trigger, update, and delete actions take the same per-task store mutex
 as the maintenance materializer. When another node is already mutating the task,
 the API returns a conflict and the operator can retry; it never proceeds with an

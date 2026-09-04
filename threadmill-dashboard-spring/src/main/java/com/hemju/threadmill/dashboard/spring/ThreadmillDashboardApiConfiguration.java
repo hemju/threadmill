@@ -3,6 +3,7 @@ package com.hemju.threadmill.dashboard.spring;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ListableBeanFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -11,6 +12,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnResource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
@@ -26,9 +28,12 @@ import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import com.hemju.threadmill.core.engine.LocalWakeBus;
+import com.hemju.threadmill.core.serialization.JobSerializer;
+import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.dashboard.api.DashboardApiService;
 import com.hemju.threadmill.dashboard.api.DashboardAuditSink;
+import com.hemju.threadmill.dashboard.api.DashboardJobDefinitionValidator;
 import com.hemju.threadmill.dashboard.api.DashboardOptions;
 
 /**
@@ -100,8 +105,27 @@ public class ThreadmillDashboardApiConfiguration {
 
   @Bean
   @ConditionalOnMissingBean
-  public DashboardApiService threadmillDashboardApiService(JobStore store, LocalWakeBus wakeBus) {
-    return new DashboardApiService(store, wakeBus);
+  public DashboardJobDefinitionValidator threadmillDashboardJobDefinitionValidator(
+      ApplicationContext context,
+      ObjectProvider<JobSerializer> serializerProvider,
+      ObjectProvider<TypeNameAliases> aliasesProvider) {
+    var serializer = serializerProvider.getIfUnique();
+    if (serializer == null) return DashboardJobDefinitionValidator.denyAll();
+    var aliases = aliasesProvider.orderedStream().toList();
+    if (aliases.size() > 1) return DashboardJobDefinitionValidator.denyAll();
+    return new SpringDashboardJobDefinitionValidator(
+        context.getClassLoader(),
+        serializer,
+        aliases.isEmpty() ? TypeNameAliases.empty() : aliases.getFirst());
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public DashboardApiService threadmillDashboardApiService(
+      JobStore store,
+      LocalWakeBus wakeBus,
+      DashboardJobDefinitionValidator jobDefinitionValidator) {
+    return DashboardApiService.withDefinitionValidator(store, wakeBus, jobDefinitionValidator);
   }
 
   @Bean

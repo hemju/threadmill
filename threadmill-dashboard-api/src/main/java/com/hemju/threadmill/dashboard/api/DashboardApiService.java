@@ -30,6 +30,7 @@ import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.schedule.RecurringMaterializer;
+import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
@@ -63,17 +64,48 @@ public final class DashboardApiService {
 
   private final JobStore store;
   private final LocalWakeBus wakeBus;
+  private final DashboardJobDefinitionValidator jobDefinitionValidator;
   private final String cronMutexHolder = UUID.randomUUID().toString();
   private final long snapshotCacheTtlNanos;
   private volatile CachedSnapshot cachedSnapshot;
 
   public DashboardApiService(JobStore store, LocalWakeBus wakeBus) {
-    this(store, wakeBus, DEFAULT_SNAPSHOT_CACHE_TTL);
+    this(store, wakeBus, DashboardJobDefinitionValidator.denyAll(), DEFAULT_SNAPSHOT_CACHE_TTL);
+  }
+
+  /** Create a service that permits executable-definition edits accepted by {@code validator}. */
+  public static DashboardApiService withDefinitionValidator(
+      JobStore store,
+      LocalWakeBus wakeBus,
+      DashboardJobDefinitionValidator jobDefinitionValidator) {
+    return withDefinitionValidator(
+        store, wakeBus, jobDefinitionValidator, DEFAULT_SNAPSHOT_CACHE_TTL);
+  }
+
+  /**
+   * Create a service with executable-definition validation and a custom snapshot-cache TTL.
+   */
+  public static DashboardApiService withDefinitionValidator(
+      JobStore store,
+      LocalWakeBus wakeBus,
+      DashboardJobDefinitionValidator jobDefinitionValidator,
+      Duration snapshotCacheTtl) {
+    return new DashboardApiService(store, wakeBus, jobDefinitionValidator, snapshotCacheTtl);
   }
 
   public DashboardApiService(JobStore store, LocalWakeBus wakeBus, Duration snapshotCacheTtl) {
+    this(store, wakeBus, DashboardJobDefinitionValidator.denyAll(), snapshotCacheTtl);
+  }
+
+  private DashboardApiService(
+      JobStore store,
+      LocalWakeBus wakeBus,
+      DashboardJobDefinitionValidator jobDefinitionValidator,
+      Duration snapshotCacheTtl) {
     this.store = Objects.requireNonNull(store, "store");
     this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
+    this.jobDefinitionValidator =
+        Objects.requireNonNull(jobDefinitionValidator, "jobDefinitionValidator");
     Objects.requireNonNull(snapshotCacheTtl, "snapshotCacheTtl");
     if (snapshotCacheTtl.isNegative())
       throw new IllegalArgumentException("snapshotCacheTtl must be >= 0");
@@ -282,9 +314,15 @@ public final class DashboardApiService {
     if (request.queue() != null) builder.queue(request.queue());
     if (request.priority() != null) builder.priority(request.priority());
     if (request.scheduledFor() != null) builder.scheduledFor(request.scheduledFor());
-    if (request.handlerType() != null) {
-      builder.spec(new JobSpec(
-          request.handlerType(), request.arguments() == null ? List.of() : request.arguments()));
+    if (request.replacesDefinition()) {
+      String handlerType =
+          request.handlerType() == null ? job.spec().handlerType() : request.handlerType();
+      List<JobArgument> arguments =
+          request.arguments() == null ? job.spec().arguments() : request.arguments();
+      var replacementSpec =
+          new JobSpec(handlerType, arguments, job.spec().dedupKey(), job.spec().dedupTtl());
+      jobDefinitionValidator.validate(replacementSpec);
+      builder.spec(replacementSpec);
     }
     boolean replaced = store.replaceJob(id, request.expectedVersion(), builder.build());
     if (!replaced) {
@@ -370,6 +408,14 @@ public final class DashboardApiService {
             ? null
             : trigger(request.triggerKind(), request.triggerValue(), preMutex.trigger());
     ZoneId requestedZone = request.zone() == null ? null : parseZone(request.zone());
+    boolean completeDefinition = request.handlerType() != null && request.payloadArgument() != null;
+    if (completeDefinition) {
+      // A fully supplied definition does not depend on the under-mutex
+      // reload. Reject it before contending for the task mutex; partial
+      // edits stay inside because their omitted half must come from the
+      // latest definition, not the pre-mutex snapshot.
+      jobDefinitionValidator.validate(JobSpec.of(request.handlerType(), request.payloadArgument()));
+    }
     withTaskMutex(name, () -> {
       CronTask existing =
           store.findCronTask(name).orElseThrow(() -> notFound("recurring task not found"));
@@ -390,6 +436,10 @@ public final class DashboardApiService {
               : request.missedRunPolicy(),
           requestedZone == null ? existing.zone() : requestedZone,
           request.enabled() == null ? existing.enabled() : request.enabled());
+      if (request.replacesDefinition() && !completeDefinition) {
+        jobDefinitionValidator.validate(
+            new JobSpec(task.handlerType(), List.of(task.payloadArgument())));
+      }
       var prior = store.findCronTaskState(name);
       boolean pendingNudge = prior.isPresent()
           && prior.get().nudgeRequestedAt() != null

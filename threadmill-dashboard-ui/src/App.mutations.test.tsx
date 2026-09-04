@@ -161,6 +161,8 @@ interface OperatorAction {
   state?: JobState;
   paused?: boolean;
   prompt?: string;
+  /** Ordered window.prompt answers for actions that ask more than once. */
+  prompts?: string[];
   body?: unknown;
 }
 
@@ -206,11 +208,10 @@ const actions: OperatorAction[] = [
     label: "Replace",
     method: "PATCH",
     path: `/jobs/${jobId}`,
-    prompt: "com.example.ReplacementHandler",
+    prompts: ["priority queue", "10", "", "com.example.ReplacementHandler"],
     body: {
       expectedVersion: 7,
-      handlerType: "com.example.ReplacementHandler",
-      arguments: []
+      handlerType: "com.example.ReplacementHandler"
     }
   },
   {
@@ -242,13 +243,23 @@ afterEach(() => {
   window.__THREADMILL_DASHBOARD_CONFIG__ = undefined;
 });
 
+function stubPrompts(action: OperatorAction) {
+  if (action.prompts) {
+    const answers = action.prompts;
+    let call = 0;
+    vi.spyOn(window, "prompt").mockImplementation(() => answers[call++] ?? "");
+    return;
+  }
+  if (action.prompt) vi.spyOn(window, "prompt").mockReturnValue(action.prompt);
+}
+
 describe.each(actions)("$name", (action) => {
   it("sends the expected request and CSRF header", async () => {
     const requests = installApiMock({
       currentJob: job(action.state),
       paused: action.paused
     });
-    if (action.prompt) vi.spyOn(window, "prompt").mockReturnValue(action.prompt);
+    stubPrompts(action);
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: action.label }));
@@ -277,7 +288,7 @@ describe.each(actions)("$name", (action) => {
       paused: action.paused,
       failMutation: true
     });
-    if (action.prompt) vi.spyOn(window, "prompt").mockReturnValue(action.prompt);
+    stubPrompts(action);
     render(<App />);
 
     fireEvent.click(await screen.findByRole("button", { name: action.label }));

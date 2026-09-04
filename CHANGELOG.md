@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Hardened dashboard executable-definition edits (issue #95). Pending-job and
+  recurring-task updates that supply a handler or payload now require `ADMIN`,
+  pass through a host-aware `DashboardJobDefinitionValidator`, resolve the same
+  handler aliases as the runtime, reject direct or inherited raw and incompatible `JobHandler`
+  declarations, and deserialize the payload before any store write. This is an
+  intentional authorization change: `REPLACE_JOB` and `UPDATE_RECURRING` still
+  permit operational queue, priority, schedule, trigger, policy, zone, and
+  enabled-state edits, but no longer select executable classes. Spring securely
+  returns 501 for definition edits when it cannot select one `JobSerializer` or
+  an unambiguous alias registry;
+  ordinary edits remain available. Job replacement also preserves existing
+  producer-deduplication metadata when only the executable definition changes.
 - Dependency vulnerability checks now run as a distinct pull-request check, a
   nightly `main` scan, and a fail-closed pre-publish release step. Each path
   uses pinned Node/npm plus a checksum-verified OSV Scanner and evaluates every

@@ -8,9 +8,11 @@ public enum DashboardPermission {
   RESUME_QUEUE,
   REQUEUE_JOB,
   DELETE_JOB,
+  /** Replace queue, priority, or schedule fields on a pending job. */
   REPLACE_JOB,
   TRIGGER_RECURRING,
   UPDATE_RECURRING,
   DELETE_RECURRING,
+  /** Includes every permission and is required to replace a job's handler or arguments. */
   ADMIN
 }

@@ -26,9 +26,16 @@ public final class DashboardApiException extends RuntimeException {
     return new DashboardApiException(Code.CONFLICT, message);
   }
 
+  /** Report that a safely configured implementation of the operation is unavailable. */
+  public static DashboardApiException unsupported(String message) {
+    return new DashboardApiException(Code.NOT_SUPPORTED, message);
+  }
+
+  /** Transport-neutral failure category. */
   public enum Code {
     BAD_REQUEST,
     NOT_FOUND,
-    CONFLICT
+    CONFLICT,
+    NOT_SUPPORTED
   }
 }
