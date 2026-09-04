@@ -94,6 +94,24 @@ function fixtureFor(url: string) {
   return responses[new URL(normalized, "http://localhost").pathname];
 }
 
+function fullJobPage(handlerType: string, offset: number) {
+  const first = responses["/threadmill/api/jobs"] as {
+    jobs: Array<Record<string, unknown>>;
+  };
+  return {
+    jobs: Array.from({ length: 50 }, (_, index) => ({
+      ...first.jobs[0],
+      id:
+        index === 0
+          ? `018f0000-0000-7000-8000-${offset === 0 ? "000000000001" : "000000000002"}`
+          : `page-${offset}-job-${index}`,
+      handlerType: index === 0 ? handlerType : `com.example.Filler${offset}_${index}`
+    })),
+    limit: 50,
+    offset
+  };
+}
+
 beforeEach(() => {
   vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
     const url = input.toString();
@@ -162,26 +180,16 @@ it("requests the next and previous job pages", async () => {
     const url = input.toString();
     calls.push(url);
     if (url.includes("/jobs?")) {
-      const secondPage = url.includes("offset=1");
-      const first = responses["/threadmill/api/jobs"] as {
-        jobs: Array<Record<string, unknown>>;
-      };
+      const secondPage = url.includes("offset=50");
       return Promise.resolve({
         ok: true,
         json: () =>
-          Promise.resolve({
-            jobs: [
-              {
-                ...first.jobs[0],
-                id: secondPage
-                  ? "018f0000-0000-7000-8000-000000000002"
-                  : "018f0000-0000-7000-8000-000000000001",
-                handlerType: secondPage ? "com.example.SecondHandler" : "com.example.ImportHandler"
-              }
-            ],
-            limit: 1,
-            offset: secondPage ? 1 : 0
-          })
+          Promise.resolve(
+            fullJobPage(
+              secondPage ? "com.example.SecondHandler" : "com.example.ImportHandler",
+              secondPage ? 50 : 0
+            )
+          )
       });
     }
     return Promise.resolve({
@@ -195,7 +203,7 @@ it("requests the next and previous job pages", async () => {
   await screen.findByText("com.example.ImportHandler");
   fireEvent.click(screen.getByLabelText("Next page"));
   await screen.findByText("com.example.SecondHandler");
-  expect(calls).toContain("/threadmill/api/jobs?state=ENQUEUED&limit=50&offset=1");
+  expect(calls).toContain("/threadmill/api/jobs?state=ENQUEUED&limit=50&offset=50");
 
   fireEvent.click(screen.getByLabelText("Previous page"));
   await screen.findByText("com.example.ImportHandler");
@@ -209,7 +217,7 @@ it("retries a failed next-page request without advancing the displayed page", as
     const url = input.toString();
     calls.push(url);
     if (url.includes("/jobs?")) {
-      const nextPage = url.includes("offset=1");
+      const nextPage = url.includes("offset=50");
       if (nextPage && !failedNextPage) {
         failedNextPage = true;
         return Promise.resolve({
@@ -219,27 +227,15 @@ it("retries a failed next-page request without advancing the displayed page", as
           json: () => Promise.resolve({})
         });
       }
-      const first = responses["/threadmill/api/jobs"] as {
-        jobs: Array<Record<string, unknown>>;
-      };
       return Promise.resolve({
         ok: true,
         json: () =>
-          Promise.resolve({
-            jobs: [
-              {
-                ...first.jobs[0],
-                id: nextPage
-                  ? "018f0000-0000-7000-8000-000000000002"
-                  : "018f0000-0000-7000-8000-000000000001",
-                handlerType: nextPage
-                  ? "com.example.SecondHandler"
-                  : "com.example.ImportHandler"
-              }
-            ],
-            limit: 1,
-            offset: nextPage ? 1 : 0
-          })
+          Promise.resolve(
+            fullJobPage(
+              nextPage ? "com.example.SecondHandler" : "com.example.ImportHandler",
+              nextPage ? 50 : 0
+            )
+          )
       });
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve(fixtureFor(url)) });
@@ -254,7 +250,7 @@ it("retries a failed next-page request without advancing the displayed page", as
 
   fireEvent.click(screen.getByLabelText("Next page"));
   await screen.findByText("com.example.SecondHandler");
-  expect(calls.filter((url) => url.endsWith("offset=1"))).toHaveLength(2);
+  expect(calls.filter((url) => url.endsWith("offset=50"))).toHaveLength(2);
 });
 
 it("paginates with the last submitted handler filter", async () => {
@@ -277,10 +273,10 @@ it("paginates with the last submitted handler filter", async () => {
       });
     }
     if (url.includes("/jobs?")) {
-      const first = responses["/threadmill/api/jobs"] as Record<string, unknown>;
+      const offset = url.includes("offset=50") ? 50 : 0;
       return Promise.resolve({
         ok: true,
-        json: () => Promise.resolve({ ...first, limit: 1, offset: url.includes("offset=1") ? 1 : 0 })
+        json: () => Promise.resolve(fullJobPage("com.example.ImportHandler", offset))
       });
     }
     return Promise.resolve({ ok: true, json: () => Promise.resolve(fixtureFor(url)) });
@@ -291,7 +287,7 @@ it("paginates with the last submitted handler filter", async () => {
   const search = await screen.findByPlaceholderText("Handler type");
   fireEvent.change(search, { target: { value: "com.example.Pending" } });
   fireEvent.click(screen.getByLabelText("Next page"));
-  await waitFor(() => expect(calls.some((url) => url.endsWith("offset=1"))).toBe(true));
+  await waitFor(() => expect(calls.some((url) => url.endsWith("offset=50"))).toBe(true));
   expect(calls.filter((url) => url.includes("/jobs?")).at(-1)).not.toContain("handlerType=");
 
   fireEvent.keyDown(search, { key: "Enter" });

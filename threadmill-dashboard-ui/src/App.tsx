@@ -290,7 +290,6 @@ export default function App() {
   );
 
   const table = useReactTable({ data: jobs.jobs, columns, getCoreRowModel: getCoreRowModel() });
-  const pageSize = jobs.limit > 0 ? jobs.limit : PAGE_SIZE;
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -421,18 +420,18 @@ export default function App() {
               aria-label="Previous page"
               onClick={() => {
                 setSelected(null);
-                void load(Math.max(0, offset - pageSize), submittedFilter);
+                void load(Math.max(0, offset - PAGE_SIZE), submittedFilter);
               }}
             >
               Previous
             </Button>
             <Button
               variant="secondary"
-              disabled={jobs.jobs.length === 0 || jobs.jobs.length < pageSize}
+              disabled={jobs.jobs.length === 0 || jobs.jobs.length < PAGE_SIZE}
               aria-label="Next page"
               onClick={() => {
                 setSelected(null);
-                void load(offset + pageSize, submittedFilter);
+                void load(offset + PAGE_SIZE, submittedFilter);
               }}
             >
               Next
