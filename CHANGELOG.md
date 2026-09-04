@@ -7,6 +7,17 @@
   Central Portal publication requires that gate, direct per-module publication
   is rejected, and a tag is rejected before the expensive build unless it
   exactly matches the effective non-SNAPSHOT versions of all published modules.
+- Dependency vulnerability checks now run as a distinct pull-request check, a
+  nightly `main` scan, and a fail-closed pre-publish release step. Each path
+  uses pinned Node/npm plus a checksum-verified OSV Scanner and evaluates every
+  Git-tracked Gradle/npm lockfile. The policy, advisory-specific reachability
+  record, and time-bounded exception rules are documented.
+- Patched the remaining locked dependency advisories: Spring Boot 4.0.8 with
+  Spring Framework 7.0.9, Spring Security 7.0.7, Logback 1.5.38, and a Tomcat
+  11.0.25 test floor; Lettuce 6.8.2.RELEASE with Netty 4.1.137.Final;
+  Browserslist 4.28.9; and PostCSS Selector Parser 6.1.4. Lettuce 6.8 adds
+  `netty-resolver-dns`/`netty-codec-dns` to the published Redis module's
+  runtime graph; these are upstream compile dependencies, not optional extras.
 - Handlers can see the engine's deadline coming (issue #119).
   `JobExecutionContext` gains `deadline()` and `remaining()`, computed by the
   same rule the timeout watchdog uses — `claimedAt` plus the effective timeout
@@ -42,6 +53,20 @@
   `ProcessingNodeConfig.MAX_TIMEOUT` (one hundred years) degrades to the global
   timeout instead of overflowing before the handler runs. The config rejects
   `jobTimeout`, `noProgressTimeout`, and `shutdownGracePeriod` above that bound.
+- Queue claim order is now exactly `(priority DESC, job id)` on every store
+  (issue #91). Redis queue and unkeyed-lane ZSET scores are exact negated
+  priorities, so a lower-priority job can no longer overtake after about 116
+  days and extreme priorities lose no timestamp precision; `JobId` now defines
+  allocation-free unsigned UUID natural order, matching Redis and PostgreSQL
+  even across Java's signed `UUID.compareTo` boundary.
+  Redis upgrades legacy scores in bounded, atomic pages that cannot resurrect
+  a concurrent claim or overwrite a replacement. The layout stays `rescored`
+  while a legacy-scoring node heartbeat is live, then a cluster-wide
+  lease-backed mutex elects one node for the final exact pass before it becomes
+  `priority_only_v1`; rolling upgrades may temporarily perturb ordering but do
+  not lose or duplicate jobs. The deprecated
+  `RedisKeys.queueScore(int, long)` compatibility overload is marked for
+  removal; enqueue time is ignored.
 - Redis `oldestEnqueuedAt` — the `threadmill.queue.oldest.enqueued.age`
   gauge and the dashboard queue view — is now one head read of a per-queue
   age index (`{threadmill}:queue_enqueued_at:{queue}`, scored by

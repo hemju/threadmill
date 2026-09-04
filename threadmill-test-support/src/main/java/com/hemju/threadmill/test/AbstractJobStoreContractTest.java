@@ -564,24 +564,54 @@ public abstract class AbstractJobStoreContractTest {
   }
 
   @Test
-  @DisplayName("a retried job re-enters the queue at its original creation-time position")
-  void retriedJobReentersTheQueueAtTheSamePositionOnEveryBackend() {
+  @DisplayName("claimReady orders by priority DESC then canonical job id, never age")
+  void claimReadyOrdersByPriorityThenCanonicalIdAcrossAge() {
+    var base = Instant.now().minus(117, ChronoUnit.DAYS);
+    var canonicalFirst = concurrentJobWithId(
+        "com.example.H",
+        JobId.of(UUID.fromString("00000000-0000-0000-8000-000000000001")),
+        null,
+        null,
+        1,
+        base.plus(117, ChronoUnit.DAYS));
+    var signedUuidFirst = concurrentJobWithId(
+        "com.example.H",
+        JobId.of(UUID.fromString("80000000-0000-0000-8000-000000000001")),
+        null,
+        null,
+        1,
+        base.plus(117, ChronoUnit.DAYS));
+    var muchOlderLowerPriority =
+        concurrentJobWithId("com.example.H", fixedJobId(2), null, null, 0, base);
+
+    store.insert(muchOlderLowerPriority);
+    store.insert(signedUuidFirst);
+    store.insert(canonicalFirst);
+
+    assertThat(store.claimReady(NodeId.newId(), "default", 3, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(canonicalFirst.id(), signedUuidFirst.id(), muchOlderLowerPriority.id());
+  }
+
+  @Test
+  @DisplayName("a retried job re-enters the queue at its original job-id position")
+  void retriedJobReentersTheQueueAtTheSameIdPositionOnEveryBackend() {
     var base = Instant.now().minusSeconds(5);
-    // Same priority; a is created before b. Use fixed, ordered ids so the
-    // relational backends' id tie-break is deterministic (a < b).
+    // Same priority; fixed ordered ids make the shared job-id tie-break
+    // deterministic (a < b), independent of enqueue or retry time.
     Job a = concurrentJobWithId("com.example.H", fixedJobId(1), null, null, 0, base);
     Job b = concurrentJobWithId("com.example.H", fixedJobId(2), null, null, 0, base.plusMillis(1));
     store.insert(a);
     store.insert(b);
 
-    // a is claimed first (earliest creation), fails, and is re-enqueued.
+    // a is claimed first (lowest id), fails, and is re-enqueued.
     Job claimedA = store.claimReady(NodeId.newId(), "default", 1, Instant.now()).get(0);
     assertThat(claimedA.id()).isEqualTo(a.id());
     finish(claimedA, JobState.FAILED);
     retryToEnqueued(a.id());
 
-    // a re-entered ENQUEUED later in wall-clock time but must keep its place
-    // ahead of b by creation order on every backend.
+    // a re-entered ENQUEUED later in wall-clock time but keeps its place
+    // ahead of b by job id on every backend.
     assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
         .extracting(Job::id)
         .containsExactly(a.id());

@@ -3,6 +3,7 @@ package com.hemju.threadmill.store.redis;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -20,6 +21,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
@@ -29,6 +31,7 @@ import io.lettuce.core.SetArgs;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -89,6 +92,7 @@ class RedisJobStoreRegressionTest {
   private static RedisURI uri;
   private static RedisClient adminClient;
   private static StatefulRedisConnection<String, String> adminConnection;
+  private final List<RedisJobStore> openedStores = new ArrayList<>();
 
   @BeforeAll
   static void start() {
@@ -112,14 +116,371 @@ class RedisJobStoreRegressionTest {
     adminConnection.sync().flushdb();
   }
 
+  @AfterEach
+  void closeOpenedStores() {
+    for (RedisJobStore store : openedStores.reversed()) store.close();
+    openedStores.clear();
+  }
+
   private JobStore store() {
-    return new RedisJobStore(uri);
+    var store = new RedisJobStore(uri);
+    openedStores.add(store);
+    return store;
   }
 
   private static Job sample() {
     return Job.builder()
         .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
         .build();
+  }
+
+  @Test
+  void higherPriorityWinsAfterMoreThan116Days() {
+    var oldAt = Instant.parse("2025-01-01T00:00:00Z");
+    var newAt = oldAt.plus(117, ChronoUnit.DAYS);
+    Job oldLowerPriority = Job.builder()
+        .clock(Clock.fixed(oldAt, ZoneId.of("UTC")))
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"old\"")))
+        .priority(0)
+        .build();
+    Job newHigherPriority = Job.builder()
+        .clock(Clock.fixed(newAt, ZoneId.of("UTC")))
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"new\"")))
+        .priority(1)
+        .build();
+    JobStore store = store();
+
+    store.insert(oldLowerPriority);
+    store.insert(newHigherPriority);
+
+    assertThat(store.claimReady(NodeId.newId(), "default", 1, newAt.plusSeconds(1)))
+        .extracting(Job::id)
+        .containsExactly(newHigherPriority.id());
+  }
+
+  @Test
+  void startupRescoresLegacyPriorityAndTimestampQueueIndexes() {
+    var oldAt = Instant.parse("2025-01-01T00:00:00Z");
+    var newAt = oldAt.plus(117, ChronoUnit.DAYS);
+    Job oldLowerPriority = Job.builder()
+        .clock(Clock.fixed(oldAt, ZoneId.of("UTC")))
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"old\"")))
+        .priority(0)
+        .build();
+    Job newHigherPriority = Job.builder()
+        .clock(Clock.fixed(newAt, ZoneId.of("UTC")))
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"new\"")))
+        .priority(1)
+        .build();
+    JobStore writer = store();
+    writer.insert(oldLowerPriority);
+    writer.insert(newHigherPriority);
+    RedisCommands<String, String> r = adminConnection.sync();
+    String queue = RedisKeys.queue("default");
+    String unkeyed = RedisKeys.queueUnkeyed("default");
+    r.zadd(queue, legacyQueueScore(0, oldAt), oldLowerPriority.id().toString());
+    r.zadd(queue, legacyQueueScore(1, newAt), newHigherPriority.id().toString());
+    r.zadd(unkeyed, legacyQueueScore(0, oldAt), oldLowerPriority.id().toString());
+    r.zadd(unkeyed, legacyQueueScore(1, newAt), newHigherPriority.id().toString());
+    r.del(RedisKeys.QUEUE_PRIORITY_LAYOUT);
+    assertThat(r.zrange(queue, 0, -1))
+        .as("legacy score lets age overpower priority")
+        .containsExactly(
+            oldLowerPriority.id().toString(), newHigherPriority.id().toString());
+
+    JobStore upgraded = store();
+
+    assertThat(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT)).isEqualTo("priority_only_v1");
+    assertThat(r.zscore(queue, oldLowerPriority.id().toString()))
+        .isEqualTo(RedisKeys.queueScore(0));
+    assertThat(r.zscore(queue, newHigherPriority.id().toString()))
+        .isEqualTo(RedisKeys.queueScore(1));
+    assertThat(r.zscore(unkeyed, oldLowerPriority.id().toString()))
+        .isEqualTo(RedisKeys.queueScore(0));
+    assertThat(r.zscore(unkeyed, newHigherPriority.id().toString()))
+        .isEqualTo(RedisKeys.queueScore(1));
+    assertThat(r.zrange(queue, 0, -1))
+        .containsExactly(
+            newHigherPriority.id().toString(), oldLowerPriority.id().toString());
+    assertThat(upgraded.claimReady(NodeId.newId(), "default", 1, newAt.plusSeconds(1)))
+        .extracting(Job::id)
+        .containsExactly(newHigherPriority.id());
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void priorityLayoutRescoreDoesNotResurrectConcurrentlyClaimedMembers() throws Exception {
+    JobStore writer = store();
+    var jobs = new ArrayList<Job>(3_000);
+    for (int i = 0; i < 3_000; i++) jobs.add(sample());
+    for (int start = 0; start < jobs.size(); start += 750) {
+      writer.insertAll(jobs.subList(start, Math.min(start + 750, jobs.size())));
+    }
+
+    RedisCommands<String, String> r = adminConnection.sync();
+    String queue = RedisKeys.queue("default");
+    String unkeyed = RedisKeys.queueUnkeyed("default");
+    var legacyScoresAndIds = new ArrayList<Object>(jobs.size() * 2);
+    for (int i = 0; i < jobs.size(); i++) {
+      legacyScoresAndIds.add(1e15 + i);
+      legacyScoresAndIds.add(jobs.get(i).id().toString());
+    }
+    r.zadd(queue, legacyScoresAndIds.toArray());
+    r.zadd(unkeyed, legacyScoresAndIds.toArray());
+    r.del(RedisKeys.QUEUE_PRIORITY_LAYOUT);
+
+    var start = new CountDownLatch(1);
+    var migrationFinished = new AtomicBoolean();
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      Future<JobStore> migration = executor.submit(() -> {
+        start.await();
+        try {
+          return store();
+        } finally {
+          migrationFinished.set(true);
+        }
+      });
+      Future<?> claimer = executor.submit(() -> {
+        start.await();
+        var nodeId = NodeId.newId();
+        while (!migrationFinished.get()) {
+          writer.claimReady(nodeId, "default", 20, Instant.now());
+        }
+        return null;
+      });
+      start.countDown();
+      migration.get(30, TimeUnit.SECONDS);
+      claimer.get(30, TimeUnit.SECONDS);
+    }
+
+    for (String id : r.zrange(queue, 0, -1)) {
+      assertThat(r.hget(RedisKeys.PREFIX + "job:" + id, "state"))
+          .as("queue member remains ENQUEUED: " + id)
+          .isEqualTo("ENQUEUED");
+    }
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void priorityRescorePageDoesNotResurrectMemberClaimedAfterItsScan() {
+    JobStore store = store();
+    Job job = sample();
+    store.insert(job);
+    RedisCommands<String, String> r = adminConnection.sync();
+    String queue = RedisKeys.queue("default");
+    assertThat(r.zrange(queue, 0, 0)).containsExactly(job.id().toString());
+
+    assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(job.id());
+    String result = r.eval(
+        LuaScripts.rescoreQueuePriorityPage(),
+        ScriptOutputType.VALUE,
+        new String[] {queue},
+        RedisKeys.PREFIX + "job:",
+        "default",
+        "0",
+        job.id().toString());
+
+    assertThat(result).isEqualTo("OK");
+    assertThat(r.zscore(queue, job.id().toString())).isNull();
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void priorityRescorePageUsesTheCurrentReplacementPriority() {
+    JobStore store = store();
+    Job job = Job.builder()
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
+        .priority(0)
+        .build();
+    store.insert(job);
+    RedisCommands<String, String> r = adminConnection.sync();
+    String queue = RedisKeys.queue("default");
+    String unkeyed = RedisKeys.queueUnkeyed("default");
+    String scannedId = r.zrange(queue, 0, 0).getFirst();
+
+    assertThat(store.replaceJob(
+            job.id(), job.version(), JobReplacement.builder().priority(5).build()))
+        .isTrue();
+    // Model a Java-side rescorer overwriting the replacement with the stale
+    // priority it read before replaceJob committed.
+    r.zadd(queue, RedisKeys.queueScore(0), scannedId);
+    r.zadd(unkeyed, RedisKeys.queueScore(0), scannedId);
+
+    String queueResult = r.eval(
+        LuaScripts.rescoreQueuePriorityPage(),
+        ScriptOutputType.VALUE,
+        new String[] {queue},
+        RedisKeys.PREFIX + "job:",
+        "default",
+        "0",
+        scannedId);
+    String unkeyedResult = r.eval(
+        LuaScripts.rescoreQueuePriorityPage(),
+        ScriptOutputType.VALUE,
+        new String[] {unkeyed},
+        RedisKeys.PREFIX + "job:",
+        "default",
+        "1",
+        scannedId);
+
+    assertThat(queueResult).isEqualTo("OK");
+    assertThat(unkeyedResult).isEqualTo("OK");
+    assertThat(r.zscore(queue, scannedId)).isEqualTo(RedisKeys.queueScore(5));
+    assertThat(r.zscore(unkeyed, scannedId)).isEqualTo(RedisKeys.queueScore(5));
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void priorityLayoutFinalizesOnlyAfterLegacyNodeExitsAndRunsOneLastExactPass() throws Exception {
+    store();
+    RedisCommands<String, String> r = adminConnection.sync();
+    r.set(RedisKeys.QUEUE_PRIORITY_LAYOUT, "rescored");
+    NodeId legacy = NodeId.newId();
+    r.sadd(RedisKeys.NODES, legacy.toString());
+    r.set(
+        RedisKeys.nodeHeartbeat(legacy),
+        Long.toString(System.currentTimeMillis()),
+        SetArgs.Builder.ex(60));
+    r.set(RedisKeys.nodeLayout(legacy), "1", SetArgs.Builder.ex(60));
+
+    JobStore upgraded = store();
+    assertThat(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT)).isEqualTo("rescored");
+    Job lower = Job.builder()
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"low\"")))
+        .priority(0)
+        .build();
+    Job higher = Job.builder()
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"high\"")))
+        .priority(1)
+        .build();
+    upgraded.insert(lower);
+    upgraded.insert(higher);
+    String queue = RedisKeys.queue("default");
+    String unkeyed = RedisKeys.queueUnkeyed("default");
+    r.zadd(queue, 1d, lower.id().toString());
+    r.zadd(queue, 2d, higher.id().toString());
+    r.zadd(unkeyed, 1d, lower.id().toString());
+    r.zadd(unkeyed, 2d, higher.id().toString());
+
+    NodeId current = NodeId.newId();
+    upgraded.recordNodeHeartbeat(current, Instant.now());
+    assertThat(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT))
+        .as("a live legacy scorer keeps the layout intermediate")
+        .isEqualTo("rescored");
+
+    r.del(RedisKeys.nodeHeartbeat(legacy));
+    upgraded.recordNodeHeartbeat(current, Instant.now());
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    while (!"priority_only_v1".equals(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT))) {
+      assertThat(System.nanoTime()).as("priority layout finalized within 10s").isLessThan(deadline);
+      Thread.sleep(20);
+    }
+    assertThat(r.zrange(queue, 0, -1))
+        .containsExactly(higher.id().toString(), lower.id().toString());
+    assertThat(r.zscore(queue, higher.id().toString())).isEqualTo(RedisKeys.queueScore(1));
+    assertThat(r.zscore(unkeyed, lower.id().toString())).isEqualTo(RedisKeys.queueScore(0));
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void futureNodeLayoutVersionsRemainPriorityAware() {
+    store();
+    RedisCommands<String, String> r = adminConnection.sync();
+    NodeId future = NodeId.newId();
+    r.sadd(RedisKeys.NODES, future.toString());
+    r.set(
+        RedisKeys.nodeHeartbeat(future),
+        Long.toString(System.currentTimeMillis()),
+        SetArgs.Builder.ex(60));
+    r.set(RedisKeys.nodeLayout(future), "3", SetArgs.Builder.ex(60));
+
+    store();
+
+    assertThat(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT)).isEqualTo("priority_only_v1");
+  }
+
+  @Test
+  void priorityLayoutFinalizerUsesAClusterWideMutex() throws Exception {
+    store();
+    RedisCommands<String, String> r = adminConnection.sync();
+    r.set(RedisKeys.QUEUE_PRIORITY_LAYOUT, "rescored");
+    NodeId legacy = NodeId.newId();
+    r.sadd(RedisKeys.NODES, legacy.toString());
+    r.set(
+        RedisKeys.nodeHeartbeat(legacy),
+        Long.toString(System.currentTimeMillis()),
+        SetArgs.Builder.ex(60));
+    r.set(RedisKeys.nodeLayout(legacy), "1", SetArgs.Builder.ex(60));
+    JobStore first = store();
+    JobStore second = store();
+    r.del(RedisKeys.nodeHeartbeat(legacy));
+
+    String blocker = "review-test-blocker";
+    assertThat(first.tryAcquireMutex(
+            RedisJobStore.QUEUE_PRIORITY_LAYOUT_FINALIZER_MUTEX, blocker, Duration.ofMinutes(1)))
+        .isTrue();
+    first.recordNodeHeartbeat(NodeId.newId(), Instant.now());
+    assertThat(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT))
+        .as("a node that does not own the cluster mutex must not finalize")
+        .isEqualTo("rescored");
+
+    first.releaseMutex(RedisJobStore.QUEUE_PRIORITY_LAYOUT_FINALIZER_MUTEX, blocker);
+    second.recordNodeHeartbeat(NodeId.newId(), Instant.now());
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    while (!"priority_only_v1".equals(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT))) {
+      assertThat(System.nanoTime()).as("mutex owner finalized within 10s").isLessThan(deadline);
+      Thread.sleep(20);
+    }
+  }
+
+  @Test
+  void terminalPriorityLayoutRepairsObviousLegacyScoreDrift() {
+    JobStore writer = store();
+    Job job = sample();
+    writer.insert(job);
+    RedisCommands<String, String> r = adminConnection.sync();
+    String queue = RedisKeys.queue("default");
+    String unkeyed = RedisKeys.queueUnkeyed("default");
+    r.zadd(queue, 1e15, job.id().toString());
+    r.zadd(unkeyed, 1e15, job.id().toString());
+
+    store();
+
+    assertThat(r.zscore(queue, job.id().toString())).isEqualTo(RedisKeys.queueScore(0));
+    assertThat(r.zscore(unkeyed, job.id().toString())).isEqualTo(RedisKeys.queueScore(0));
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void priorityLayoutPrunesDanglingMembersAndNamesMalformedJobs() {
+    store();
+    RedisCommands<String, String> r = adminConnection.sync();
+    JobId dangling = JobId.newId();
+    r.sadd(RedisKeys.QUEUES, "default");
+    r.zadd(RedisKeys.queue("default"), 1e15, dangling.toString());
+    r.zadd(RedisKeys.queueUnkeyed("default"), 1e15, dangling.toString());
+    r.del(RedisKeys.QUEUE_PRIORITY_LAYOUT);
+
+    store();
+
+    assertThat(r.zscore(RedisKeys.queue("default"), dangling.toString())).isNull();
+    assertThat(r.zscore(RedisKeys.queueUnkeyed("default"), dangling.toString())).isNull();
+
+    JobStore writer = store();
+    Job malformed = sample();
+    writer.insert(malformed);
+    r.hdel(RedisKeys.job(malformed.id()), "priority");
+    r.del(RedisKeys.QUEUE_PRIORITY_LAYOUT);
+    assertThatThrownBy(this::store)
+        .isInstanceOf(JobEngineFatalException.class)
+        .hasMessageContaining(malformed.id().toString());
+  }
+
+  private static double legacyQueueScore(int priority, Instant createdAt) {
+    long micros = createdAt.getEpochSecond() * 1_000_000L + createdAt.getNano() / 1_000L;
+    return -(double) priority * 1e13 + micros;
   }
 
   @ParameterizedTest
@@ -1443,10 +1804,10 @@ class RedisJobStoreRegressionTest {
     r.zadd(index, at, id);
     // The reader observed the stale head and found it absent from the queue;
     // then the re-enqueue lands before the reader's removal.
-    r.zadd(queue, RedisKeys.queueScore(0, System.currentTimeMillis() * 1_000L), id);
+    r.zadd(queue, RedisKeys.queueScore(0), id);
     r.zadd(index, at + 1_000d, id);
     Long removedWhileEnqueued = r.eval(
-        RedisJobStore.PRUNE_STALE_AGE_INDEX_MEMBERS_LUA,
+        LuaScripts.pruneStaleAgeIndexMembers(),
         ScriptOutputType.INTEGER,
         new String[] {index, queue},
         id);
@@ -1458,7 +1819,7 @@ class RedisJobStoreRegressionTest {
     // Without the re-enqueue the same call removes the stale member.
     r.zrem(queue, id);
     Long removedWhenStale = r.eval(
-        RedisJobStore.PRUNE_STALE_AGE_INDEX_MEMBERS_LUA,
+        LuaScripts.pruneStaleAgeIndexMembers(),
         ScriptOutputType.INTEGER,
         new String[] {index, queue},
         id);
@@ -1596,7 +1957,7 @@ class RedisJobStoreRegressionTest {
     var expectedExclusiveInFlight = new HashMap<String, Long>();
     var expectedWorkflowCounts = new HashMap<String, Map<String, Long>>();
     var expectedWorkflowHolds = new HashMap<String, Map<String, Long>>();
-    var expectedUnkeyed = new HashMap<String, Set<String>>();
+    var expectedUnkeyed = new HashMap<String, Map<String, Double>>();
     var expectedQueueKeys = new HashMap<String, Map<String, Long>>();
     var expectedPendingRoots = new HashMap<String, Set<String>>();
     var expectedEnqueuedAt = new HashMap<String, Map<String, Double>>();
@@ -1627,7 +1988,8 @@ class RedisJobStoreRegressionTest {
       }
 
       String queue = hash.get("queue");
-      assertActiveStateMembership(r, id, state, queue, hash.get("owner_node_id"));
+      int priority = Integer.parseInt(hash.get("priority"));
+      assertActiveStateMembership(r, id, state, queue, hash.get("owner_node_id"), priority);
       assertConcurrencyMembership(
           r,
           id,
@@ -1652,7 +2014,9 @@ class RedisJobStoreRegressionTest {
               .computeIfAbsent(queue, ignored -> new HashMap<>())
               .merge(concurrencyKey, 1L, Long::sum);
         } else {
-          expectedUnkeyed.computeIfAbsent(queue, ignored -> new HashSet<>()).add(id.toString());
+          expectedUnkeyed
+              .computeIfAbsent(queue, ignored -> new HashMap<>())
+              .put(id.toString(), RedisKeys.queueScore(priority));
         }
       }
       String workflowRootId = hash.get("workflow_root_id");
@@ -1676,9 +2040,14 @@ class RedisJobStoreRegressionTest {
     // no missing entries, no strays.
     var strayUnkeyed = new HashSet<>(r.keys(RedisKeys.PREFIX + "queue_unkeyed:*"));
     for (var entry : expectedUnkeyed.entrySet()) {
-      assertThat(r.zrange(RedisKeys.queueUnkeyed(entry.getKey()), 0, -1))
+      var actual = new HashMap<String, Double>();
+      for (ScoredValue<String> member :
+          r.zrangeWithScores(RedisKeys.queueUnkeyed(entry.getKey()), 0, -1)) {
+        actual.put(member.getValue(), member.getScore());
+      }
+      assertThat(actual)
           .as("unkeyed ready index for queue " + entry.getKey())
-          .containsExactlyInAnyOrderElementsOf(entry.getValue());
+          .containsExactlyInAnyOrderEntriesOf(entry.getValue());
       strayUnkeyed.remove(RedisKeys.queueUnkeyed(entry.getKey()));
     }
     assertThat(strayUnkeyed).as("stray unkeyed ready indexes").isEmpty();
@@ -1732,11 +2101,16 @@ class RedisJobStoreRegressionTest {
   }
 
   private static void assertActiveStateMembership(
-      RedisCommands<String, String> r, JobId id, JobState state, String queue, String ownerNodeId) {
+      RedisCommands<String, String> r,
+      JobId id,
+      JobState state,
+      String queue,
+      String ownerNodeId,
+      int priority) {
     if (state == JobState.ENQUEUED) {
       assertThat(r.zscore(RedisKeys.queue(queue), id.toString()))
           .as("queue index for " + id)
-          .isNotNull();
+          .isEqualTo(RedisKeys.queueScore(priority));
     } else {
       assertThat(r.zscore(RedisKeys.queue(queue), id.toString()))
           .as("queue index leak for " + id)

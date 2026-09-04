@@ -24,9 +24,13 @@ val npmBuild by
     tasks.registering(Exec::class) {
         dependsOn(npmInstall)
         inputs.dir("src")
+        inputs.dir("browser-tests")
+        inputs.dir("public")
         inputs.file("index.html")
         inputs.file("package.json")
         inputs.file("package-lock.json")
+        inputs.file("playwright.config.ts")
+        inputs.file("tsconfig.browser-tests.json")
         inputs.file("tsconfig.json")
         inputs.file("vite.config.ts")
         outputs.dir("dist")

@@ -76,6 +76,14 @@ public final class LuaScripts {
     return load("mutex_acquire.lua");
   }
 
+  public static String rescoreQueuePriorityPage() {
+    return load("rescore_queue_priority_page.lua");
+  }
+
+  public static String pruneStaleAgeIndexMembers() {
+    return load("prune_stale_age_index_members.lua");
+  }
+
   private static String load(String name) {
     return CACHE.computeIfAbsent(name, n -> {
       try (InputStream in =

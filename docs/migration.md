@@ -14,6 +14,16 @@ Before production, run the getting-started example, port one real job, then run
 the job twice manually to prove idempotency before enabling recurring or retry
 behavior.
 
+## Upgrading Metrics Wiring
+
+Use `ThreadmillMetrics.meteredStore()` as the store passed to processing nodes
+and producers. It now records claim latency/failures and rejected-write
+attempts at the actual `JobStore` boundary. Remove host-side calls to
+`recordClaimLatency`; keeping both paths double-counts claims. A host-scheduled
+`metrics.refresh()` remains supported but is optional because gauge reads now
+refresh one shared snapshot after the configured interval, independently of
+job completion.
+
 ## Renaming Handlers And Payloads
 
 Threadmill persists handler class names in `JobSpec.handlerType()` and payload

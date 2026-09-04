@@ -1,7 +1,6 @@
 /**
- * Micrometer integration for Threadmill: per-state gauges sourced from the
- * incrementally-maintained counters, processed/failed counters tagged by
- * cause, and a processing-time timer. Wires in as a
- * {@link com.hemju.threadmill.core.engine.JobInterceptor}.
+ * Micrometer integration for Threadmill: pull-refreshed store gauges,
+ * bounded per-queue meters, processing lifecycle counters and timers, and a
+ * store decorator for claim and rejected-write signals.
  */
 package com.hemju.threadmill.metrics;

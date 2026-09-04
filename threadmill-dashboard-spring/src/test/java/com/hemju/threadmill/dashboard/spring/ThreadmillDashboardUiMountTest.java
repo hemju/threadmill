@@ -25,6 +25,7 @@ class ThreadmillDashboardUiMountTest {
     runner.run(context -> {
       assertThat(context).hasSingleBean(ThreadmillDashboardApiController.class);
       assertThat(context).doesNotHaveBean("threadmillDashboardUiWebMvcConfigurer");
+      assertThat(context).doesNotHaveBean(ThreadmillDashboardUiConfigurationController.class);
     });
   }
 
@@ -54,7 +55,10 @@ class ThreadmillDashboardUiMountTest {
     var resource = getClass().getResource("/ui-fixture/threadmill-index.html");
     runner
         .withClassLoader(new UiResourceClassLoader(getClass().getClassLoader(), resource))
-        .run(context -> assertThat(context).hasBean("threadmillDashboardUiWebMvcConfigurer"));
+        .run(context -> {
+          assertThat(context).hasBean("threadmillDashboardUiWebMvcConfigurer");
+          assertThat(context).hasSingleBean(ThreadmillDashboardUiConfigurationController.class);
+        });
   }
 
   private static final class UiResourceClassLoader extends ClassLoader {

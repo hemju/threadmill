@@ -28,6 +28,13 @@ token back in the configured header. Set
 If no `SecurityFilterChain` exists, startup fails unless unsafe read-only local
 mode is enabled.
 
+Registering Threadmill's scoped chain makes Spring Boot's default catch-all
+chain back off. The Threadmill chain protects only the configured dashboard API
+path and `/threadmill/**`; it does not secure any other host endpoints. Provide
+a host catch-all `SecurityFilterChain` for the rest of the application, or set
+`threadmill.dashboard.security.auto-configure=false` if the host should own the
+complete security configuration (including Boot's default chain).
+
 Sensitive fields are redacted by default: payload arguments, metadata, logs,
 results, and failure messages. Full detail requires both
 `DashboardOptions.exposeSensitiveDetails=true` and
