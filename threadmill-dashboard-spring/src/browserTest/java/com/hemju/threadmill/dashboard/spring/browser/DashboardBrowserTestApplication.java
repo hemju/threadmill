@@ -17,6 +17,8 @@ import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.schedule.CronTask;
+import com.hemju.threadmill.core.serialization.JobSerializer;
+import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
@@ -47,11 +49,14 @@ public final class DashboardBrowserTestApplication {
   @Bean
   JobStore jobStore() {
     var store = new InMemoryJobStore();
-    insertJob(
-        store,
-        "018f0000-0000-7000-8000-000000000101",
-        "com.example.ReplaceMeHandler",
-        JobState.ENQUEUED);
+    store.insert(Job.builder()
+        .id(JobId.parse("018f0000-0000-7000-8000-000000000101"))
+        .createdAt(Instant.parse("2026-01-01T00:00:00Z"))
+        .spec(JobSpec.of(
+            ReplaceMeHandler.class.getName(),
+            new JobArgument(BrowserPayload.class.getName(), "{\"value\":\"before\"}")))
+        .initialState(JobState.ENQUEUED)
+        .build());
     insertJob(
         store,
         "018f0000-0000-7000-8000-000000000102",
@@ -79,6 +84,17 @@ public final class DashboardBrowserTestApplication {
     upsertRecurring(store, "nightly-update");
     upsertRecurring(store, "nightly-delete");
     return store;
+  }
+
+  /**
+   * Without a serializer the dashboard cannot validate an executable
+   * definition and securely answers 501, so a host that offers replacement
+   * must supply one. This mounts the dashboard alone, without the Spring Boot
+   * starter that would otherwise contribute it.
+   */
+  @Bean
+  JobSerializer jobSerializer() {
+    return new JsonJobSerializer();
   }
 
   @Bean

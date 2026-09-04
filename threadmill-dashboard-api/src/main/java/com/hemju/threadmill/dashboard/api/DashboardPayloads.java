@@ -108,14 +108,38 @@ public final class DashboardPayloads {
 
   public record ScheduleRetryRequest(long expectedVersion, Duration delay) {}
 
+  /**
+   * Pending-job replacement request.
+   *
+   * <p>Queue, priority, and schedule edits require {@link DashboardPermission#REPLACE_JOB}.
+   * Supplying either {@code handlerType} or {@code arguments} replaces the executable definition
+   * and requires {@link DashboardPermission#ADMIN}; omitted definition fields preserve their
+   * current values.
+   */
   public record ReplaceJobRequest(
       long expectedVersion,
       String queue,
       Integer priority,
       Instant scheduledFor,
       String handlerType,
-      List<JobArgument> arguments) {}
+      List<JobArgument> arguments) {
 
+    public boolean replacesDefinition() {
+      return handlerType != null || arguments != null;
+    }
+
+    /** Permission required by the fields present in this request. */
+    public DashboardPermission requiredPermission() {
+      return replacesDefinition() ? DashboardPermission.ADMIN : DashboardPermission.REPLACE_JOB;
+    }
+
+    /** Stable audit action for the fields present in this request. */
+    public String auditAction() {
+      return replacesDefinition() ? "replace_job_definition" : "replace_job";
+    }
+  }
+
+  /** Recurring-task update; omitted fields preserve the current definition. */
   public record UpdateRecurringRequest(
       String triggerKind,
       String triggerValue,
@@ -125,7 +149,24 @@ public final class DashboardPayloads {
       Integer priority,
       CronTask.MissedRunPolicy missedRunPolicy,
       String zone,
-      Boolean enabled) {}
+      Boolean enabled) {
+
+    public boolean replacesDefinition() {
+      return handlerType != null || payloadArgument != null;
+    }
+
+    /** Permission required by the fields present in this request. */
+    public DashboardPermission requiredPermission() {
+      return replacesDefinition()
+          ? DashboardPermission.ADMIN
+          : DashboardPermission.UPDATE_RECURRING;
+    }
+
+    /** Stable audit action for the fields present in this request. */
+    public String auditAction() {
+      return replacesDefinition() ? "update_recurring_definition" : "update_recurring";
+    }
+  }
 
   public record ActionResponse(String status, String target) {}
 }

@@ -252,8 +252,8 @@ public final class ThreadmillDashboardApiController {
       @RequestBody ReplaceJobRequest request) {
     return action(
         authentication,
-        DashboardPermission.REPLACE_JOB,
-        "replace_job",
+        request.requiredPermission(),
+        request.auditAction(),
         id,
         () -> service.replaceJob(JobId.parse(id), request));
   }
@@ -276,8 +276,8 @@ public final class ThreadmillDashboardApiController {
       @RequestBody UpdateRecurringRequest request) {
     return action(
         authentication,
-        DashboardPermission.UPDATE_RECURRING,
-        "update_recurring",
+        request.requiredPermission(),
+        request.auditAction(),
         name,
         () -> service.updateRecurring(name, request));
   }
@@ -372,6 +372,7 @@ public final class ThreadmillDashboardApiController {
           case BAD_REQUEST -> HttpStatus.BAD_REQUEST;
           case NOT_FOUND -> HttpStatus.NOT_FOUND;
           case CONFLICT -> HttpStatus.CONFLICT;
+          case NOT_SUPPORTED -> HttpStatus.NOT_IMPLEMENTED;
         };
     return ResponseEntity.status(status)
         .body(ProblemDetail.forStatusAndDetail(status, e.getMessage()));

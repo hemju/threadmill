@@ -151,13 +151,38 @@ export default function App() {
   }
 
   async function replaceJob(job: JobSummary) {
-    const handlerType = window.prompt("Handler type", job.handlerType);
-    if (!handlerType || handlerType === job.handlerType) return;
+    const queue = window.prompt("Queue", job.queue);
+    if (queue === null) return;
+    const priorityText = window.prompt("Priority", String(job.priority));
+    if (priorityText === null) return;
+    const priority = priorityText.trim() === "" ? job.priority : Number(priorityText);
+    if (!Number.isInteger(priority)) {
+      setError("Priority must be an integer");
+      return;
+    }
+    const scheduledFor = window.prompt(
+      "Scheduled for (ISO-8601; blank keeps the current value)",
+      job.scheduledFor ?? ""
+    );
+    if (scheduledFor === null) return;
+    const body: Record<string, unknown> = { expectedVersion: job.version };
+    if (queue && queue !== job.queue) body.queue = queue;
+    if (priority !== job.priority) body.priority = priority;
+    if (scheduledFor && scheduledFor !== job.scheduledFor) body.scheduledFor = scheduledFor;
+    if (session?.permissions.includes("ADMIN")) {
+      const handlerType = window.prompt(
+        "Handler type (ADMIN operation; the existing payload is retained)",
+        job.handlerType
+      );
+      if (handlerType === null) return;
+      if (handlerType && handlerType !== job.handlerType) body.handlerType = handlerType;
+    }
+    if (Object.keys(body).length === 1) return;
     await mutate(
       `/jobs/${job.id}`,
       {
         method: "PATCH",
-        body: JSON.stringify({ expectedVersion: job.version, handlerType, arguments: [] })
+        body: JSON.stringify(body)
       },
       "replaced"
     );
