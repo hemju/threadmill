@@ -55,7 +55,7 @@ public class ThreadmillRedisAutoConfiguration {
     return store;
   }
 
-  private static RedisStoreConfig redisStoreConfig(ThreadmillProperties.RedisProperties redis) {
+  static RedisStoreConfig redisStoreConfig(ThreadmillProperties.RedisProperties redis) {
     var safety = redis.isNoEvictionExternallyValidated()
         ? RedisStoreConfig.RedisSafetyValidation.externallyValidatedMode()
         : RedisStoreConfig.RedisSafetyValidation.strict();
@@ -72,13 +72,20 @@ public class ThreadmillRedisAutoConfiguration {
         yield new RedisStoreConfig.Sentinel(
             sentinel.getMasterName(),
             parseRedisNodes(sentinel.getNodes()),
-            sentinel.getPassword(),
+            new RedisStoreConfig.Credentials(sentinel.getUsername(), sentinel.getPassword()),
+            new RedisStoreConfig.Credentials(
+                sentinel.getSentinelUsername(), sentinel.getSentinelPassword()),
+            new RedisStoreConfig.Tls(sentinel.isTls(), sentinel.isVerifyPeer()),
             safety);
       }
       case "cluster" -> {
         var cluster = redis.getCluster();
         yield new RedisStoreConfig.Cluster(
-            parseRedisNodes(cluster.getNodes()), cluster.getReadPolicy(), safety);
+            parseRedisNodes(cluster.getNodes()),
+            cluster.getReadPolicy(),
+            new RedisStoreConfig.Credentials(cluster.getUsername(), cluster.getPassword()),
+            new RedisStoreConfig.Tls(cluster.isTls(), cluster.isVerifyPeer()),
+            safety);
       }
       default ->
         throw new IllegalArgumentException(

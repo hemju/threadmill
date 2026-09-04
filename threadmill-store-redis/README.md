@@ -9,11 +9,31 @@ topologies are all supported.
 Choose via `RedisStoreConfig`:
 
 - **Standalone** — single Redis instance, optionally with a password.
-- **Sentinel** — master/replica with automatic failover via Sentinels.
+- **Sentinel** — master/replica with automatic failover via Sentinels. Redis
+  data-node and Sentinel ACL credentials are configured independently; one TLS
+  policy covers both connection planes, as required by Lettuce's Sentinel URI.
 - **Cluster** — multi-node Cluster; **every engine key uses the single
   `{threadmill}` hash tag** so Lua scripts run inside one slot. This
   supports Cluster topology/failover; it deliberately does not shard job
-  keys across masters.
+  keys across masters. ACL authentication and verified TLS apply to every seed.
+
+For example, an authenticated TLS Cluster can be configured directly:
+
+```java
+var config = new RedisStoreConfig.Cluster(
+    List.of(new RedisStoreConfig.HostAndPort("redis-1", 6380)),
+    "master",
+    new RedisStoreConfig.Credentials("threadmill", clusterPassword),
+    RedisStoreConfig.Tls.verified());
+var store = new RedisJobStore(config);
+```
+
+`Credentials` also supports password-only authentication. Peer verification is
+enabled by `Tls.verified()` and uses the JVM trust material. For custom Lettuce
+TLS resources or client options, inject a caller-managed `RedisClient` or
+`RedisClusterClient`; closing the store does not close an injected client.
+Threadmill topology descriptions and wrapped connection failures never include
+ACL usernames or passwords.
 
 Durability is Redis-level. Run with `--appendonly yes`. Out of the box,
 Redis is less durable than PostgreSQL — a crash within 1 s of a state
@@ -39,7 +59,9 @@ used for managed Redis where `CONFIG GET` is unavailable.
 
 Every key lives under `{threadmill}:` so multi-key Lua scripts route to
 the same Cluster slot. The `userSegment` encoding is `Base64Url(value)` so
-queue / handler / dedup-key user input cannot escape the namespace.
+queue / handler / dedup-key user input cannot escape the namespace. Optional
+Lua key positions use `{threadmill}:no_key`, never an empty key, so absent
+indexes remain in the same slot too.
 
 | Key | Type | Purpose |
 |---|---|---|
@@ -65,6 +87,7 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:node:heartbeat:{node}` | STRING with TTL | Key existence is the heartbeat; TTL is the timeout. |
 | `{threadmill}:node:layout:{node}` | STRING with heartbeat TTL | Monotonic Redis layout version maintained by a live node: `1` knows the age index but writes legacy priority scores; `>=2` maintains both current layouts. Missing or malformed means v0.2.1 or earlier. |
 | `{threadmill}:lease:maintenance` | STRING | Maintenance-lease holder; refreshed via `lease_acquire.lua`. |
+| `{threadmill}:no_key` | Reserved sentinel | Placeholder for an absent optional Lua `KEYS` entry; never stores data. |
 | `{threadmill}:dedup:{queue}:{dedupKey}` | STRING | Dedup record. |
 | `{threadmill}:dedup_expiry` | ZSET | Dedup record expiries; maintenance cleanup reads this. |
 | `{threadmill}:concurrency:{key}:counters` | HASH | Per-key in-flight counts (`exclusive_in_flight`, `shared_in_flight`). |

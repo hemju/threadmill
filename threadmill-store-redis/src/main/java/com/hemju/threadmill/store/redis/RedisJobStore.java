@@ -145,12 +145,12 @@ public final class RedisJobStore implements JobStore {
 
   public RedisJobStore(RedisURI uri) {
     this(
-        connectStandalone(internalStandaloneClient(uri)),
+        connectOwned(internalStandaloneClient(uri)),
         new JsonJobSerializer(),
         defaultCapabilities(),
         true,
         RedisStoreConfig.RedisSafetyValidation.strict(),
-        describeUri(uri));
+        RedisConnectionConfig.describeUri(uri));
   }
 
   public RedisJobStore(RedisStoreConfig config) {
@@ -160,7 +160,7 @@ public final class RedisJobStore implements JobStore {
         defaultCapabilities(),
         true,
         config.safetyValidation(),
-        describeConfig(config));
+        RedisConnectionConfig.describe(config));
   }
 
   public RedisJobStore(
@@ -188,6 +188,39 @@ public final class RedisJobStore implements JobStore {
         "standalone (client-injected)");
   }
 
+  /**
+   * Creates a store from a caller-managed Cluster client. The caller retains
+   * ownership of the client and its custom TLS resources.
+   */
+  public RedisJobStore(
+      RedisClusterClient client, JobSerializer serializer, JobStoreCapabilities capabilities) {
+    this(
+        connectClusterClient(Objects.requireNonNull(client, "client")),
+        serializer,
+        capabilities,
+        false,
+        RedisStoreConfig.RedisSafetyValidation.strict(),
+        "cluster (client-injected)");
+  }
+
+  /**
+   * Creates a store from a caller-managed Cluster client with explicit Redis
+   * safety-validation behavior. The caller retains ownership of the client.
+   */
+  public RedisJobStore(
+      RedisClusterClient client,
+      JobSerializer serializer,
+      JobStoreCapabilities capabilities,
+      RedisStoreConfig.RedisSafetyValidation safetyValidation) {
+    this(
+        connectClusterClient(Objects.requireNonNull(client, "client")),
+        serializer,
+        capabilities,
+        false,
+        safetyValidation,
+        "cluster (client-injected)");
+  }
+
   private record ConnectionHandle(
       AbstractRedisClient client,
       AutoCloseable connection,
@@ -200,7 +233,7 @@ public final class RedisJobStore implements JobStore {
     Objects.requireNonNull(config, "config");
     return switch (config) {
       case RedisStoreConfig.Standalone standalone ->
-        connectStandalone(internalStandaloneClient(standalone.uri()));
+        connectOwned(internalStandaloneClient(standalone.uri()));
       case RedisStoreConfig.Sentinel sentinel -> connectSentinel(sentinel);
       case RedisStoreConfig.Cluster cluster -> connectCluster(cluster);
     };
@@ -211,17 +244,21 @@ public final class RedisJobStore implements JobStore {
     return new ConnectionHandle(client, connection, connection.sync(), connection.async());
   }
 
+  private static ConnectionHandle connectOwned(RedisClient client) {
+    try {
+      return connectStandalone(client);
+    } catch (RuntimeException connectFailure) {
+      client.shutdown();
+      throw connectFailure;
+    }
+  }
+
   private static ConnectionHandle connectSentinel(RedisStoreConfig.Sentinel config) {
-    var first = config.nodes().getFirst();
-    var builder = RedisURI.Builder.sentinel(first.host(), first.port(), config.master());
-    for (int i = 1; i < config.nodes().size(); i++) {
-      var node = config.nodes().get(i);
-      builder.withSentinel(node.host(), node.port());
+    try {
+      return connectOwned(internalStandaloneClient(RedisConnectionConfig.sentinelUri(config)));
+    } catch (RuntimeException connectFailure) {
+      throw RedisConnectionConfig.redactedConnectionFailure("Redis Sentinel", connectFailure);
     }
-    if (config.password() != null && !config.password().isBlank()) {
-      builder.withPassword(config.password().toCharArray());
-    }
-    return connectStandalone(internalStandaloneClient(builder.build()));
   }
 
   /**
@@ -235,11 +272,18 @@ public final class RedisJobStore implements JobStore {
   }
 
   private static ConnectionHandle connectCluster(RedisStoreConfig.Cluster config) {
-    var uris = config.nodes().stream()
-        .map(node -> RedisURI.Builder.redis(node.host(), node.port()).build())
-        .toList();
-    RedisClusterClient client = RedisClusterClient.create(uris);
+    RedisClusterClient client =
+        RedisClusterClient.create(RedisConnectionConfig.clusterUris(config));
     client.setOptions(RedisClusterOptions.topologyRefreshing());
+    try {
+      return connectClusterClient(client);
+    } catch (RuntimeException connectFailure) {
+      client.shutdown();
+      throw RedisConnectionConfig.redactedConnectionFailure("Redis Cluster", connectFailure);
+    }
+  }
+
+  private static ConnectionHandle connectClusterClient(RedisClusterClient client) {
     StatefulRedisClusterConnection<String, String> connection = client.connect();
     return new ConnectionHandle(client, connection, connection.sync(), connection.async());
   }
@@ -275,21 +319,6 @@ public final class RedisJobStore implements JobStore {
       }
       throw validationFailure;
     }
-  }
-
-  private static String describeUri(RedisURI uri) {
-    Objects.requireNonNull(uri, "uri");
-    return "standalone host=" + uri.getHost() + " port=" + uri.getPort();
-  }
-
-  private static String describeConfig(RedisStoreConfig config) {
-    return switch (config) {
-      case RedisStoreConfig.Standalone standalone -> describeUri(standalone.uri());
-      case RedisStoreConfig.Sentinel sentinel ->
-        "sentinel master=" + sentinel.master() + " nodes=" + sentinel.nodes().size();
-      case RedisStoreConfig.Cluster cluster ->
-        "cluster nodes=" + cluster.nodes().size();
-    };
   }
 
   /** Closes the underlying connection (and the client, if this instance owns it). */
@@ -399,7 +428,7 @@ public final class RedisJobStore implements JobStore {
     double activeScore = activeScoreFor(snapshot, stateAt);
     var keys = new String[] {
       RedisKeys.job(snapshot.id()),
-      activeKey == null ? "" : activeKey,
+      optionalKey(activeKey),
       RedisKeys.byStateTime(snapshot.currentState()),
       RedisKeys.byHandler(snapshot.spec().handlerType()),
       RedisKeys.COUNTS,
@@ -519,7 +548,7 @@ public final class RedisJobStore implements JobStore {
         String activeKey = activeKeyFor(snap.currentState(), snap.queue(), snap.ownerNodeId());
         double activeScore = activeScoreFor(snap, stateAt);
         keyList.add(RedisKeys.job(snap.id()));
-        keyList.add(activeKey == null ? "" : activeKey);
+        keyList.add(optionalKey(activeKey));
         keyList.add(RedisKeys.byStateTime(snap.currentState()));
         keyList.add(RedisKeys.byHandler(snap.spec().handlerType()));
         keyList.add(RedisKeys.COUNTS);
@@ -636,7 +665,7 @@ public final class RedisJobStore implements JobStore {
           new String[] {
             RedisKeys.dedup(snapshot.queue(), dedupKey),
             RedisKeys.job(snapshot.id()),
-            activeKey == null ? "" : activeKey,
+            optionalKey(activeKey),
             RedisKeys.byStateTime(snapshot.currentState()),
             RedisKeys.byHandler(snapshot.spec().handlerType()),
             RedisKeys.COUNTS,
@@ -730,21 +759,21 @@ public final class RedisJobStore implements JobStore {
     String newPerNode =
         (snapshot.currentState() == JobState.PROCESSING && snapshot.ownerNodeId() != null)
             ? RedisKeys.processingFor(snapshot.ownerNodeId())
-            : "";
+            : RedisKeys.NO_KEY;
     String oldActive = activeKeyFor(oldState, oldQueue, oldOwnerNodeId);
     String oldPerNode = (oldState == JobState.PROCESSING && oldOwnerNodeId != null)
         ? RedisKeys.processingFor(oldOwnerNodeId)
-        : "";
+        : RedisKeys.NO_KEY;
 
     Instant stateAt = lastTransitionTime(snapshot, snapshot.currentState());
     double newScore = activeScoreFor(snapshot, stateAt);
 
     var keys = new String[] {
       RedisKeys.job(snapshot.id()),
-      newActive == null ? "" : newActive,
+      optionalKey(newActive),
       newPerNode,
       RedisKeys.byStateTime(snapshot.currentState()),
-      oldActive == null ? "" : oldActive,
+      optionalKey(oldActive),
       oldPerNode,
       RedisKeys.byStateTime(oldState),
       RedisKeys.COUNTS,
@@ -846,11 +875,11 @@ public final class RedisJobStore implements JobStore {
       String oldActive = activeKeyFor(oldState, oldQueue, oldOwnerNodeId);
       String oldPerNode = (oldState == JobState.PROCESSING && oldOwnerNodeId != null)
           ? RedisKeys.processingFor(oldOwnerNodeId)
-          : "";
+          : RedisKeys.NO_KEY;
 
       var keys = new String[] {
         RedisKeys.job(id),
-        oldActive == null ? "" : oldActive,
+        optionalKey(oldActive),
         oldPerNode,
         RedisKeys.byStateTime(oldState),
         RedisKeys.byStateTime(JobState.DELETED),
@@ -2092,7 +2121,7 @@ public final class RedisJobStore implements JobStore {
             jobKey,
             RedisKeys.byStateTime(state),
             RedisKeys.COUNTS,
-            handler == null ? "" : RedisKeys.byHandler(handler)
+            handler == null ? RedisKeys.NO_KEY : RedisKeys.byHandler(handler)
           },
           idStr,
           state.name(),
@@ -2198,8 +2227,8 @@ public final class RedisJobStore implements JobStore {
 
     var keys = new String[] {
       RedisKeys.job(id),
-      newActive == null ? "" : newActive,
-      oldActive == null ? "" : oldActive,
+      optionalKey(newActive),
+      optionalKey(oldActive),
       RedisKeys.byStateTime(state),
       concurrencyPendingKey(oldConcurrencyKey),
       concurrencyPendingKey(snap),
@@ -2616,7 +2645,7 @@ public final class RedisJobStore implements JobStore {
 
   private static String awaitingParentKey(JobSnapshot snapshot) {
     return snapshot.relationship() == null
-        ? ""
+        ? RedisKeys.NO_KEY
         : RedisKeys.awaitingByParent(snapshot.relationship().parentId());
   }
 
@@ -2673,19 +2702,19 @@ public final class RedisJobStore implements JobStore {
   }
 
   private static String concurrencyPendingKey(String key) {
-    return key == null ? "" : RedisKeys.concurrencyPending(key);
+    return key == null ? RedisKeys.NO_KEY : RedisKeys.concurrencyPending(key);
   }
 
   private static String concurrencyCountersKey(String key) {
-    return key == null ? "" : RedisKeys.concurrencyCounters(key);
+    return key == null ? RedisKeys.NO_KEY : RedisKeys.concurrencyCounters(key);
   }
 
   private static String concurrencyWorkflowsKey(String key) {
-    return key == null ? "" : RedisKeys.concurrencyWorkflows(key);
+    return key == null ? RedisKeys.NO_KEY : RedisKeys.concurrencyWorkflows(key);
   }
 
   private static String concurrencyWorkflowCountsKey(String key) {
-    return key == null ? "" : RedisKeys.concurrencyWorkflowCounts(key);
+    return key == null ? RedisKeys.NO_KEY : RedisKeys.concurrencyWorkflowCounts(key);
   }
 
   private static String concurrencyPendingMember(JobSnapshot snapshot) {
@@ -2695,13 +2724,15 @@ public final class RedisJobStore implements JobStore {
   }
 
   /**
-   * Per-root pending mirror key, or {@code ""} for unkeyed jobs and for jobs
+   * Per-root pending mirror key, or {@link RedisKeys#NO_KEY} for unkeyed jobs and for jobs
    * that are their own workflow root (standalone keyed jobs carry no mirror
    * entry — only workflow members need to be findable by root).
    */
   private static String pendingRootKey(String concurrencyKey, String workflowRootId, JobId id) {
-    if (concurrencyKey == null || workflowRootId == null || workflowRootId.isEmpty()) return "";
-    if (workflowRootId.equals(id.toString())) return "";
+    if (concurrencyKey == null || workflowRootId == null || workflowRootId.isEmpty()) {
+      return RedisKeys.NO_KEY;
+    }
+    if (workflowRootId.equals(id.toString())) return RedisKeys.NO_KEY;
     return RedisKeys.concurrencyPendingRoot(concurrencyKey, workflowRootId);
   }
 
@@ -2716,6 +2747,10 @@ public final class RedisJobStore implements JobStore {
     return mode == null
         ? ""
         : RedisKeys.concurrencyPendingMember(ConcurrencyMode.valueOf(mode), id);
+  }
+
+  private static String optionalKey(String key) {
+    return key == null ? RedisKeys.NO_KEY : key;
   }
 
   private static boolean tryClaimLock(
@@ -2762,6 +2797,7 @@ public final class RedisJobStore implements JobStore {
     String workflowRootId = emptyToNull(hash.get("workflow_root_id"));
     evalScript(
         """
+                local no_key = '{threadmill}:no_key'
                 if redis.call('HGET', KEYS[1], 'state') ~= 'ENQUEUED' then return 0 end
                 if redis.call('HGET', KEYS[1], 'version') ~= ARGV[3] then return 0 end
                 redis.call('HSET', KEYS[1], 'state', 'QUARANTINED', 'current_state_at', ARGV[2],
@@ -2772,10 +2808,10 @@ public final class RedisJobStore implements JobStore {
                 redis.call('ZADD', KEYS[4], tonumber(ARGV[2]), ARGV[1])
                 redis.call('HINCRBY', KEYS[5], 'ENQUEUED', -1)
                 redis.call('HINCRBY', KEYS[5], 'QUARANTINED', 1)
-                if KEYS[6] ~= '' and ARGV[4] ~= '' then
+                if KEYS[6] ~= no_key and ARGV[4] ~= '' then
                   redis.call('ZREM', KEYS[6], ARGV[4])
                 end
-                if KEYS[12] ~= '' and ARGV[4] ~= '' then
+                if KEYS[12] ~= no_key and ARGV[4] ~= '' then
                   redis.call('ZREM', KEYS[12], ARGV[4])
                 end
                 if ARGV[7] ~= '' then
@@ -2784,7 +2820,7 @@ public final class RedisJobStore implements JobStore {
                 else
                   redis.call('ZREM', KEYS[11], ARGV[1])
                 end
-                if KEYS[8] ~= '' and ARGV[5] ~= '' then
+                if KEYS[8] ~= no_key and ARGV[5] ~= '' then
                   local workflow_count = redis.call('HINCRBY', KEYS[8], ARGV[5], -1)
                   if workflow_count <= 0 then redis.call('HDEL', KEYS[8], ARGV[5]) end
                 end
@@ -2792,7 +2828,7 @@ public final class RedisJobStore implements JobStore {
                 -- this root: a never-claimed standalone job has none, and a
                 -- phantom decrement would corrupt the in-flight counter that
                 -- other roots on the key rely on.
-                if KEYS[7] ~= '' and KEYS[9] ~= '' and ARGV[5] ~= '' and
+                if KEYS[7] ~= no_key and KEYS[9] ~= no_key and ARGV[5] ~= '' and
                    redis.call('HGET', KEYS[7], ARGV[5]) ~= false then
                   local outstanding = redis.call('HINCRBY', KEYS[7], ARGV[5], -1)
                   if outstanding <= 0 then

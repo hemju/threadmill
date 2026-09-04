@@ -81,15 +81,25 @@ Spring can auto-create a Redis store when `threadmill.store.redis.*` is set.
 | `threadmill.store.redis.uri` | | Standalone Redis URI. |
 | `threadmill.store.redis.sentinel.master-name` | | Sentinel master name. |
 | `threadmill.store.redis.sentinel.nodes` | | Sentinel node list in `host:port` form. |
-| `threadmill.store.redis.sentinel.password` | | Optional password. |
+| `threadmill.store.redis.sentinel.username` | | Optional Redis data-node ACL username. Requires `password`. |
+| `threadmill.store.redis.sentinel.password` | | Optional Redis data-node password; supports password-only authentication. |
+| `threadmill.store.redis.sentinel.sentinel-username` | | Optional Sentinel control-plane ACL username. Requires `sentinel-password`. |
+| `threadmill.store.redis.sentinel.sentinel-password` | | Optional Sentinel control-plane password; supports password-only authentication. |
+| `threadmill.store.redis.sentinel.tls` | `false` | Use TLS for both Sentinel discovery and Redis data-node connections. Lettuce applies one TLS policy to both. |
+| `threadmill.store.redis.sentinel.verify-peer` | `true` | Verify the TLS certificate and hostname. May be `false` only when Sentinel TLS is enabled. |
 | `threadmill.store.redis.cluster.nodes` | | Cluster seed nodes in `host:port` form. |
 | `threadmill.store.redis.cluster.read-policy` | `master` | Only master reads are allowed for engine correctness. |
+| `threadmill.store.redis.cluster.username` | | Optional Redis Cluster ACL username. Requires `password`. |
+| `threadmill.store.redis.cluster.password` | | Optional Redis Cluster password; supports password-only authentication. |
+| `threadmill.store.redis.cluster.tls` | `false` | Use TLS for seed discovery and Cluster node connections. |
+| `threadmill.store.redis.cluster.verify-peer` | `true` | Verify TLS certificates and hostnames. May be `false` only when Cluster TLS is enabled. |
 | `threadmill.store.redis.no-eviction-externally-validated` | `false` | Set only for managed Redis where `CONFIG GET maxmemory-policy` is unavailable and operators have verified `noeviction` out of band. |
 | `threadmill.store.redis.reset-on-start` | `false` | Delete all keys under Threadmill's Redis namespace before creating the auto-configured store. Intended for disposable development environments only. |
 | `threadmill.store.redis.allow-destructive-reset` | `false` | Must be `true` for `reset-on-start`. This destroys all Threadmill jobs, recurring tasks, dedup records, queue pauses, leases, and concurrency bookkeeping in the Redis namespace. |
 
 Redis Cluster uses one `{threadmill}` hash slot. See
-[redis-topologies.md](redis-topologies.md).
+[redis-topologies.md](redis-topologies.md) for secure topology examples and
+JVM trust-store guidance.
 
 ## Remote Wake Properties
 

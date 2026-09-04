@@ -60,6 +60,16 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     this(connectStandalone(Objects.requireNonNull(client, "client"), channel), false);
   }
 
+  /** Creates a wake channel that shares a caller-managed Cluster client. */
+  public RedisRemoteWakeChannel(RedisClusterClient client) {
+    this(client, CHANNEL);
+  }
+
+  /** Creates a named wake channel that shares a caller-managed Cluster client. */
+  public RedisRemoteWakeChannel(RedisClusterClient client, String channel) {
+    this(connectClusterClient(Objects.requireNonNull(client, "client"), channel), false);
+  }
+
   /**
    * Create a channel that shares an existing client (standalone, sentinel,
    * or cluster) without owning it: closing the channel closes only the two
@@ -222,30 +232,23 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
 
   private static ConnectionHandle connectSentinel(
       RedisStoreConfig.Sentinel config, String channel) {
-    var first = config.nodes().getFirst();
-    var builder = RedisURI.Builder.sentinel(first.host(), first.port(), config.master());
-    for (int i = 1; i < config.nodes().size(); i++) {
-      var node = config.nodes().get(i);
-      builder.withSentinel(node.host(), node.port());
+    try {
+      return connectOwned(RedisClient.create(RedisConnectionConfig.sentinelUri(config)), channel);
+    } catch (RuntimeException connectFailure) {
+      throw RedisConnectionConfig.redactedConnectionFailure("Redis Sentinel", connectFailure);
     }
-    if (config.password() != null && !config.password().isBlank()) {
-      builder.withPassword(config.password().toCharArray());
-    }
-    return connectOwned(RedisClient.create(builder.build()), channel);
   }
 
   private static ConnectionHandle connectCluster(RedisStoreConfig.Cluster config, String channel) {
-    var uris = config.nodes().stream()
-        .map(node -> RedisURI.Builder.redis(node.host(), node.port()).build())
-        .toList();
-    RedisClusterClient client = RedisClusterClient.create(uris);
+    RedisClusterClient client =
+        RedisClusterClient.create(RedisConnectionConfig.clusterUris(config));
     client.setOptions(RedisClusterOptions.topologyRefreshing());
     try {
       return connectClusterClient(client, channel);
     } catch (RuntimeException connectFailure) {
       // The cluster client is always created (owned) here.
       client.shutdown();
-      throw connectFailure;
+      throw RedisConnectionConfig.redactedConnectionFailure("Redis Cluster", connectFailure);
     }
   }
 

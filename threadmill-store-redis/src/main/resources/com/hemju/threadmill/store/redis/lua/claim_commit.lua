@@ -11,13 +11,13 @@
 --   [5] by_state_time ENQUEUED
 --   [6] by_state_time PROCESSING
 --   [7] counts hash
---   [8] concurrency counters HASH, or empty
---   [9] concurrency pending ZSET, or empty
---   [10] concurrency workflows HASH, or empty
---   [11] concurrency workflow counts HASH, or empty
+--   [8] concurrency counters HASH, or no-key sentinel
+--   [9] concurrency pending ZSET, or no-key sentinel
+--   [10] concurrency workflows HASH, or no-key sentinel
+--   [11] concurrency workflow counts HASH, or no-key sentinel
 --   [12] queue_keys HASH (key -> ENQUEUED count in this queue)
 --   [13] queue_unkeyed ZSET
---   [14] concurrency pending_root ZSET, or empty
+--   [14] concurrency pending_root ZSET, or no-key sentinel
 --   [15] queue_enqueued_at ZSET (ENQUEUED ids scored by current_state_at millis)
 
 -- ARGV:
@@ -33,6 +33,7 @@
 --   [10] workflow root id
 --   [11] concurrency pending member, or empty
 
+local no_key = '{threadmill}:no_key'
 local job_key = KEYS[1]
 local queue_key = KEYS[2]
 local processing_all = KEYS[3]
@@ -74,7 +75,7 @@ local function member_matches(member, exclusive_only)
 end
 
 local function has_earlier_pending(exclusive_only)
-    if pending_key == '' or pending_member == '' then
+    if pending_key == no_key or pending_member == '' then
         return false
     end
     local score = redis.call('ZSCORE', pending_key, pending_member)
@@ -137,7 +138,7 @@ if concurrency_key ~= '' then
         redis.call('HSET', workflows_key, workflow_root_id, tostring(outstanding_count))
     end
     redis.call('ZREM', pending_key, pending_member)
-    if pending_root_key ~= '' then
+    if pending_root_key ~= no_key then
         redis.call('ZREM', pending_root_key, pending_member)
     end
 end

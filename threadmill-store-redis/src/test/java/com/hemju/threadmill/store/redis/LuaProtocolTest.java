@@ -2,6 +2,8 @@ package com.hemju.threadmill.store.redis;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import java.util.List;
+
 import org.junit.jupiter.api.Test;
 
 /**
@@ -63,5 +65,21 @@ class LuaProtocolTest {
         .contains("for i = " + (prefix + 1) + ", #ARGV do")
         .doesNotContain("for i = " + prefix + ", #ARGV do")
         .doesNotContain("for i = " + (prefix + 2) + ", #ARGV do");
+  }
+
+  @Test
+  void optionalKeySentinelMatchesTheJavaProtocol() {
+    var scripts = List.of(
+        LuaScripts.insert(),
+        LuaScripts.insertAll(),
+        LuaScripts.enqueueIfAbsent(),
+        LuaScripts.saveAtomic(),
+        LuaScripts.claimCommit(),
+        LuaScripts.softDelete(),
+        LuaScripts.retentionDelete(),
+        LuaScripts.replaceJob());
+
+    assertThat(scripts)
+        .allSatisfy(script -> assertThat(script).contains("'" + RedisKeys.NO_KEY + "'"));
   }
 }

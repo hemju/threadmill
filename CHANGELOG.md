@@ -25,6 +25,18 @@
   Browserslist 4.28.9; and PostCSS Selector Parser 6.1.4. Lettuce 6.8 adds
   `netty-resolver-dns`/`netty-codec-dns` to the published Redis module's
   runtime graph; these are upstream compile dependencies, not optional extras.
+- Redis Cluster and Sentinel now support production ACL/TLS configuration
+  (issue #93). Cluster credentials and verified TLS apply to every seed;
+  Sentinel keeps Redis data-node credentials separate from Sentinel
+  control-plane credentials while using Lettuce's shared TLS policy for both.
+  Spring exposes the matching properties, peer verification defaults on, and
+  caller-managed `RedisClusterClient` instances can be injected for custom TLS
+  resources. Topology descriptions and configuration-owned startup failures
+  redact usernames and passwords. Real authenticated/TLS Cluster and Sentinel
+  tests cover the connection and store paths. The Cluster test also exposed
+  and fixed optional Lua `KEYS` entries using empty strings (a different hash
+  slot); absent keys now use the reserved `{threadmill}:no_key` same-slot
+  sentinel.
 - Handlers can see the engine's deadline coming (issue #119).
   `JobExecutionContext` gains `deadline()` and `remaining()`, computed by the
   same rule the timeout watchdog uses — `claimedAt` plus the effective timeout

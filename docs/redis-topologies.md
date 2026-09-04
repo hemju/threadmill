@@ -26,7 +26,18 @@ threadmill:
           - redis-sentinel-1:26379
           - redis-sentinel-2:26379
           - redis-sentinel-3:26379
+        username: threadmill-data
+        password: ${REDIS_DATA_PASSWORD}
+        sentinel-username: threadmill-sentinel
+        sentinel-password: ${REDIS_SENTINEL_PASSWORD}
+        tls: true
+        verify-peer: true
 ```
+
+The data-node and Sentinel credentials are independent. Password-only
+authentication is also supported by omitting the corresponding username.
+Lettuce uses one TLS policy for Sentinel discovery and the discovered Redis
+data nodes, so `tls` and `verify-peer` apply to both connection planes.
 
 ## Cluster
 
@@ -37,15 +48,42 @@ threadmill:
       mode: cluster
       cluster:
         nodes:
-          - redis-1:6379
-          - redis-2:6379
+          - redis-1:6380
+          - redis-2:6380
         read-policy: master
+        username: threadmill
+        password: ${REDIS_CLUSTER_PASSWORD}
+        tls: true
+        verify-peer: true
 ```
+
+`read-policy` remains fixed to `master`: Threadmill does not read mutable job
+state from replicas. Every Cluster seed receives the configured ACL credentials
+and TLS policy.
+
+## TLS Trust and Custom Clients
+
+Peer verification defaults to enabled. Certificates must chain to the JVM's
+trust material; use the standard `javax.net.ssl.trustStore`,
+`javax.net.ssl.trustStoreType`, and `javax.net.ssl.trustStorePassword` system
+properties when a private CA is not already trusted. Disabling peer
+verification is accepted only when TLS is enabled and should be limited to
+disposable development environments.
+
+Applications that need a custom Lettuce `ClientResources`, `SslOptions`, or
+other client policy can build a `RedisClient` or `RedisClusterClient` and pass
+it to the corresponding `RedisJobStore` constructor. The caller retains client
+ownership; closing the store closes its connection, not the injected client.
+
+Topology descriptions and Threadmill-wrapped connection failures omit both ACL
+usernames and passwords.
 
 All Threadmill keys use the `{threadmill}` hash tag. That keeps every multi-key
 Lua script in one Redis Cluster slot and makes the v1 store Cluster-safe. It
 also means Cluster is used for topology and failover, not for horizontal
-distribution of Threadmill job keys across masters.
+distribution of Threadmill job keys across masters. Optional Lua key positions
+use a `{threadmill}:no_key` sentinel rather than an empty string, so even jobs
+without optional indexes preserve that one-slot guarantee.
 
 For production durability, enable Redis AOF, for example `appendonly yes`.
 Threadmill's durability on Redis is bounded by the Redis persistence policy you

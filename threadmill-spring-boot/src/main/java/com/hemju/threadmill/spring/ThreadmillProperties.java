@@ -575,7 +575,12 @@ public class ThreadmillProperties {
   public static final class SentinelProperties {
     private String masterName;
     private List<String> nodes = new ArrayList<>();
+    private String username;
     private String password;
+    private String sentinelUsername;
+    private String sentinelPassword;
+    private boolean tls;
+    private boolean verifyPeer = true;
 
     public String getMasterName() {
       return masterName;
@@ -600,11 +605,55 @@ public class ThreadmillProperties {
     public void setPassword(String password) {
       this.password = password;
     }
+
+    public String getUsername() {
+      return username;
+    }
+
+    public void setUsername(String username) {
+      this.username = username;
+    }
+
+    public String getSentinelUsername() {
+      return sentinelUsername;
+    }
+
+    public void setSentinelUsername(String sentinelUsername) {
+      this.sentinelUsername = sentinelUsername;
+    }
+
+    public String getSentinelPassword() {
+      return sentinelPassword;
+    }
+
+    public void setSentinelPassword(String sentinelPassword) {
+      this.sentinelPassword = sentinelPassword;
+    }
+
+    public boolean isTls() {
+      return tls;
+    }
+
+    public void setTls(boolean tls) {
+      this.tls = tls;
+    }
+
+    public boolean isVerifyPeer() {
+      return verifyPeer;
+    }
+
+    public void setVerifyPeer(boolean verifyPeer) {
+      this.verifyPeer = verifyPeer;
+    }
   }
 
   public static final class ClusterProperties {
     private List<String> nodes = new ArrayList<>();
     private String readPolicy = "master";
+    private String username;
+    private String password;
+    private boolean tls;
+    private boolean verifyPeer = true;
 
     public List<String> getNodes() {
       return nodes;
@@ -620,6 +669,38 @@ public class ThreadmillProperties {
 
     public void setReadPolicy(String readPolicy) {
       this.readPolicy = readPolicy;
+    }
+
+    public String getUsername() {
+      return username;
+    }
+
+    public void setUsername(String username) {
+      this.username = username;
+    }
+
+    public String getPassword() {
+      return password;
+    }
+
+    public void setPassword(String password) {
+      this.password = password;
+    }
+
+    public boolean isTls() {
+      return tls;
+    }
+
+    public void setTls(boolean tls) {
+      this.tls = tls;
+    }
+
+    public boolean isVerifyPeer() {
+      return verifyPeer;
+    }
+
+    public void setVerifyPeer(boolean verifyPeer) {
+      this.verifyPeer = verifyPeer;
     }
   }
 }
