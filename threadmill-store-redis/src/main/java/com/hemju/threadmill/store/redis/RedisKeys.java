@@ -58,6 +58,8 @@ import com.hemju.threadmill.core.NodeId;
  *       millis. {@code oldestEnqueuedAt} reads its head, so the age gauge
  *       is one indexed read instead of a per-member scan of the
  *       priority-ordered queue ZSET.</li>
+ *   <li>{@code {threadmill}:layout:queue_enqueued_at} — STRING marker set
+ *       once the age index has been backfilled from a pre-index layout.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflows} — HASH workflow root
  *       id → active outstanding hold count.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflow_counts} — HASH workflow
@@ -81,6 +83,14 @@ public final class RedisKeys {
   public static final String MAINTENANCE_LEASE = PREFIX + "lease:maintenance";
   /** HASH queue-name &rarr; pause-reason (empty string if no reason supplied). */
   public static final String QUEUE_PAUSES = PREFIX + "queue_pauses";
+
+  /**
+   * STRING marker recording that the per-queue {@code queue_enqueued_at} age
+   * index has been backfilled from the queue ZSETs. Absent on stores written
+   * by releases before the index existed (v0.2.1 and earlier); the store
+   * rebuilds the index once on startup and then sets it.
+   */
+  public static final String QUEUE_ENQUEUED_AT_LAYOUT = PREFIX + "layout:queue_enqueued_at";
 
   private RedisKeys() {}
 

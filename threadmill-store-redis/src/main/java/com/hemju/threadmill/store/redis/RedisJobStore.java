@@ -33,6 +33,7 @@ import io.lettuce.core.RedisURI;
 import io.lettuce.core.ScanArgs;
 import io.lettuce.core.ScanCursor;
 import io.lettuce.core.ScoredValue;
+import io.lettuce.core.ScoredValueScanCursor;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.SetArgs;
 import io.lettuce.core.ZAddArgs;
@@ -244,6 +245,7 @@ public final class RedisJobStore implements JobStore {
     this.topologyDescription = Objects.requireNonNull(topologyDescription, "topologyDescription");
     try {
       validateRedisSafety();
+      backfillQueueEnqueuedAtIndex();
     } catch (RuntimeException validationFailure) {
       // A wrong eviction policy is the EXPECTED failure mode on
       // misconfigured Redis (and apps retry startup): the connection
@@ -487,10 +489,11 @@ public final class RedisJobStore implements JobStore {
     }
 
     try {
-      // Pack 13 keys + 18 args per job for the batched Lua script.
+      // Pack INSERT_KEYS_PER_JOB keys + INSERT_ARGS_PER_JOB args per job for
+      // the batched Lua script; insert_all.lua advances by the same strides.
       int n = snapshots.size();
-      var keyList = new ArrayList<String>(n * 14);
-      var argList = new ArrayList<String>(1 + n * 18);
+      var keyList = new ArrayList<String>(n * INSERT_KEYS_PER_JOB);
+      var argList = new ArrayList<String>(1 + n * INSERT_ARGS_PER_JOB);
       argList.add(Integer.toString(n));
       for (int i = 0; i < n; i++) {
         JobSnapshot snap = snapshots.get(i);
@@ -908,6 +911,20 @@ public final class RedisJobStore implements JobStore {
       RedisFuture<Double> sharedRoot,
       RedisFuture<Double> exclusiveRoot,
       RedisFuture<List<String>> members) {}
+
+  /**
+   * Positional key / arg protocol shared with {@code insert.lua} and
+   * {@code insert_all.lua}: the batch script advances by exactly these strides.
+   */
+  static final int INSERT_KEYS_PER_JOB = 14;
+
+  static final int INSERT_ARGS_PER_JOB = 18;
+
+  /** ZSCAN page size for the one-time age-index backfill. */
+  private static final int LAYOUT_BACKFILL_PAGE = 1_000;
+
+  /** Stale age-index heads dropped per {@code oldestEnqueuedAt} read before giving up. */
+  private static final int MAX_STALE_AGE_HEADS_PER_READ = 1_000;
 
   private static final int MIN_KEYS_PER_CLAIM_PASS = 32;
   private static final int MAX_KEYS_PER_CLAIM_PASS = 256;
@@ -1455,10 +1472,86 @@ public final class RedisJobStore implements JobStore {
     // per-member Lua scan (one HGET per ENQUEUED job inside one atomic
     // call) would block the single-threaded server for seconds at
     // endurance-scale backlogs.
-    List<ScoredValue<String>> head =
-        sync().zrangeWithScores(RedisKeys.queueEnqueuedAt(queue), 0, 0);
-    if (head == null || head.isEmpty()) return Optional.empty();
-    return Optional.of(Instant.ofEpochMilli((long) head.get(0).getScore()));
+    String indexKey = RedisKeys.queueEnqueuedAt(queue);
+    String queueKey = RedisKeys.queue(queue);
+    RedisClusterCommands<String, String> r = sync();
+    for (int dropped = 0; dropped < MAX_STALE_AGE_HEADS_PER_READ; dropped++) {
+      List<ScoredValue<String>> head = r.zrangeWithScores(indexKey, 0, 0);
+      if (head == null || head.isEmpty()) return Optional.empty();
+      ScoredValue<String> oldest = head.get(0);
+      // Queue-ZSET membership is the authority for "ENQUEUED in this queue".
+      // A head that left the queue without leaving this index was claimed,
+      // deleted, or moved by a node running a release that predates the
+      // index (rolling upgrade). Drop it and look again: each removal is
+      // permanent, so the cost is amortized over the stale population.
+      if (r.zscore(queueKey, oldest.getValue()) != null) {
+        return Optional.of(Instant.ofEpochMilli((long) oldest.getScore()));
+      }
+      r.zrem(indexKey, oldest.getValue());
+    }
+    // Pathological stale run: the next read continues the cleanup.
+    return Optional.empty();
+  }
+
+  /**
+   * One-time layout upgrade from stores written before the per-queue age
+   * index existed (v0.2.1 and earlier): rebuild every
+   * {@code queue_enqueued_at} ZSET from the queue ZSETs, then record the
+   * layout marker so later starts skip the walk.
+   *
+   * <p>Runs from Java over ZSCAN pages with pipelined per-member reads, so it
+   * never holds the server the way a single Lua walk would, and ZSCAN's
+   * guarantee (every member present for the whole scan is returned at least
+   * once) survives concurrent claims that a rank-based page would skip.
+   * ZADD is idempotent, so concurrent new nodes may both run it. During a
+   * rolling upgrade, nodes still on the old release keep writing without
+   * this index: jobs they enqueue are young and drain through normal claims
+   * (a new node's claim removes a missing member harmlessly), and members
+   * they claim without removing are dropped by {@link #oldestEnqueuedAt} on
+   * read. The marker is deliberately not per node — once any new node has
+   * backfilled, the pre-upgrade backlog is indexed for everyone.
+   */
+  private void backfillQueueEnqueuedAtIndex() {
+    RedisClusterCommands<String, String> r = sync();
+    if (r.exists(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT) > 0) return;
+    Set<String> queues = r.smembers(RedisKeys.QUEUES);
+    if (queues != null) {
+      for (String queue : queues) {
+        backfillQueueEnqueuedAt(r, queue);
+      }
+    }
+    r.set(RedisKeys.QUEUE_ENQUEUED_AT_LAYOUT, "1");
+  }
+
+  private void backfillQueueEnqueuedAt(RedisClusterCommands<String, String> r, String queue) {
+    String queueKey = RedisKeys.queue(queue);
+    String indexKey = RedisKeys.queueEnqueuedAt(queue);
+    ScanCursor cursor = ScanCursor.INITIAL;
+    ScoredValueScanCursor<String> page;
+    do {
+      page = r.zscan(queueKey, cursor, ScanArgs.Builder.limit(LAYOUT_BACKFILL_PAGE));
+      List<ScoredValue<String>> members = page.getValues();
+      if (members != null && !members.isEmpty()) {
+        var reads = new ArrayList<RedisFuture<String>>(members.size());
+        for (ScoredValue<String> member : members) {
+          reads.add(asyncCommands.hget(
+              RedisKeys.PREFIX + "job:" + member.getValue(), "current_state_at"));
+        }
+        awaitAll(reads);
+        var scoresAndIds = new ArrayList<Object>(members.size() * 2);
+        for (int i = 0; i < members.size(); i++) {
+          String at = resultOf(reads.get(i));
+          // A member whose hash vanished between the scan and the read is
+          // a dangling queue entry, not an ENQUEUED job; leave it to the
+          // claim path's own handling.
+          if (at == null || at.isEmpty()) continue;
+          scoresAndIds.add(Double.parseDouble(at));
+          scoresAndIds.add(members.get(i).getValue());
+        }
+        if (!scoresAndIds.isEmpty()) r.zadd(indexKey, scoresAndIds.toArray());
+      }
+      cursor = page;
+    } while (!page.isFinished());
   }
 
   @Override

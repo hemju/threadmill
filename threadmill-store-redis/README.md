@@ -49,6 +49,7 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:queue_keys:{queue}` | HASH | Concurrency key → count of ENQUEUED keyed jobs of that key in the queue. The claim path uses a rotating bounded HSCAN cursor, so one pass stays bounded even at high key cardinality. |
 | `{threadmill}:queue_unkeyed:{queue}` | ZSET | ENQUEUED unkeyed job ids, scored like the queue ZSET. The unkeyed claim lane never pages past keyed work. |
 | `{threadmill}:queue_enqueued_at:{queue}` | ZSET | Every ENQUEUED job id in the queue, scored by `current_state_at` millis. `oldestEnqueuedAt` (the `threadmill.queue.oldest.enqueued.age` gauge and the dashboard queue view) reads its head with one `ZRANGE 0 0 WITHSCORES`, so the age gauge never scans the priority-ordered queue ZSET. Maintained inside the same atomic scripts as queue membership. |
+| `{threadmill}:layout:queue_enqueued_at` | STRING | Marker that the age index has been backfilled from a pre-index layout (v0.2.1 and earlier). See *Layout upgrades*. |
 | `{threadmill}:queue_pauses` | HASH | Paused queue → reason. |
 | `{threadmill}:cron_task_namespace:{namespace}` | SET | Cron task names owned by one reconciliation namespace. |
 | `{threadmill}:cron_task_namespaces` | SET | Known recurring reconciliation namespaces. |
@@ -63,6 +64,27 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:concurrency:{key}:workflows` | HASH | Workflow root id → active outstanding hold count. Presence means the workflow currently owns the key. |
 | `{threadmill}:concurrency:{key}:workflow_counts` | HASH | Workflow root id → total non-terminal job count. Maintained incrementally so claim does not scan active jobs. |
 | `{threadmill}:concurrency:{key}:claim_lock` | STRING | Short-lived mutex around per-key claim bookkeeping. |
+
+## Layout upgrades
+
+The age index `{threadmill}:queue_enqueued_at:{queue}` did not exist before
+v0.2.2. A store constructed against data written by an earlier release
+rebuilds it once on startup, before serving any read: it ZSCANs each
+registered queue ZSET in bounded pages, reads `current_state_at` for the
+members with pipelined `HGET`s, `ZADD`s them, and then sets the
+`{threadmill}:layout:queue_enqueued_at` marker so later starts skip the walk.
+The walk runs from Java, never as one Lua call, so it does not hold the
+server. It is idempotent; several new nodes starting together may all run it.
+
+During a rolling upgrade, nodes on the old release keep writing without the
+index. Jobs they enqueue are young and drain through normal claims (a new
+node's claim removes a missing member harmlessly). Members they claim,
+delete, or move without removing them from the index are dropped lazily:
+`oldestEnqueuedAt` checks its head against the queue ZSET, which is the
+authority for "ENQUEUED in this queue", and removes a head that has left it
+before looking again. Until the last old node is gone, the age gauge may
+briefly under-report for a queue whose oldest job was enqueued by an old
+node; it never reports a job that is no longer ENQUEUED.
 
 ## Development reset
 
