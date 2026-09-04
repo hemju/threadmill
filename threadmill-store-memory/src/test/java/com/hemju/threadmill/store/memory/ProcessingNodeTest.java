@@ -36,8 +36,8 @@ import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.serialization.SerializationException;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
+import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.core.store.JobStore;
-import com.hemju.threadmill.test.ForwardingJobStore;
 
 /**
  * End-to-end engine tests: enqueue a job, the dispatcher claims and runs

@@ -8,6 +8,7 @@ dependencies {
     api(libs.opentelemetry.api)
 
     testImplementation(project(":threadmill-store-memory"))
+    testImplementation(project(":threadmill-test-support"))
     testImplementation(libs.opentelemetry.sdk)
     testImplementation(libs.opentelemetry.sdk.testing)
     testImplementation(platform(libs.junit.bom))

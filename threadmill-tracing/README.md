@@ -27,3 +27,9 @@ The processing span scope intentionally spans the handler invocation. That
 relies on Threadmill's `JobRunner` contract that interceptor start,
 handler execution, and interceptor success/failure callbacks run on the same
 execution thread.
+
+The traced store is a full decorator: it extends the core `ForwardingJobStore`,
+so capability lookups such as `describe()`, `supportsExternalTransactions()`,
+and `createRemoteWakeChannel(...)` reach the wrapped store unchanged and
+`delegate()` returns the wrapped store. Wrapping a PostgreSQL store keeps its
+`join_transaction` support and `LISTEN`/`NOTIFY` wake channel.
