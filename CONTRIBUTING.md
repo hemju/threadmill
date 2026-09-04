@@ -11,6 +11,7 @@ storage or framework code in `threadmill-core`.
 ## Development Requirements
 
 - Use Java 25.
+- Use Node.js 24.20.0 and npm 11.19.0 when changing the dashboard, matching CI.
 - Use the committed Gradle wrapper: `./gradlew`.
 - When changing a Gradle dependency, regenerate and commit dependency locks and
   checksum verification metadata with
@@ -36,6 +37,18 @@ or maintenance behavior, also run the relevant real-backend tests:
 ```
 
 These tests use Testcontainers and require a working container runtime.
+
+For dependency changes, install OSV Scanner and run the same fail-closed gate
+as CI:
+
+```bash
+./gradlew dependencySecurityScan -PdependencyScanRequired=true
+```
+
+If the gate reports an advisory, follow the thresholds, reachability review,
+and temporary-exception rules in
+[Dependency security](docs/dependency-security.md). Never add a package-wide or
+permanent ignore to make a pull request green.
 
 For release-sensitive or production-behavior changes, run:
 

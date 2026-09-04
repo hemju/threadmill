@@ -21,6 +21,13 @@ change may lose the state change depending on `appendfsync` setting.
 Crash-mid-claim semantics are still correct (orphan recovery runs), the
 durability question is whether the engine remembers what it did.
 
+The published module uses Lettuce 6.8.2.RELEASE and forces its Netty graph to
+the 4.1.137.Final security floor. Lettuce 6.8 promotes DNS resolution to a
+compile dependency, so `netty-resolver-dns` and `netty-codec-dns` are expected
+runtime dependencies of this module; do not exclude them as accidental
+transitives. See [Dependency security](../docs/dependency-security.md) for the
+advisory-specific reachability record.
+
 Threadmill also requires `maxmemory-policy noeviction`. Eviction policies are
 cache semantics, not durable job-store semantics: `allkeys-*` can split job
 hashes from their indexes/counts, and `volatile-*` can delete TTL-backed
