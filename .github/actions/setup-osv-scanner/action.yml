@@ -1,0 +1,35 @@
+name: Set up OSV Scanner
+description: Install the checksum-verified OSV Scanner version used by dependency gates
+
+runs:
+  using: composite
+  steps:
+    - name: Download and verify OSV Scanner v2.5.0
+      shell: bash
+      env:
+        OSV_SCANNER_VERSION: v2.5.0
+        OSV_SCANNER_LINUX_AMD64_SHA256: edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c
+        OSV_SCANNER_LINUX_ARM64_SHA256: fe152e1a546af223e6c557cc3111a8bb3e5dc02fcbf7dbe95d26567c0f0041f2
+      run: |
+        case "${RUNNER_ARCH}" in
+          X64)
+            asset="osv-scanner_linux_amd64"
+            checksum="${OSV_SCANNER_LINUX_AMD64_SHA256}"
+            ;;
+          ARM64)
+            asset="osv-scanner_linux_arm64"
+            checksum="${OSV_SCANNER_LINUX_ARM64_SHA256}"
+            ;;
+          *)
+            printf 'Unsupported runner architecture: %s\n' "${RUNNER_ARCH}" >&2
+            exit 1
+            ;;
+        esac
+        bindir="$(mktemp -d "${RUNNER_TEMP}/osv-scanner.XXXXXX")"
+        scanner="${bindir}/osv-scanner"
+        curl --fail --location --silent --show-error --retry 3 --retry-all-errors \
+          --output "${scanner}" \
+          "https://github.com/google/osv-scanner/releases/download/${OSV_SCANNER_VERSION}/${asset}"
+        printf '%s  %s\n' "${checksum}" "${scanner}" | sha256sum --check -
+        chmod +x "${scanner}"
+        printf '%s\n' "${bindir}" >> "${GITHUB_PATH}"

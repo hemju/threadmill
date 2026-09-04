@@ -21,11 +21,16 @@ configurations[browserTestSourceSet.runtimeOnlyConfigurationName].extendsFrom(
 
 dependencies {
     constraints {
-        // Spring Boot 4.0.7's BOM resolves tools.jackson.core:jackson-databind
-        // 3.1.4 (GHSA-5gvw-p9qm-jgwh) onto the test classpath; constrain the
-        // patched release until a Boot patch carries it. Remove when the
-        // springBoot pin advances past 4.0.7.
-        testImplementation(libs.jackson3.databind)
+        // Spring Boot 4.0.8 resolves Tomcat 11.0.24, below the 11.0.25 floor for
+        // GHSA-9xv2-5v5q-p794, GHSA-gcx9-497g-6cp6, and GHSA-h3x4-894j-xpx5.
+        // Remove these constraints when Boot's BOM resolves Tomcat >= 11.0.25.
+        testImplementation(
+            "org.apache.tomcat.embed:tomcat-embed-core:${libs.versions.tomcat.get()}"
+        )
+        testImplementation("org.apache.tomcat.embed:tomcat-embed-el:${libs.versions.tomcat.get()}")
+        testImplementation(
+            "org.apache.tomcat.embed:tomcat-embed-websocket:${libs.versions.tomcat.get()}"
+        )
     }
     api(project(":threadmill-core"))
     api(project(":threadmill-dashboard-api"))

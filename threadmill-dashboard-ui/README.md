@@ -14,8 +14,10 @@ the Spring adapter mounts it automatically when present.
 
 The Spring adapter emits `/threadmill/config.js` from
 `threadmill.dashboard.api.base-path`, so a mounted console follows a custom API
-path without host-page changes. Other adapters can provide the same runtime
-value before the app loads:
+path without host-page changes. The asset jar includes an empty fallback
+`config.js`, so development and non-Spring mounts keep the default API path
+without a missing-script error. Other adapters can override that file or
+provide the same runtime value before the app loads:
 
 ```html
 <script>

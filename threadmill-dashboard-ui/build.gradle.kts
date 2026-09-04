@@ -25,6 +25,7 @@ val npmBuild by
         dependsOn(npmInstall)
         inputs.dir("src")
         inputs.dir("browser-tests")
+        inputs.dir("public")
         inputs.file("index.html")
         inputs.file("package.json")
         inputs.file("package-lock.json")

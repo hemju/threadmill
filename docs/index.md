@@ -40,6 +40,8 @@
 - [Operations](operations.md) — production runbook, pause / resume, monitoring.
 - [Troubleshooting](troubleshooting.md) — symptom → cause → fix.
 - [Migration](migration.md) — replacing an existing job or scheduler system.
+- [Dependency security](dependency-security.md) — enforced scan inputs,
+  vulnerability policy, exceptions, and reachability analysis.
 - [Release checklist](release-checklist.md).
 
 ## Operations dashboard

@@ -40,6 +40,13 @@ import com.hemju.threadmill.dashboard.api.DashboardOptions;
  * {@link HttpSecurity} early enough to build the scoped dashboard chain, which
  * then makes Boot's default chain back off instead of leaving a login-page
  * chain to intercept dashboard requests first.
+ *
+ * <p>Because Boot backs off its default catch-all chain when any
+ * {@link SecurityFilterChain} exists, the auto-configured Threadmill chain
+ * secures only the dashboard paths; it does not secure the rest of the host
+ * application. Hosts must provide their own catch-all chain, or set
+ * {@code threadmill.dashboard.security.auto-configure=false} to retain control
+ * of the complete security configuration.
  */
 @AutoConfiguration(
     afterName = {
