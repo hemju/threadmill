@@ -108,8 +108,14 @@ sequenceDiagram
 - Different candidates in the same queue are protected by
   `FOR UPDATE SKIP LOCKED`, so competing nodes skip rows already being claimed.
 - Candidate gathering uses bounded unkeyed, keyed-head, and active-hold lanes.
-  The keyed lane currently examines a capped set of queue-scoped keys per
-  poll; later keys are reconsidered on subsequent polls as that page changes.
+  The keyed lane examines at most 512 queue-scoped keys per unproductive poll
+  and rotates a process-local cursor so later keys are reached without walking
+  the pending-row backlog. Each `PostgresJobStore` instance rotates
+  independently; cursor entries are bounded and disposable fairness hints,
+  not durable scheduling state. When the bound is exceeded, least-recently-used
+  eviction preserves active queues' cursors and discards an idle queue's hint.
+  Eviction preserves claim correctness but restarts that queue's fairness
+  progress.
 - Claim decisions are scalar-first: group counters, active workflow holds, and
   earliest pending order are loaded once per page, and job bodies are fetched
   only for candidates that will actually claim.
@@ -241,6 +247,12 @@ Threadmill handles the starvation cases that would break correctness:
   through the same persisted transition path.
 - Queue-family stride scheduling smooths dispatch across matched queues inside
   one lane, and a zero weight pauses a queue in that family.
+- PostgreSQL rotates through concurrency keys in pages of 512. A claimable key
+  is inspected within approximately `ceil(distinct keys / 512) × pollInterval`
+  when earlier pages remain concurrency-blocked. An unproductive claim stops
+  after one page so its transaction does not grow the `FOR UPDATE` lock set
+  with key count. Wake signals remain hints: above one page they wake the
+  current cursor page, which may not contain the newly enqueued key.
 
 Threadmill does not promise:
 

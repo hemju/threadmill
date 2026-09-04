@@ -3,6 +3,8 @@ package com.hemju.threadmill.store.postgres;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -22,6 +24,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import javax.sql.DataSource;
 
@@ -287,11 +290,54 @@ class PostgresJobStoreRegressionTest {
   }
 
   private static Job keyedJob(String key) {
+    return keyedJob(key, 0);
+  }
+
+  private static Job keyedJob(String key, int priority) {
     return Job.builder()
         .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
         .concurrencyKey(key)
         .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+        .priority(priority)
         .build();
+  }
+
+  private static DataSource countingLooseScanDataSource(AtomicInteger looseScans) {
+    return (DataSource) Proxy.newProxyInstance(
+        DataSource.class.getClassLoader(),
+        new Class<?>[] {DataSource.class},
+        (proxy, method, args) -> {
+          try {
+            var result = method.invoke(dataSource, args);
+            if (method.getName().equals("getConnection") && result instanceof Connection conn) {
+              return countingLooseScanConnection(conn, looseScans);
+            }
+            return result;
+          } catch (InvocationTargetException e) {
+            throw e.getCause();
+          }
+        });
+  }
+
+  private static Connection countingLooseScanConnection(
+      Connection connection, AtomicInteger looseScans) {
+    return (Connection) Proxy.newProxyInstance(
+        Connection.class.getClassLoader(),
+        new Class<?>[] {Connection.class},
+        (proxy, method, args) -> {
+          if (method.getName().equals("prepareStatement")
+              && args != null
+              && args.length > 0
+              && args[0] instanceof String sql
+              && sql.contains("WITH RECURSIVE keys(k)")) {
+            looseScans.incrementAndGet();
+          }
+          try {
+            return method.invoke(connection, args);
+          } catch (InvocationTargetException e) {
+            throw e.getCause();
+          }
+        });
   }
 
   @Test
@@ -331,6 +377,100 @@ class PostgresJobStoreRegressionTest {
         }
       }
     }
+  }
+
+  @Test
+  void keyedClaimRotationReachesClaimableWorkBeyondTheFirstBlockedPage() {
+    var setupStore = store();
+    var blockedKeyCount = PostgresJobStore.MAX_PENDING_KEYS_PER_PASS + 1;
+    var blockers = new ArrayList<Job>(blockedKeyCount);
+    for (int i = 0; i < blockedKeyCount; i++) {
+      blockers.add(keyedJob("blocked:%04d".formatted(i)));
+    }
+    setupStore.insertAll(blockers);
+    assertThat(setupStore.claimReady(NodeId.newId(), "default", blockedKeyCount, Instant.now()))
+        .hasSize(blockedKeyCount);
+
+    var blockedWaiters = new ArrayList<Job>(blockedKeyCount);
+    for (int i = 0; i < blockedKeyCount; i++) {
+      blockedWaiters.add(keyedJob("blocked:%04d".formatted(i)));
+    }
+    setupStore.insertAll(blockedWaiters);
+    var laterClaimable = keyedJob("claimable:after-blocked-page");
+    setupStore.insert(laterClaimable);
+
+    // A fresh store starts at the lexicographically first key. The first
+    // page contains only blocked keys; the second contains the extra
+    // blocker plus the independent key.
+    var claimingStore = store();
+    assertThat(claimingStore.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .isEmpty();
+    assertThat(claimingStore.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(laterClaimable.id());
+
+    // The short tail clears the cursor. Work inserted at an early key is
+    // reached when the next poll wraps to the beginning.
+    var earlyClaimable = keyedJob("available:after-wrap", Integer.MAX_VALUE);
+    setupStore.insert(earlyClaimable);
+    assertThat(claimingStore.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(earlyClaimable.id());
+  }
+
+  @Test
+  void smallKeyQueuesUseOneLooseScanPerClaimPoll() {
+    var setupStore = store();
+    var blockers = List.of(keyedJob("blocked:a"), keyedJob("blocked:b"), keyedJob("blocked:c"));
+    setupStore.insertAll(blockers);
+    assertThat(setupStore.claimReady(NodeId.newId(), "default", blockers.size(), Instant.now()))
+        .hasSize(blockers.size());
+    setupStore.insertAll(
+        List.of(keyedJob("blocked:a"), keyedJob("blocked:b"), keyedJob("blocked:c")));
+
+    var looseScans = new AtomicInteger();
+    var measuredStore = new PostgresJobStore(countingLooseScanDataSource(looseScans));
+    looseScans.set(0);
+    for (int poll = 0; poll < 4; poll++) {
+      var before = looseScans.get();
+      assertThat(measuredStore.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+          .isEmpty();
+      assertThat(looseScans.get() - before).as("loose scans in poll %s", poll).isEqualTo(1);
+    }
+  }
+
+  @Test
+  void drainedTailRestartsKeyedScanWithoutAnEmptyPoll() {
+    var setupStore = store();
+    var blockedKeyCount = PostgresJobStore.MAX_PENDING_KEYS_PER_PASS + 1;
+    var blockers = new ArrayList<Job>(blockedKeyCount);
+    for (int i = 0; i < blockedKeyCount; i++) {
+      blockers.add(keyedJob("blocked:%04d".formatted(i)));
+    }
+    setupStore.insertAll(blockers);
+    assertThat(setupStore.claimReady(NodeId.newId(), "default", blockedKeyCount, Instant.now()))
+        .hasSize(blockedKeyCount);
+
+    var blockedWaiters = new ArrayList<Job>(blockedKeyCount);
+    for (int i = 0; i < blockedKeyCount; i++) {
+      blockedWaiters.add(keyedJob("blocked:%04d".formatted(i)));
+    }
+    setupStore.insertAll(blockedWaiters);
+
+    var claimingStore = store();
+    assertThat(claimingStore.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .isEmpty();
+
+    // The only key after the first page was the look-ahead key. Drain it
+    // before the next poll, then add work before the saved cursor. The next
+    // tail scan is empty and must restart from the beginning in this poll.
+    assertThat(setupStore.softDelete(blockedWaiters.getLast().id())).isTrue();
+    var earlyClaimable = keyedJob("available:after-drained-tail", Integer.MAX_VALUE);
+    setupStore.insert(earlyClaimable);
+
+    assertThat(claimingStore.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(earlyClaimable.id());
   }
 
   @Test
@@ -865,6 +1005,40 @@ class PostgresJobStoreRegressionTest {
           var plan = new StringBuilder();
           while (rs.next()) plan.append(rs.getString(1)).append('\n');
           assertThat(plan.toString()).contains("threadmill_jobs_workflow_outstanding_idx");
+        }
+      }
+    }
+  }
+
+  @Test
+  void keysetPagedKeyEnumerationUsesQueuePendingIndex() throws SQLException {
+    var store = store();
+    for (int i = 0; i < 80; i++) {
+      store.insert(keyedJob("plan:%04d".formatted(i)));
+    }
+
+    try (Connection conn = dataSource.getConnection();
+        Statement st = conn.createStatement()) {
+      st.execute("SET enable_seqscan = off");
+      try (PreparedStatement ps = conn.prepareStatement("EXPLAIN (FORMAT TEXT) "
+          + "WITH RECURSIVE keys(k) AS ("
+          + "  (SELECT concurrency_key FROM threadmill_jobs "
+          + "   WHERE queue = ? AND concurrency_key IS NOT NULL AND state = 'ENQUEUED' "
+          + "   AND concurrency_key > ? ORDER BY concurrency_key LIMIT 1) "
+          + "  UNION ALL "
+          + "  SELECT (SELECT j.concurrency_key FROM threadmill_jobs j "
+          + "          WHERE j.queue = ? AND j.concurrency_key > keys.k "
+          + "          AND j.state = 'ENQUEUED' ORDER BY j.concurrency_key LIMIT 1) "
+          + "  FROM keys WHERE keys.k IS NOT NULL) "
+          + "SELECT k FROM keys WHERE k IS NOT NULL LIMIT ?")) {
+        ps.setString(1, "default");
+        ps.setString(2, "plan:0000");
+        ps.setString(3, "default");
+        ps.setInt(4, PostgresJobStore.MAX_PENDING_KEYS_PER_PASS + 1);
+        try (ResultSet rs = ps.executeQuery()) {
+          var plan = new StringBuilder();
+          while (rs.next()) plan.append(rs.getString(1)).append('\n');
+          assertThat(plan.toString()).contains("threadmill_jobs_queue_pending_idx");
         }
       }
     }
