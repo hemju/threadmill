@@ -8,9 +8,9 @@ package com.hemju.threadmill.core.handler;
  * resolver that constructs the handler from its no-arg constructor for
  * environments without a DI container.
  *
- * <p>Resolution failures are deterministic: an unresolvable handler causes
- * the engine to move the job into {@code QUARANTINED} rather than failing
- * the dispatcher loop.
+ * <p>Non-fatal resolution failures are deterministic: an unresolvable handler
+ * causes the engine to move the job into {@code QUARANTINED} rather than
+ * failing the dispatcher loop. Process-fatal JVM errors escape instead.
  */
 public interface JobHandlerResolver {
 

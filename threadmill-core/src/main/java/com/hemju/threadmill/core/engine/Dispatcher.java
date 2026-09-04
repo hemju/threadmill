@@ -20,6 +20,7 @@ import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.store.JobStore;
 
 /**
@@ -27,10 +28,10 @@ import com.hemju.threadmill.core.store.JobStore;
  * claims that many ready jobs from the {@link JobStore}, and submits them
  * to the worker pool.
  *
- * <p>The loop is robust against transient store outages: a thrown
- * exception trips the circuit breaker, the loop pauses, and a probe
- * thread re-attempts {@link JobStore#verifyWritable()} until it succeeds —
- * at which point processing resumes automatically.
+ * <p>The loop is robust against transient store outages: a non-fatal runtime
+ * exception trips the circuit breaker, the loop pauses, and a probe thread
+ * re-attempts {@link JobStore#verifyWritable()} until it succeeds — at which
+ * point processing resumes automatically. Process-fatal JVM errors escape.
  *
  * <p><strong>Engine-internal.</strong> This class is {@code public} only for
  * the engine's own cross-package wiring and its test harnesses; it is NOT
@@ -177,7 +178,8 @@ public final class Dispatcher {
       } catch (InterruptedException ie) {
         Thread.currentThread().interrupt();
         break;
-      } catch (Throwable t) {
+      } catch (RuntimeException t) {
+        FatalErrors.rethrowIfFatal(t);
         if (!running.get()) {
           break;
         }
@@ -234,7 +236,7 @@ public final class Dispatcher {
         }
         boolean submitted = false;
         try {
-          workerPool.submit(() -> {
+          workerPool.execute(() -> {
             try {
               runner.run(job);
             } finally {
@@ -260,7 +262,8 @@ public final class Dispatcher {
         }
       } catch (InterruptedException interrupted) {
         throw interrupted;
-      } catch (Throwable t) {
+      } catch (RuntimeException t) {
+        FatalErrors.rethrowIfFatal(t);
         LOG.warn("Failed to dispatch claimed job {} — releasing it for redelivery", job.id(), t);
         releaseClaimed(job, "engine.dispatch-failure");
       }
@@ -403,7 +406,8 @@ public final class Dispatcher {
     try {
       store.verifyWritable();
       return true;
-    } catch (Throwable t) {
+    } catch (RuntimeException t) {
+      FatalErrors.rethrowIfFatal(t);
       return false;
     }
   }

@@ -19,6 +19,7 @@ import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.RetryInterceptor;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
 
@@ -110,7 +111,8 @@ public final class RecurringMaterializer {
       if (!task.enabled()) continue;
       try {
         tickOne(task, now);
-      } catch (Throwable t) {
+      } catch (RuntimeException t) {
+        FatalErrors.rethrowIfFatal(t);
         LOG.warn("Recurring tick failed for task {}", task.name(), t);
       }
     }
@@ -129,7 +131,8 @@ public final class RecurringMaterializer {
     } finally {
       try {
         store.releaseMutex(taskMutexName(task.name()), mutexHolder);
-      } catch (RuntimeException ignored) {
+      } catch (RuntimeException releaseFailure) {
+        FatalErrors.rethrowIfFatal(releaseFailure);
         // the lease expires on its own
       }
     }

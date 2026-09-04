@@ -26,6 +26,7 @@ import com.hemju.threadmill.core.handler.JobExecutionContext.CancellationReason;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
 import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.SerializationException;
 import com.hemju.threadmill.core.spec.JobArgument;
@@ -151,8 +152,8 @@ public final class JobRunner {
 
   /**
    * Run a single claimed job to completion. Must be invoked on a virtual
-   * thread from the worker pool. Never throws — every failure is captured
-   * and routed through the single failure code path.
+   * thread from the worker pool. Non-fatal failures are captured and routed
+   * through the single failure code path; process-fatal JVM errors escape.
    */
   public void run(Job job) {
     Objects.requireNonNull(job, "job");
@@ -184,6 +185,7 @@ public final class JobRunner {
       handler = resolved;
       payload = deserializePayload(job);
     } catch (Throwable resolutionFailure) {
+      FatalErrors.rethrowIfFatal(resolutionFailure);
       quarantine(job, ctx, resolutionFailure);
       return;
     }
@@ -213,6 +215,7 @@ public final class JobRunner {
               carrier.interrupt();
             }
           } catch (Throwable t) {
+            FatalErrors.rethrowIfFatal(t);
             LOG.warn("Timeout watchdog check failed for job {}", job.id(), t);
           }
         },
@@ -224,26 +227,41 @@ public final class JobRunner {
         TimeUnit.MILLISECONDS);
 
     try {
-      ScopedValue.where(EngineScopedValues.CURRENT, ctx).run(() -> {
-        try {
-          handler.run(payload, ctx);
-        } catch (RuntimeException re) {
-          throw re;
-        } catch (Exception e) {
-          throw new HandlerInvocationException(e);
-        }
-      });
-      watchdog.cancel(false);
-      // Clear any straggler interrupt the watchdog may have raised after the handler returned.
-      Thread.interrupted();
+      try {
+        ScopedValue.where(EngineScopedValues.CURRENT, ctx).run(() -> {
+          try {
+            handler.run(payload, ctx);
+          } catch (RuntimeException re) {
+            FatalErrors.rethrowIfFatal(re);
+            throw re;
+          } catch (Exception e) {
+            FatalErrors.rethrowIfFatal(e);
+            throw new HandlerInvocationException(e);
+          }
+        });
+      } finally {
+        // The watchdog is disarmed the moment the handler returns or throws, and this
+        // finally is what guarantees it: a fatal must escape, but not before its periodic
+        // task releases the captured ctx -> Job graph, because the JVM does not
+        // necessarily terminate when an error kills one worker thread.
+        //
+        // Scoping this to the handler call is load-bearing on the success path too.
+        // saveTerminalWithRetry retains finalization responsibility for as long as the
+        // store is unavailable, so a watchdog still armed across markSucceeded would
+        // interrupt that retry once the deadline passed, abort the loop at its
+        // Thread.sleep, and convert a handler that already succeeded into a FAILED job
+        // that RetryInterceptor then runs a second time.
+        watchdog.cancel(false);
+        // Clear any straggler interrupt the watchdog may have raised after the handler returned.
+        Thread.interrupted();
+      }
       if (ctx.cancellation().orElse(null) == CancellationReason.TIMEOUT) {
         throw new HandlerTimeoutException();
       }
       ctx.flushBestEffort();
       markSucceeded(job, ctx);
     } catch (Throwable t) {
-      watchdog.cancel(false);
-      Thread.interrupted();
+      FatalErrors.rethrowIfFatal(t);
       ctx.flushBestEffort();
       Throwable unwrapped = unwrap(t);
       recordFailure(job, ctx, unwrapped, classify(ctx, unwrapped));
@@ -321,6 +339,7 @@ public final class JobRunner {
     } catch (StaleJobException stale) {
       LOG.debug("Job {} version moved under us during failure path — skipping", job.id());
     } catch (Throwable t) {
+      FatalErrors.rethrowIfFatal(t);
       LOG.error("Failure path itself threw for job {}", job.id(), t);
     }
   }
@@ -340,6 +359,7 @@ public final class JobRunner {
       LOG.debug("Job {} version moved under us during success path", job.id());
       return;
     } catch (Throwable t) {
+      FatalErrors.rethrowIfFatal(t);
       // The in-memory job already carries the SUCCEEDED entry, so the
       // failure transition would be illegal on it. Reload the persisted
       // PROCESSING row and route the reloaded job through the single
@@ -373,6 +393,7 @@ public final class JobRunner {
       } catch (StaleJobException | OversizedJobException | SerializationException notTransient) {
         throw notTransient;
       } catch (RuntimeException e) {
+        FatalErrors.rethrowIfFatal(e);
         failures++;
         if (isShuttingDown()) {
           throw e;
@@ -405,6 +426,7 @@ public final class JobRunner {
     try {
       return store.findById(job.id()).orElse(null);
     } catch (RuntimeException e) {
+      FatalErrors.rethrowIfFatal(e);
       LOG.error(
           "Could not reload job {} after a failed SUCCEEDED save; it stays PROCESSING until reclaim",
           job.id(),
@@ -427,6 +449,7 @@ public final class JobRunner {
       interceptors.onStateChange(job, from, JobState.QUARANTINED);
       interceptors.onProcessingFailed(job, ctx, cause, JobInterceptor.FailureCause.QUARANTINE);
     } catch (Throwable t) {
+      FatalErrors.rethrowIfFatal(t);
       LOG.error("Quarantine path itself threw for job {}", job.id(), t);
     }
   }

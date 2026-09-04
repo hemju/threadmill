@@ -15,6 +15,7 @@ import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 
@@ -187,6 +188,7 @@ public final class RetryInterceptor implements JobInterceptor {
       } catch (StaleJobException stale) {
         throw stale;
       } catch (RuntimeException transientError) {
+        FatalErrors.rethrowIfFatal(transientError);
         if (++attempt >= RESCHEDULE_SAVE_ATTEMPTS) {
           throw transientError;
         }

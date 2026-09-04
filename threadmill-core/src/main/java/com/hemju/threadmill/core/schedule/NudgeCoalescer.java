@@ -5,6 +5,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.store.JobStore.NudgeOutcome;
 
 /**
@@ -76,6 +77,7 @@ final class NudgeCoalescer {
       try {
         return waitOn.join();
       } catch (CompletionException e) {
+        FatalErrors.rethrowIfFatal(e);
         if (e.getCause() instanceof RuntimeException runtime) throw runtime;
         if (e.getCause() instanceof Error error) throw error;
         throw e;
@@ -93,6 +95,7 @@ final class NudgeCoalescer {
     try {
       outcome = write.get();
     } catch (Throwable t) {
+      FatalErrors.rethrowIfFatal(t);
       failure = t;
     }
     CompletableFuture<NudgeOutcome> promoted;
@@ -122,6 +125,7 @@ final class NudgeCoalescer {
             .name("threadmill-nudge-coalescer")
             .start(() -> drive(taskName, slot, write));
       } catch (Throwable cannotStart) {
+        FatalErrors.rethrowIfFatal(cannotStart);
         // The promoted generation is already installed as inFlight, so
         // if nobody drives it every current and future caller for this
         // task parks forever on an uninterruptible join. Fail the

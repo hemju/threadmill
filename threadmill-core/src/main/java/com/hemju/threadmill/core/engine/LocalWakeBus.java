@@ -5,6 +5,8 @@ import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
+import com.hemju.threadmill.core.internal.FatalErrors;
+
 /**
  * In-process notification channel for "a new claimable job just landed on
  * queue X". When a producer and {@link ProcessingNode} share the same bus,
@@ -49,7 +51,8 @@ public final class LocalWakeBus {
     for (Consumer<String> sink : sinks) {
       try {
         sink.accept(queue);
-      } catch (Throwable ignored) {
+      } catch (Throwable sinkFailure) {
+        FatalErrors.rethrowIfFatal(sinkFailure);
         // Wake is opportunistic; failures fall back to the next poll.
       }
     }

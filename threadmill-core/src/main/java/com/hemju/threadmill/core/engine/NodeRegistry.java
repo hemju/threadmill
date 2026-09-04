@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.store.JobStore;
 
 /**
@@ -72,12 +73,19 @@ public final class NodeRegistry {
 
   public void start() {
     if (!running.compareAndSet(false, true)) return;
-    // The first heartbeat and election run synchronously so a freshly
-    // started node is registered before dispatchers begin claiming.
-    tickOnce();
-    Thread t =
-        Thread.ofPlatform().name("threadmill-registry-" + nodeId).daemon(true).start(this::loop);
-    loopThread.set(t);
+    boolean initialized = false;
+    try {
+      // The first heartbeat and election run synchronously so a freshly
+      // started node is registered before dispatchers begin claiming.
+      tickOnce();
+      Thread t =
+          Thread.ofPlatform().name("threadmill-registry-" + nodeId).daemon(true).start(this::loop);
+      loopThread.set(t);
+      initialized = true;
+    } finally {
+      // A failed synchronous tick must not leave start() permanently wedged behind running=true.
+      if (!initialized) running.set(false);
+    }
   }
 
   public void stop() {
@@ -87,7 +95,8 @@ public final class NodeRegistry {
     try {
       store.recordNodeHeartbeat(nodeId, Instant.EPOCH);
       store.releaseMaintenanceLease(nodeId);
-    } catch (Throwable ignored) {
+    } catch (Throwable cleanupFailure) {
+      FatalErrors.rethrowIfFatal(cleanupFailure);
       // best-effort
     }
   }
@@ -115,7 +124,8 @@ public final class NodeRegistry {
         masterUntil = renewalStart.plus(maintenanceLeaseDuration);
       }
       master = elected;
-    } catch (Throwable t) {
+    } catch (RuntimeException t) {
+      FatalErrors.rethrowIfFatal(t);
       LOG.warn("NodeRegistry tick failed", t);
       master = false; // refuse to act as master under store uncertainty
     }

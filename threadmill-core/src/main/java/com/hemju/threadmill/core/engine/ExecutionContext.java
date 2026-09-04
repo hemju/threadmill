@@ -19,6 +19,7 @@ import com.hemju.threadmill.core.JobProgress;
 import com.hemju.threadmill.core.JobResult;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.store.JobStore;
@@ -251,6 +252,7 @@ public final class ExecutionContext implements JobExecutionContext {
       store.saveExecutionUpdate(job, nodeId);
       lastPersistedAt = Instant.now();
     } catch (Throwable t) {
+      FatalErrors.rethrowIfFatal(t);
       LOG.debug("Threadmill check-in flush failed for job {}", jobId, t);
     }
   }

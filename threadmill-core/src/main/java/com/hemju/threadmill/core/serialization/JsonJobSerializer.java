@@ -34,6 +34,7 @@ import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
@@ -511,6 +512,7 @@ public final class JsonJobSerializer implements JobSerializer {
     } catch (SerializationException e) {
       throw e;
     } catch (RuntimeException | IOException e) {
+      FatalErrors.rethrowIfFatal(e);
       // Structurally malformed-but-valid JSON surfaces as NPE / CCE /
       // DateTimeParseException; the documented contract is SerializationException.
       throw new SerializationException("Failed to deserialize job", e);

@@ -24,6 +24,42 @@ the terminal save completes normally. If the node shuts down first, its retry
 and heartbeats stop; the maintenance leader then reclaims the job after
 `heartbeatTimeout` under the usual at-least-once semantics.
 
+## Fatal JVM Errors and Process Supervision
+
+Threadmill contains ordinary handler exceptions and `AssertionError` as
+per-job failures. Handler linkage and initialization failures can be safely
+quarantined. It does not contain `VirtualMachineError` (including
+`OutOfMemoryError` and `StackOverflowError`) or `ThreadDeath`, even when one is
+wrapped in a simple cause chain. Those errors escape handler, interceptor,
+dispatcher, maintenance, registry, and remote-wake boundaries before logging,
+failure serialization, interceptor callbacks, or retry logic can treat the JVM
+as healthy.
+
+Escaping an engine boundary terminates that engine thread, not necessarily the
+JVM. Threadmill deliberately does not call `System.exit` or `Runtime.halt`; the
+host owns termination policy. Without a host policy, a fatal error on a worker
+can leave its job `PROCESSING` while the node's owner heartbeat continues to
+refresh it. Orphan recovery cannot reclaim that job, and its claim-time
+concurrency slot remains held, until the node stops and its heartbeat expires.
+A fatal error on a long-lived engine loop can similarly leave a live but
+impaired process.
+
+Production deployments must therefore convert uncaught process-fatal errors
+into process termination and run the service under a supervisor that restarts
+it. For `OutOfMemoryError`, use `-XX:+ExitOnOutOfMemoryError`, or
+`-XX:+CrashOnOutOfMemoryError` when a fatal-error log or core dump is required.
+For other process-fatal errors, install a process-wide
+`Thread.setDefaultUncaughtExceptionHandler` before starting Threadmill that
+invokes the host's termination policy, or use an equivalent liveness watchdog
+that terminates an impaired process. The default handler is JVM-global, so the
+application—not this library—must own it. Java 25 no longer provides
+`Thread.stop()` as a source of `ThreadDeath`, but application or instrumentation
+code can still throw it explicitly.
+
+After process termination stops the node heartbeat, normal heartbeat expiry
+and orphan recovery provide at-least-once redelivery on a surviving node. The
+handler must therefore remain idempotent.
+
 ## Metrics
 
 Use `ThreadmillMetrics` with a Micrometer registry. Key meters include job

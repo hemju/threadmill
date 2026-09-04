@@ -7,6 +7,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.internal.FatalErrors;
 
 /**
  * Composite that invokes a chain of {@link JobInterceptor}s in registration
@@ -55,6 +56,7 @@ public final class JobInterceptors implements JobInterceptor {
     try {
       r.run();
     } catch (Throwable t) {
+      FatalErrors.rethrowIfFatal(t);
       LOG.warn("Interceptor {} threw — continuing", source.getClass().getName(), t);
     }
   }

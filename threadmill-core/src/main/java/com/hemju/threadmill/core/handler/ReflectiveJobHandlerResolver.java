@@ -5,6 +5,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.serialization.TypeNameAliases;
 
 /**
@@ -54,6 +55,7 @@ public final class ReflectiveJobHandlerResolver implements JobHandlerResolver {
     } catch (HandlerResolutionException e) {
       throw e;
     } catch (Exception e) {
+      FatalErrors.rethrowIfFatal(e);
       throw new HandlerResolutionException("Cannot resolve handler " + handlerTypeName, e);
     }
   }

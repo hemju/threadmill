@@ -20,6 +20,7 @@ import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
@@ -637,7 +638,8 @@ public final class Scheduler {
     } finally {
       try {
         store.releaseMutex(mutex, cronMutexHolder);
-      } catch (RuntimeException ignored) {
+      } catch (RuntimeException releaseFailure) {
+        FatalErrors.rethrowIfFatal(releaseFailure);
         // the lease expires on its own
       }
     }
@@ -651,7 +653,8 @@ public final class Scheduler {
     } finally {
       try {
         store.releaseMutex(mutex, cronMutexHolder);
-      } catch (RuntimeException ignored) {
+      } catch (RuntimeException releaseFailure) {
+        FatalErrors.rethrowIfFatal(releaseFailure);
         // the lease expires on its own
       }
     }
