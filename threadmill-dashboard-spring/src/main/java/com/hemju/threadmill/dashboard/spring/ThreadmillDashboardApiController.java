@@ -250,10 +250,11 @@ public final class ThreadmillDashboardApiController {
       Authentication authentication,
       @PathVariable("id") String id,
       @RequestBody ReplaceJobRequest request) {
+    boolean replacesDefinition = request.replacesDefinition();
     return action(
         authentication,
-        DashboardPermission.REPLACE_JOB,
-        "replace_job",
+        replacesDefinition ? DashboardPermission.ADMIN : DashboardPermission.REPLACE_JOB,
+        replacesDefinition ? "replace_job_definition" : "replace_job",
         id,
         () -> service.replaceJob(JobId.parse(id), request));
   }

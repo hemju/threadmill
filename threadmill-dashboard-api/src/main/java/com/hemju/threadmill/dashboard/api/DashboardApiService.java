@@ -30,6 +30,7 @@ import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.schedule.RecurringMaterializer;
+import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
@@ -63,17 +64,35 @@ public final class DashboardApiService {
 
   private final JobStore store;
   private final LocalWakeBus wakeBus;
+  private final DashboardJobDefinitionValidator jobDefinitionValidator;
   private final String cronMutexHolder = UUID.randomUUID().toString();
   private final long snapshotCacheTtlNanos;
   private volatile CachedSnapshot cachedSnapshot;
 
   public DashboardApiService(JobStore store, LocalWakeBus wakeBus) {
-    this(store, wakeBus, DEFAULT_SNAPSHOT_CACHE_TTL);
+    this(store, wakeBus, DashboardJobDefinitionValidator.denyAll(), DEFAULT_SNAPSHOT_CACHE_TTL);
+  }
+
+  public DashboardApiService(
+      JobStore store,
+      LocalWakeBus wakeBus,
+      DashboardJobDefinitionValidator jobDefinitionValidator) {
+    this(store, wakeBus, jobDefinitionValidator, DEFAULT_SNAPSHOT_CACHE_TTL);
   }
 
   public DashboardApiService(JobStore store, LocalWakeBus wakeBus, Duration snapshotCacheTtl) {
+    this(store, wakeBus, DashboardJobDefinitionValidator.denyAll(), snapshotCacheTtl);
+  }
+
+  public DashboardApiService(
+      JobStore store,
+      LocalWakeBus wakeBus,
+      DashboardJobDefinitionValidator jobDefinitionValidator,
+      Duration snapshotCacheTtl) {
     this.store = Objects.requireNonNull(store, "store");
     this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
+    this.jobDefinitionValidator =
+        Objects.requireNonNull(jobDefinitionValidator, "jobDefinitionValidator");
     Objects.requireNonNull(snapshotCacheTtl, "snapshotCacheTtl");
     if (snapshotCacheTtl.isNegative())
       throw new IllegalArgumentException("snapshotCacheTtl must be >= 0");
@@ -282,9 +301,15 @@ public final class DashboardApiService {
     if (request.queue() != null) builder.queue(request.queue());
     if (request.priority() != null) builder.priority(request.priority());
     if (request.scheduledFor() != null) builder.scheduledFor(request.scheduledFor());
-    if (request.handlerType() != null) {
-      builder.spec(new JobSpec(
-          request.handlerType(), request.arguments() == null ? List.of() : request.arguments()));
+    if (request.replacesDefinition()) {
+      String handlerType =
+          request.handlerType() == null ? job.spec().handlerType() : request.handlerType();
+      List<JobArgument> arguments =
+          request.arguments() == null ? job.spec().arguments() : request.arguments();
+      var replacementSpec =
+          new JobSpec(handlerType, arguments, job.spec().dedupKey(), job.spec().dedupTtl());
+      jobDefinitionValidator.validate(replacementSpec);
+      builder.spec(replacementSpec);
     }
     boolean replaced = store.replaceJob(id, request.expectedVersion(), builder.build());
     if (!replaced) {

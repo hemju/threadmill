@@ -1,8 +1,11 @@
 package com.hemju.threadmill.dashboard.spring;
 
+import java.util.Optional;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ListableBeanFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.SmartInitializingSingleton;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -11,6 +14,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnResource;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.core.Ordered;
 import org.springframework.core.annotation.Order;
@@ -24,9 +28,11 @@ import org.springframework.web.servlet.config.annotation.ViewControllerRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import com.hemju.threadmill.core.engine.LocalWakeBus;
+import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.dashboard.api.DashboardApiService;
 import com.hemju.threadmill.dashboard.api.DashboardAuditSink;
+import com.hemju.threadmill.dashboard.api.DashboardJobDefinitionValidator;
 import com.hemju.threadmill.dashboard.api.DashboardOptions;
 
 /**
@@ -81,8 +87,19 @@ public class ThreadmillDashboardApiConfiguration {
 
   @Bean
   @ConditionalOnMissingBean
-  public DashboardApiService threadmillDashboardApiService(JobStore store, LocalWakeBus wakeBus) {
-    return new DashboardApiService(store, wakeBus);
+  public DashboardJobDefinitionValidator threadmillDashboardJobDefinitionValidator(
+      ApplicationContext context, ObjectProvider<JobSerializer> serializer) {
+    return new SpringDashboardJobDefinitionValidator(
+        context.getClassLoader(), Optional.ofNullable(serializer.getIfAvailable()));
+  }
+
+  @Bean
+  @ConditionalOnMissingBean
+  public DashboardApiService threadmillDashboardApiService(
+      JobStore store,
+      LocalWakeBus wakeBus,
+      DashboardJobDefinitionValidator jobDefinitionValidator) {
+    return new DashboardApiService(store, wakeBus, jobDefinitionValidator);
   }
 
   @Bean

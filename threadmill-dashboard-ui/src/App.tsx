@@ -131,13 +131,16 @@ export default function App() {
   }
 
   async function replaceJob(job: JobSummary) {
-    const handlerType = window.prompt("Handler type", job.handlerType);
+    const handlerType = window.prompt(
+      "Handler type (ADMIN operation; the existing payload is retained)",
+      job.handlerType
+    );
     if (!handlerType || handlerType === job.handlerType) return;
     await mutate(
       `/jobs/${job.id}`,
       {
         method: "PATCH",
-        body: JSON.stringify({ expectedVersion: job.version, handlerType, arguments: [] })
+        body: JSON.stringify({ expectedVersion: job.version, handlerType })
       },
       "replaced"
     );
@@ -246,7 +249,7 @@ export default function App() {
               <Button
                 variant="ghost"
                 size="icon"
-                disabled={!has(session, "REPLACE_JOB") || !canReplace(job)}
+                disabled={!has(session, "ADMIN") || !canReplace(job)}
                 aria-label="Replace"
                 onClick={() => void replaceJob(job)}
               >

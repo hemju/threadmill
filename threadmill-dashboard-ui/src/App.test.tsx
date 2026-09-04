@@ -119,6 +119,26 @@ it("renders dashboard data and redaction state", async () => {
   expect(screen.getByText("All").closest("button")).toBeDisabled();
 });
 
+it("keeps handler replacement unavailable to a REPLACE_JOB-only session", async () => {
+  vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+    const url = input.toString();
+    const value =
+      url === "/threadmill/api/session"
+        ? { ...(responses[url] as object), permissions: ["READ", "REPLACE_JOB"] }
+        : responses[url] ??
+          responses[url.replace(/state=[^&]+/, "").replace(/handlerType=[^&]+/, "")];
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(value)
+    });
+  });
+
+  render(<App />);
+
+  await waitFor(() => expect(screen.getByText("com.example.ImportHandler")).toBeInTheDocument());
+  expect(screen.getByLabelText("Replace")).toBeDisabled();
+});
+
 it("uses the runtime API base path override", async () => {
   window.__THREADMILL_DASHBOARD_CONFIG__ = { apiBasePath: "/admin/threadmill/api" };
   const calls: string[] = [];

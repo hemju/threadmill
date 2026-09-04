@@ -23,6 +23,8 @@ import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
+import com.hemju.threadmill.core.handler.JobAction;
+import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
@@ -236,8 +238,7 @@ class ThreadmillDashboardApiControllerTest {
     assertThatThrownBy(() -> secureController.replaceJob(
             auth,
             JobId.newId().toString(),
-            new DashboardPayloads.ReplaceJobRequest(
-                1, null, null, null, "com.example.Other", List.of())))
+            new DashboardPayloads.ReplaceJobRequest(1, "replacement", null, null, null, null)))
         .isInstanceOf(DashboardApiException.class)
         .satisfies(error -> assertThat(((DashboardApiException) error).code())
             .isEqualTo(DashboardApiException.Code.NOT_FOUND));
@@ -245,7 +246,7 @@ class ThreadmillDashboardApiControllerTest {
             auth,
             pending.id().toString(),
             new DashboardPayloads.ReplaceJobRequest(
-                pending.version() + 1, null, null, null, "com.example.Other", List.of())))
+                pending.version() + 1, "replacement", null, null, null, null)))
         .isInstanceOf(DashboardApiException.class)
         .satisfies(error -> assertThat(((DashboardApiException) error).code())
             .isEqualTo(DashboardApiException.Code.CONFLICT));
@@ -253,10 +254,62 @@ class ThreadmillDashboardApiControllerTest {
             auth,
             processing.id().toString(),
             new DashboardPayloads.ReplaceJobRequest(
-                processing.version(), null, null, null, "com.example.Other", List.of())))
+                processing.version(), "replacement", null, null, null, null)))
         .isInstanceOf(DashboardApiException.class)
         .satisfies(error -> assertThat(((DashboardApiException) error).code())
             .isEqualTo(DashboardApiException.Code.CONFLICT));
+  }
+
+  @Test
+  void definitionReplacementRequiresAdminAndAuditsTheBoundary() {
+    var pending = Job.builder().spec(JobSpec.of("com.example.Handler")).build();
+    store.insert(pending);
+
+    assertThatThrownBy(() -> secureController.replaceJob(
+            auth("operator", "THREADMILL_REPLACE_JOB"),
+            pending.id().toString(),
+            new DashboardPayloads.ReplaceJobRequest(
+                pending.version(),
+                null,
+                null,
+                null,
+                ArbitraryClasspathHandler.class.getName(),
+                null)))
+        .isInstanceOf(ResponseStatusException.class)
+        .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode())
+            .isEqualTo(HttpStatus.FORBIDDEN));
+
+    assertThat(store.findById(pending.id()).orElseThrow().spec().handlerType())
+        .isEqualTo("com.example.Handler");
+    assertThat(auditEvents).singleElement().satisfies(event -> {
+      assertThat(event.permission()).isEqualTo(DashboardPermission.ADMIN);
+      assertThat(event.action()).isEqualTo("replace_job_definition");
+      assertThat(event.target()).isEqualTo(pending.id().toString());
+      assertThat(event.outcome()).isEqualTo("denied");
+    });
+
+    var adminController = new ThreadmillDashboardApiController(
+        new DashboardApiService(store, new LocalWakeBus(), replacement -> {}),
+        new SpringSecurityDashboardAuthorizer(),
+        auditEvents::add,
+        DashboardOptions.secureDefaults());
+    var response = adminController.replaceJob(
+        auth("root", "THREADMILL_ADMIN"),
+        pending.id().toString(),
+        new DashboardPayloads.ReplaceJobRequest(
+            pending.version(),
+            null,
+            null,
+            null,
+            ArbitraryClasspathHandler.class.getName(),
+            List.of(new JobArgument("com.hemju.threadmill.core.handler.NoPayload", "{}"))));
+
+    assertThat(response.status()).isEqualTo("replaced");
+    assertThat(auditEvents.getLast()).satisfies(event -> {
+      assertThat(event.permission()).isEqualTo(DashboardPermission.ADMIN);
+      assertThat(event.action()).isEqualTo("replace_job_definition");
+      assertThat(event.outcome()).isEqualTo("replaced");
+    });
   }
 
   @Test
@@ -423,6 +476,11 @@ class ThreadmillDashboardApiControllerTest {
         .filter(claimed -> claimed.id().equals(id))
         .findFirst()
         .orElseThrow();
+  }
+
+  private static final class ArbitraryClasspathHandler implements JobAction {
+    @Override
+    public void run(JobExecutionContext ctx) {}
   }
 
   private static Authentication auth(String name, String... authorities) {

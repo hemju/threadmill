@@ -1,5 +1,6 @@
 package com.hemju.threadmill.dashboard.spring;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
@@ -28,7 +29,12 @@ import org.springframework.web.context.WebApplicationContext;
 
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.handler.JobHandler;
+import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.schedule.CronTask;
+import com.hemju.threadmill.core.serialization.JobSerializer;
+import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
@@ -149,19 +155,70 @@ class ThreadmillDashboardSecurityIntegrationTest {
   @Test
   void oversizedJobReplacementIsContentTooLargeNotAServerError() throws Exception {
     var store = context.getBean(JobStore.class);
-    var pending = Job.builder().spec(JobSpec.of("com.example.Handler")).build();
+    var pending = Job.builder()
+        .spec(JobSpec.of(
+            OriginalHandler.class.getName(),
+            new JobArgument(OriginalPayload.class.getName(), "{\"value\":\"small\"}")))
+        .build();
     store.insert(pending);
     String hugeArgument = "x".repeat(300_000); // > the 256 KiB default serialized-size cap
+
+    mvc.perform(patch("/threadmill/api/jobs/" + pending.id())
+            .with(user("ada").authorities(authority("THREADMILL_ADMIN")))
+            .with(csrf())
+            .contentType("application/json")
+            .content("{\"expectedVersion\":" + pending.version()
+                + ",\"handlerType\":\"" + OriginalHandler.class.getName()
+                + "\",\"arguments\":[{\"typeTag\":\"" + OriginalPayload.class.getName()
+                + "\",\"serialized\":\"{\\\"value\\\":\\\"" + hugeArgument
+                + "\\\"}\"}]}"))
+        .andExpect(status().is(413))
+        .andExpect(jsonPath("$.detail").value(containsString("exceeds limit")));
+  }
+
+  @Test
+  void replaceJobOnlyPrincipalCannotSelectAnArbitraryClasspathHandler() throws Exception {
+    var store = context.getBean(JobStore.class);
+    var pending = Job.builder()
+        .spec(JobSpec.of(
+            OriginalHandler.class.getName(),
+            new JobArgument(OriginalPayload.class.getName(), "{\"value\":\"safe\"}")))
+        .build();
+    store.insert(pending);
 
     mvc.perform(patch("/threadmill/api/jobs/" + pending.id())
             .with(user("ada").authorities(authority("THREADMILL_REPLACE_JOB")))
             .with(csrf())
             .contentType("application/json")
+            .content("{\"expectedVersion\":" + pending.version() + ",\"handlerType\":\""
+                + ArbitraryClasspathHandler.class.getName() + "\"}"))
+        .andExpect(status().isForbidden());
+
+    assertThat(store.findById(pending.id()).orElseThrow().spec().handlerType())
+        .isEqualTo(OriginalHandler.class.getName());
+  }
+
+  @Test
+  void incompatibleReplacementPayloadIsRejectedBeforePersistence() throws Exception {
+    var store = context.getBean(JobStore.class);
+    var originalSpec = JobSpec.of(
+        OriginalHandler.class.getName(),
+        new JobArgument(OriginalPayload.class.getName(), "{\"value\":\"safe\"}"));
+    var pending = Job.builder().spec(originalSpec).build();
+    store.insert(pending);
+
+    mvc.perform(patch("/threadmill/api/jobs/" + pending.id())
+            .with(user("root").authorities(authority("THREADMILL_ADMIN")))
+            .with(csrf())
+            .contentType("application/json")
             .content("{\"expectedVersion\":" + pending.version()
-                + ",\"handlerType\":\"com.example.Other\",\"arguments\":[{\"typeTag\":\"java.lang.String\",\"serialized\":\""
-                + hugeArgument + "\"}]}"))
-        .andExpect(status().is(413))
-        .andExpect(jsonPath("$.detail").value(containsString("exceeds limit")));
+                + ",\"handlerType\":\"" + ArbitraryClasspathHandler.class.getName()
+                + "\",\"arguments\":[{\"typeTag\":\"" + OriginalPayload.class.getName()
+                + "\",\"serialized\":\"{\\\"value\\\":\\\"wrong\\\"}\"}]}"))
+        .andExpect(status().isBadRequest())
+        .andExpect(jsonPath("$.detail").value(containsString("not compatible")));
+
+    assertThat(store.findById(pending.id()).orElseThrow().spec()).isEqualTo(originalSpec);
   }
 
   private static SimpleGrantedAuthority authority(String value) {
@@ -176,5 +233,24 @@ class ThreadmillDashboardSecurityIntegrationTest {
     JobStore jobStore() {
       return new InMemoryJobStore();
     }
+
+    @Bean
+    JobSerializer jobSerializer() {
+      return new JsonJobSerializer();
+    }
+  }
+
+  private record OriginalPayload(String value) implements JobPayload {}
+
+  private record ArbitraryPayload(int value) implements JobPayload {}
+
+  private static final class OriginalHandler implements JobHandler<OriginalPayload> {
+    @Override
+    public void run(OriginalPayload payload, JobExecutionContext ctx) {}
+  }
+
+  private static final class ArbitraryClasspathHandler implements JobHandler<ArbitraryPayload> {
+    @Override
+    public void run(ArbitraryPayload payload, JobExecutionContext ctx) {}
   }
 }

@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -33,6 +34,7 @@ import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStore.NudgeOutcome;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
+import com.hemju.threadmill.dashboard.api.DashboardPayloads.ReplaceJobRequest;
 import com.hemju.threadmill.dashboard.api.DashboardPayloads.UpdateRecurringRequest;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 import com.hemju.threadmill.test.ForwardingJobStore;
@@ -448,6 +450,51 @@ class DashboardApiServiceTest {
         .isInstanceOf(DashboardApiException.class)
         .satisfies(error -> assertThat(((DashboardApiException) error).code())
             .isEqualTo(DashboardApiException.Code.BAD_REQUEST));
+  }
+
+  @Test
+  void argumentOnlyReplacementPreservesTheHandlerAndIsValidatedBeforePersistence() {
+    var store = new InMemoryJobStore();
+    var originalArgument = new JobArgument("example.OriginalPayload", "{\"value\":\"old\"}");
+    var replacementArgument = new JobArgument("example.ReplacementPayload", "{\"value\":\"new\"}");
+    var job = Job.builder()
+        .spec(JobSpec.of("example.RegisteredHandler", originalArgument)
+            .withDedup("original-key", Duration.ofHours(1)))
+        .build();
+    store.insert(job);
+    var validated = new ArrayList<JobSpec>();
+    var service = new DashboardApiService(store, new LocalWakeBus(), validated::add);
+
+    service.replaceJob(
+        job.id(),
+        new ReplaceJobRequest(job.version(), null, null, null, null, List.of(replacementArgument)));
+
+    assertThat(validated).singleElement().satisfies(spec -> {
+      assertThat(spec.handlerType()).isEqualTo("example.RegisteredHandler");
+      assertThat(spec.arguments()).containsExactly(replacementArgument);
+      assertThat(spec.dedupKey()).isEqualTo("original-key");
+      assertThat(spec.dedupTtl()).isEqualTo(Duration.ofHours(1));
+    });
+    assertThat(store.findById(job.id()).orElseThrow().spec()).isEqualTo(validated.getFirst());
+  }
+
+  @Test
+  void definitionReplacementWithoutAValidatorIsRejectedBeforePersistence() {
+    var store = new InMemoryJobStore();
+    var originalSpec = JobSpec.of("example.RegisteredHandler");
+    var job = Job.builder().spec(originalSpec).build();
+    store.insert(job);
+    var service = new DashboardApiService(store, new LocalWakeBus());
+
+    assertThatThrownBy(() -> service.replaceJob(
+            job.id(),
+            new ReplaceJobRequest(
+                job.version(), null, null, null, "example.ArbitraryHandler", null)))
+        .isInstanceOf(DashboardApiException.class)
+        .satisfies(error -> assertThat(((DashboardApiException) error).code())
+            .isEqualTo(DashboardApiException.Code.BAD_REQUEST));
+
+    assertThat(store.findById(job.id()).orElseThrow().spec()).isEqualTo(originalSpec);
   }
 
   private static void seedQueues(InMemoryJobStore store) {
