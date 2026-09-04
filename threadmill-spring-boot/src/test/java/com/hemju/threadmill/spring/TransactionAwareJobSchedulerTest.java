@@ -27,8 +27,8 @@ import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
+import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
-import com.hemju.threadmill.test.ForwardingJobStore;
 
 /**
  * Drives the {@link TransactionAwareJobScheduler} contract directly by

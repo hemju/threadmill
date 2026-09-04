@@ -35,9 +35,20 @@ behave identically.
   mutexes, queue pauses, bulk insert, …).
 - `Jobs` — tiny factory for the jobs the contract tests build. Keeps the
   tests focused on the contract rather than on how to construct a job.
+- `JobStoreDecoratorContract` — reflective check for `JobStore` decorators.
+  `assertForwardsEveryOperation(decorate)` wraps a recording proxy and
+  requires every `JobStore` method — the interface's `default` methods
+  included, and any method added to the SPI later — to reach the delegate
+  exactly once with the caller's arguments and to return the delegate's
+  result. Pair it with the contract suite: the suite proves a decorator does
+  not break the store it wraps, this proves it forwards everything.
+- `ForwardingJobStore` — deprecated alias for
+  `com.hemju.threadmill.core.store.ForwardingJobStore`, the forwarding base
+  every decorator (tracing, metrics, test fault injection) now extends.
+  Extend the core class directly in new code.
 
 ## Build
 
-This module has no production sources — it ships the abstract base for the
-backend modules' test source sets to extend. Built as part of every other
-module's test compile.
+This module ships test infrastructure only — the abstract contract base,
+fixtures, and the decorator contract for the backend and decorator modules'
+test source sets. Built as part of every other module's test compile.

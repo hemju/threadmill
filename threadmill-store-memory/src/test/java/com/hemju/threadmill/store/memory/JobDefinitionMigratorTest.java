@@ -17,6 +17,7 @@ import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
+import com.hemju.threadmill.core.store.ForwardingJobStore;
 
 /**
  * Regression tests for {@link JobDefinitionMigrator}: rewriting persisted job
@@ -111,7 +112,7 @@ class JobDefinitionMigratorTest {
     insertWithState(JobState.ENQUEUED, OLD_HANDLER);
 
     var raced = new java.util.concurrent.atomic.AtomicBoolean(false);
-    var racingStore = new com.hemju.threadmill.test.ForwardingJobStore(store) {
+    var racingStore = new ForwardingJobStore(store) {
       @Override
       public boolean replaceJob(
           JobId id, long expectedVersion, com.hemju.threadmill.core.JobReplacement r) {

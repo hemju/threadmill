@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test;
 
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.NodeRegistry;
-import com.hemju.threadmill.test.ForwardingJobStore;
+import com.hemju.threadmill.core.store.ForwardingJobStore;
 
 class NodeRegistryTest {
 

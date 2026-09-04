@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- `JobStore` decorators now share one forwarding base (issue #131).
+  `com.hemju.threadmill.core.store.ForwardingJobStore` forwards every SPI
+  operation, including the interface's `default` methods, and both the
+  OpenTelemetry `TracingJobStore` and the Micrometer `MeteredJobStore` extend
+  it, overriding only the operations they instrument. This fixes the tracing
+  decorator silently answering the interface defaults for
+  `supportsExternalTransactions()` and `createRemoteWakeChannel(String)`: a
+  traced PostgreSQL store no longer loses `join_transaction` support or its
+  `LISTEN`/`NOTIFY` wake channel behind the decorator. The test-support
+  `com.hemju.threadmill.test.ForwardingJobStore` is deprecated in favour of the
+  core class, and `threadmill-test-support` gains
+  `JobStoreDecoratorContract.assertForwardsEveryOperation`, a reflective check
+  that fails by method name when a decorator lets any current or future
+  `JobStore` method fall through to a default.
+
 ## 0.2.4
 
 - Process-fatal JVM errors are no longer swallowed as ordinary job or loop

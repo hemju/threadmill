@@ -38,7 +38,7 @@ import com.hemju.threadmill.core.schedule.RecurringMaterializer;
 import com.hemju.threadmill.core.schedule.Scheduler;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
-import com.hemju.threadmill.test.ForwardingJobStore;
+import com.hemju.threadmill.core.store.ForwardingJobStore;
 
 /**
  * End-to-end tests for the scheduling API, recurring tasks (interval +

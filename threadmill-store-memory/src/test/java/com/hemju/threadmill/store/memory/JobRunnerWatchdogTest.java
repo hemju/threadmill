@@ -29,7 +29,7 @@ import com.hemju.threadmill.core.handler.ReflectiveJobHandlerResolver;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
-import com.hemju.threadmill.test.ForwardingJobStore;
+import com.hemju.threadmill.core.store.ForwardingJobStore;
 
 /**
  * The per-job timeout watchdog uses a ScheduledThreadPoolExecutor with
