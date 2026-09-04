@@ -45,7 +45,9 @@ until stale clears; use `threadmill.metrics.snapshot.age` to judge their age.
 Concurrent readers use the cached snapshot while a refresh is in flight. The
 reader that starts the refresh performs the bounded store reads synchronously;
 the refresh interval and queue cap therefore budget store load as well as
-freshness and cardinality.
+freshness and cardinality. An explicit `metrics.refresh()` waits for an
+in-flight pull and then runs a new pass, preserving its immediate-refresh
+contract for host-driven checks.
 
 Queue tags are capped at 100 active queues per metrics instance by default.
 `threadmill.metrics.queue.tags.omitted` reports how many active queues did not
@@ -58,6 +60,11 @@ retries during one logical outage. It excludes the SPI's expected
 stale-version, oversize, invalid-argument, and duplicate-id outcomes so normal
 multi-node races and caller validation errors do not masquerade as store
 health failures.
+
+Queue-meter registration/removal failures increment
+`threadmill.metrics.queue.meter.errors` and are logged separately. They do not
+mark the store snapshot stale because counts and timestamps may already be
+current even when the registry rejects a meter.
 
 ## Datastores
 

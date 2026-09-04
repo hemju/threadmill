@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.ReentrantLock;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
@@ -60,12 +61,13 @@ public final class ThreadmillMetrics {
   private final AtomicReference<StoreSnapshot> snapshot =
       new AtomicReference<>(StoreSnapshot.empty());
   private final AtomicBoolean snapshotStale = new AtomicBoolean(true);
-  private final AtomicBoolean refreshInProgress = new AtomicBoolean();
+  private final ReentrantLock refreshLock = new ReentrantLock();
   private final AtomicInteger consecutiveRefreshFailures = new AtomicInteger();
   private final AtomicInteger consecutiveMeterFailures = new AtomicInteger();
   private final Map<String, QueueMeters> queueMeters = new ConcurrentHashMap<>();
   private final Counter processedCounter;
   private final Counter refreshErrors;
+  private final Counter meterReconciliationErrors;
   private final Counter claimFailures;
   private final Counter orphanReclaims;
   private final Map<String, Counter> failedCounters = new ConcurrentHashMap<>();
@@ -110,6 +112,9 @@ public final class ThreadmillMetrics {
         .register(registry);
     this.refreshErrors = Counter.builder("threadmill.metrics.refresh.errors")
         .description("Errors while refreshing Threadmill metrics from the store")
+        .register(registry);
+    this.meterReconciliationErrors = Counter.builder("threadmill.metrics.queue.meter.errors")
+        .description("Errors while reconciling bounded per-queue meters")
         .register(registry);
     this.claimFailures = Counter.builder("threadmill.claim.failures")
         .description("JobStore claimReady calls that failed")
@@ -177,7 +182,13 @@ public final class ThreadmillMetrics {
    * advancing from their last known timestamps rather than dropping to zero.
    */
   public void refresh() {
-    refreshIfDue(true);
+    refreshLock.lock();
+    try {
+      refreshAt();
+    } finally {
+      lastRefreshNanos = System.nanoTime();
+      refreshLock.unlock();
+    }
   }
 
   private void refreshAt() {
@@ -220,6 +231,7 @@ public final class ThreadmillMetrics {
       reconcileQueueMeters(selectedQueues);
       consecutiveMeterFailures.set(0);
     } catch (RuntimeException e) {
+      meterReconciliationErrors.increment();
       var failures = consecutiveMeterFailures.incrementAndGet();
       if (failures == 1 || failures % 60 == 0) {
         LOG.warn(
@@ -276,27 +288,25 @@ public final class ThreadmillMetrics {
   }
 
   private void refreshThrottled() {
-    refreshIfDue(false);
-  }
-
-  private void refreshIfDue(boolean force) {
     var now = System.nanoTime();
-    if (!force && !refreshDue(now, lastRefreshNanos)) {
+    if (!refreshDue(now, lastRefreshNanos)) {
       return;
     }
-    if (!refreshInProgress.compareAndSet(false, true)) {
+    if (!refreshLock.tryLock()) {
       return;
     }
     try {
-      now = System.nanoTime();
-      if (force || refreshDue(now, lastRefreshNanos)) {
-        refreshAt();
+      if (refreshDue(System.nanoTime(), lastRefreshNanos)) {
+        try {
+          refreshAt();
+        } finally {
+          // Start the cooldown when an attempt actually finishes. Slow or
+          // failed reads must not provoke an immediate retry pile-up.
+          lastRefreshNanos = System.nanoTime();
+        }
       }
     } finally {
-      // Start the cooldown when the attempt finishes. Slow or failed reads
-      // must not provoke an immediate pile-up of retrying callers.
-      lastRefreshNanos = System.nanoTime();
-      refreshInProgress.set(false);
+      refreshLock.unlock();
     }
   }
 
@@ -354,7 +364,7 @@ public final class ThreadmillMetrics {
    * @deprecated Pass {@link #meteredStore()} to the processing node instead;
    *     calling both paths double-counts claims.
    */
-  @Deprecated
+  @Deprecated(since = "0.2.2", forRemoval = false)
   public void recordClaimLatency(Duration duration) {
     recordClaimReadyLatency(duration);
   }

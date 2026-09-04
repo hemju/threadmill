@@ -68,17 +68,18 @@ final class MeteredJobStore implements JobStore {
 
   @Override
   public void insert(Job job) {
-    writeVoid("insert", () -> delegate.insert(job));
+    writeVoid("insert", true, () -> delegate.insert(job));
   }
 
   @Override
   public List<JobId> insertAll(List<Job> jobs) {
-    return write("insert_all", () -> delegate.insertAll(jobs));
+    return write("insert_all", true, () -> delegate.insertAll(jobs));
   }
 
   @Override
   public EnqueueResult enqueueIfAbsent(Job job, String dedupKey, Duration ttl, Instant now) {
-    return write("enqueue_if_absent", () -> delegate.enqueueIfAbsent(job, dedupKey, ttl, now));
+    return write(
+        "enqueue_if_absent", true, () -> delegate.enqueueIfAbsent(job, dedupKey, ttl, now));
   }
 
   @Override
@@ -300,26 +301,38 @@ final class MeteredJobStore implements JobStore {
   }
 
   private <T> T write(String operation, Supplier<T> action) {
+    return write(operation, false, action);
+  }
+
+  private <T> T write(String operation, boolean duplicateIdIsContractual, Supplier<T> action) {
     try {
       return action.get();
     } catch (RuntimeException rejected) {
-      if (!isContractualRejection(operation, rejected)) {
+      if (!isContractualRejection(duplicateIdIsContractual, rejected)) {
         metrics.recordRejectedWrite(operation);
       }
       throw rejected;
     }
   }
 
-  private static boolean isContractualRejection(String operation, RuntimeException failure) {
+  private static boolean isContractualRejection(
+      boolean duplicateIdIsContractual, RuntimeException failure) {
+    // Invalid arguments are caller-side contract failures for every SPI
+    // operation. Duplicate ids are contractual only on the three insertion
+    // entry points, so that policy is declared at their call sites rather
+    // than inferred from the exported operation tag.
     return failure instanceof StaleJobException
         || failure instanceof OversizedJobException
         || failure instanceof IllegalArgumentException
-        || failure instanceof IllegalStateException
-            && (operation.equals("insert") || operation.equals("insert_all"));
+        || (duplicateIdIsContractual && failure instanceof IllegalStateException);
   }
 
   private void writeVoid(String operation, Runnable action) {
-    write(operation, () -> {
+    writeVoid(operation, false, action);
+  }
+
+  private void writeVoid(String operation, boolean duplicateIdIsContractual, Runnable action) {
+    write(operation, duplicateIdIsContractual, () -> {
       action.run();
       return null;
     });

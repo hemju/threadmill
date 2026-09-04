@@ -25,6 +25,7 @@ and rejected store writes.
 | `threadmill.claim.failures` | Counter | — | `claimReady` calls that threw. Deliberately has no queue tag. |
 | `threadmill.store.writes.rejected` | Counter | `operation` | Non-contractual store-write failures, tagged by a fixed operation-name set. Expected stale-version, oversize, invalid-argument, and duplicate-id rejections are excluded. Counts failed attempts, including retries, rather than distinct outages. |
 | `threadmill.metrics.refresh.errors` | Counter | — | Gauge-refresh failures (store unreachable etc.). |
+| `threadmill.metrics.queue.meter.errors` | Counter | — | Failures while registering or removing bounded per-queue meters. The store snapshot can still be current. |
 | `threadmill.metrics.snapshot.stale` | Gauge | — | `1` after a failed refresh; clears to `0` after the next successful refresh. |
 | `threadmill.metrics.snapshot.age` | Gauge | — | Milliseconds since the last successful store-derived snapshot (`-1` before any success). |
 | `threadmill.metrics.queue.tags.omitted` | Gauge | — | Active queues omitted because the configured queue-tag cap was reached. |
@@ -57,8 +58,9 @@ snapshot instead of waiting behind an in-flight refresh, and the refresh
 cooldown starts when the store reads finish. The reader that starts a refresh
 does perform those synchronous reads, so choose the interval and queue cap as
 store-load budgets as well as scrape-freshness/cardinality settings. There is
-no background thread. `metrics.refresh()` remains available for an immediate
-host-driven refresh.
+no background thread. `metrics.refresh()` waits for any in-flight pull and then
+runs its own pass, so a host-requested refresh observes writes made after the
+earlier pull began.
 
 If a refresh fails, counts and queue depths retain the last successful values;
 age gauges continue advancing from their last known timestamps. The stale
@@ -107,6 +109,9 @@ directly against their `MeterRegistry` bean.
 - **`threadmill.metrics.snapshot.stale` = 1** — gauge values are last-known
   data. Use snapshot age to decide whether they are too old for an operational
   decision; refresh errors identify repeated failures.
+- **`threadmill.metrics.queue.meter.errors` rising** — the store snapshot may
+  still be current, but queue-meter registration/removal is failing. Inspect
+  registry filters and duplicate meter ids.
 - **`threadmill.metrics.queue.tags.omitted` > 0** — raise the configured cap or
   aggregate queues at the registry/exporter layer if per-queue visibility is
   required for all active queues.

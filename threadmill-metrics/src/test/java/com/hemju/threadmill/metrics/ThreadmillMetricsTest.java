@@ -304,6 +304,50 @@ class ThreadmillMetricsTest {
   }
 
   @Test
+  void forcedRefreshRunsAfterAnInFlightPullAndObservesLaterWrites() throws Exception {
+    var backingStore = new InMemoryJobStore();
+    var store = new BlockingSnapshotStore(backingStore);
+    var registry = new SimpleMeterRegistry();
+    var metrics = new ThreadmillMetrics(registry, store, Duration.ofNanos(1), 10);
+    store.blockRefresh.set(true);
+
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      var pullRefresh = executor.submit(() -> stateGauge(registry, JobState.ENQUEUED));
+      assertThat(store.refreshEntered.await(1, TimeUnit.SECONDS)).isTrue();
+      backingStore.insert(newJob("q"));
+
+      var forcedRefresh = executor.submit(metrics::refresh);
+      assertThat(forcedRefresh.isDone()).isFalse();
+      store.releaseRefresh.countDown();
+
+      assertThat(pullRefresh.get(1, TimeUnit.SECONDS)).isZero();
+      forcedRefresh.get(1, TimeUnit.SECONDS);
+      assertThat(store.countsCalls.get()).isEqualTo(3);
+      assertThat(stateGauge(registry, JobState.ENQUEUED)).isEqualTo(1d);
+    } finally {
+      store.releaseRefresh.countDown();
+    }
+  }
+
+  @Test
+  void queueMeterReconciliationFailureDoesNotMarkTheStoreSnapshotStale() {
+    var store = new InMemoryJobStore();
+    store.insert(newJob("q"));
+    var registry = new SimpleMeterRegistry();
+    registry.counter("threadmill.queue.depth", "queue", "q");
+    var metrics = new ThreadmillMetrics(registry, store, Duration.ofHours(1), 10);
+
+    metrics.refresh();
+
+    assertThat(stateGauge(registry, JobState.ENQUEUED)).isEqualTo(1d);
+    assertThat(registry.get("threadmill.metrics.snapshot.stale").gauge().value())
+        .isZero();
+    assertThat(registry.counter("threadmill.metrics.refresh.errors").count()).isZero();
+    assertThat(registry.counter("threadmill.metrics.queue.meter.errors").count())
+        .isPositive();
+  }
+
+  @Test
   void meteredStoreRecordsClaimFailuresAndRejectedWritesAtTheirBoundaries() {
     var backingStore = new InMemoryJobStore();
     var failingStore = new BoundaryFailureStore(backingStore);
@@ -340,6 +384,11 @@ class ThreadmillMetricsTest {
     store.insert(job);
 
     assertThatThrownBy(() -> store.insert(job)).isInstanceOf(IllegalStateException.class);
+    assertThatThrownBy(() -> store.insertAll(List.of(job)))
+        .isInstanceOf(IllegalStateException.class);
+    assertThatThrownBy(
+            () -> store.enqueueIfAbsent(job, "dedup", Duration.ofMinutes(1), Instant.now()))
+        .isInstanceOf(IllegalStateException.class);
     assertThatThrownBy(() -> store.saveAtomic(job, job.version() + 1))
         .isInstanceOf(StaleJobException.class);
 
@@ -569,6 +618,7 @@ class ThreadmillMetricsTest {
     @Override
     public Map<JobState, Long> countsByState() {
       countsCalls.incrementAndGet();
+      var counts = super.countsByState();
       if (blockRefresh.get()) {
         refreshEntered.countDown();
         try {
@@ -581,7 +631,7 @@ class ThreadmillMetricsTest {
               "interrupted while waiting to release metrics refresh", e);
         }
       }
-      return super.countsByState();
+      return counts;
     }
   }
 }
