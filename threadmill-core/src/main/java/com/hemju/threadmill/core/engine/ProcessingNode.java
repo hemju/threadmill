@@ -37,8 +37,9 @@ import com.hemju.threadmill.core.store.JobStore;
  * a partial save. Handlers must be idempotent.
  *
  * <p>Process-fatal JVM errors escape Threadmill's handler and loop boundaries.
- * Applications should expose uncaught failures to their process-fatal policy
- * and run nodes under a supervisor that restarts a terminated JVM.
+ * An uncaught error terminates its engine thread, not necessarily the JVM;
+ * applications must configure a process-fatal policy and run nodes under a
+ * supervisor that restarts the terminated process.
  */
 public final class ProcessingNode implements AutoCloseable {
 
@@ -73,7 +74,9 @@ public final class ProcessingNode implements AutoCloseable {
     this.wakeBus = b.wakeBus == null ? new LocalWakeBus() : b.wakeBus;
     JobHandlerResolver resolver =
         b.resolver == null ? new ReflectiveJobHandlerResolver() : b.resolver;
-    this.workerPool = Executors.newVirtualThreadPerTaskExecutor();
+    var workerFactory =
+        Thread.ofVirtual().name("threadmill-worker-" + nodeId + "-", 0).factory();
+    this.workerPool = Executors.newThreadPerTaskExecutor(workerFactory);
     this.interceptors = new JobInterceptors();
     this.retryInterceptor =
         new RetryInterceptor(store, config.defaultMaxAttempts(), config.retryInitialBackoff());
@@ -205,10 +208,11 @@ public final class ProcessingNode implements AutoCloseable {
       interruptInFlight();
       Thread.currentThread().interrupt();
     } finally {
+      // Stop the watchdog before any best-effort store cleanup can rethrow a process-fatal error.
+      runner.shutdown();
       maintenance.stop();
       wakeRegistration.run();
       registry.stop();
-      runner.shutdown();
     }
   }
 

@@ -131,8 +131,8 @@ public final class RecurringMaterializer {
     } finally {
       try {
         store.releaseMutex(taskMutexName(task.name()), mutexHolder);
-      } catch (RuntimeException ignored) {
-        FatalErrors.rethrowIfFatal(ignored);
+      } catch (RuntimeException releaseFailure) {
+        FatalErrors.rethrowIfFatal(releaseFailure);
         // the lease expires on its own
       }
     }
@@ -333,7 +333,6 @@ public final class RecurringMaterializer {
           try {
             return job.attempts() >= Integer.parseInt(raw.trim());
           } catch (RuntimeException malformed) {
-            FatalErrors.rethrowIfFatal(malformed);
             return false;
           }
         })

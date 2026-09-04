@@ -218,7 +218,6 @@ public final class RetryInterceptor implements JobInterceptor {
             .orElse(defaultPolicy.initialBackoff());
         return new RetryPolicy(attempts, backoff);
       } catch (RuntimeException malformed) {
-        FatalErrors.rethrowIfFatal(malformed);
         LOG.warn(
             "Ignoring malformed per-job retry metadata for job {} ({}) — applying the remaining precedence levels",
             job.id(),

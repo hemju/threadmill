@@ -638,8 +638,8 @@ public final class Scheduler {
     } finally {
       try {
         store.releaseMutex(mutex, cronMutexHolder);
-      } catch (RuntimeException ignored) {
-        FatalErrors.rethrowIfFatal(ignored);
+      } catch (RuntimeException releaseFailure) {
+        FatalErrors.rethrowIfFatal(releaseFailure);
         // the lease expires on its own
       }
     }
@@ -653,8 +653,8 @@ public final class Scheduler {
     } finally {
       try {
         store.releaseMutex(mutex, cronMutexHolder);
-      } catch (RuntimeException ignored) {
-        FatalErrors.rethrowIfFatal(ignored);
+      } catch (RuntimeException releaseFailure) {
+        FatalErrors.rethrowIfFatal(releaseFailure);
         // the lease expires on its own
       }
     }

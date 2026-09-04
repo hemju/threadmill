@@ -51,8 +51,8 @@ public final class LocalWakeBus {
     for (Consumer<String> sink : sinks) {
       try {
         sink.accept(queue);
-      } catch (Throwable ignored) {
-        FatalErrors.rethrowIfFatal(ignored);
+      } catch (Throwable sinkFailure) {
+        FatalErrors.rethrowIfFatal(sinkFailure);
         // Wake is opportunistic; failures fall back to the next poll.
       }
     }

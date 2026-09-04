@@ -1,6 +1,12 @@
 package com.hemju.threadmill.core.internal;
 
-/** Internal classification for JVM errors that Threadmill must never contain. */
+/**
+ * Internal classification for JVM errors that Threadmill must never contain.
+ *
+ * <p><strong>Engine-internal.</strong> This class is {@code public} only for cross-module engine
+ * wiring; it is NOT part of Threadmill's supported public API. Its methods and behavior may change
+ * in any release without notice.
+ */
 public final class FatalErrors {
 
   private static final int MAX_CAUSE_DEPTH = 64;
@@ -8,10 +14,12 @@ public final class FatalErrors {
   private FatalErrors() {}
 
   /**
-   * Rethrow a process-fatal JVM error found in {@code failure} or its cause chain.
+   * Rethrow a process-fatal JVM error found in {@code failure} or its simple cause chain.
    *
-   * <p>The bounded walk avoids allocating while the VM may already be under resource pressure and
-   * cannot loop forever on a malformed cyclic cause chain.
+   * <p>The walk is bounded so a malformed cyclic cause chain terminates without an allocating
+   * visited set while the VM may already be under resource pressure. Suppressed exceptions are not
+   * traversed: the engine contract covers causal wrappers, and reading suppressed exceptions would
+   * broaden this into an allocating graph walk on the failure path.
    */
   @SuppressWarnings("removal")
   public static void rethrowIfFatal(Throwable failure) {

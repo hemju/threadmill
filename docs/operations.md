@@ -35,13 +35,30 @@ dispatcher, maintenance, registry, and remote-wake boundaries before logging,
 failure serialization, interceptor callbacks, or retry logic can treat the JVM
 as healthy.
 
-Run production nodes under a process supervisor configured to restart the
-service after fatal JVM termination, and route uncaught engine-thread errors to
-the host's process-fatal policy. Threadmill deliberately does not call
-`System.exit` or `Runtime.halt`; the host owns termination policy. If the
-process terminates with a job still `PROCESSING`, normal heartbeat expiry and
-orphan recovery provide at-least-once redelivery on a surviving node, so the
-handler must remain idempotent.
+Escaping an engine boundary terminates that engine thread, not necessarily the
+JVM. Threadmill deliberately does not call `System.exit` or `Runtime.halt`; the
+host owns termination policy. Without a host policy, a fatal error on a worker
+can leave its job `PROCESSING` while the node's owner heartbeat continues to
+refresh it. Orphan recovery cannot reclaim that job, and its claim-time
+concurrency slot remains held, until the node stops and its heartbeat expires.
+A fatal error on a long-lived engine loop can similarly leave a live but
+impaired process.
+
+Production deployments must therefore convert uncaught process-fatal errors
+into process termination and run the service under a supervisor that restarts
+it. For `OutOfMemoryError`, use `-XX:+ExitOnOutOfMemoryError`, or
+`-XX:+CrashOnOutOfMemoryError` when a fatal-error log or core dump is required.
+For other process-fatal errors, install a process-wide
+`Thread.setDefaultUncaughtExceptionHandler` before starting Threadmill that
+invokes the host's termination policy, or use an equivalent liveness watchdog
+that terminates an impaired process. The default handler is JVM-global, so the
+application—not this library—must own it. Java 25 no longer provides
+`Thread.stop()` as a source of `ThreadDeath`, but application or instrumentation
+code can still throw it explicitly.
+
+After process termination stops the node heartbeat, normal heartbeat expiry
+and orphan recovery provide at-least-once redelivery on a surviving node. The
+handler must therefore remain idempotent.
 
 ## Metrics
 

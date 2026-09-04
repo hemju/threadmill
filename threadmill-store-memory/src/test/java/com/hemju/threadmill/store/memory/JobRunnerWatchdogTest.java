@@ -1,6 +1,7 @@
 package com.hemju.threadmill.store.memory;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.awaitility.Awaitility.await;
 
 import java.time.Duration;
@@ -16,6 +17,9 @@ import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.JobInterceptors;
 import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
+import com.hemju.threadmill.core.handler.JobHandler;
+import com.hemju.threadmill.core.handler.JobHandlerResolver;
+import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.handler.ReflectiveJobHandlerResolver;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
@@ -66,5 +70,44 @@ class JobRunnerWatchdogTest {
     } finally {
       runner.shutdown();
     }
+  }
+
+  @Test
+  @DisplayName("a fatal handler error cancels its watchdog before escaping")
+  void fatalHandlerErrorCancelsWatchdogBeforeEscaping() throws Exception {
+    var store = new InMemoryJobStore();
+    var nodeId = NodeId.newId();
+    var fatal = new TestVirtualMachineError();
+    JobHandler<JobPayload> handler = (payload, ctx) -> {
+      throw new IllegalStateException("wrapped fatal", fatal);
+    };
+    JobHandlerResolver resolver = ignored -> handler;
+    var runner = new JobRunner(
+        store,
+        nodeId,
+        resolver,
+        serializer,
+        new JobInterceptors(),
+        ProcessingNodeConfig.builder().jobTimeout(Duration.ofMinutes(5)).build());
+    try {
+      var field = JobRunner.class.getDeclaredField("timeoutExecutor");
+      field.setAccessible(true);
+      var executor = (ScheduledThreadPoolExecutor) field.get(runner);
+      JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("fatal"));
+      Job job =
+          Job.builder().spec(new JobSpec("example.FatalHandler", List.of(arg))).build();
+      store.insert(job);
+      Job claimed = store.claimReady(nodeId, "default", 1, Instant.now()).getFirst();
+
+      assertThatThrownBy(() -> runner.run(claimed)).isSameAs(fatal);
+      await().atMost(Duration.ofSeconds(5)).until(() -> executor.getQueue().isEmpty());
+      assertThat(executor.getQueue()).isEmpty();
+    } finally {
+      runner.shutdown();
+    }
+  }
+
+  private static final class TestVirtualMachineError extends VirtualMachineError {
+    private static final long serialVersionUID = 1L;
   }
 }

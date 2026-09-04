@@ -227,29 +227,32 @@ public final class JobRunner {
         TimeUnit.MILLISECONDS);
 
     try {
-      ScopedValue.where(EngineScopedValues.CURRENT, ctx).run(() -> {
-        try {
-          handler.run(payload, ctx);
-        } catch (RuntimeException re) {
-          FatalErrors.rethrowIfFatal(re);
-          throw re;
-        } catch (Exception e) {
-          FatalErrors.rethrowIfFatal(e);
-          throw new HandlerInvocationException(e);
+      try {
+        ScopedValue.where(EngineScopedValues.CURRENT, ctx).run(() -> {
+          try {
+            handler.run(payload, ctx);
+          } catch (RuntimeException re) {
+            FatalErrors.rethrowIfFatal(re);
+            throw re;
+          } catch (Exception e) {
+            FatalErrors.rethrowIfFatal(e);
+            throw new HandlerInvocationException(e);
+          }
+        });
+        if (ctx.cancellation().orElse(null) == CancellationReason.TIMEOUT) {
+          throw new HandlerTimeoutException();
         }
-      });
-      watchdog.cancel(false);
-      // Clear any straggler interrupt the watchdog may have raised after the handler returned.
-      Thread.interrupted();
-      if (ctx.cancellation().orElse(null) == CancellationReason.TIMEOUT) {
-        throw new HandlerTimeoutException();
+        ctx.flushBestEffort();
+        markSucceeded(job, ctx);
+      } finally {
+        // A fatal must escape, but not before its periodic task releases the captured ctx -> Job
+        // graph. The JVM does not necessarily terminate when an error kills one worker thread.
+        watchdog.cancel(false);
+        // Clear any straggler interrupt the watchdog may have raised after the handler returned.
+        Thread.interrupted();
       }
-      ctx.flushBestEffort();
-      markSucceeded(job, ctx);
     } catch (Throwable t) {
       FatalErrors.rethrowIfFatal(t);
-      watchdog.cancel(false);
-      Thread.interrupted();
       ctx.flushBestEffort();
       Throwable unwrapped = unwrap(t);
       recordFailure(job, ctx, unwrapped, classify(ctx, unwrapped));

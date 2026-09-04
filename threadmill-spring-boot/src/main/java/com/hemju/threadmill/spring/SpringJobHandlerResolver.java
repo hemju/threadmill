@@ -57,8 +57,8 @@ public final class SpringJobHandlerResolver implements JobHandlerResolver {
       try {
         Object bean = context.getBean(type);
         return (JobHandler<?>) bean;
-      } catch (BeansException ignored) {
-        FatalErrors.rethrowIfFatal(ignored);
+      } catch (BeansException lookupFailure) {
+        FatalErrors.rethrowIfFatal(lookupFailure);
         // Not a registered bean — fall back to autowire-by-type construction.
         Object instance = context.getAutowireCapableBeanFactory().createBean(type);
         return (JobHandler<?>) instance;

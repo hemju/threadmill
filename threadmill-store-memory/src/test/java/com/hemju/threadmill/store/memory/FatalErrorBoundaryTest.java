@@ -10,9 +10,11 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.Test;
 
@@ -26,6 +28,7 @@ import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.MaintenanceCycle;
 import com.hemju.threadmill.core.engine.NodeRegistry;
+import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.engine.RetryInterceptor;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
@@ -133,10 +136,14 @@ class FatalErrorBoundaryTest {
   @Test
   void processFatalErrorsEscapeRegistryBoundary() {
     for (Error fatal : fatalErrors()) {
+      var heartbeatAttempts = new AtomicInteger();
       var store = new ForwardingJobStore(new InMemoryJobStore()) {
         @Override
         public void recordNodeHeartbeat(NodeId nodeId, Instant now) {
-          throw new IllegalStateException("wrapped fatal registry failure", fatal);
+          if (heartbeatAttempts.getAndIncrement() == 0) {
+            throw new IllegalStateException("wrapped fatal registry failure", fatal);
+          }
+          super.recordNodeHeartbeat(nodeId, now);
         }
       };
       var registry = new NodeRegistry(
@@ -147,6 +154,56 @@ class FatalErrorBoundaryTest {
           Duration.ofSeconds(1));
 
       assertThatThrownBy(registry::start).isSameAs(fatal);
+      try {
+        registry.start();
+        assertThat(heartbeatAttempts).hasValueGreaterThanOrEqualTo(2);
+      } finally {
+        registry.stop();
+      }
+    }
+  }
+
+  @Test
+  void fatalRegistryCleanupStillShutsDownTheTimeoutWatchdog() throws Exception {
+    var fatal = new TestVirtualMachineError();
+    var store = new ForwardingJobStore(new InMemoryJobStore()) {
+      @Override
+      public void releaseMaintenanceLease(NodeId nodeId) {
+        throw new IllegalStateException("wrapped fatal registry cleanup", fatal);
+      }
+    };
+    var node = ProcessingNode.builder(store).build();
+    var runnerField = ProcessingNode.class.getDeclaredField("runner");
+    runnerField.setAccessible(true);
+    var runner = (JobRunner) runnerField.get(node);
+    var executorField = JobRunner.class.getDeclaredField("timeoutExecutor");
+    executorField.setAccessible(true);
+    var timeoutExecutor = (ScheduledExecutorService) executorField.get(runner);
+    node.start();
+
+    assertThatThrownBy(node::close).isSameAs(fatal);
+    assertThat(timeoutExecutor.isShutdown()).isTrue();
+  }
+
+  @Test
+  void productionWorkerThreadsHaveDiagnosticNames() throws Exception {
+    var store = new InMemoryJobStore();
+    var workerName = new CompletableFuture<String>();
+    JobHandler<JobPayload> handler =
+        (payload, ctx) -> workerName.complete(Thread.currentThread().getName());
+    var node = ProcessingNode.builder(store)
+        .config(
+            ProcessingNodeConfig.builder().pollInterval(Duration.ofMillis(10)).build())
+        .handlerResolver(ignored -> handler)
+        .build();
+    insertJob(store);
+
+    try {
+      node.start();
+      assertThat(workerName.get(ASYNC_TIMEOUT.toMillis(), TimeUnit.MILLISECONDS))
+          .startsWith("threadmill-worker-");
+    } finally {
+      node.close();
     }
   }
 
