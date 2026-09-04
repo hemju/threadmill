@@ -2,6 +2,7 @@ import java.io.File
 import org.assertj.core.api.Assertions.assertThat
 import org.gradle.testkit.runner.GradleRunner
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 
 class ProductionCheckFunctionalTest {
     private val repositoryRoot =
@@ -38,8 +39,9 @@ class ProductionCheckFunctionalTest {
     }
 
     @Test
-    fun `every central publication entry point runs only after the production and tag gates`() {
-        val publicationTaskPaths = centralPublicationTaskPaths()
+    fun `every supported central publication entry point runs after the production and tag gates`() {
+        val aggregationTaskPaths = centralPublicationTaskPaths().filterNot(::isModuleTask)
+        val publicationTaskPaths = aggregationTaskPaths + nmcpStagingTaskPaths()
         val taskPaths =
             dryRun(
                 *publicationTaskPaths.toTypedArray(),
@@ -76,6 +78,58 @@ class ProductionCheckFunctionalTest {
             }
     }
 
+    @Test
+    fun `direct module central publication lanes refuse before the release gauntlet`() {
+        val directModuleTaskPaths = centralPublicationTaskPaths().filter(::isModuleTask)
+        val taskPaths = dryRun(*directModuleTaskPaths.toTypedArray())
+
+        assertThat(directModuleTaskPaths).isNotEmpty
+        assertThat(taskPaths)
+            .contains(":rejectDirectModulePublication")
+            .doesNotContain(":cleanAll", ":productionCheck", ":verifyReleaseTag")
+
+        val rejectionIndex = taskPaths.indexOf(":rejectDirectModulePublication")
+        taskPaths
+            .filterNot { it == ":rejectDirectModulePublication" }
+            .forEach { taskPath ->
+                assertThat(taskPaths.indexOf(taskPath))
+                    .describedAs("$taskPath must run after the direct-publication refusal")
+                    .isGreaterThan(rejectionIndex)
+            }
+    }
+
+    @Test
+    fun `release tag reads each published project's actual version`(
+        @TempDir temporaryDirectory: File
+    ) {
+        val initScript = File(temporaryDirectory, "override-version.init.gradle")
+        initScript.writeText(
+            """
+            gradle.afterProject { project, state ->
+                if (project.path == ':threadmill-core') {
+                    project.version = 'test-inconsistent-version'
+                }
+            }
+            """
+                .trimIndent()
+        )
+
+        val result =
+            GradleRunner.create()
+                .withProjectDir(repositoryRoot)
+                .withArguments(
+                    "verifyReleaseTag",
+                    "-I",
+                    initScript.absolutePath,
+                    "--no-configuration-cache",
+                )
+                .buildAndFail()
+
+        assertThat(result.output)
+            .contains("one consistent release version across all published modules")
+            .contains("test-inconsistent-version")
+    }
+
     private fun centralPublicationTaskPaths(): List<String> {
         val result =
             GradleRunner.create()
@@ -88,16 +142,20 @@ class ProductionCheckFunctionalTest {
                 .mapNotNull { CENTRAL_PUBLICATION_TASK.matchEntire(it)?.groupValues?.get(1) }
                 .map { ":$it" }
                 .toList()
+        return centralTasks.distinct()
+    }
+
+    private fun nmcpStagingTaskPaths(): List<String> {
         val publishedProjects =
             PUBLISHED_PROJECT.findAll(File(repositoryRoot, "build.gradle.kts").readText())
                 .map { it.groupValues[1] }
                 .toList()
-        val stagingTasks =
-            publishedProjects.flatMap { project ->
-                NMCP_STAGING_TASKS.map { task -> ":$project:$task" }
-            }
-        return (centralTasks + stagingTasks).distinct()
+        return publishedProjects.flatMap { project ->
+            NMCP_STAGING_TASKS.map { task -> ":$project:$task" }
+        }
     }
+
+    private fun isModuleTask(taskPath: String): Boolean = taskPath.indexOf(':', startIndex = 1) >= 0
 
     private fun dryRun(vararg tasksAndArguments: String): List<String> {
         val result =
@@ -113,7 +171,7 @@ class ProductionCheckFunctionalTest {
 
     private companion object {
         val CENTRAL_PUBLICATION_TASK =
-            Regex("^(\\S*(?:CentralPortal|CentralSnapshots)\\S*)\\s+-\\s+Publishes.*$")
+            Regex("^(\\S*(?:CentralPortal|CentralSnapshots)\\S*)(?:\\s+.*)?$")
         val DRY_RUN_TASK = Regex("^(:\\S+) SKIPPED$")
         val INCLUDED_PROJECT = Regex("\"(threadmill-[a-z-]+)\"")
         val PUBLISHED_PROJECT = Regex("project\\(\":(threadmill-[a-z-]+)\"\\)")

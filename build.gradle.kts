@@ -1,4 +1,3 @@
-import com.hemju.threadmill.gradle.ThreadmillVersion
 import com.hemju.threadmill.gradle.VerifyReleaseTag
 
 plugins {
@@ -113,7 +112,9 @@ tasks.named("check") {
 // cannot consume stale outputs before a later clean deletes them.
 allprojects {
     tasks.configureEach {
-        if (name !in setOf("clean", "cleanAll", "verifyReleaseTag")) {
+        if (
+            name !in setOf("clean", "cleanAll", "verifyReleaseTag", "rejectDirectModulePublication")
+        ) {
             mustRunAfter(cleanAll)
         }
     }
@@ -314,7 +315,7 @@ val requestedReleaseTag =
     providers.gradleProperty("releaseTag").orElse(providers.environmentVariable("GITHUB_REF_NAME"))
 val verifyReleaseTag by
     tasks.registering(VerifyReleaseTag::class) {
-        publishedVersions.set(publishedProjects.map { ThreadmillVersion.CURRENT })
+        publishedVersions.set(provider { publishedProjects.map { it.version.toString() } })
         releaseTag.set(requestedReleaseTag)
     }
 
@@ -351,24 +352,34 @@ val modulePublicationTasks =
         "nmcpPublishAllPublicationsToCentralPortal",
         "nmcpPublishAllPublicationsToCentralPortalSnapshots",
     )
+val rejectDirectModulePublication by
+    tasks.registering {
+        description = "Reject unsupported per-module Central Portal publication."
+        doLast {
+            throw GradleException(
+                "Threadmill publishes one atomic multi-module bundle; use " +
+                    "publishAggregationToCentralPortal instead of a per-module publication task."
+            )
+        }
+    }
 val nmcpStagingTasks =
     setOf("publishMavenJavaPublicationToNmcpRepository", "publishAllPublicationsToNmcpRepository")
 
 publishedProjects.forEach { publishedProject ->
     publishedProject.pluginManager.withPlugin("com.gradleup.nmcp") {
         modulePublicationTasks.forEach {
-            publishedProject.tasks.named(it) {
-                dependsOn(productionCheck, verifyReleaseTag)
-                // Threadmill releases one atomic multi-module aggregation. A
-                // direct module upload could publish an incomplete release.
-                enabled = false
-            }
+            // Threadmill releases one atomic multi-module aggregation. A direct
+            // module upload could publish an incomplete release, so fail with an
+            // actionable error before scheduling the expensive release gate.
+            publishedProject.tasks.named(it) { dependsOn(rejectDirectModulePublication) }
         }
         // Nmcp creates repository staging tasks after its plugin callback starts.
         // An exact lazy match catches those later registrations without the
         // fail-open suffix matching that previously hid new/renamed task lanes.
         publishedProject.tasks
             .matching { it.name in nmcpStagingTasks }
-            .configureEach { mustRunAfter(productionCheck, verifyReleaseTag) }
+            .configureEach {
+                mustRunAfter(productionCheck, verifyReleaseTag, rejectDirectModulePublication)
+            }
     }
 }

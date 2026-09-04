@@ -11,14 +11,22 @@ plugins {
 }
 
 // Configure Nmcp's direct per-module Central tasks even though the root build
-// disables them in favor of the atomic aggregation. Nmcp validates credentials
-// as soon as one of those task lanes enters the graph; sharing the root
-// properties lets the build-logic regression test prove the lanes stay gated.
+// replaces them with an explicit refusal in favor of the atomic aggregation.
+// Nmcp validates credentials as soon as one of those task lanes enters the
+// graph, so fallbacks let the refusal explain the supported command even on a
+// machine without release credentials. If the refusal wiring is ever removed,
+// these sentinel credentials still make the remote call fail closed.
 @Suppress("DEPRECATION")
 nmcp {
     publishAllPublicationsToCentralPortal {
-        username = rootProject.providers.gradleProperty("centralPortalUsername")
-        password = rootProject.providers.gradleProperty("centralPortalPassword")
+        username =
+            rootProject.providers
+                .gradleProperty("centralPortalUsername")
+                .orElse("threadmill-direct-module-publication-disabled")
+        password =
+            rootProject.providers
+                .gradleProperty("centralPortalPassword")
+                .orElse("threadmill-direct-module-publication-disabled")
         publishingType = "AUTOMATIC"
     }
 }
