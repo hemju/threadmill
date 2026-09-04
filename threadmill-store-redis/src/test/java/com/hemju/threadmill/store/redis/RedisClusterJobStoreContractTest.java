@@ -34,7 +34,39 @@ class RedisClusterJobStoreContractTest extends AbstractJobStoreContractTest {
 
   @BeforeAll
   static void startCluster() throws Exception {
-    int hostPort = availablePort();
+    int hostPort = startContainerWithFreshPort();
+    awaitClusterReady();
+
+    var seed = RedisURI.create("redis://localhost:" + hostPort);
+    adminClient = RedisClusterClient.create(seed);
+    adminConnection = adminClient.connect();
+    config = new RedisStoreConfig.Cluster(
+        List.of(new RedisStoreConfig.HostAndPort("localhost", hostPort)), "master");
+  }
+
+  private static int startContainerWithFreshPort() throws Exception {
+    RuntimeException lastFailure = null;
+    for (int attempt = 0; attempt < 3; attempt++) {
+      int hostPort = availablePort();
+      redis = newClusterContainer(hostPort);
+      try {
+        redis.start();
+        var addSlots = redis.execInContainer("redis-cli", "cluster", "addslotsrange", "0", "16383");
+        assertThat(addSlots.getExitCode()).as(addSlots.getStderr()).isZero();
+        return hostPort;
+      } catch (RuntimeException startFailure) {
+        lastFailure = startFailure;
+        try {
+          redis.close();
+        } catch (RuntimeException closeFailure) {
+          startFailure.addSuppressed(closeFailure);
+        }
+      }
+    }
+    throw lastFailure;
+  }
+
+  private static GenericContainer<?> newClusterContainer(int hostPort) {
     var redisConfig = """
         bind 0.0.0.0
         protected-mode no
@@ -48,21 +80,10 @@ class RedisClusterJobStoreContractTest extends AbstractJobStoreContractTest {
         appendonly yes
         maxmemory-policy noeviction
         """.formatted(hostPort);
-    redis = new FixedPortRedisContainer(hostPort)
+    return new FixedPortRedisContainer(hostPort)
         .withCopyToContainer(Transferable.of(redisConfig), "/tmp/redis.conf")
         .withCommand("redis-server", "/tmp/redis.conf")
         .waitingFor(Wait.forListeningPort());
-    redis.start();
-
-    var addSlots = redis.execInContainer("redis-cli", "cluster", "addslotsrange", "0", "16383");
-    assertThat(addSlots.getExitCode()).as(addSlots.getStderr()).isZero();
-    awaitClusterReady();
-
-    var seed = RedisURI.create("redis://localhost:" + hostPort);
-    adminClient = RedisClusterClient.create(seed);
-    adminConnection = adminClient.connect();
-    config = new RedisStoreConfig.Cluster(
-        List.of(new RedisStoreConfig.HostAndPort("localhost", hostPort)), "master");
   }
 
   @AfterAll

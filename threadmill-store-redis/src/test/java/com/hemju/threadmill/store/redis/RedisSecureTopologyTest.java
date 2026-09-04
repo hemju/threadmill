@@ -73,9 +73,9 @@ class RedisSecureTopologyTest {
 
   @Test
   void authenticatedVerifiedTlsClusterKeepsOptionalLuaKeysInOneSlot() throws Exception {
-    int hostPort = availablePort();
-    try (var redis = clusterContainer(hostPort, true)) {
-      redis.start();
+    try (var cluster = startClusterContainer(true)) {
+      var redis = cluster.container();
+      int hostPort = cluster.hostPort();
       prepareCluster(redis);
 
       var config = new RedisStoreConfig.Cluster(
@@ -101,10 +101,8 @@ class RedisSecureTopologyTest {
 
   @Test
   void authenticatedVerifiedTlsSentinelUsesSeparateControlAndDataCredentials() throws Exception {
-    int dataPort = availablePort();
-    int sentinelPort = differentAvailablePort(dataPort);
-    try (var redis = sentinelContainer(dataPort, sentinelPort)) {
-      redis.start();
+    try (var sentinel = startSentinelContainer()) {
+      int sentinelPort = sentinel.sentinelPort();
       var config = new RedisStoreConfig.Sentinel(
           MASTER,
           List.of(new RedisStoreConfig.HostAndPort("localhost", sentinelPort)),
@@ -125,9 +123,9 @@ class RedisSecureTopologyTest {
 
   @Test
   void authenticatedTlsStartupFailureDoesNotExposeCredentials() throws Exception {
-    int hostPort = availablePort();
-    try (var redis = clusterContainer(hostPort, false)) {
-      redis.start();
+    try (var cluster = startClusterContainer(false)) {
+      var redis = cluster.container();
+      int hostPort = cluster.hostPort();
       prepareCluster(redis);
 
       var wrongPassword = "must-never-appear-in-errors";
@@ -214,6 +212,23 @@ class RedisSecureTopologyTest {
         .waitingFor(Wait.forListeningPort());
   }
 
+  private static RunningCluster startClusterContainer(boolean requireClientCertificate)
+      throws IOException {
+    RuntimeException lastFailure = null;
+    for (int attempt = 0; attempt < 3; attempt++) {
+      int hostPort = availablePort();
+      var container = clusterContainer(hostPort, requireClientCertificate);
+      try {
+        container.start();
+        return new RunningCluster(container, hostPort);
+      } catch (RuntimeException startFailure) {
+        lastFailure = startFailure;
+        closeAfterFailedStart(container, startFailure);
+      }
+    }
+    throw lastFailure;
+  }
+
   private static SecureRedisContainer sentinelContainer(int dataPort, int sentinelPort) {
     var dataConfig = """
         bind 0.0.0.0
@@ -271,6 +286,32 @@ class RedisSecureTopologyTest {
             "redis-server /secure/data.conf --daemonize yes"
                 + " && exec redis-server /secure/sentinel.conf --sentinel")
         .waitingFor(Wait.forListeningPorts(dataPort, sentinelPort));
+  }
+
+  private static RunningSentinel startSentinelContainer() throws IOException {
+    RuntimeException lastFailure = null;
+    for (int attempt = 0; attempt < 3; attempt++) {
+      int dataPort = availablePort();
+      int sentinelPort = differentAvailablePort(dataPort);
+      var container = sentinelContainer(dataPort, sentinelPort);
+      try {
+        container.start();
+        return new RunningSentinel(container, sentinelPort);
+      } catch (RuntimeException startFailure) {
+        lastFailure = startFailure;
+        closeAfterFailedStart(container, startFailure);
+      }
+    }
+    throw lastFailure;
+  }
+
+  private static void closeAfterFailedStart(
+      SecureRedisContainer container, RuntimeException startFailure) {
+    try {
+      container.close();
+    } catch (RuntimeException closeFailure) {
+      startFailure.addSuppressed(closeFailure);
+    }
   }
 
   private static SecureRedisContainer secureContainer() {
@@ -377,6 +418,24 @@ class RedisSecureTopologyTest {
     // close-to-bind TOCTOU window; the resource lock prevents this suite racing itself.
     try (var socket = new ServerSocket(0)) {
       return socket.getLocalPort();
+    }
+  }
+
+  private record RunningCluster(SecureRedisContainer container, int hostPort)
+      implements AutoCloseable {
+
+    @Override
+    public void close() {
+      container.close();
+    }
+  }
+
+  private record RunningSentinel(SecureRedisContainer container, int sentinelPort)
+      implements AutoCloseable {
+
+    @Override
+    public void close() {
+      container.close();
     }
   }
 
