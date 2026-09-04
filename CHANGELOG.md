@@ -8,9 +8,9 @@
   Git-tracked Gradle/npm lockfile. The policy, advisory-specific reachability
   record, and time-bounded exception rules are documented.
 - Patched the remaining locked dependency advisories: Spring Boot 4.0.8 with
-  Spring Framework 7.0.9, Spring Security 7.0.7, and a Tomcat 11.0.25 test
-  floor; Lettuce 6.8.2.RELEASE with Netty 4.1.137.Final; Browserslist 4.28.9;
-  and PostCSS Selector Parser 6.1.4. Lettuce 6.8 adds
+  Spring Framework 7.0.9, Spring Security 7.0.7, Logback 1.5.38, and a Tomcat
+  11.0.25 test floor; Lettuce 6.8.2.RELEASE with Netty 4.1.137.Final;
+  Browserslist 4.28.9; and PostCSS Selector Parser 6.1.4. Lettuce 6.8 adds
   `netty-resolver-dns`/`netty-codec-dns` to the published Redis module's
   runtime graph; these are upstream compile dependencies, not optional extras.
 - Handlers can see the engine's deadline coming (issue #119).
