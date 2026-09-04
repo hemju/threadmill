@@ -259,6 +259,50 @@ public final class EngineTestHandlers {
     }
   }
 
+  /**
+   * Blocks until the timeout interrupt, then checks in from its cleanup path
+   * and blocks again. The watchdog must interrupt it a second time: a
+   * check-in moves the deadline forward but must not lift a cancellation.
+   */
+  public static final class CheckInDuringCleanupHandler implements JobHandler<HelloPayload> {
+    public static final AtomicInteger INTERRUPTS = new AtomicInteger();
+    public static final AtomicReference<Instant> FIRST_INTERRUPT_AT = new AtomicReference<>();
+    public static final AtomicReference<Instant> SECOND_INTERRUPT_AT = new AtomicReference<>();
+
+    @Override
+    public void run(HelloPayload payload, JobExecutionContext ctx) throws Exception {
+      try {
+        Thread.sleep(60_000);
+      } catch (InterruptedException first) {
+        INTERRUPTS.incrementAndGet();
+        FIRST_INTERRUPT_AT.set(Instant.now());
+        ctx.checkIn("cleaning up");
+        try {
+          Thread.sleep(60_000);
+        } catch (InterruptedException second) {
+          INTERRUPTS.incrementAndGet();
+          SECOND_INTERRUPT_AT.set(Instant.now());
+          throw second;
+        }
+      }
+    }
+  }
+
+  /**
+   * Records the cancellation the engine had already recorded when the
+   * handler started, then fails with a socket-shaped runtime exception.
+   */
+  public static final class CancellationRecordingHandler implements JobHandler<HelloPayload> {
+    public static final AtomicReference<Optional<JobExecutionContext.CancellationReason>>
+        CANCELLATION_AT_START = new AtomicReference<>();
+
+    @Override
+    public void run(HelloPayload payload, JobExecutionContext ctx) {
+      CANCELLATION_AT_START.set(ctx.cancellation());
+      throw new IllegalStateException("Closed by interrupt");
+    }
+  }
+
   /** Simple payload used by every test handler. */
   public static final class HelloPayload implements JobPayload {
     public String name;
@@ -292,5 +336,9 @@ public final class EngineTestHandlers {
     ShutdownDeadlineObservingHandler.COLLAPSED_DEADLINE.set(null);
     ShutdownDeadlineObservingHandler.CANCELLED_AT_COLLAPSE.set(false);
     CurrentContextHandler.CURRENT_IS_THIS_CONTEXT.set(false);
+    CheckInDuringCleanupHandler.INTERRUPTS.set(0);
+    CheckInDuringCleanupHandler.FIRST_INTERRUPT_AT.set(null);
+    CheckInDuringCleanupHandler.SECOND_INTERRUPT_AT.set(null);
+    CancellationRecordingHandler.CANCELLATION_AT_START.set(null);
   }
 }

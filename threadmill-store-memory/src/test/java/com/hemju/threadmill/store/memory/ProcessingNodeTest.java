@@ -24,11 +24,14 @@ import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.Dispatcher;
 import com.hemju.threadmill.core.engine.JobInterceptor;
+import com.hemju.threadmill.core.engine.JobInterceptors;
+import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.engine.QueueLane;
 import com.hemju.threadmill.core.engine.QueueWeights;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.handler.ReflectiveJobHandlerResolver;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.serialization.SerializationException;
 import com.hemju.threadmill.core.spec.JobArgument;
@@ -1377,6 +1380,116 @@ class ProcessingNodeTest {
       assertThat(failureKinds).contains(JobInterceptor.FailureCause.TIMEOUT);
       Job loaded = store.findById(job.id()).orElseThrow();
       assertThat(loaded.currentState()).isEqualTo(JobState.FAILED);
+    });
+  }
+
+  @Test
+  void timedOutHandlerThatChecksInDuringCleanupIsInterruptedAgain() {
+    // PR #121 review: markCancelled(TIMEOUT) is permanent, but the deadline
+    // formula is not — a checkIn() from cleanup code moves it forward. The
+    // watchdog must keep interrupting once cancellation is recorded, or
+    // repeated check-ins could keep a timed-out attempt alive indefinitely.
+    var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofMillis(300))
+            .noProgressTimeout(Duration.ofSeconds(60))
+            .checkInMinInterval(Duration.ofMillis(25))
+            .defaultMaxAttempts(1)
+            .build())
+        .interceptor(new JobInterceptor() {
+          @Override
+          public void onProcessingFailed(
+              Job j, JobExecutionContext c, Throwable cause, FailureCause kind) {
+            failureKinds.add(kind);
+          }
+        })
+        .build();
+    Job job = enqueueHello(
+        EngineTestHandlers.CheckInDuringCleanupHandler.class, fastConfig.defaultQueue());
+    node.start();
+
+    await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+      assertThat(EngineTestHandlers.CheckInDuringCleanupHandler.INTERRUPTS.get())
+          .isEqualTo(2);
+      assertThat(failureKinds).contains(JobInterceptor.FailureCause.TIMEOUT);
+      assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.FAILED);
+    });
+    Duration gap = Duration.between(
+        EngineTestHandlers.CheckInDuringCleanupHandler.FIRST_INTERRUPT_AT.get(),
+        EngineTestHandlers.CheckInDuringCleanupHandler.SECOND_INTERRUPT_AT.get());
+    assertThat(gap)
+        .as("the second interrupt arrives within the watchdog cadence, not after noProgressTimeout")
+        .isLessThan(Duration.ofSeconds(2));
+  }
+
+  @Test
+  void forcedShutdownLatchedBeforeTheSweepStillCancelsALateRegisteringAttempt() {
+    // PR #121 review: cancelInFlightForShutdown() iterates a weakly consistent
+    // set, so a worker registering its context after the sweep would receive
+    // shutdownNow()'s interrupt with no SHUTDOWN recorded and, if the
+    // interrupt surfaces socket-shaped, be billed as a handler fault. The
+    // sweep latches forced shutdown and run() checks the latch on the way in.
+    var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
+    var interceptors = new JobInterceptors().add(new JobInterceptor() {
+      @Override
+      public void onProcessingFailed(
+          Job j, JobExecutionContext c, Throwable cause, FailureCause kind) {
+        failureKinds.add(kind);
+      }
+    });
+    var nodeId = NodeId.newId();
+    var runner = new JobRunner(
+        store, nodeId, new ReflectiveJobHandlerResolver(), serializer, interceptors, fastConfig);
+    Job job = enqueueHello(
+        EngineTestHandlers.CancellationRecordingHandler.class, fastConfig.defaultQueue());
+    Job claimed =
+        store.claimReady(nodeId, fastConfig.defaultQueue(), 1, Instant.now()).getFirst();
+    try {
+      // The sweep runs first and sees nothing; the attempt registers afterwards.
+      runner.cancelInFlightForShutdown();
+      runner.run(claimed);
+    } finally {
+      runner.shutdown();
+    }
+
+    assertThat(EngineTestHandlers.CancellationRecordingHandler.CANCELLATION_AT_START.get())
+        .contains(JobExecutionContext.CancellationReason.SHUTDOWN);
+    assertThat(failureKinds).containsExactly(JobInterceptor.FailureCause.SHUTDOWN);
+  }
+
+  @Test
+  void absurdTimeoutMetadataFallsBackToTheGlobalTimeout() {
+    // PR #121 review: a per-job override near Long.MAX_VALUE parses but makes
+    // Duration.toMillis() and Instant.plus overflow before the handler's try
+    // block, escaping the single failure path and stranding the row in
+    // PROCESSING. It must degrade to the global timeout like malformed input.
+    var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
+    JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("test"));
+    Job job = Job.builder()
+        .spec(new JobSpec(EngineTestHandlers.HangingHandler.class.getName(), List.of(arg)))
+        .queue(fastConfig.defaultQueue())
+        .metadata("threadmill.job.timeoutSeconds", Long.toString(Long.MAX_VALUE))
+        .build();
+    store.insert(job);
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofMillis(300))
+            .defaultMaxAttempts(1)
+            .build())
+        .interceptor(new JobInterceptor() {
+          @Override
+          public void onProcessingFailed(
+              Job j, JobExecutionContext c, Throwable cause, FailureCause kind) {
+            failureKinds.add(kind);
+          }
+        })
+        .build();
+    node.start();
+
+    await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+      assertThat(failureKinds).contains(JobInterceptor.FailureCause.TIMEOUT);
+      assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.FAILED);
     });
   }
 

@@ -29,7 +29,7 @@ final class ImportHandler implements JobHandler<ImportFile> {
 `ctx.deadline()` is that instant, computed by the same rule the engine's
 watchdog uses, and `ctx.remaining()` is the time left. When the deadline
 passes the engine **interrupts the worker thread**; on a virtual thread that
-aborts in-flight socket I/O and leaves the interrupt flag set — see
+can abort in-flight socket I/O and leaves the interrupt flag set — see
 [Handlers → Timeouts](handlers.md#timeouts) for the full contract. A
 long-running handler therefore checks its budget before each step rather than
 relying on the interrupt:

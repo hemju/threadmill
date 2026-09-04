@@ -72,6 +72,11 @@ public final class JobRunner {
   // The instant the owning node will interrupt still-running attempts; null
   // until close() begins. Caps ctx.deadline() for every in-flight attempt.
   private volatile Instant shutdownDeadline;
+  // Latched once the node has decided to interrupt the worker pool. Closes the
+  // race between the SHUTDOWN sweep over inFlight and a worker registering its
+  // context a moment later: that worker still receives shutdownNow()'s
+  // interrupt and must classify it as SHUTDOWN, not as a handler fault.
+  private volatile boolean forcedShutdown;
 
   public JobRunner(
       JobStore store,
@@ -127,9 +132,12 @@ public final class JobRunner {
    * calls this immediately before it interrupts the worker pool, so the
    * record is already the fact when the interrupt lands and the failure
    * path classifies the attempt as {@code SHUTDOWN} regardless of which
-   * exception the interrupt surfaces as.
+   * exception the interrupt surfaces as. Forced shutdown is latched before the
+   * sweep, so an attempt that registers after the sweep iterated (the set
+   * iterator is weakly consistent) marks itself on the way in.
    */
   public void cancelInFlightForShutdown() {
+    forcedShutdown = true;
     for (ExecutionContext ctx : inFlight) {
       ctx.markCancelled(CancellationReason.SHUTDOWN);
     }
@@ -150,6 +158,11 @@ public final class JobRunner {
     Objects.requireNonNull(job, "job");
     var ctx = newContext(job);
     inFlight.add(ctx);
+    // Both sides of the add-versus-sweep race: the sweep marks everything it
+    // sees, and anything it could not see yet marks itself here.
+    if (forcedShutdown) {
+      ctx.markCancelled(CancellationReason.SHUTDOWN);
+    }
     try {
       runTracked(job, ctx);
     } finally {
@@ -185,7 +198,11 @@ public final class JobRunner {
     ScheduledFuture<?> watchdog = timeoutExecutor.scheduleAtFixedRate(
         () -> {
           try {
-            if (!ctx.watchdogDeadline().isAfter(Instant.now())) {
+            // Once cancelled, keep interrupting every tick until the handler
+            // returns: a check-in from cleanup code moves watchdogDeadline()
+            // forward, and without the latch repeated check-ins could keep a
+            // timed-out attempt alive indefinitely.
+            if (ctx.isCancelled() || !ctx.watchdogDeadline().isAfter(Instant.now())) {
               // Record the reason BEFORE interrupting, so ctx.cancellation()
               // is already the fact when the handler observes the interrupt.
               ctx.markCancelled(CancellationReason.TIMEOUT);
@@ -429,6 +446,19 @@ public final class JobRunner {
             META_TIMEOUT_SECONDS,
             meta.get(),
             job.id());
+        return jobTimeout;
+      }
+      if (seconds > ProcessingNodeConfig.MAX_TIMEOUT.toSeconds()) {
+        // A value near Long.MAX_VALUE parses, but Duration.toMillis() and
+        // claimedAt.plus(...) overflow before the handler's try block, which
+        // would escape the single failure path and strand the claimed row
+        // in PROCESSING. Bad metadata must degrade, never disable or crash.
+        LOG.warn(
+            "Ignoring {}='{}' for job {} — exceeds the maximum timeout of {}; using the global job timeout",
+            META_TIMEOUT_SECONDS,
+            meta.get(),
+            job.id(),
+            ProcessingNodeConfig.MAX_TIMEOUT);
         return jobTimeout;
       }
       return Duration.ofSeconds(seconds);

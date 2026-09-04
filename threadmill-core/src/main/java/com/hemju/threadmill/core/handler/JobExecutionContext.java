@@ -33,15 +33,21 @@ import com.hemju.threadmill.core.NodeId;
  *
  * <p>Every attempt runs under a deadline, and when it passes the engine
  * <strong>interrupts the worker thread</strong>. Workers are virtual threads,
- * so an interrupt aborts any blocking socket I/O the handler is in at that
- * moment: the JDK closes the socket and throws
- * {@code SocketException: Closed by interrupt}. The interrupt flag stays set
- * afterwards — only methods that throw {@code InterruptedException} clear it —
- * and the engine re-asserts it every second until the handler returns. A
- * handler must therefore treat an interrupt as cancellation: stop issuing
- * blocking calls, do not blame the external system it was talking to, and
- * return or rethrow promptly. Cleanup that keeps borrowing pooled connections
- * after the interrupt destroys each one on first use.
+ * and on a virtual thread an interrupt can also abort blocking I/O: the JDK
+ * guarantees it for {@code java.net.Socket} with the default implementation
+ * and for {@code InterruptibleChannel}s, which close the socket and throw
+ * {@code SocketException: Closed by interrupt} (or
+ * {@code ClosedByInterruptException}); third-party JDBC, HTTP, or Redis
+ * clients that use their own transports may translate the interrupt
+ * differently or observe it only at their next interruptible call. The
+ * interrupt flag stays set afterwards — only methods that throw
+ * {@code InterruptedException} clear it — and the engine re-asserts it every
+ * watchdog tick until the handler returns, including after a check-in made
+ * from cleanup code. A handler must therefore treat an interrupt as
+ * cancellation: stop issuing blocking calls, do not blame the external system
+ * it was talking to, and return or rethrow promptly. Cleanup that keeps
+ * borrowing pooled connections after the interrupt may destroy each one on
+ * first use.
  *
  * <p>The engine never has to interrupt a cooperative handler. {@link #deadline()}
  * is the instant the interrupt will arrive if the attempt is still running,
@@ -65,8 +71,12 @@ import com.hemju.threadmill.core.NodeId;
  * different things: <em>checkpoint and return</em> leaves the job
  * {@code SUCCEEDED}, so the handler must make the remaining work reachable
  * itself (a continuation job, a persisted cursor); <em>throw</em> leaves the
- * job {@code FAILED} and retried — free and immediate when the reason was
- * node shutdown, at the cost of an attempt when the job's own budget ran out.
+ * job {@code FAILED} and retried under the normal retry policy, which costs
+ * an attempt — including when the deadline collapsed because the node is
+ * closing. The free immediate requeue applies only to an attempt the engine
+ * itself cancelled, that is once {@link #cancellation()} reports
+ * {@link CancellationReason#SHUTDOWN} because the interrupt landed; a handler
+ * winding down early during a drain should therefore checkpoint and return.
  *
  * <p>{@link #cancellation()} is the fact, not the forecast: it is set the
  * moment the engine decides to abandon the attempt, immediately before the

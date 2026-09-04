@@ -48,10 +48,13 @@ public @interface Job {
    * metadata override.
    *
    * <p>When the cap passes, the engine <strong>interrupts the worker
-   * thread</strong>. Workers are virtual threads, so the interrupt aborts any
-   * blocking socket I/O in progress ({@code SocketException: Closed by
-   * interrupt}); the interrupt flag stays set afterwards and the engine
-   * re-asserts it every second until the handler returns. Treat an interrupt
+   * thread</strong>. Workers are virtual threads, so the interrupt can also
+   * abort blocking I/O: guaranteed for {@code java.net.Socket} with the
+   * default implementation and for interruptible channels
+   * ({@code SocketException: Closed by interrupt}), while third-party clients
+   * with their own transports may translate it differently. The interrupt flag
+   * stays set afterwards and the engine re-asserts it every watchdog tick
+   * until the handler returns. Treat an interrupt
    * as cancellation: stop issuing blocking calls, do not blame the external
    * system you were talking to, and return or rethrow promptly. Once the
    * handler has called {@code ctx.checkIn()} this cap no longer applies;

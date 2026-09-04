@@ -84,4 +84,26 @@ class ProcessingNodeConfigTest {
         .isInstanceOf(IllegalArgumentException.class)
         .hasMessageContaining("retentionInterval");
   }
+
+  @Test
+  void timeoutsBeyondTheMaximumAreRejected() {
+    // A timeout near Long.MAX_VALUE seconds overflows the millisecond arithmetic the
+    // watchdog and JobExecutionContext.deadline() perform on it; the config fails fast
+    // and the per-job metadata override degrades to the global timeout (JobRunner).
+    assertThatThrownBy(() -> ProcessingNodeConfig.builder()
+            .jobTimeout(ProcessingNodeConfig.MAX_TIMEOUT.plusSeconds(1))
+            .build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("jobTimeout");
+    assertThatThrownBy(() -> ProcessingNodeConfig.builder()
+            .noProgressTimeout(Duration.ofSeconds(Long.MAX_VALUE))
+            .build())
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("noProgressTimeout");
+    // The bound itself is accepted.
+    var config = ProcessingNodeConfig.builder()
+        .jobTimeout(ProcessingNodeConfig.MAX_TIMEOUT)
+        .build();
+    assertThat(config.jobTimeout()).isEqualTo(ProcessingNodeConfig.MAX_TIMEOUT);
+  }
 }

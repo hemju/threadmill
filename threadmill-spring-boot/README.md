@@ -229,7 +229,7 @@ Applied to a `JobHandler<P>` Spring bean. Required attributes:
 - `priority` — within-queue priority, higher wins. Default `0`.
 - `timeout` — ISO-8601 duration. Falls back to `threadmill.jobTimeout`. When
   it passes the engine interrupts the worker thread; on a virtual thread that
-  aborts in-flight socket I/O and leaves the interrupt flag set. Handlers read
+  can abort in-flight socket I/O and leaves the interrupt flag set. Handlers read
   `ctx.remaining()` between steps to stop first — see the `@Job.timeout`
   Javadoc and [Handlers → Timeouts](../docs/handlers.md#timeouts).
 - `maxAttempts` — total execution attempts including the first; `1` means a

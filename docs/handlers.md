@@ -147,15 +147,19 @@ second after `deadline()`.
 Workers are virtual threads, and on a virtual thread an interrupt is not a
 polite flag:
 
-- Any blocking socket I/O in progress is aborted: the JDK closes the socket
-  and throws `SocketException: Closed by interrupt`. A JDBC call, an HTTP
-  client call, a Redis call — whichever the handler is inside at that moment.
+- Blocking I/O in progress can be aborted. The JDK guarantees this for
+  `java.net.Socket` with the default implementation and for interruptible
+  channels: the socket is closed and `SocketException: Closed by interrupt`
+  (or `ClosedByInterruptException`) is thrown. That covers the JDBC, HTTP,
+  and Redis clients built on those primitives; a client that brings its own
+  transport may translate the interrupt differently or only notice it at its
+  next interruptible call.
 - The interrupt flag **stays set**. Only methods that throw
   `InterruptedException` clear it; a `SocketException` does not, and the
-  engine re-asserts the interrupt every second until the handler returns.
-  Every later blocking call on the thread fails the same way, and every
-  pooled connection the handler borrows for cleanup is destroyed on first
-  use.
+  engine re-asserts the interrupt every watchdog tick until the handler
+  returns — a `checkIn()` from cleanup code does not lift it. Every later
+  blocking call on the thread can fail the same way, and each pooled
+  connection the handler borrows for cleanup may be destroyed on first use.
 
 So treat an interrupt as cancellation: stop issuing blocking calls, do not
 classify the failure as a fault of the external system you were talking to,
@@ -184,11 +188,15 @@ for (Step step : plan) {
 There are two ways out and they mean different things. **Checkpoint and
 return** leaves the job `SUCCEEDED`, so the handler must make the remaining
 work reachable itself — a continuation job, or a persisted cursor its next run
-reads. **Throw** leaves the job `FAILED` and retried: immediately and without
-consuming an attempt when the reason was node shutdown, at the cost of an
-attempt when the job's own budget ran out. Sizing a single long call is the
-same move — give the client a timeout of `remaining()` minus a margin, and
-the call ends cleanly before the socket is torn down under it.
+reads. **Throw** leaves the job `FAILED` and retried under the normal retry
+policy, which costs an attempt — including when the deadline collapsed
+because the node is closing. The free, immediate requeue applies only to an
+attempt the engine itself cancelled, that is once `ctx.cancellation()` reports
+`SHUTDOWN` because the interrupt landed; the engine cannot tell a deliberate
+early stop from a genuine failure, so a handler winding down early during a
+drain should checkpoint and return. Sizing a single long call is the same
+move — give the client a timeout of `remaining()` minus a margin, and the
+call ends cleanly before the socket is torn down under it.
 
 ## Retry
 
