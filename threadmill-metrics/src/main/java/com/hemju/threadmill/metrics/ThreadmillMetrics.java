@@ -288,6 +288,15 @@ public final class ThreadmillMetrics {
   }
 
   private void refreshThrottled() {
+    if (refreshLock.isHeldByCurrentThread()) {
+      // A registry callback can read a gauge while reconcileQueueMeters is
+      // still registering it. tryLock() would succeed for the holder, and the
+      // re-entered refresh would recurse into the ConcurrentHashMap mapping
+      // function computing that queue's meters. The snapshot such a call
+      // would rebuild is the one this thread is already producing, so there
+      // is nothing to gain by refreshing again.
+      return;
+    }
     var now = System.nanoTime();
     if (!refreshDue(now, lastRefreshNanos)) {
       return;
