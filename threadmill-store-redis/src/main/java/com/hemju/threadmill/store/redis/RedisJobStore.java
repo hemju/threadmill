@@ -252,6 +252,7 @@ public final class RedisJobStore implements JobStore {
     this.topologyDescription = Objects.requireNonNull(topologyDescription, "topologyDescription");
     try {
       validateRedisSafety();
+      upgradeQueuePriorityLayout();
       upgradeQueueEnqueuedAtLayout();
     } catch (RuntimeException validationFailure) {
       // A wrong eviction policy is the EXPECTED failure mode on
@@ -903,7 +904,7 @@ public final class RedisJobStore implements JobStore {
     return result;
   }
 
-  /** A claimable candidate id ordered by its queue-ZSET score (priority, then age). */
+  /** A claimable candidate id ordered by its queue-ZSET score (priority, then job id). */
   private record ClaimCandidate(double queueScore, String id) {}
 
   private record KeyAdmissionRead(
@@ -936,6 +937,9 @@ public final class RedisJobStore implements JobStore {
   /** Age-index layout state: no old-release node remains and the index is exact. */
   private static final String LAYOUT_COMPLETE = "complete";
 
+  /** Queue score layout version whose score is exactly the negated priority. */
+  private static final String QUEUE_PRIORITY_LAYOUT_VERSION = "priority_only_v1";
+
   /** Node heartbeat and node layout keys share this TTL. */
   private static final long NODE_HEARTBEAT_TTL_SECONDS = 60;
 
@@ -953,9 +957,10 @@ public final class RedisJobStore implements JobStore {
    * workflow holds. A rotating HSCAN cursor bounds each pass instead of
    * HGETALL-walking every registered key. Per-key reads and queue-score probes
    * are issued asynchronously in batches, so latency is bounded by network
-   * round trips rather than multiplied by the number of keys. These reads are
-   * unlocked and approximate; claim_commit.lua stays the single admission
-   * authority.
+   * round trips rather than multiplied by the number of keys. Queue scores
+   * are exact negated priorities and equal-priority candidates use the job id
+   * as the tie-break. These reads are unlocked and approximate;
+   * claim_commit.lua stays the single admission authority.
    */
   private List<ClaimCandidate> gatherClaimCandidates(
       RedisClusterCommands<String, String> r, String queue, int cap) {
@@ -1647,6 +1652,54 @@ public final class RedisJobStore implements JobStore {
       cursor = page;
     } while (!page.isFinished());
     return List.copyOf(queues);
+  }
+
+  /**
+   * One-time in-place upgrade from the v0.2.1 queue score
+   * ({@code -priority * 1e13 + enqueue_micros}) to the exact
+   * priority-only score. The queue member remains the job id, so changing a
+   * score is idempotent and all Lua removal paths remain compatible. Each
+   * index is walked in bounded ZSCAN pages and its priorities are fetched in
+   * one asynchronous batch per page.
+   *
+   * <p>The marker is written only after every registered queue and unkeyed
+   * claim-lane index has been rescored. Deployments must stop pre-upgrade
+   * writers before this upgrade runs: an old writer can reintroduce the
+   * legacy score after the marker has been committed.
+   */
+  private void upgradeQueuePriorityLayout() {
+    RedisClusterCommands<String, String> r = sync();
+    if (QUEUE_PRIORITY_LAYOUT_VERSION.equals(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT))) return;
+    for (String queue : scanQueues(r)) {
+      rescoreQueueIndex(r, RedisKeys.queue(queue));
+      rescoreQueueIndex(r, RedisKeys.queueUnkeyed(queue));
+    }
+    r.set(RedisKeys.QUEUE_PRIORITY_LAYOUT, QUEUE_PRIORITY_LAYOUT_VERSION);
+  }
+
+  private void rescoreQueueIndex(RedisClusterCommands<String, String> r, String indexKey) {
+    ScanCursor cursor = ScanCursor.INITIAL;
+    ScoredValueScanCursor<String> page;
+    do {
+      page = r.zscan(indexKey, cursor, ScanArgs.Builder.limit(LAYOUT_BACKFILL_PAGE));
+      List<ScoredValue<String>> members = page.getValues();
+      if (members != null && !members.isEmpty()) {
+        var reads = new ArrayList<RedisFuture<String>>(members.size());
+        for (ScoredValue<String> member : members) {
+          reads.add(asyncCommands.hget(RedisKeys.PREFIX + "job:" + member.getValue(), "priority"));
+        }
+        awaitAll(reads);
+        var scoresAndIds = new ArrayList<Object>(members.size() * 2);
+        for (int i = 0; i < members.size(); i++) {
+          String priority = resultOf(reads.get(i));
+          if (priority == null || priority.isEmpty()) continue;
+          scoresAndIds.add(RedisKeys.queueScore(Integer.parseInt(priority)));
+          scoresAndIds.add(members.get(i).getValue());
+        }
+        if (!scoresAndIds.isEmpty()) r.zadd(indexKey, scoresAndIds.toArray());
+      }
+      cursor = page;
+    } while (!page.isFinished());
   }
 
   /**
@@ -2648,16 +2701,12 @@ public final class RedisJobStore implements JobStore {
 
   private static double activeScoreFor(JobSnapshot s, Instant stateAt) {
     return switch (s.currentState()) {
-      // Order the per-queue ENQUEUED ZSET by CREATION time, not the
-      // (re-)enqueue transition time, so a retried or scheduled-then-
-      // promoted job keeps its original queue position — matching the
-      // relational backends' `ORDER BY priority DESC, id` (UUIDv7 ids are
-      // creation-ordered). This also makes ordersByCreationTime honest.
-      case ENQUEUED -> {
-        Instant order = s.createdAt() != null ? s.createdAt() : stateAt;
-        yield RedisKeys.queueScore(
-            s.priority(), order.getEpochSecond() * 1_000_000L + order.getNano() / 1_000L);
-      }
+      // The score orders priority exactly across the full int range. Redis
+      // breaks equal-score ties lexicographically by the UUID member, matching
+      // every other backend's `ORDER BY priority DESC, id` directly. Retries
+      // therefore keep their original position without encoding time in a
+      // finite-width floating-point score.
+      case ENQUEUED -> RedisKeys.queueScore(s.priority());
       case SCHEDULED ->
         s.scheduledFor() == null
             ? stateAt.toEpochMilli()

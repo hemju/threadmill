@@ -20,8 +20,9 @@ import com.hemju.threadmill.core.NodeId;
  * <ul>
  *   <li>{@code {threadmill}:job:{id}} — HASH per job (body + scalar fields + version).</li>
  *   <li>{@code {threadmill}:queue:{queue}} — ZSET of ENQUEUED job ids, scored
- *       {@code -priority * 1e13 + enqueue_micros} so {@code ZRANGE LIMIT 0 N}
- *       returns highest-priority, oldest first.</li>
+ *       {@code -priority} so {@code ZRANGE LIMIT 0 N} returns highest-priority
+ *       first and Redis's lexicographic member tie-break orders equal-priority
+ *       UUIDv7 ids.</li>
  *   <li>{@code {threadmill}:scheduled} — ZSET of SCHEDULED ids scored by
  *       {@code scheduled_at} (millis).</li>
  *   <li>{@code {threadmill}:awaiting} — ZSET of AWAITING ids scored by
@@ -60,6 +61,8 @@ import com.hemju.threadmill.core.NodeId;
  *       priority-ordered queue ZSET.</li>
  *   <li>{@code {threadmill}:layout:queue_enqueued_at} — STRING upgrade state
  *       of the age index ({@code backfilled} / {@code complete}).</li>
+ *   <li>{@code {threadmill}:layout:queue_priority} — STRING recording that
+ *       queue and unkeyed-queue ZSET scores use exact negated priorities.</li>
  *   <li>{@code {threadmill}:node:layout:{nodeId}} — STRING with the heartbeat
  *       TTL, written by nodes that maintain the age index; a live heartbeat
  *       without it identifies an old-release node during a rolling upgrade.</li>
@@ -96,6 +99,12 @@ public final class RedisKeys {
    * final exact reconciliation has run.
    */
   public static final String QUEUE_ENQUEUED_AT_LAYOUT = PREFIX + "layout:queue_enqueued_at";
+
+  /**
+   * STRING recording that the queue and unkeyed-queue ZSETs use the exact
+   * priority-only score introduced after v0.2.1.
+   */
+  public static final String QUEUE_PRIORITY_LAYOUT = PREFIX + "layout:queue_priority";
 
   private RedisKeys() {}
 
@@ -235,19 +244,29 @@ public final class RedisKeys {
   }
 
   /**
-   * Computes the ZSET score used by per-queue ready sets.
+   * Computes the exact ZSET score used by per-queue ready sets.
    *
-   * <p>Precision envelope: the score is collision-safe across distinct
-   * int priorities, but FIFO-within-priority precision degrades once
-   * {@code |score|} exceeds 2^53 (IEEE double mantissa). With 2026-epoch
-   * micros that happens for priorities beyond roughly ±1,000, reaching
-   * ~4-second granularity at {@code Integer.MAX_VALUE}. Score ties fall
-   * back to lexicographic UUIDv7 member order (still time-ordered at
-   * millisecond resolution), so ordering damage is bounded — but exact
-   * micros-FIFO within a priority is only guaranteed for priorities in
-   * roughly the ±1,000 range. Keep operational priorities small.
+   * <p>Every {@code int} is exactly representable as a Redis double score.
+   * Negating the priority makes the smallest score the highest priority;
+   * equal scores use Redis's lexicographic member order, which is the job-id
+   * tie-break required by the store contract.
    */
-  public static double queueScore(int priority, long enqueueMicros) {
-    return (-(double) priority) * 1e13 + (double) enqueueMicros;
+  public static double queueScore(int priority) {
+    return priority == 0 ? 0d : -(double) priority;
+  }
+
+  /**
+   * Computes the exact queue score while accepting the legacy enqueue-time
+   * argument for source compatibility. Time no longer participates in queue
+   * ordering.
+   *
+   * @param priority job priority
+   * @param ignoredEnqueueMicros legacy enqueue-time argument, ignored
+   * @return the exact negated-priority score
+   * @deprecated use {@link #queueScore(int)}
+   */
+  @Deprecated(since = "0.2.2")
+  public static double queueScore(int priority, long ignoredEnqueueMicros) {
+    return queueScore(priority);
   }
 }

@@ -37,7 +37,7 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | Key | Type | Purpose |
 |---|---|---|
 | `{threadmill}:job:{id}` | HASH | Per-job state. Fields: `body`, `state`, `queue`, `priority`, `handler_signature`, `scheduled_at`, `owner_node_id`, `owner_heartbeat_at`, `last_checkin_at`, `current_state_at`, `created_at`, `workflow_root_id`, `concurrency_key`, `concurrency_mode`, `version`. |
-| `{threadmill}:queue:{queue}` | ZSET | ENQUEUED job ids per queue. Score `-priority * 1e13 + enqueue_micros` so `ZRANGE LIMIT 0 N` returns highest-priority, oldest-first. |
+| `{threadmill}:queue:{queue}` | ZSET | ENQUEUED job ids per queue. Score `-priority` so `ZRANGE LIMIT 0 N` returns highest-priority first; Redis breaks equal-score ties lexicographically by the UUIDv7 job-id member. This exactly matches `(priority DESC, id)` across the full `int` priority and timestamp ranges. |
 | `{threadmill}:scheduled` | ZSET | SCHEDULED ids scored by `scheduled_at` (millis since epoch). |
 | `{threadmill}:awaiting` | ZSET | AWAITING ids scored by state-entry time. |
 | `{threadmill}:processing` | ZSET | Global PROCESSING ids scored by `owner_heartbeat_at`. Used by orphan recovery. |
@@ -50,6 +50,7 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:queue_unkeyed:{queue}` | ZSET | ENQUEUED unkeyed job ids, scored like the queue ZSET. The unkeyed claim lane never pages past keyed work. |
 | `{threadmill}:queue_enqueued_at:{queue}` | ZSET | Every ENQUEUED job id in the queue, scored by `current_state_at` millis. `oldestEnqueuedAt` (the `threadmill.queue.oldest.enqueued.age` gauge and the dashboard queue view) reads its head with one `ZRANGE 0 0 WITHSCORES`, so the age gauge never scans the priority-ordered queue ZSET. Maintained inside the same atomic scripts as queue membership. |
 | `{threadmill}:layout:queue_enqueued_at` | STRING | Marker that the age index has been backfilled from a pre-index layout (v0.2.1 and earlier). See *Layout upgrades*. |
+| `{threadmill}:layout:queue_priority` | STRING | `priority_only_v1` after the queue and unkeyed-queue ZSETs have been rescored from the v0.2.1 priority-plus-time layout. See *Layout upgrades*. |
 | `{threadmill}:queue_pauses` | HASH | Paused queue → reason. |
 | `{threadmill}:cron_task_namespace:{namespace}` | SET | Cron task names owned by one reconciliation namespace. |
 | `{threadmill}:cron_task_namespaces` | SET | Known recurring reconciliation namespaces. |
@@ -66,6 +67,29 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:concurrency:{key}:claim_lock` | STRING | Short-lived mutex around per-key claim bookkeeping. |
 
 ## Layout upgrades
+
+### Queue priority score
+
+v0.2.1 encoded both priority and enqueue time into one floating-point ZSET
+score. A one-level priority difference was only `10^13` microseconds, so a
+lower-priority job more than about 115.74 days older could sort first. The
+current layout scores only `-priority`; all `int` values are exactly
+representable, and the UUIDv7 member provides the contract's job-id
+tie-break.
+
+When `{threadmill}:layout:queue_priority` is absent, store construction pages
+every registered queue and unkeyed-queue index with `ZSCAN`, pipelines the
+job-hash priority reads, applies the new scores idempotently, and writes
+`priority_only_v1` only after every page completes. Existing members keep the
+same job ids, so all Lua removal paths remain compatible.
+
+**Upgrade procedure.** This score change requires a coordinated upgrade:
+stop every pre-upgrade worker and producer before starting the first new
+process, then keep them stopped. An old writer cannot understand the new
+layout marker and can reintroduce a priority-plus-time score after the
+one-time rescore.
+
+### Per-queue age index
 
 The age index `{threadmill}:queue_enqueued_at:{queue}` did not exist before
 v0.2.2. The `{threadmill}:layout:queue_enqueued_at` STRING records how far
@@ -160,7 +184,8 @@ Never a destructive `BLPOP` / `ZPOPMIN`. The flow is:
    pending-order head runs discovered through a rotating HSCAN over
    `{threadmill}:queue_keys:{queue}`,
    and active-workflow-hold members via the `pending_root` mirrors — then
-   sorts them by queue-ZSET score (priority-aware). Per-key admission reads
+   sorts them by queue-ZSET score and UUID member, exactly `(priority DESC,
+   id)`. Per-key admission reads
    and queue-score probes are asynchronously pipelined. Each pass is bounded
    by a key-page budget and never scales with backlog depth or requires one
    network round trip per registered key.
