@@ -3,8 +3,11 @@ package com.hemju.threadmill.store.redis;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.List;
 
+import io.lettuce.core.RedisConnectionException;
 import io.lettuce.core.RedisCredentials;
 import io.lettuce.core.RedisURI;
 import io.lettuce.core.SslVerifyMode;
@@ -89,7 +92,36 @@ class RedisConnectionConfigTest {
   void disablingPeerVerificationWithoutTlsIsRejected() {
     assertThatThrownBy(() -> new RedisStoreConfig.Tls(false, false))
         .isInstanceOf(IllegalArgumentException.class)
-        .hasMessage("verifyPeer=false requires TLS to be enabled");
+        .hasMessage("non-default TLS verification requires TLS to be enabled");
+  }
+
+  @Test
+  void certificateAuthorityVerificationModeReachesEveryClusterSeed() {
+    var config = new RedisStoreConfig.Cluster(
+        List.of(FIRST, SECOND),
+        "master",
+        RedisStoreConfig.Credentials.none(),
+        RedisStoreConfig.Tls.verifiedCertificateAuthority());
+
+    assertThat(RedisConnectionConfig.clusterUris(config))
+        .allSatisfy(uri -> assertThat(uri.getVerifyMode()).isEqualTo(SslVerifyMode.CA));
+    assertThat(RedisConnectionConfig.describe(config)).contains("tls=ca-verified");
+  }
+
+  @Test
+  void redactedFailureKeepsOnlySafeExceptionTypesInItsCause() {
+    var original = new RedisConnectionException(
+        "Cannot connect to redis://private-user:private-password@example",
+        new IllegalStateException("WRONGPASS private-password"));
+
+    var redacted = RedisConnectionConfig.redactedConnectionFailure("cluster nodes=1", original);
+
+    assertThat(redacted)
+        .hasMessageContaining("authentication failed")
+        .hasCauseInstanceOf(RedisConnectionException.class);
+    assertThat(stackTrace(redacted))
+        .contains("RedisConnectionException -> IllegalStateException")
+        .doesNotContain("private-user", "private-password");
   }
 
   @Test
@@ -104,5 +136,11 @@ class RedisConnectionConfigTest {
 
   private static RedisCredentials credentials(RedisURI uri) {
     return uri.getCredentialsProvider().resolveCredentials().block();
+  }
+
+  private static String stackTrace(Throwable failure) {
+    var output = new StringWriter();
+    failure.printStackTrace(new PrintWriter(output));
+    return output.toString();
   }
 }

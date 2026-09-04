@@ -17,7 +17,7 @@
 --
 -- Returns 1 if the job was deleted, 0 if it was skipped.
 
-local no_key = '{threadmill}:no_key'
+local no_key = '__THREADMILL_NO_KEY__'
 local now_ms = tonumber(ARGV[3])
 
 local state = redis.call('HGET', KEYS[1], 'state')

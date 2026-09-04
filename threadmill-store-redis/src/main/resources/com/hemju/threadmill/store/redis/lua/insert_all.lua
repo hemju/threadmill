@@ -10,7 +10,7 @@
 -- the 0-based index of the offending job — and no writes have been made
 -- (existence is pre-validated for every job before any write).
 
-local no_key = '{threadmill}:no_key'
+local no_key = '__THREADMILL_NO_KEY__'
 local n = tonumber(ARGV[1])
 if n == nil or n <= 0 then
     return 'OK'

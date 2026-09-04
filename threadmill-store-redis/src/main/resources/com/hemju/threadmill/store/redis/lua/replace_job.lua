@@ -39,7 +39,7 @@
 --
 -- Returns 'OK', 'STALE' (version mismatch), 'WRONG_STATE', or 'VANISHED'.
 
-local no_key        = '{threadmill}:no_key'
+local no_key        = '__THREADMILL_NO_KEY__'
 local job_key       = KEYS[1]
 local new_active    = KEYS[2]
 local old_active    = KEYS[3]

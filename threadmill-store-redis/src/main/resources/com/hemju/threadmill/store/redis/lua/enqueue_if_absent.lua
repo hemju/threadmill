@@ -1,6 +1,6 @@
 -- Atomically insert a job unless the dedup key already points at a live job.
 
-local no_key         = '{threadmill}:no_key'
+local no_key         = '__THREADMILL_NO_KEY__'
 local dedup_key      = KEYS[1]
 local job_key        = KEYS[2]
 local active_key     = KEYS[3]

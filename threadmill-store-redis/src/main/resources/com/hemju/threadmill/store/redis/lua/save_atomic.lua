@@ -57,7 +57,7 @@
 -- Returns 'ok' on success, 'stale' on version mismatch, 'vanished' if the job
 -- has been hard-deleted.
 
-local no_key                 = '{threadmill}:no_key'
+local no_key                 = '__THREADMILL_NO_KEY__'
 local job_key                = KEYS[1]
 local new_active_key         = KEYS[2]
 local new_active_node_key    = KEYS[3]

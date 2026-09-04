@@ -1,6 +1,10 @@
 package com.hemju.threadmill.store.redis;
 
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 
 import io.lettuce.core.RedisConnectionException;
 import io.lettuce.core.RedisURI;
@@ -8,6 +12,8 @@ import io.lettuce.core.SslVerifyMode;
 
 /** Builds redaction-safe Lettuce connection details from Threadmill topology configuration. */
 final class RedisConnectionConfig {
+
+  private static final int MAX_CAUSE_DEPTH = 32;
 
   private RedisConnectionConfig() {}
 
@@ -17,7 +23,7 @@ final class RedisConnectionConfig {
     for (var node : config.nodes()) {
       builder.withSentinel(redisUri(node, config.sentinelCredentials(), config.tls()));
     }
-    // Lettuce deliberately applies one TLS policy to the data and Sentinel endpoints.
+    // RedisURI.Builder propagates the aggregate TLS policy to every Sentinel URI.
     applyTls(builder, config.tls());
     return builder.build();
   }
@@ -68,8 +74,10 @@ final class RedisConnectionConfig {
     } else {
       reason = "connection failed";
     }
+    var diagnostic = new RedisConnectionException(
+        "Sanitized original exception chain: " + safeExceptionChain(failure));
     return new RedisConnectionException(
-        "Unable to connect to " + topology + ": " + reason + " (credentials redacted)");
+        "Unable to connect to " + topology + ": " + reason + " (credentials redacted)", diagnostic);
   }
 
   private static RedisURI redisUri(
@@ -94,19 +102,42 @@ final class RedisConnectionConfig {
 
   private static void applyTls(RedisURI.Builder builder, RedisStoreConfig.Tls tls) {
     if (!tls.enabled()) return;
-    builder.withSsl(true).withVerifyPeer(tls.verifyPeer());
+    builder.withSsl(true).withVerifyPeer(tls.verifyMode());
   }
 
   private static String describeTls(RedisStoreConfig.Tls tls) {
     if (!tls.enabled()) return "disabled";
-    return tls.verifyPeer() ? "verified" : "unverified";
+    return switch (tls.verifyMode()) {
+      case FULL -> "verified";
+      case CA -> "ca-verified";
+      case NONE -> "unverified";
+    };
   }
 
   private static boolean failureContains(Throwable failure, String fragment) {
-    for (var current = failure; current != null; current = current.getCause()) {
-      if (current.getClass().getSimpleName().contains(fragment)) return true;
-      if (current.getMessage() != null && current.getMessage().contains(fragment)) return true;
+    var expected = fragment.toLowerCase(Locale.ROOT);
+    var seen = Collections.newSetFromMap(new IdentityHashMap<Throwable, Boolean>());
+    int depth = 0;
+    for (var current = failure;
+        current != null && depth++ < MAX_CAUSE_DEPTH && seen.add(current);
+        current = current.getCause()) {
+      if (current.getClass().getSimpleName().toLowerCase(Locale.ROOT).contains(expected))
+        return true;
+      if (current.getMessage() != null
+          && current.getMessage().toLowerCase(Locale.ROOT).contains(expected)) return true;
     }
     return false;
+  }
+
+  private static String safeExceptionChain(Throwable failure) {
+    var names = new ArrayList<String>();
+    var seen = Collections.newSetFromMap(new IdentityHashMap<Throwable, Boolean>());
+    int depth = 0;
+    for (var current = failure;
+        current != null && depth++ < MAX_CAUSE_DEPTH && seen.add(current);
+        current = current.getCause()) {
+      names.add(current.getClass().getSimpleName());
+    }
+    return String.join(" -> ", names);
   }
 }

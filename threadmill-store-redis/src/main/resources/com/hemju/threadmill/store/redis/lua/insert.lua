@@ -38,7 +38,7 @@
 --
 -- Returns 1 on success, "exists" on duplicate id.
 
-local no_key         = '{threadmill}:no_key'
+local no_key         = '__THREADMILL_NO_KEY__'
 local job_key        = KEYS[1]
 local active_key     = KEYS[2]
 local state_time_key = KEYS[3]

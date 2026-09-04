@@ -41,7 +41,7 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
   }
 
   public RedisRemoteWakeChannel(RedisURI uri, String channel) {
-    this(connectOwned(RedisClient.create(uri), channel), true);
+    this(connectConfiguredStandalone(uri, channel), true);
   }
 
   public RedisRemoteWakeChannel(RedisStoreConfig config) {
@@ -174,7 +174,7 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
   private static ConnectionHandle connect(RedisStoreConfig config, String channel) {
     return switch (config) {
       case RedisStoreConfig.Standalone standalone ->
-        connectOwned(RedisClient.create(standalone.uri()), channel);
+        connectConfiguredStandalone(standalone.uri(), channel);
       case RedisStoreConfig.Sentinel sentinel -> connectSentinel(sentinel, channel);
       case RedisStoreConfig.Cluster cluster -> connectCluster(cluster, channel);
     };
@@ -187,6 +187,15 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     } catch (RuntimeException connectFailure) {
       client.shutdown();
       throw connectFailure;
+    }
+  }
+
+  private static ConnectionHandle connectConfiguredStandalone(RedisURI uri, String channel) {
+    try {
+      return connectOwned(RedisClient.create(uri), channel);
+    } catch (RuntimeException connectFailure) {
+      throw RedisConnectionConfig.redactedConnectionFailure(
+          RedisConnectionConfig.describeUri(uri), connectFailure);
     }
   }
 
@@ -235,7 +244,8 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     try {
       return connectOwned(RedisClient.create(RedisConnectionConfig.sentinelUri(config)), channel);
     } catch (RuntimeException connectFailure) {
-      throw RedisConnectionConfig.redactedConnectionFailure("Redis Sentinel", connectFailure);
+      throw RedisConnectionConfig.redactedConnectionFailure(
+          RedisConnectionConfig.describe(config), connectFailure);
     }
   }
 
@@ -248,7 +258,8 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     } catch (RuntimeException connectFailure) {
       // The cluster client is always created (owned) here.
       client.shutdown();
-      throw RedisConnectionConfig.redactedConnectionFailure("Redis Cluster", connectFailure);
+      throw RedisConnectionConfig.redactedConnectionFailure(
+          RedisConnectionConfig.describe(config), connectFailure);
     }
   }
 

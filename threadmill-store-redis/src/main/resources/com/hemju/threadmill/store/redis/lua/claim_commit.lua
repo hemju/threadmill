@@ -33,7 +33,7 @@
 --   [10] workflow root id
 --   [11] concurrency pending member, or empty
 
-local no_key = '{threadmill}:no_key'
+local no_key = '__THREADMILL_NO_KEY__'
 local job_key = KEYS[1]
 local queue_key = KEYS[2]
 local processing_all = KEYS[3]

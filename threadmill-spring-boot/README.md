@@ -217,12 +217,12 @@ list). The most common:
 | `threadmill.store.postgres.schema-mode` | `migrate` | `migrate`, `validate`, `none`, or `drop-and-migrate`. |
 | `threadmill.store.postgres.allow-destructive-schema-reset` | `false` | Required for `drop-and-migrate`; destroys stored Threadmill jobs. |
 | `threadmill.store.redis.mode` | `standalone` | `standalone` / `sentinel` / `cluster`. |
-| `threadmill.store.redis.uri` | — | `redis://host:port` for standalone mode. |
-| `threadmill.store.redis.sentinel.username` / `.password` | — | Redis data-node ACL credentials. Username requires a password; password-only authentication is supported. |
+| `threadmill.store.redis.uri` | — | Lettuce `redis://` / `rediss://` URI for standalone mode. |
+| `threadmill.store.redis.sentinel.data-node-username` / `.data-node-password` | — | Redis data-node ACL credentials. The legacy `.password` data-node alias remains supported. |
 | `threadmill.store.redis.sentinel.sentinel-username` / `.sentinel-password` | — | Independent Sentinel control-plane ACL credentials. |
-| `threadmill.store.redis.sentinel.tls` / `.verify-peer` | `false` / `true` | TLS policy shared by Sentinel discovery and data-node connections. |
+| `threadmill.store.redis.sentinel.tls` / `.verify-mode` | `false` / `full` | Shared TLS policy; modes are `full`, `ca`, and `none`. `.verify-peer` remains a compatibility boolean. |
 | `threadmill.store.redis.cluster.username` / `.password` | — | Redis Cluster ACL credentials applied to every seed. |
-| `threadmill.store.redis.cluster.tls` / `.verify-peer` | `false` / `true` | Cluster TLS; peer verification defaults on. |
+| `threadmill.store.redis.cluster.tls` / `.verify-mode` | `false` / `full` | Cluster TLS; modes are `full`, `ca`, and `none`. `.verify-peer` remains a compatibility boolean. |
 | `threadmill.store.redis.reset-on-start` | `false` | Delete Threadmill Redis keys before startup; development only. |
 | `threadmill.store.redis.allow-destructive-reset` | `false` | Required for `reset-on-start`; destroys stored Threadmill jobs. |
 

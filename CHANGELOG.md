@@ -29,14 +29,19 @@
   (issue #93). Cluster credentials and verified TLS apply to every seed;
   Sentinel keeps Redis data-node credentials separate from Sentinel
   control-plane credentials while using Lettuce's shared TLS policy for both.
-  Spring exposes the matching properties, peer verification defaults on, and
+  Spring exposes the matching properties, full peer verification defaults on,
+  CA-only verification is also supported, and
   caller-managed `RedisClusterClient` instances can be injected for custom TLS
-  resources. Topology descriptions and configuration-owned startup failures
-  redact usernames and passwords. Real authenticated/TLS Cluster and Sentinel
-  tests cover the connection and store paths. The Cluster test also exposed
-  and fixed optional Lua `KEYS` entries using empty strings (a different hash
-  slot); absent keys now use the reserved `{threadmill}:no_key` same-slot
-  sentinel.
+  resources, mutual TLS, and rotating credentials. Topology descriptions and
+  configuration-owned startup failures redact usernames and passwords while
+  retaining a sanitized exception-type chain. Real authenticated/mTLS Cluster
+  and Sentinel tests cover the injected-client and store paths.
+- Fixed a release-blocking Redis Cluster `CROSSSLOT` failure in ordinary job
+  insertion and transitions. Optional Lua `KEYS` entries used empty strings,
+  which hash outside the engine slot; absent keys now use the reserved
+  `{threadmill}:no_key` same-slot sentinel loaded from one Java constant. The
+  complete shared job-store contract now runs through an actual Cluster client
+  and asserts that the protocol sentinel is never materialized as a Redis key.
 - Handlers can see the engine's deadline coming (issue #119).
   `JobExecutionContext` gains `deadline()` and `remaining()`, computed by the
   same rule the timeout watchdog uses — `claimedAt` plus the effective timeout

@@ -32,7 +32,7 @@
 -- Returns 1 on success, 0 if already DELETED, -1 if vanished, -2 if the
 -- live version no longer matches expected_version (caller must re-read).
 
-local no_key             = '{threadmill}:no_key'
+local no_key             = '__THREADMILL_NO_KEY__'
 local job_key            = KEYS[1]
 local old_active_key     = KEYS[2]
 local old_active_node    = KEYS[3]

@@ -7,20 +7,25 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.net.ServerSocket;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
 
-import org.junit.jupiter.api.AfterAll;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisConnectionException;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.SslOptions;
+import io.lettuce.core.SslVerifyMode;
+import io.lettuce.core.cluster.RedisClusterClient;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.parallel.ResourceLock;
-import org.junit.jupiter.api.parallel.Resources;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.images.builder.Transferable;
@@ -33,7 +38,7 @@ import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 
-@ResourceLock(Resources.SYSTEM_PROPERTIES)
+@ResourceLock("redis-secure-fixed-ports")
 class RedisSecureTopologyTest {
 
   private static final String DATA_USERNAME = "threadmill-data";
@@ -41,44 +46,35 @@ class RedisSecureTopologyTest {
   private static final String SENTINEL_USERNAME = "threadmill-sentinel";
   private static final String SENTINEL_PASSWORD = "threadmill-sentinel-secret";
   private static final String MASTER = "threadmill-master";
-  private static final String TRUST_STORE_PASSWORD = "threadmill-test";
 
   @TempDir
   static Path tempDirectory;
 
+  private static Path caCertificate;
+  private static Path serverCertificate;
   private static Path serverKey;
-  private static String previousTrustStore;
-  private static String previousTrustStoreType;
-  private static String previousTrustStorePassword;
 
   @BeforeAll
-  static void installTestTrustStore() throws IOException {
-    previousTrustStore = System.getProperty("javax.net.ssl.trustStore");
-    previousTrustStoreType = System.getProperty("javax.net.ssl.trustStoreType");
-    previousTrustStorePassword = System.getProperty("javax.net.ssl.trustStorePassword");
-
-    var encoded = resourceBytes("/redis-secure/truststore.p12.b64");
-    var trustStore = tempDirectory.resolve("truststore.p12");
-    Files.write(trustStore, Base64.getMimeDecoder().decode(encoded));
+  static void materializeTestCertificates() throws Exception {
+    caCertificate = copyResource("/redis-secure/ca.crt", "ca.crt");
+    serverCertificate = copyResource("/redis-secure/server.crt", "server.crt");
     serverKey = tempDirectory.resolve("server.key");
     Files.write(
         serverKey, Base64.getMimeDecoder().decode(resourceBytes("/redis-secure/server.key.b64")));
-    System.setProperty("javax.net.ssl.trustStore", trustStore.toString());
-    System.setProperty("javax.net.ssl.trustStoreType", "PKCS12");
-    System.setProperty("javax.net.ssl.trustStorePassword", TRUST_STORE_PASSWORD);
-  }
 
-  @AfterAll
-  static void restoreTrustStore() {
-    restoreProperty("javax.net.ssl.trustStore", previousTrustStore);
-    restoreProperty("javax.net.ssl.trustStoreType", previousTrustStoreType);
-    restoreProperty("javax.net.ssl.trustStorePassword", previousTrustStorePassword);
+    try (var input = Files.newInputStream(serverCertificate)) {
+      var certificate =
+          (X509Certificate) CertificateFactory.getInstance("X.509").generateCertificate(input);
+      assertThat(certificate.getNotAfter().toInstant())
+          .as("committed TLS fixture must not expire during normal maintenance")
+          .isAfter(Instant.now().plus(Duration.ofDays(365)));
+    }
   }
 
   @Test
   void authenticatedVerifiedTlsClusterKeepsOptionalLuaKeysInOneSlot() throws Exception {
     int hostPort = availablePort();
-    try (var redis = clusterContainer(hostPort)) {
+    try (var redis = clusterContainer(hostPort, true)) {
       redis.start();
       prepareCluster(redis);
 
@@ -88,7 +84,18 @@ class RedisSecureTopologyTest {
           new RedisStoreConfig.Credentials(DATA_USERNAME, DATA_PASSWORD),
           RedisStoreConfig.Tls.verified());
 
-      assertStoreRoundTrip(config, "cluster", "tls=verified");
+      try (var client = secureClusterClient(config);
+          var inspection = client.connect()) {
+        var store = injectedStore(client);
+        try {
+          assertStoreRoundTrip(store, "cluster (client-injected)");
+          assertThat(inspection.sync().exists(RedisKeys.NO_KEY))
+              .as("the optional-key sentinel is protocol-only and must never be materialized")
+              .isZero();
+        } finally {
+          store.close();
+        }
+      }
     }
   }
 
@@ -105,14 +112,21 @@ class RedisSecureTopologyTest {
           new RedisStoreConfig.Credentials(SENTINEL_USERNAME, SENTINEL_PASSWORD),
           RedisStoreConfig.Tls.verified());
 
-      assertStoreRoundTrip(config, "sentinel", "tls=verified");
+      try (var client = secureSentinelClient(config)) {
+        var store = injectedStore(client);
+        try {
+          assertStoreRoundTrip(store, "standalone (client-injected)");
+        } finally {
+          store.close();
+        }
+      }
     }
   }
 
   @Test
   void authenticatedTlsStartupFailureDoesNotExposeCredentials() throws Exception {
     int hostPort = availablePort();
-    try (var redis = clusterContainer(hostPort)) {
+    try (var redis = clusterContainer(hostPort, false)) {
       redis.start();
       prepareCluster(redis);
 
@@ -121,47 +135,55 @@ class RedisSecureTopologyTest {
           List.of(new RedisStoreConfig.HostAndPort("localhost", hostPort)),
           "master",
           new RedisStoreConfig.Credentials(DATA_USERNAME, wrongPassword),
-          RedisStoreConfig.Tls.verified());
+          RedisStoreConfig.Tls.unverified());
 
       var failure = catchThrowable(() -> new RedisJobStore(config));
       assertThat(failure)
           .isNotNull()
           .hasMessageContaining("authentication failed")
-          .hasNoCause();
+          .hasMessageContaining("cluster nodes=1")
+          .hasCauseInstanceOf(RedisConnectionException.class);
       assertThat(stackTrace(failure)).doesNotContain(DATA_USERNAME, wrongPassword);
-    }
-  }
 
-  private static void assertStoreRoundTrip(
-      RedisStoreConfig config, String topology, String tlsDescription) {
-    var store = new RedisJobStore(config);
-    try {
-      var job = Job.builder()
-          .spec(
-              JobSpec.of("com.example.SecureHandler", new JobArgument("java.lang.String", "\"x\"")))
+      var standaloneUri = RedisURI.builder()
+          .withHost("localhost")
+          .withPort(hostPort)
+          .withAuthentication(DATA_USERNAME, wrongPassword.toCharArray())
+          .withSsl(true)
+          .withVerifyPeer(SslVerifyMode.NONE)
           .build();
-      store.insert(job);
-
-      assertThat(store.findById(job.id())).isPresent();
-      var claimed =
-          store.claimReady(NodeId.newId(), "default", 1, Instant.now()).getFirst();
-      long claimedVersion = claimed.version();
-      claimed.transitionTo(JobState.SUCCEEDED, Instant.now());
-      store.saveAtomic(claimed, claimedVersion);
-      assertThat(store.softDelete(job.id())).isTrue();
-      assertThat(store.findById(job.id()))
-          .get()
-          .extracting(Job::currentState)
-          .isEqualTo(JobState.DELETED);
-      assertThat(store.describe())
-          .contains(topology, tlsDescription)
-          .doesNotContain(DATA_USERNAME, DATA_PASSWORD, SENTINEL_USERNAME, SENTINEL_PASSWORD);
-    } finally {
-      store.close();
+      var standaloneFailure = catchThrowable(() -> new RedisJobStore(standaloneUri));
+      assertThat(standaloneFailure)
+          .isNotNull()
+          .hasMessageContaining("standalone host=localhost")
+          .hasMessageContaining("authentication failed");
+      assertThat(stackTrace(standaloneFailure)).doesNotContain(DATA_USERNAME, wrongPassword);
     }
   }
 
-  private static SecureRedisContainer clusterContainer(int hostPort) {
+  private static void assertStoreRoundTrip(RedisJobStore store, String topology) {
+    var job = Job.builder()
+        .spec(JobSpec.of("com.example.SecureHandler", new JobArgument("java.lang.String", "\"x\"")))
+        .build();
+    store.insert(job);
+
+    assertThat(store.findById(job.id())).isPresent();
+    var claimed = store.claimReady(NodeId.newId(), "default", 1, Instant.now()).getFirst();
+    long claimedVersion = claimed.version();
+    claimed.transitionTo(JobState.SUCCEEDED, Instant.now());
+    store.saveAtomic(claimed, claimedVersion);
+    assertThat(store.softDelete(job.id())).isTrue();
+    assertThat(store.findById(job.id()))
+        .get()
+        .extracting(Job::currentState)
+        .isEqualTo(JobState.DELETED);
+    assertThat(store.describe())
+        .contains(topology)
+        .doesNotContain(DATA_USERNAME, DATA_PASSWORD, SENTINEL_USERNAME, SENTINEL_PASSWORD);
+  }
+
+  private static SecureRedisContainer clusterContainer(
+      int hostPort, boolean requireClientCertificate) {
     var config = """
         bind 0.0.0.0
         protected-mode no
@@ -170,7 +192,7 @@ class RedisSecureTopologyTest {
         tls-cert-file /secure/server.crt
         tls-key-file /secure/server.key
         tls-ca-cert-file /secure/ca.crt
-        tls-auth-clients no
+        tls-auth-clients %s
         tls-cluster yes
         cluster-enabled yes
         cluster-config-file /tmp/nodes.conf
@@ -183,7 +205,8 @@ class RedisSecureTopologyTest {
         maxmemory-policy noeviction
         user default off
         user %s on >%s ~* &* +@all
-        """.formatted(hostPort, hostPort, DATA_USERNAME, DATA_PASSWORD);
+        """.formatted(
+        requireClientCertificate ? "yes" : "no", hostPort, hostPort, DATA_USERNAME, DATA_PASSWORD);
     return secureContainer()
         .bindFixedPort(hostPort, 6379)
         .withCopyToContainer(Transferable.of(config), "/secure/redis.conf")
@@ -200,7 +223,7 @@ class RedisSecureTopologyTest {
         tls-cert-file /secure/server.crt
         tls-key-file /secure/server.key
         tls-ca-cert-file /secure/ca.crt
-        tls-auth-clients no
+        tls-auth-clients yes
         appendonly yes
         maxmemory-policy noeviction
         pidfile /tmp/redis-data.pid
@@ -215,7 +238,7 @@ class RedisSecureTopologyTest {
         tls-cert-file /secure/server.crt
         tls-key-file /secure/server.key
         tls-ca-cert-file /secure/ca.crt
-        tls-auth-clients no
+        tls-auth-clients yes
         tls-replication yes
         pidfile /tmp/redis-sentinel.pid
         user default off
@@ -252,11 +275,42 @@ class RedisSecureTopologyTest {
 
   private static SecureRedisContainer secureContainer() {
     return new SecureRedisContainer()
-        .withCopyFileToContainer(
-            MountableFile.forClasspathResource("redis-secure/ca.crt"), "/secure/ca.crt")
-        .withCopyFileToContainer(
-            MountableFile.forClasspathResource("redis-secure/server.crt"), "/secure/server.crt")
+        .withCopyFileToContainer(MountableFile.forHostPath(caCertificate), "/secure/ca.crt")
+        .withCopyFileToContainer(MountableFile.forHostPath(serverCertificate), "/secure/server.crt")
         .withCopyFileToContainer(MountableFile.forHostPath(serverKey), "/secure/server.key");
+  }
+
+  private static RedisClusterClient secureClusterClient(RedisStoreConfig.Cluster config) {
+    var client = RedisClusterClient.create(RedisConnectionConfig.clusterUris(config));
+    client.setOptions(RedisClusterOptions.topologyRefreshing()
+        .mutate()
+        .sslOptions(testSslOptions())
+        .build());
+    return client;
+  }
+
+  private static RedisClient secureSentinelClient(RedisStoreConfig.Sentinel config) {
+    var client = RedisClient.create(RedisConnectionConfig.sentinelUri(config));
+    client.setOptions(RedisClusterOptions.standaloneOptions()
+        .mutate()
+        .sslOptions(testSslOptions())
+        .build());
+    return client;
+  }
+
+  private static SslOptions testSslOptions() {
+    return SslOptions.builder()
+        .trustManager(caCertificate.toFile())
+        .keyManager(serverCertificate.toFile(), serverKey.toFile(), null)
+        .build();
+  }
+
+  private static RedisJobStore injectedStore(RedisClient client) {
+    return new RedisJobStore(client);
+  }
+
+  private static RedisJobStore injectedStore(RedisClusterClient client) {
+    return new RedisJobStore(client);
   }
 
   private static void prepareCluster(SecureRedisContainer redis) throws Exception {
@@ -265,6 +319,10 @@ class RedisSecureTopologyTest {
         "--tls",
         "--cacert",
         "/secure/ca.crt",
+        "--cert",
+        "/secure/server.crt",
+        "--key",
+        "/secure/server.key",
         "--user",
         DATA_USERNAME,
         "--pass",
@@ -285,6 +343,10 @@ class RedisSecureTopologyTest {
           "--tls",
           "--cacert",
           "/secure/ca.crt",
+          "--cert",
+          "/secure/server.crt",
+          "--key",
+          "/secure/server.key",
           "--user",
           DATA_USERNAME,
           "--pass",
@@ -310,6 +372,9 @@ class RedisSecureTopologyTest {
   }
 
   private static int availablePort() throws IOException {
+    // Redis Cluster and Sentinel advertise their ports before Testcontainers can
+    // assign random host mappings. The fixed binding therefore has an unavoidable
+    // close-to-bind TOCTOU window; the resource lock prevents this suite racing itself.
     try (var socket = new ServerSocket(0)) {
       return socket.getLocalPort();
     }
@@ -318,24 +383,20 @@ class RedisSecureTopologyTest {
   private static byte[] resourceBytes(String resource) throws IOException {
     try (var input = RedisSecureTopologyTest.class.getResourceAsStream(resource)) {
       if (input == null) throw new IOException("Missing test resource: " + resource);
-      return new String(input.readAllBytes(), StandardCharsets.US_ASCII)
-          .strip()
-          .getBytes(StandardCharsets.US_ASCII);
+      return input.readAllBytes();
     }
+  }
+
+  private static Path copyResource(String resource, String filename) throws IOException {
+    var destination = tempDirectory.resolve(filename);
+    Files.write(destination, resourceBytes(resource));
+    return destination;
   }
 
   private static String stackTrace(Throwable failure) {
     var output = new StringWriter();
     failure.printStackTrace(new PrintWriter(output));
     return output.toString();
-  }
-
-  private static void restoreProperty(String name, String previousValue) {
-    if (previousValue == null) {
-      System.clearProperty(name);
-    } else {
-      System.setProperty(name, previousValue);
-    }
   }
 
   private static final class SecureRedisContainer extends GenericContainer<SecureRedisContainer> {

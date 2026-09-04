@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Objects;
 
 import io.lettuce.core.RedisURI;
+import io.lettuce.core.SslVerifyMode;
 
 /** Configuration for creating a Redis-backed job store across supported topologies. */
 public sealed interface RedisStoreConfig
@@ -53,20 +54,42 @@ public sealed interface RedisStoreConfig
     }
   }
 
-  /** TLS transport settings. Peer verification remains enabled by default. */
-  record Tls(boolean enabled, boolean verifyPeer) {
+  /** TLS transport settings. Full certificate and hostname verification remains the default. */
+  record Tls(boolean enabled, SslVerifyMode verifyMode) {
+
+    public Tls(boolean enabled, boolean verifyPeer) {
+      this(enabled, verifyPeer ? SslVerifyMode.FULL : SslVerifyMode.NONE);
+    }
+
     public Tls {
-      if (!enabled && !verifyPeer) {
-        throw new IllegalArgumentException("verifyPeer=false requires TLS to be enabled");
+      Objects.requireNonNull(verifyMode, "verifyMode");
+      if (!enabled && verifyMode != SslVerifyMode.FULL) {
+        throw new IllegalArgumentException(
+            "non-default TLS verification requires TLS to be enabled");
       }
     }
 
     public static Tls disabled() {
-      return new Tls(false, true);
+      return new Tls(false, SslVerifyMode.FULL);
     }
 
     public static Tls verified() {
-      return new Tls(true, true);
+      return new Tls(true, SslVerifyMode.FULL);
+    }
+
+    /** TLS with certificate-chain verification but without hostname verification. */
+    public static Tls verifiedCertificateAuthority() {
+      return new Tls(true, SslVerifyMode.CA);
+    }
+
+    /** TLS without peer verification. Intended only for disposable development environments. */
+    public static Tls unverified() {
+      return new Tls(true, SslVerifyMode.NONE);
+    }
+
+    /** Compatibility view of whether any peer verification is enabled. */
+    public boolean verifyPeer() {
+      return verifyMode != SslVerifyMode.NONE;
     }
   }
 

@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Locale;
 
 import io.lettuce.core.RedisURI;
+import io.lettuce.core.SslVerifyMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -72,10 +73,11 @@ public class ThreadmillRedisAutoConfiguration {
         yield new RedisStoreConfig.Sentinel(
             sentinel.getMasterName(),
             parseRedisNodes(sentinel.getNodes()),
-            new RedisStoreConfig.Credentials(sentinel.getUsername(), sentinel.getPassword()),
+            new RedisStoreConfig.Credentials(
+                sentinel.getDataNodeUsername(), sentinel.getDataNodePassword()),
             new RedisStoreConfig.Credentials(
                 sentinel.getSentinelUsername(), sentinel.getSentinelPassword()),
-            new RedisStoreConfig.Tls(sentinel.isTls(), sentinel.isVerifyPeer()),
+            redisTls(sentinel.isTls(), sentinel.isVerifyPeer(), sentinel.getVerifyMode()),
             safety);
       }
       case "cluster" -> {
@@ -84,13 +86,27 @@ public class ThreadmillRedisAutoConfiguration {
             parseRedisNodes(cluster.getNodes()),
             cluster.getReadPolicy(),
             new RedisStoreConfig.Credentials(cluster.getUsername(), cluster.getPassword()),
-            new RedisStoreConfig.Tls(cluster.isTls(), cluster.isVerifyPeer()),
+            redisTls(cluster.isTls(), cluster.isVerifyPeer(), cluster.getVerifyMode()),
             safety);
       }
       default ->
         throw new IllegalArgumentException(
             "threadmill.store.redis.mode must be standalone, sentinel, or cluster");
     };
+  }
+
+  private static RedisStoreConfig.Tls redisTls(
+      boolean enabled, boolean verifyPeer, String verifyMode) {
+    if (verifyMode == null || verifyMode.isBlank()) {
+      return new RedisStoreConfig.Tls(enabled, verifyPeer);
+    }
+    try {
+      return new RedisStoreConfig.Tls(
+          enabled, SslVerifyMode.valueOf(verifyMode.strip().toUpperCase(Locale.ROOT)));
+    } catch (IllegalArgumentException invalidMode) {
+      throw new IllegalArgumentException(
+          "Redis TLS verify-mode must be full, ca, or none", invalidMode);
+    }
   }
 
   private static List<RedisStoreConfig.HostAndPort> parseRedisNodes(List<String> nodes) {

@@ -77,7 +77,8 @@ class LuaProtocolTest {
         LuaScripts.claimCommit(),
         LuaScripts.softDelete(),
         LuaScripts.retentionDelete(),
-        LuaScripts.replaceJob());
+        LuaScripts.replaceJob(),
+        LuaScripts.quarantineUnreadable());
 
     assertThat(scripts)
         .allSatisfy(script -> assertThat(script).contains("'" + RedisKeys.NO_KEY + "'"));

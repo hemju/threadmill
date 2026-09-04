@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.List;
 
+import io.lettuce.core.SslVerifyMode;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
@@ -47,8 +48,8 @@ class RedisPropertiesBindingTest {
             "threadmill.store.redis.mode=sentinel",
             "threadmill.store.redis.sentinel.master-name=threadmill-master",
             "threadmill.store.redis.sentinel.nodes[0]=sentinel.example:26380",
-            "threadmill.store.redis.sentinel.username=data-user",
-            "threadmill.store.redis.sentinel.password=data-password",
+            "threadmill.store.redis.sentinel.data-node-username=data-user",
+            "threadmill.store.redis.sentinel.data-node-password=data-password",
             "threadmill.store.redis.sentinel.sentinel-username=sentinel-user",
             "threadmill.store.redis.sentinel.sentinel-password=sentinel-password",
             "threadmill.store.redis.sentinel.tls=true",
@@ -68,6 +69,44 @@ class RedisPropertiesBindingTest {
   }
 
   @Test
+  void caOnlyVerificationModeBindsForClusterTls() {
+    runner
+        .withPropertyValues(
+            "threadmill.store.redis.mode=cluster",
+            "threadmill.store.redis.cluster.nodes[0]=redis.example:6380",
+            "threadmill.store.redis.cluster.tls=true",
+            "threadmill.store.redis.cluster.verify-mode=ca")
+        .run(context -> {
+          assertThat(context).hasNotFailed();
+          var redis = context.getBean(ThreadmillProperties.class).getStore().getRedis();
+          var config =
+              (RedisStoreConfig.Cluster) ThreadmillRedisAutoConfiguration.redisStoreConfig(redis);
+
+          assertThat(config.tls().verifyMode()).isEqualTo(SslVerifyMode.CA);
+        });
+  }
+
+  @Test
+  void legacySentinelPasswordStillTargetsTheDataNode() {
+    runner
+        .withPropertyValues(
+            "threadmill.store.redis.mode=sentinel",
+            "threadmill.store.redis.sentinel.master-name=threadmill-master",
+            "threadmill.store.redis.sentinel.nodes[0]=sentinel.example:26379",
+            "threadmill.store.redis.sentinel.password=legacy-data-password")
+        .run(context -> {
+          assertThat(context).hasNotFailed();
+          var redis = context.getBean(ThreadmillProperties.class).getStore().getRedis();
+          var config =
+              (RedisStoreConfig.Sentinel) ThreadmillRedisAutoConfiguration.redisStoreConfig(redis);
+
+          assertThat(config.dataNodeCredentials())
+              .isEqualTo(RedisStoreConfig.Credentials.passwordOnly("legacy-data-password"));
+          assertThat(config.sentinelCredentials()).isEqualTo(RedisStoreConfig.Credentials.none());
+        });
+  }
+
+  @Test
   void disablingPeerVerificationWithoutEnablingTlsFailsValidation() {
     runner
         .withPropertyValues(
@@ -78,7 +117,7 @@ class RedisPropertiesBindingTest {
           var redis = context.getBean(ThreadmillProperties.class).getStore().getRedis();
           assertThatThrownBy(() -> ThreadmillRedisAutoConfiguration.redisStoreConfig(redis))
               .isInstanceOf(IllegalArgumentException.class)
-              .hasMessage("verifyPeer=false requires TLS to be enabled");
+              .hasMessage("non-default TLS verification requires TLS to be enabled");
         });
   }
 
