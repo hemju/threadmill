@@ -67,7 +67,12 @@ public class ThreadmillProperties {
   /** Initial backoff before the first retry. */
   private Duration retryInitialBackoff = Duration.ofSeconds(5);
 
-  /** Per-job timeout. */
+  /**
+   * Wall-clock cap for one attempt of a job that carries no per-job override.
+   * When it passes, the engine interrupts the worker thread; see
+   * {@link Job#timeout()} for the interrupt contract. Once a handler has
+   * checked in, {@link #getNoProgressTimeout()} applies instead.
+   */
   private Duration jobTimeout = Duration.ofMinutes(5);
 
   /** Maximum consecutive dispatcher store failures before pausing. */
@@ -79,11 +84,25 @@ public class ThreadmillProperties {
   /** How often a paused dispatcher probes the store for recovery. */
   private Duration storeOutagePollInterval = Duration.ofSeconds(5);
 
-  /** Grace period for in-flight jobs during node shutdown. */
+  /**
+   * How long in-flight jobs may keep running after the node begins closing.
+   * Handlers see {@code ctx.deadline()} collapse to the end of this window;
+   * whatever is still running afterwards is interrupted and rescheduled
+   * without consuming a retry attempt.
+   */
   private Duration shutdownGracePeriod = Duration.ofSeconds(10);
 
+  /** Minimum interval between persisted check-in, progress, and log flushes for one job. */
   private Duration checkInMinInterval = Duration.ofSeconds(5);
+
+  /**
+   * How long a handler that has checked in at least once may go without
+   * another check-in before the engine interrupts it. Replaces
+   * {@link #getJobTimeout()} after the first check-in; the same interrupt
+   * contract applies.
+   */
   private Duration noProgressTimeout = Duration.ofMinutes(15);
+
   private int logMaxRatePerSecond = 100;
   private int logMaxEntries = 1000;
   private int logMaxBytes = 256 * 1024;

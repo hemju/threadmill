@@ -3,6 +3,7 @@ package com.hemju.threadmill.core.engine;
 import java.util.Objects;
 
 import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.handler.JobExecutionContexts;
 
 /**
  * Java 25 scoped values used by the engine to publish per-execution context
@@ -18,13 +19,15 @@ import com.hemju.threadmill.core.handler.JobExecutionContext;
  * executor must wrap each task with {@link #capturing(Runnable)} to carry
  * the {@link JobExecutionContext} across.
  *
- * <p>Threadmill exposes a single binding here; if richer published values
- * are needed later, add them through the same accessor.
+ * <p>The scoped value itself is owned by the handler API
+ * ({@link JobExecutionContexts#CURRENT}) so that
+ * {@link JobExecutionContext#current()} does not depend on the engine;
+ * {@link #CURRENT} is that same instance under its engine-side name.
  */
 public final class EngineScopedValues {
 
-  /** The currently-executing job's context, or null when not inside a handler. */
-  public static final ScopedValue<JobExecutionContext> CURRENT = ScopedValue.newInstance();
+  /** The currently-executing job's context; unbound when not inside a handler. */
+  public static final ScopedValue<JobExecutionContext> CURRENT = JobExecutionContexts.CURRENT;
 
   /**
    * Wrap {@code task} so the calling thread's current

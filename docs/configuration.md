@@ -17,16 +17,16 @@ must be nonblank, at most 128 characters, and contain no control characters.
 | `heartbeatTimeout` | `60s` | Orphan and node heartbeat expiry. |
 | `maintenanceLeaseDuration` | `60s` | Store-backed leadership lease. Must be greater than `claimHeartbeat`. |
 | `nodeHeartbeatRetention` | `10m` | How long old node registry entries remain visible after their last heartbeat. Must be greater than `heartbeatTimeout`. |
-| `jobTimeout` | `5m` | Per-job execution timeout. |
+| `jobTimeout` | `5m` | Wall-clock cap per attempt before the first check-in; the worker thread is interrupted when it passes. Handlers see it as `ctx.deadline()`. |
 | `maxConsecutiveDispatcherFailures` | `10` | Circuit-breaker pause threshold. |
 | `retryInitialBackoff` | `5s` | Default retry backoff. |
 | `defaultMaxAttempts` | `5` | Attempts including the first run. |
 | `claimBatchSize` | `10` | Maximum jobs claimed per poll. |
 | `defaultQueue` | `default` | Queue a lane-less node polls (the default lane). NOT the queue `Scheduler` convenience methods write to — those always use the literal `"default"`; set a matching lane or pass an explicit queue. |
 | `storeOutagePollInterval` | `5s` | Probe interval while paused by store outage. |
-| `shutdownGracePeriod` | `10s` | Time to wait for in-flight jobs on close. |
+| `shutdownGracePeriod` | `10s` | Time to wait for in-flight jobs on close. Caps `ctx.deadline()` while closing; work still running afterwards is interrupted and rescheduled without consuming an attempt. |
 | `checkInMinInterval` | `5s` | Minimum interval between persisted check-in/progress/log flushes for one job. |
-| `noProgressTimeout` | `15m` | Timeout after the most recent check-in when a handler stops making progress. |
+| `noProgressTimeout` | `15m` | Interrupt deadline after the most recent check-in when a handler stops making progress; replaces `jobTimeout` once a handler has checked in. |
 | `queueFamilyDiscoveryInterval` | `1s` | Core API setting for queue-family discovery cadence. Spring binds this as `threadmill.queue-family.discovery-interval`. |
 | `queueFamilyRetentionAfterEmpty` | `30s` | Core API setting for queue-family empty-queue retention. Spring binds this as `threadmill.queue-family.retention-after-empty`. |
 | `logMaxRatePerSecond` | `100` | Accepted per-job log entries per second. Extra entries are dropped. |

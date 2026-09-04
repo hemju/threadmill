@@ -160,6 +160,185 @@ class ProcessingNodeTest {
   }
 
   @Test
+  void deadlineMatchesTheWatchdogRuleBeforeAndAfterCheckIn() {
+    // Guard for github issue #119: ctx.deadline() is the watchdog's own
+    // formula — claimedAt + the per-job override before the first check-in,
+    // lastCheckIn + noProgressTimeout after it.
+    JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("test"));
+    Job job = Job.builder()
+        .spec(
+            new JobSpec(EngineTestHandlers.DeadlineRecordingHandler.class.getName(), List.of(arg)))
+        .queue(fastConfig.defaultQueue())
+        .metadata("threadmill.job.timeoutSeconds", "7")
+        .build();
+    store.insert(job);
+    var noProgress = Duration.ofSeconds(3);
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofSeconds(60))
+            .noProgressTimeout(noProgress)
+            .build())
+        .build();
+    node.start();
+
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(() -> assertThat(store.findById(job.id()).orElseThrow().currentState())
+            .isEqualTo(JobState.SUCCEEDED));
+
+    assertThat(EngineTestHandlers.DeadlineRecordingHandler.START_DEADLINE.get())
+        .as("before any check-in the deadline is claimedAt + the per-job override")
+        .isEqualTo(EngineTestHandlers.DeadlineRecordingHandler.CLAIMED_AT.get().plusSeconds(7));
+    assertThat(EngineTestHandlers.DeadlineRecordingHandler.CHECK_IN_DEADLINE.get())
+        .as("after a check-in the deadline is that check-in + noProgressTimeout")
+        .isAfterOrEqualTo(
+            EngineTestHandlers.DeadlineRecordingHandler.BEFORE_CHECK_IN.get().plus(noProgress))
+        .isBeforeOrEqualTo(
+            EngineTestHandlers.DeadlineRecordingHandler.AFTER_CHECK_IN.get().plus(noProgress));
+  }
+
+  @Test
+  void cooperativeHandlerThatStopsOnRemainingIsNeverInterrupted() {
+    // Guard for github issue #119: a handler that checks ctx.remaining()
+    // against its step budget finishes SUCCEEDED and is never interrupted,
+    // even though running every step would overshoot the timeout.
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofSeconds(1))
+            .defaultMaxAttempts(1)
+            .build())
+        .build();
+    Job job =
+        enqueueHello(EngineTestHandlers.CooperativeStepHandler.class, fastConfig.defaultQueue());
+    node.start();
+
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(() -> assertThat(store.findById(job.id()).orElseThrow().currentState())
+            .isEqualTo(JobState.SUCCEEDED));
+    assertThat(EngineTestHandlers.CooperativeStepHandler.INTERRUPTS.get()).isZero();
+    assertThat(EngineTestHandlers.CooperativeStepHandler.STEPS.get())
+        .as("it took the steps the budget allowed and stopped short of the fourth")
+        .isBetween(1, 3);
+  }
+
+  @Test
+  void timeoutCancellationIsRecordedBeforeTheInterruptLands() {
+    // Guard for github issue #119: cancellation() is the fact, set before the
+    // interrupt, so cleanup code can read it instead of the interrupt flag.
+    var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofMillis(300))
+            .defaultMaxAttempts(1)
+            .build())
+        .interceptor(new JobInterceptor() {
+          @Override
+          public void onProcessingFailed(
+              Job j, JobExecutionContext c, Throwable cause, FailureCause kind) {
+            failureKinds.add(kind);
+          }
+        })
+        .build();
+    Job job =
+        enqueueHello(EngineTestHandlers.SocketLikeBlockingHandler.class, fastConfig.defaultQueue());
+    node.start();
+
+    await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+      assertThat(failureKinds).contains(JobInterceptor.FailureCause.TIMEOUT);
+      assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.FAILED);
+    });
+    assertThat(EngineTestHandlers.SocketLikeBlockingHandler.CANCELLATION.get())
+        .contains(JobExecutionContext.CancellationReason.TIMEOUT);
+  }
+
+  @Test
+  void shutdownInterruptSurfacingAsASocketFailureIsStillClassifiedAsShutdown() {
+    // Guard for github issue #119: on a virtual thread the shutdown interrupt
+    // aborts socket I/O and surfaces as SocketException, not
+    // InterruptedException. Classification reads the engine's own
+    // cancellation record, so the attempt is still SHUTDOWN: rescheduled
+    // immediately, no attempt burned.
+    Job job = enqueueHello(EngineTestHandlers.SocketLikeBlockingHandler.class, "default");
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofSeconds(30))
+            .shutdownGracePeriod(Duration.ofMillis(200))
+            .build())
+        .build();
+    node.start();
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .until(() -> store.findById(job.id()).orElseThrow().currentState() == JobState.PROCESSING);
+
+    node.close();
+
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .until(() -> store.findById(job.id()).orElseThrow().currentState() == JobState.SCHEDULED);
+    assertThat(store.findById(job.id()).orElseThrow().attempts())
+        .as("shutdown must not burn an attempt")
+        .isZero();
+    assertThat(EngineTestHandlers.SocketLikeBlockingHandler.CANCELLATION.get())
+        .contains(JobExecutionContext.CancellationReason.SHUTDOWN);
+  }
+
+  @Test
+  void closeCollapsesTheDeadlineToTheShutdownGracePeriod() throws Exception {
+    // Guard for github issue #119: once close() begins, ctx.deadline()
+    // reflects the end of the grace period rather than the far-off job
+    // timeout, while cancellation() stays empty until the interrupt is
+    // actually sent — forecast versus fact.
+    var grace = Duration.ofSeconds(2);
+    Job job = enqueueHello(EngineTestHandlers.ShutdownDeadlineObservingHandler.class, "default");
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofSeconds(60))
+            .shutdownGracePeriod(grace)
+            .build())
+        .build();
+    node.start();
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .until(() ->
+            EngineTestHandlers.ShutdownDeadlineObservingHandler.INITIAL_DEADLINE.get() != null);
+
+    Instant closeStarted = Instant.now();
+    Thread closer = Thread.ofVirtual().start(node::close);
+    assertThat(closer.join(Duration.ofSeconds(10)))
+        .as("the handler winds down before the grace period, so close() returns promptly")
+        .isTrue();
+
+    assertThat(EngineTestHandlers.ShutdownDeadlineObservingHandler.INITIAL_DEADLINE.get())
+        .isAfter(closeStarted.plus(Duration.ofSeconds(50)));
+    assertThat(EngineTestHandlers.ShutdownDeadlineObservingHandler.COLLAPSED_DEADLINE.get())
+        .isAfterOrEqualTo(closeStarted)
+        .isBeforeOrEqualTo(closeStarted.plus(grace).plus(Duration.ofSeconds(1)));
+    assertThat(EngineTestHandlers.ShutdownDeadlineObservingHandler.CANCELLED_AT_COLLAPSE.get())
+        .as("a collapsed deadline is a forecast; nothing has been cancelled yet")
+        .isFalse();
+    assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.SUCCEEDED);
+  }
+
+  @Test
+  void currentContextResolvesInsideRunAndIsEmptyOutside() {
+    assertThat(JobExecutionContext.current()).isEmpty();
+    node = ProcessingNode.builder(store).config(fastConfig).build();
+    Job job =
+        enqueueHello(EngineTestHandlers.CurrentContextHandler.class, fastConfig.defaultQueue());
+    node.start();
+
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(() -> assertThat(store.findById(job.id()).orElseThrow().currentState())
+            .isEqualTo(JobState.SUCCEEDED));
+    assertThat(EngineTestHandlers.CurrentContextHandler.CURRENT_IS_THIS_CONTEXT.get())
+        .as("code two calls below run() resolves the same context the handler was given")
+        .isTrue();
+    assertThat(JobExecutionContext.current()).isEmpty();
+  }
+
+  @Test
   void successfulConcurrencyJobReleasesKeyForNextJob() {
     node = ProcessingNode.builder(store)
         .config(fastConfig.toBuilder().defaultMaxAttempts(1).build())

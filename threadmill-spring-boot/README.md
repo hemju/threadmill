@@ -209,7 +209,7 @@ list). The most common:
 | `threadmill.maintenancePollInterval` | `PT1S` | Master-only maintenance cadence for recurring tasks, scheduled promotion, and orphan reclaim. |
 | `threadmill.retentionInterval` | `PT1H` | Master-only retention cadence for succeeded jobs, dedup keys, and stale node records. |
 | `threadmill.defaultMaxAttempts` | `5` | Per-job retry budget (including first attempt). |
-| `threadmill.jobTimeout` | `PT5M` | Per-job timeout. |
+| `threadmill.jobTimeout` | `PT5M` | Per-attempt runtime cap; the worker thread is interrupted when it passes. |
 | `threadmill.remote-wake.enabled` | `true` | Publish cross-node wake hints for auto-configured Postgres / Redis stores. |
 | `threadmill.remote-wake.channel` | backend default | Optional channel override for deployment isolation. |
 | `threadmill.spring.enqueue-mode` | `after_commit` | `after_commit`, `join_transaction`, or `immediate`. |
@@ -227,7 +227,11 @@ Applied to a `JobHandler<P>` Spring bean. Required attributes:
 
 - `queue` — queue name. Default `"default"`.
 - `priority` — within-queue priority, higher wins. Default `0`.
-- `timeout` — ISO-8601 duration. Falls back to `threadmill.jobTimeout`.
+- `timeout` — ISO-8601 duration. Falls back to `threadmill.jobTimeout`. When
+  it passes the engine interrupts the worker thread; on a virtual thread that
+  aborts in-flight socket I/O and leaves the interrupt flag set. Handlers read
+  `ctx.remaining()` between steps to stop first — see the `@Job.timeout`
+  Javadoc and [Handlers → Timeouts](../docs/handlers.md#timeouts).
 - `maxAttempts` — total execution attempts including the first; `1` means a
   single attempt with no retries. `-1` (the default) leaves the retry budget
   to the `RetryInterceptor`: per-exception-type policies apply, then

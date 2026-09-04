@@ -1,10 +1,12 @@
 package com.hemju.threadmill.core.engine;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Supplier;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,14 +25,19 @@ import com.hemju.threadmill.core.store.JobStore;
 
 /**
  * The engine's concrete {@link JobExecutionContext}. Carries the running
- * job's identity, the owning node, the attempt number, the start time, and
- * the user-touchable surfaces (log, progress, metadata, result).
+ * job's identity, the owning node, the attempt number, the start time, the
+ * attempt's deadline and cancellation state, and the user-touchable surfaces
+ * (log, progress, metadata, result).
  *
  * <p>This is published to handler code via {@link EngineScopedValues}.
  * Threads forked through a {@code StructuredTaskScope} inherit the binding;
  * plain virtual threads and executor tasks do not — wrap those with
  * {@link EngineScopedValues#capturing(Runnable)} so spawned code can still
  * resolve the current job's id and attempt.
+ *
+ * <p>The deadline lives here, not in the watchdog, so that the watchdog and
+ * {@link #deadline()} can never disagree: {@link #watchdogDeadline()} is the
+ * single formula both read.
  */
 public final class ExecutionContext implements JobExecutionContext {
 
@@ -42,6 +49,8 @@ public final class ExecutionContext implements JobExecutionContext {
   private final NodeId nodeId;
   private final int attempt;
   private final Instant claimedAt;
+  private final Duration effectiveTimeout;
+  private final Supplier<Optional<Instant>> shutdownDeadline;
   private final JobLog log;
   private final JobProgress progress;
   private final JobMetadata metadata;
@@ -50,11 +59,19 @@ public final class ExecutionContext implements JobExecutionContext {
   private final AtomicReference<JobResult> result = new AtomicReference<>();
   private final AtomicReference<Object> resultObject = new AtomicReference<>();
   private final AtomicReference<Instant> lastCheckIn = new AtomicReference<>();
+  private final AtomicReference<CancellationReason> cancellation = new AtomicReference<>();
   private volatile Instant lastPersistedAt = Instant.EPOCH;
   private volatile long logWindowSecond = -1L;
   private volatile int acceptedLogCount;
   private final AtomicLong droppedLogCount = new AtomicLong();
 
+  /**
+   * @param effectiveTimeout the wall-clock timeout for this attempt — the
+   *     per-job override when present and valid, else the node's
+   *     {@code jobTimeout}
+   * @param shutdownDeadline the instant the owning node will interrupt
+   *     still-running work because it is closing; empty while the node runs
+   */
   public ExecutionContext(
       Job job,
       JobStore store,
@@ -62,6 +79,8 @@ public final class ExecutionContext implements JobExecutionContext {
       NodeId nodeId,
       int attempt,
       Instant claimedAt,
+      Duration effectiveTimeout,
+      Supplier<Optional<Instant>> shutdownDeadline,
       JobLog log,
       JobProgress progress,
       JobMetadata metadata,
@@ -72,7 +91,9 @@ public final class ExecutionContext implements JobExecutionContext {
     this.jobId = jobId;
     this.nodeId = nodeId;
     this.attempt = attempt;
-    this.claimedAt = claimedAt;
+    this.claimedAt = Objects.requireNonNull(claimedAt, "claimedAt");
+    this.effectiveTimeout = Objects.requireNonNull(effectiveTimeout, "effectiveTimeout");
+    this.shutdownDeadline = Objects.requireNonNull(shutdownDeadline, "shutdownDeadline");
     this.log = log;
     this.progress = progress;
     this.metadata = metadata;
@@ -99,6 +120,54 @@ public final class ExecutionContext implements JobExecutionContext {
   @Override
   public Instant claimedAt() {
     return claimedAt;
+  }
+
+  /**
+   * The wall-clock timeout this attempt runs under before its first
+   * check-in: the per-job override when present and valid, else the
+   * node's {@code jobTimeout}. Resolved once, at context creation.
+   */
+  public Duration effectiveTimeout() {
+    return effectiveTimeout;
+  }
+
+  /**
+   * The instant the timeout watchdog interrupts this attempt: the claim
+   * instant plus the effective timeout before the first check-in, the most
+   * recent check-in plus {@code noProgressTimeout} afterwards. The watchdog
+   * reads exactly this; {@link #deadline()} additionally folds in the
+   * node's shutdown deadline.
+   */
+  public Instant watchdogDeadline() {
+    Instant checkIn = lastCheckIn.get();
+    return checkIn == null
+        ? claimedAt.plus(effectiveTimeout)
+        : checkIn.plus(config.noProgressTimeout());
+  }
+
+  @Override
+  public Instant deadline() {
+    Instant watchdog = watchdogDeadline();
+    return shutdownDeadline
+        .get()
+        .filter(shutdown -> shutdown.isBefore(watchdog))
+        .orElse(watchdog);
+  }
+
+  @Override
+  public Optional<CancellationReason> cancellation() {
+    return Optional.ofNullable(cancellation.get());
+  }
+
+  /**
+   * Engine-internal: record why the engine is abandoning this attempt.
+   * Called immediately before the worker thread is interrupted. The first
+   * reason wins; a later call with a different reason is ignored.
+   *
+   * @return {@code true} if this call recorded the reason
+   */
+  public boolean markCancelled(CancellationReason reason) {
+    return cancellation.compareAndSet(null, Objects.requireNonNull(reason, "reason"));
   }
 
   @Override
