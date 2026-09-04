@@ -46,9 +46,9 @@ starter if you use Spring):
 
 ```kotlin
 // build.gradle.kts
-implementation("com.hemju.threadmill:threadmill-core:0.2.1")
-implementation("com.hemju.threadmill:threadmill-store-postgres:0.2.1") // or -store-redis / -store-memory
-implementation("com.hemju.threadmill:threadmill-spring-boot:0.2.1")    // optional Spring Boot integration
+implementation("com.hemju.threadmill:threadmill-core:0.2.2")
+implementation("com.hemju.threadmill:threadmill-store-postgres:0.2.2") // or -store-redis / -store-memory
+implementation("com.hemju.threadmill:threadmill-spring-boot:0.2.2")    // optional Spring Boot integration
 ```
 
 ```xml
@@ -56,7 +56,7 @@ implementation("com.hemju.threadmill:threadmill-spring-boot:0.2.1")    // option
 <dependency>
   <groupId>com.hemju.threadmill</groupId>
   <artifactId>threadmill-core</artifactId>
-  <version>0.2.1</version>
+  <version>0.2.2</version>
 </dependency>
 ```
 

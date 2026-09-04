@@ -1,7 +1,42 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
 
+- Process-fatal JVM errors are no longer swallowed as ordinary job or loop
+  failures (issue #101). Every intentional `catch (Throwable)` now classifies
+  `VirtualMachineError` / `ThreadDeath` — including through bounded wrapper and
+  cause chains — and rethrows it before logging, interceptor invocation, failure
+  serialization, or retry work. Long-lived dispatcher, maintenance, registry,
+  and recurring loops catch `RuntimeException` rather than `Throwable`, worker
+  tasks run through `ExecutorService.execute` so a fatal reaches the thread's
+  uncaught-exception path instead of an ignored `Future`, and the per-job
+  watchdog is cancelled before the fatal escapes and before terminal
+  finalization begins. A handler `AssertionError` remains an ordinary per-job
+  failure. Threadmill still does not call `System.exit`: configure
+  `-XX:+ExitOnOutOfMemoryError` (or an equivalent uncaught-exception handler)
+  plus a process supervisor, because until the process stops, a fatal worker's
+  job stays `PROCESSING` and holds its concurrency slot.
+- Micrometer store gauges now refresh on their own bounded pull path instead of
+  only on job completion (issue #100), so queue depths, per-state counts, and
+  oldest-age gauges stay truthful when processing stalls and when a queue is
+  paused or newly created. A failed refresh retains the last successful
+  snapshot, keeps ages advancing, and exposes
+  `threadmill.metrics.snapshot.stale`, a snapshot age, and a refresh-error
+  counter rather than reporting zero. Concurrent gauge readers use the cached
+  snapshot instead of queueing behind an in-flight refresh. `meteredStore()`
+  now records claim latency and failures, persisted orphan reclaims, and
+  rejected store-write attempts at the real `JobStore` boundary — contractual
+  stale-version, oversize, and invalid-argument rejections are excluded from
+  store-health signals — and per-queue meters are capped by a configurable hard
+  tag limit (default 100) that reports overflow through
+  `threadmill.metrics.queue.tags.omitted`.
+- Fixed PostgreSQL keyed claim polling permanently re-reading the same first
+  page of concurrency-blocked keys, which starved claimable work behind a hot
+  key (issue #92). Queue-scoped keys are now keyset-paged from a bounded,
+  process-local cursor with least-recently-used eviction, cursor progress
+  survives concurrent polls through identity-checked updates, the common path
+  still costs one loose-scan query, and a drained tail restarts within the same
+  poll instead of reporting an empty one.
 - Release publication is now fail-closed (issue #99): `productionCheck` cleans
   and checks every subproject from one ordered task graph, supported aggregate
   Central Portal publication requires that gate, direct per-module publication
