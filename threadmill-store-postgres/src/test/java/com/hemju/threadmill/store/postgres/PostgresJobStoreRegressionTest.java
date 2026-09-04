@@ -440,6 +440,40 @@ class PostgresJobStoreRegressionTest {
   }
 
   @Test
+  void drainedTailRestartsKeyedScanWithoutAnEmptyPoll() {
+    var setupStore = store();
+    var blockedKeyCount = PostgresJobStore.MAX_PENDING_KEYS_PER_PASS + 1;
+    var blockers = new ArrayList<Job>(blockedKeyCount);
+    for (int i = 0; i < blockedKeyCount; i++) {
+      blockers.add(keyedJob("blocked:%04d".formatted(i)));
+    }
+    setupStore.insertAll(blockers);
+    assertThat(setupStore.claimReady(NodeId.newId(), "default", blockedKeyCount, Instant.now()))
+        .hasSize(blockedKeyCount);
+
+    var blockedWaiters = new ArrayList<Job>(blockedKeyCount);
+    for (int i = 0; i < blockedKeyCount; i++) {
+      blockedWaiters.add(keyedJob("blocked:%04d".formatted(i)));
+    }
+    setupStore.insertAll(blockedWaiters);
+
+    var claimingStore = store();
+    assertThat(claimingStore.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .isEmpty();
+
+    // The only key after the first page was the look-ahead key. Drain it
+    // before the next poll, then add work before the saved cursor. The next
+    // tail scan is empty and must restart from the beginning in this poll.
+    assertThat(setupStore.softDelete(blockedWaiters.getLast().id())).isTrue();
+    var earlyClaimable = keyedJob("available:after-drained-tail", Integer.MAX_VALUE);
+    setupStore.insert(earlyClaimable);
+
+    assertThat(claimingStore.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(earlyClaimable.id());
+  }
+
+  @Test
   void claimReadyIsAtomicAcrossManyConcurrentVirtualThreads() throws Exception {
     JobStore store = store();
     int total = 200;

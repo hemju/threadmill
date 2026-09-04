@@ -23,7 +23,6 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 import javax.sql.DataSource;
 
@@ -95,7 +94,8 @@ public final class PostgresJobStore implements JobStore {
   private final JobStoreCapabilities capabilities;
   private final String serverVersion;
   private final String databaseName;
-  private final Map<String, PendingKeyCursor> pendingKeyCursors = new ConcurrentHashMap<>();
+  private final PendingKeyCursors pendingKeyCursors =
+      new PendingKeyCursors(MAX_TRACKED_PENDING_KEY_CURSORS);
 
   public PostgresJobStore(DataSource dataSource) {
     this(dataSource, new JsonJobSerializer(), JobStoreCapabilities.defaults());
@@ -792,16 +792,15 @@ public final class PostgresJobStore implements JobStore {
    * 415k backlog.
    */
   private List<String> distinctEnqueuedKeys(Connection conn, String queue) throws SQLException {
-    var observedCursor = pendingKeyCursors.get(queue);
+    var observedCursor = pendingKeyCursors.current(queue);
     var after = observedCursor == null ? null : observedCursor.after;
     var keys = distinctEnqueuedKeysAfter(conn, queue, after);
     if (keys.size() > MAX_PENDING_KEYS_PER_PASS) {
-      keys.removeLast();
-      advancePendingKeyCursor(queue, observedCursor, keys.getLast());
+      trimLookAheadAndAdvance(queue, observedCursor, keys);
       return keys;
     }
 
-    clearPendingKeyCursor(queue, observedCursor);
+    pendingKeyCursors.clear(queue, observedCursor);
     if (keys.isEmpty() && observedCursor != null) {
       // The tail disappeared after the previous look-ahead (for example,
       // another node claimed it). Restart now instead of reporting a false
@@ -809,38 +808,16 @@ public final class PostgresJobStore implements JobStore {
       // identity-checked update; duplicate scanning is harmless.
       keys = distinctEnqueuedKeysAfter(conn, queue, null);
       if (keys.size() > MAX_PENDING_KEYS_PER_PASS) {
-        keys.removeLast();
-        advancePendingKeyCursor(queue, null, keys.getLast());
+        trimLookAheadAndAdvance(queue, null, keys);
       }
     }
     return keys;
   }
 
-  private void advancePendingKeyCursor(String queue, PendingKeyCursor expected, String nextKey) {
-    var next = new PendingKeyCursor(nextKey);
-    synchronized (pendingKeyCursors) {
-      if (expected != null) {
-        pendingKeyCursors.replace(queue, expected, next);
-        return;
-      }
-      if (pendingKeyCursors.containsKey(queue)) {
-        return;
-      }
-      if (pendingKeyCursors.size() >= MAX_TRACKED_PENDING_KEY_CURSORS) {
-        var evicted = pendingKeyCursors.keySet().iterator().next();
-        pendingKeyCursors.remove(evicted);
-      }
-      pendingKeyCursors.put(queue, next);
-    }
-  }
-
-  private void clearPendingKeyCursor(String queue, PendingKeyCursor expected) {
-    if (expected == null) {
-      return;
-    }
-    synchronized (pendingKeyCursors) {
-      pendingKeyCursors.remove(queue, expected);
-    }
+  private void trimLookAheadAndAdvance(
+      String queue, PendingKeyCursor observedCursor, List<String> keys) {
+    keys.removeLast();
+    pendingKeyCursors.advance(queue, observedCursor, keys.getLast());
   }
 
   private List<String> distinctEnqueuedKeysAfter(Connection conn, String queue, String after)
@@ -876,11 +853,66 @@ public final class PostgresJobStore implements JobStore {
     }
   }
 
-  private static final class PendingKeyCursor {
+  /**
+   * One identity-bearing cursor generation. Equality deliberately remains
+   * object identity so a delayed poll cannot overwrite a newer generation
+   * that happens to carry the same {@link #after} value. Do not convert this
+   * class to a record or add value-based {@code equals}/{@code hashCode}.
+   */
+  static final class PendingKeyCursor {
     private final String after;
 
     private PendingKeyCursor(String after) {
       this.after = after;
+    }
+
+    String after() {
+      return after;
+    }
+  }
+
+  /**
+   * Bounded cursor hints guarded by short in-memory critical sections. JDBC
+   * work always happens outside this object. Insertion-order eviction rotates
+   * the queue that loses fairness progress when more queues are active than
+   * the bound can retain.
+   */
+  static final class PendingKeyCursors {
+    private final int maxTracked;
+    private final Map<String, PendingKeyCursor> cursors = new LinkedHashMap<>();
+
+    PendingKeyCursors(int maxTracked) {
+      if (maxTracked < 1) {
+        throw new IllegalArgumentException("maxTracked must be positive");
+      }
+      this.maxTracked = maxTracked;
+    }
+
+    synchronized PendingKeyCursor current(String queue) {
+      return cursors.get(queue);
+    }
+
+    synchronized void advance(String queue, PendingKeyCursor expected, String nextKey) {
+      if (expected != null) {
+        if (cursors.get(queue) == expected) {
+          cursors.put(queue, new PendingKeyCursor(nextKey));
+        }
+        return;
+      }
+      if (cursors.containsKey(queue)) {
+        return;
+      }
+      if (cursors.size() >= maxTracked) {
+        var eldest = cursors.keySet().iterator().next();
+        cursors.remove(eldest);
+      }
+      cursors.put(queue, new PendingKeyCursor(nextKey));
+    }
+
+    synchronized void clear(String queue, PendingKeyCursor expected) {
+      if (expected != null && cursors.get(queue) == expected) {
+        cursors.remove(queue);
+      }
     }
   }
 
