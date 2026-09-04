@@ -28,8 +28,43 @@ and heartbeats stop; the maintenance leader then reclaims the job after
 
 Use `ThreadmillMetrics` with a Micrometer registry. Key meters include job
 counts by state, queue depths, oldest enqueued age by queue, oldest processing
-heartbeat age, processed/failed counters, processing time, claim latency, and
-metric refresh errors.
+heartbeat age, processed/failed counters, orphan reclaim, processing time,
+claim latency/failures, rejected writes, and metric refresh health.
+
+Wire `metrics.meteredStore()` into both processing nodes and producers, plus
+`metrics.asInterceptor()` into each processing node. Claims and rejected
+writes are observed at that store boundary; the interceptor records lifecycle
+signals only after their state transition commits.
+
+Store gauges refresh on pull at most once per second by default, even when no
+job completes. A failed refresh retains the last successful counts/depths,
+keeps age gauges advancing from the last known timestamps, sets
+`threadmill.metrics.snapshot.stale` to `1`, and increments
+`threadmill.metrics.refresh.errors`. Treat those values as last-known data
+until stale clears; use `threadmill.metrics.snapshot.age` to judge their age.
+Concurrent readers use the cached snapshot while a refresh is in flight. The
+reader that starts the refresh performs the bounded store reads synchronously;
+the refresh interval and queue cap therefore budget store load as well as
+freshness and cardinality. An explicit `metrics.refresh()` waits for an
+in-flight pull and then runs a new pass, preserving its immediate-refresh
+contract for host-driven checks.
+
+Queue tags are capped at 100 active queues per metrics instance by default.
+`threadmill.metrics.queue.tags.omitted` reports how many active queues did not
+receive a tag slot. Drained queues release slots for newly appearing queues.
+The constructor overload accepts a different refresh interval and queue cap;
+zero disables per-queue meters.
+
+`threadmill.store.writes.rejected` counts failed write attempts, including
+retries during one logical outage. It excludes the SPI's expected
+stale-version, oversize, invalid-argument, and duplicate-id outcomes so normal
+multi-node races and caller validation errors do not masquerade as store
+health failures.
+
+Queue-meter registration/removal failures increment
+`threadmill.metrics.queue.meter.errors` and are logged separately. They do not
+mark the store snapshot stale because counts and timestamps may already be
+current even when the registry rejects a meter.
 
 ## Datastores
 
