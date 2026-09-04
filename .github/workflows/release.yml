@@ -40,4 +40,8 @@ jobs:
           ORG_GRADLE_PROJECT_signingPassword: ${{ secrets.SIGNING_PASSWORD }}
           ORG_GRADLE_PROJECT_centralPortalUsername: ${{ secrets.CENTRAL_PORTAL_USERNAME }}
           ORG_GRADLE_PROJECT_centralPortalPassword: ${{ secrets.CENTRAL_PORTAL_PASSWORD }}
-        run: ./gradlew publishAggregationToCentralPortal --no-configuration-cache --stacktrace
+        run: >-
+          ./gradlew publishAggregationToCentralPortal
+          -PreleaseTag="${GITHUB_REF_NAME}"
+          --no-configuration-cache
+          --stacktrace

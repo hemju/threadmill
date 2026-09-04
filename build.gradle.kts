@@ -45,6 +45,51 @@ dependencies {
 
 allprojects { tasks.withType<Test>().configureEach { systemProperty("file.encoding", "UTF-8") } }
 
+// --------------------------------------------------------- Aggregate lifecycle
+//
+// The root Base plugin's `clean` and `check` tasks do not aggregate the same
+// tasks from subprojects. Keep explicit all-project lifecycle tasks so the
+// documented root checks cannot silently omit a module.
+
+val cleanAll by
+    tasks.registering {
+        group = "build"
+        description = "Delete build outputs for the root project and every subproject."
+        dependsOn(":clean")
+        dependsOn(subprojects.map { "${it.path}:clean" })
+    }
+
+val buildLogicTest by
+    tasks.registering(Exec::class) {
+        group = "verification"
+        description = "Run the buildSrc build-logic regression tests."
+        val wrapper =
+            if (System.getProperty("os.name").startsWith("Windows")) "gradlew.bat" else "gradlew"
+        commandLine(
+            rootProject.file(wrapper).absolutePath,
+            "-p",
+            rootProject.file("buildSrc").absolutePath,
+            "test",
+            "--no-configuration-cache",
+        )
+    }
+
+tasks.named("check") {
+    dependsOn(subprojects.map { "${it.path}:check" })
+    dependsOn(buildLogicTest)
+}
+
+// A lifecycle task's ordering constraint does not extend to its dependencies.
+// Order every non-clean task after cleanAll so compilation and resource work
+// cannot consume stale outputs before a later clean deletes them.
+allprojects {
+    tasks.configureEach {
+        if (path != ":cleanAll" && name != "clean") {
+            mustRunAfter(cleanAll)
+        }
+    }
+}
+
 // ---------------------------------------------------------------- Spotless
 //
 // Code formatting + hygiene enforced by `check`.
@@ -216,36 +261,82 @@ tasks.register("artifactInspection") {
     }
 }
 
-tasks.register("productionCheck") {
-    group = "verification"
-    description = "Run the production-readiness validation gauntlet."
-    dependsOn("clean", "check", "dependencySecurityScan", "artifactInspection")
-    dependsOn(subprojects.map { it.tasks.matching { task -> task.name == "javadoc" } })
-    dependsOn(
-        ":threadmill-store-postgres:test",
-        ":threadmill-store-redis:test",
-        ":threadmill-soak:soakRegression",
-        // The correctness simulation is the gate that caught the C1
-        // in-memory concurrency bypass — a release candidate must run it.
-        ":threadmill-simulation:simulate",
-        // The process-separated nudge simulation pins maintenance-leader
-        // hard-kill handoff and the documented producer crash window.
-        ":threadmill-simulation:simulateNudge",
-    )
-    dependsOn(":threadmill-example:run")
-}
+val productionCheck by
+    tasks.registering {
+        group = "verification"
+        description = "Run the production-readiness validation gauntlet."
+        dependsOn(cleanAll, "check", "dependencySecurityScan", "artifactInspection")
+        dependsOn(subprojects.map { it.tasks.matching { task -> task.name == "javadoc" } })
+        dependsOn(
+            ":threadmill-store-postgres:test",
+            ":threadmill-store-redis:test",
+            ":threadmill-soak:soakRegression",
+            // The correctness simulation is the gate that caught the C1
+            // in-memory concurrency bypass — a release candidate must run it.
+            ":threadmill-simulation:simulate",
+            // The process-separated nudge simulation pins maintenance-leader
+            // hard-kill handoff and the documented producer crash window.
+            ":threadmill-simulation:simulateNudge",
+        )
+        dependsOn(":threadmill-example:run")
+    }
 
-val cleanTask = tasks.named("clean")
+val verifyReleaseTag by
+    tasks.registering {
+        group = "verification"
+        description = "Require the release tag to exactly match the project version."
+        doLast {
+            val projectVersions = subprojects.map { it.version.toString() }.distinct()
+            if (projectVersions.size != 1 || projectVersions.single() == "unspecified") {
+                throw GradleException(
+                    "Expected one consistent release version across all subprojects, found " +
+                        projectVersions.joinToString(prefix = "[", postfix = "]")
+                )
+            }
+            val projectVersion = projectVersions.single()
+            val expectedTag = "v$projectVersion"
+            val actualTag =
+                providers
+                    .gradleProperty("releaseTag")
+                    .orElse(providers.environmentVariable("GITHUB_REF_NAME"))
+                    .orNull
+                    ?: throw GradleException(
+                        "Release tag is unavailable; pass -PreleaseTag=$expectedTag."
+                    )
+            if (actualTag != expectedTag) {
+                throw GradleException(
+                    "Release tag '$actualTag' does not match project version '$projectVersion'; " +
+                        "expected '$expectedTag'."
+                )
+            }
+            if (projectVersion.endsWith("-SNAPSHOT")) {
+                throw GradleException("Refusing to publish snapshot version '$projectVersion'.")
+            }
+        }
+    }
+
+// One task graph builds, tests, inspects, signs, and uploads the same artifacts.
+// Nmcp's non-prefixed task is a lifecycle alias; gate the real prefixed upload
+// task as well, then stage and zip the already-verified artifacts afterwards.
+allprojects {
+    tasks
+        .matching { it.name.endsWith("ToNmcpRepository") }
+        .configureEach { mustRunAfter(productionCheck, verifyReleaseTag) }
+}
 
 tasks
-    .matching { it.name in setOf("check", "artifactInspection", "dependencySecurityScan") }
-    .configureEach { mustRunAfter(cleanTask) }
+    .matching {
+        it.name in
+            setOf(
+                "nmcpCheckAggregationFiles",
+                "nmcpZipAggregation",
+                "nmcpPublishAggregationToCentralPortal",
+            )
+    }
+    .configureEach { mustRunAfter(productionCheck, verifyReleaseTag) }
 
-subprojects {
-    tasks
-        .matching {
-            it.name in setOf("jar", "test", "javadoc", "soak", "run") ||
-                it.name.startsWith("simulate")
-        }
-        .configureEach { mustRunAfter(cleanTask) }
+tasks.named("nmcpPublishAggregationToCentralPortal") {
+    dependsOn(productionCheck, verifyReleaseTag)
 }
+
+tasks.named("publishAggregationToCentralPortal") { dependsOn(productionCheck, verifyReleaseTag) }

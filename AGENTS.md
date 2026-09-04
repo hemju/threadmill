@@ -140,7 +140,7 @@ These are acceptance criteria, not suggestions.
 The build uses Gradle (≥ 9.5) and the project's Java 25 toolchain.
 
 - `./gradlew build` — compile + test + assemble all modules.
-- `./gradlew check` — tests + Spotless formatting check.
+- `./gradlew check` — every subproject's tests/checks, the build-logic regression tests, and Spotless formatting.
 - `./gradlew test` — run the test suite.
 - `./gradlew :threadmill-core:test` — test a single module.
 - `./gradlew :threadmill-store-memory:test` — run the contract suite against the in-memory store.
@@ -153,7 +153,7 @@ The build uses Gradle (≥ 9.5) and the project's Java 25 toolchain.
 - `./gradlew :threadmill-simulation:simulateWorkerChurnPostgres` / `simulateWorkerChurnRedis` — run worker-process churn simulations against shared local datastores.
 - `./gradlew :threadmill-simulation:simulateNudgePostgres` / `simulateNudgeRedis` — run the fixed process-separated nudge simulation with a hard-killed maintenance leader and a producer killed between its durable work write and nudge. `simulateNudge` runs both real backends.
 - `./gradlew :threadmill-example:run` — compile and run the public getting-started example.
-- `./gradlew productionCheck` — release-candidate validation: clean, check, Javadoc, real store tests, soak, short correctness and process-separated nudge simulations, dependency scan hook, example, and artifact inspection.
+- `./gradlew productionCheck` — release-candidate validation from clean outputs for every subproject: complete checks, Javadoc, real store tests, soak, short correctness and process-separated nudge simulations, dependency scan hook, example, and artifact inspection. Central Portal publication depends on this task and an exact release-tag/project-version match, so the verified artifacts are uploaded from the same task graph.
 - Integration tests for the real backends use **Testcontainers** and need a working container runtime (Docker / Podman / Colima / OrbStack).
 
 The Gradle wrapper is committed; new clones run `./gradlew` without a system Gradle install.

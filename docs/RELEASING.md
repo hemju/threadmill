@@ -85,9 +85,11 @@ GitHub Environment named `release` with required reviewers for an approval gate.
    git tag v0.1.0
    git push origin main --tags
    ```
-4. The tag push triggers `.github/workflows/release.yml`, which runs
-   `./gradlew publishAggregationToCentralPortal`. This signs all 11 published
-   modules, assembles one bundle, and uploads it to the Central Portal.
+4. The tag push triggers `.github/workflows/release.yml`. The publication task
+   first requires the tag to exactly equal `v` plus the Gradle project version,
+   rejects snapshot versions, and runs the complete `productionCheck` gate from
+   clean outputs. The same task graph then signs the verified artifacts,
+   assembles one bundle, and uploads it to the Central Portal.
 5. The build uses `publishingType = "AUTOMATIC"`, so the deployment is
    validated and then **published to Maven Central automatically** — no manual
    click. Sync to `repo.maven.apache.org` takes ~15–30 min; the search UI can
