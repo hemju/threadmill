@@ -5,10 +5,9 @@ plugins {
 
 dependencies {
     constraints {
-        // Spring Boot 4.0.8's BOM resolves Tomcat 11.0.24, which remains below
-        // the 11.0.25 security floor. These test-only starters still execute in
-        // CI, so constrain the complete embedded-Tomcat set rather than ignore
-        // the advisories.
+        // Spring Boot 4.0.8 resolves Tomcat 11.0.24, below the 11.0.25 floor for
+        // GHSA-9xv2-5v5q-p794, GHSA-gcx9-497g-6cp6, and GHSA-h3x4-894j-xpx5.
+        // Remove these constraints when Boot's BOM resolves Tomcat >= 11.0.25.
         testImplementation(
             "org.apache.tomcat.embed:tomcat-embed-core:${libs.versions.tomcat.get()}"
         )
@@ -16,9 +15,6 @@ dependencies {
         testImplementation(
             "org.apache.tomcat.embed:tomcat-embed-websocket:${libs.versions.tomcat.get()}"
         )
-
-        // Keep the patched Jackson release until Spring Boot's BOM catches up.
-        testImplementation(libs.jackson3.databind)
     }
     api(project(":threadmill-core"))
     api(project(":threadmill-dashboard-api"))

@@ -94,8 +94,7 @@ tasks.named("check") { dependsOn("spotlessCheck") }
 
 tasks.register("dependencySecurityScan") {
     group = "verification"
-    description = "Scan every committed Gradle and npm lockfile for known vulnerabilities."
-    dependsOn(":threadmill-dashboard-ui:npmAudit")
+    description = "Scan every Git-tracked Gradle and npm lockfile for known vulnerabilities."
     doLast {
         val osv =
             providers
@@ -126,38 +125,53 @@ tasks.register("dependencySecurityScan") {
                     "agent, or pass -PdependencyScanRequired=false to skip (not recommended for releases)."
             )
         }
+        val trackedFiles =
+            providers.exec {
+                workingDir(rootDir)
+                commandLine("git", "ls-files", "-z", "--", "*gradle.lockfile", "*package-lock.json")
+                isIgnoreExitValue = true
+            }
+        if (trackedFiles.result.get().exitValue != 0) {
+            throw GradleException(
+                "dependencySecurityScan requires a Git checkout so it can scan exactly the Git-tracked " +
+                    "lockfiles. Run it from a clone/worktree; exported source trees are not release evidence."
+            )
+        }
         val lockfiles =
-            providers
-                .exec {
-                    workingDir(rootDir)
-                    commandLine(
-                        "git",
-                        "ls-files",
-                        "-z",
-                        "--",
-                        "*gradle.lockfile",
-                        "*package-lock.json",
-                    )
-                }
-                .standardOutput
-                .asText
+            trackedFiles.standardOutput.asText
                 .get()
                 .split('\u0000')
                 .filter(String::isNotBlank)
                 .map(rootProject::file)
-                .onEach {
-                    if (!it.isFile) {
-                        throw GradleException("Committed lockfile does not exist: $it")
-                    }
-                }
                 .sortedBy { it.absolutePath }
         if (lockfiles.isEmpty()) {
             throw GradleException("dependencySecurityScan found no supported lockfiles")
         }
+        lockfiles.forEach {
+            if (!it.isFile) {
+                throw GradleException("Git-tracked lockfile does not exist: $it")
+            }
+        }
         logger.lifecycle(
-            "Scanning ${lockfiles.size} committed dependency lockfiles:\n" +
+            "Scanning ${lockfiles.size} Git-tracked dependency lockfiles:\n" +
                 lockfiles.joinToString("\n") { "- ${it.relativeTo(rootDir)}" }
         )
+
+        val npmAudit =
+            providers.exec {
+                workingDir(rootProject.file("threadmill-dashboard-ui"))
+                commandLine("npm", "audit", "--package-lock-only", "--audit-level=low")
+                isIgnoreExitValue = true
+            }
+        val npmStandardOutput = npmAudit.standardOutput.asText.get().trim()
+        val npmStandardError = npmAudit.standardError.asText.get().trim()
+        if (npmStandardOutput.isNotEmpty()) logger.lifecycle(npmStandardOutput)
+        if (npmStandardError.isNotEmpty()) logger.warn(npmStandardError)
+        val npmResult = npmAudit.result.get()
+        if (npmResult.exitValue != 0) {
+            throw GradleException("npm audit failed with exit code ${npmResult.exitValue}")
+        }
+
         val arguments =
             mutableListOf(
                 "scan",

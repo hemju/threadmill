@@ -5,8 +5,10 @@ plugins {
 
 dependencies {
     api(project(":threadmill-core"))
-    // Force Netty to the current security floor (4.1.137: SNI parsing and
-    // routing fixes) regardless of Lettuce's transitive pin.
+    // Lettuce 6.8.2 still declares Netty 4.1.125. Force the 4.1.137 security
+    // floor: GHSA-4g8c-wm8x-jfhw / GHSA-389x-839f-4rhx affect reachable TLS or
+    // common code; GHSA-fccg-mwvh-qqg4 / GHSA-c4c3-7fpv-j4q5 are server-only.
+    // See docs/dependency-security.md for the reachability decisions.
     api(platform(libs.netty.bom))
     api(libs.lettuce.core)
 
