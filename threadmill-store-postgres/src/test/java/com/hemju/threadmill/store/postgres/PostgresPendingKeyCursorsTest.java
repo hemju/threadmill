@@ -8,7 +8,7 @@ class PostgresPendingKeyCursorsTest {
 
   @Test
   void staleGenerationCannotAdvanceOrClearCursorAfterValueWraps() {
-    var cursors = new PostgresJobStore.PendingKeyCursors(3);
+    var cursors = new PendingKeyCursors(3);
     cursors.advance("queue", null, "a");
     var stale = cursors.current("queue");
 
@@ -29,7 +29,7 @@ class PostgresPendingKeyCursorsTest {
 
   @Test
   void boundedEvictionRotatesAcrossTrackedQueues() {
-    var cursors = new PostgresJobStore.PendingKeyCursors(3);
+    var cursors = new PendingKeyCursors(3);
     cursors.advance("queue-1", null, "a");
     cursors.advance("queue-2", null, "a");
     cursors.advance("queue-3", null, "a");
@@ -45,5 +45,22 @@ class PostgresPendingKeyCursorsTest {
     assertThat(cursors.current("queue-1")).isNotNull();
     assertThat(cursors.current("queue-4")).isNotNull();
     assertThat(cursors.current("queue-5")).isNotNull();
+  }
+
+  @Test
+  void boundedEvictionPrefersIdleQueueToContinuouslyActiveQueue() {
+    var cursors = new PendingKeyCursors(2);
+    cursors.advance("hot", null, "initial");
+    cursors.advance("idle", null, "initial");
+
+    for (int generation = 0; generation < 100; generation++) {
+      var current = cursors.current("hot");
+      cursors.advance("hot", current, "generation-" + generation);
+    }
+    cursors.advance("newcomer", null, "initial");
+
+    assertThat(cursors.current("idle")).isNull();
+    assertThat(cursors.current("hot")).isNotNull();
+    assertThat(cursors.current("newcomer")).isNotNull();
   }
 }

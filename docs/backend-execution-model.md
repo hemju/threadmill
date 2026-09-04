@@ -112,9 +112,10 @@ sequenceDiagram
   and rotates a process-local cursor so later keys are reached without walking
   the pending-row backlog. Each `PostgresJobStore` instance rotates
   independently; cursor entries are bounded and disposable fairness hints,
-  not durable scheduling state. When the bound is exceeded, insertion-order
-  eviction distributes cursor resets across active queues. Eviction preserves
-  claim correctness but restarts that queue's fairness progress.
+  not durable scheduling state. When the bound is exceeded, least-recently-used
+  eviction preserves active queues' cursors and discards an idle queue's hint.
+  Eviction preserves claim correctness but restarts that queue's fairness
+  progress.
 - Claim decisions are scalar-first: group counters, active workflow holds, and
   earliest pending order are loaded once per page, and job bodies are fetched
   only for candidates that will actually claim.

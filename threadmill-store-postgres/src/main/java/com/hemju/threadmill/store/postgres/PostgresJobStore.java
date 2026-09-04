@@ -793,7 +793,7 @@ public final class PostgresJobStore implements JobStore {
    */
   private List<String> distinctEnqueuedKeys(Connection conn, String queue) throws SQLException {
     var observedCursor = pendingKeyCursors.current(queue);
-    var after = observedCursor == null ? null : observedCursor.after;
+    var after = observedCursor == null ? null : observedCursor.after();
     var keys = distinctEnqueuedKeysAfter(conn, queue, after);
     if (keys.size() > MAX_PENDING_KEYS_PER_PASS) {
       trimLookAheadAndAdvance(queue, observedCursor, keys);
@@ -849,69 +849,6 @@ public final class PostgresJobStore implements JobStore {
           keys.add(rs.getString(1));
         }
         return keys;
-      }
-    }
-  }
-
-  /**
-   * One identity-bearing cursor generation. Equality deliberately remains
-   * object identity so a delayed poll cannot overwrite a newer generation
-   * that happens to carry the same {@link #after} value. Do not convert this
-   * class to a record or add value-based {@code equals}/{@code hashCode}.
-   */
-  static final class PendingKeyCursor {
-    private final String after;
-
-    private PendingKeyCursor(String after) {
-      this.after = after;
-    }
-
-    String after() {
-      return after;
-    }
-  }
-
-  /**
-   * Bounded cursor hints guarded by short in-memory critical sections. JDBC
-   * work always happens outside this object. Insertion-order eviction rotates
-   * the queue that loses fairness progress when more queues are active than
-   * the bound can retain.
-   */
-  static final class PendingKeyCursors {
-    private final int maxTracked;
-    private final Map<String, PendingKeyCursor> cursors = new LinkedHashMap<>();
-
-    PendingKeyCursors(int maxTracked) {
-      if (maxTracked < 1) {
-        throw new IllegalArgumentException("maxTracked must be positive");
-      }
-      this.maxTracked = maxTracked;
-    }
-
-    synchronized PendingKeyCursor current(String queue) {
-      return cursors.get(queue);
-    }
-
-    synchronized void advance(String queue, PendingKeyCursor expected, String nextKey) {
-      if (expected != null) {
-        if (cursors.get(queue) == expected) {
-          cursors.put(queue, new PendingKeyCursor(nextKey));
-        }
-        return;
-      }
-      if (cursors.containsKey(queue)) {
-        return;
-      }
-      if (cursors.size() >= maxTracked) {
-        var eldest = cursors.keySet().iterator().next();
-        cursors.remove(eldest);
-      }
-      cursors.put(queue, new PendingKeyCursor(nextKey));
-    }
-
-    synchronized void clear(String queue, PendingKeyCursor expected) {
-      if (expected != null && cursors.get(queue) == expected) {
-        cursors.remove(queue);
       }
     }
   }
