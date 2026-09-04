@@ -149,8 +149,7 @@ it("keeps operational replacement available to a REPLACE_JOB-only session", asyn
     const value =
       url === "/threadmill/api/session"
         ? { ...(responses[url] as object), permissions: ["READ", "REPLACE_JOB"] }
-        : responses[url] ??
-          responses[url.replace(/state=[^&]+/, "").replace(/handlerType=[^&]+/, "")];
+        : fixtureFor(url);
     return Promise.resolve({
       ok: true,
       json: () => Promise.resolve(value)
@@ -177,8 +176,7 @@ it("lets a REPLACE_JOB-only session change queue and priority without selecting 
         ? { ...(responses[url] as object), permissions: ["READ", "REPLACE_JOB"] }
         : init?.method === "PATCH"
           ? { status: "replaced", target: "018f0000-0000-7000-8000-000000000001" }
-          : responses[url] ??
-            responses[url.replace(/state=[^&]+/, "").replace(/handlerType=[^&]+/, "")];
+          : fixtureFor(url);
     return Promise.resolve({
       ok: true,
       json: () => Promise.resolve(value)
@@ -213,8 +211,7 @@ it("treats a blank priority as no change", async () => {
         ? { ...(responses[url] as object), permissions: ["READ", "REPLACE_JOB"] }
         : init?.method === "PATCH"
           ? { status: "replaced", target: "018f0000-0000-7000-8000-000000000001" }
-          : responses[url] ??
-            responses[url.replace(/state=[^&]+/, "").replace(/handlerType=[^&]+/, "")];
+          : fixtureFor(url);
     return Promise.resolve({
       ok: true,
       json: () => Promise.resolve(value)

@@ -1,4 +1,11 @@
-import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type Browser,
+  type BrowserContext,
+  type Dialog,
+  type Page
+} from "@playwright/test";
 
 const dashboardPath = "/threadmill/";
 const apiBasePath = "/ops/threadmill/api";
@@ -67,12 +74,18 @@ test("pauses and resumes a queue through the mounted Spring API with CSRF", asyn
 test("performs requeue, retry, replace, and delete job actions", async ({ browser }) => {
   const { context, page } = await openDashboard(browser);
 
-  const replaceRow = jobRow(page, "com.example.ReplaceMeHandler");
+  const replaceRow = jobRow(page, "com.hemju.threadmill.dashboard.spring.browser.ReplaceMeHandler");
   await expect(replaceRow).toBeVisible();
-  page.once("dialog", (dialog) => dialog.accept("com.example.ReplacedHandler"));
+  // Replacement asks in sequence: queue, priority, scheduled-for, then the
+  // handler (ADMIN only). The first three repeat the job's current values so
+  // this case changes only the executable definition.
+  const answers = ["default", "0", "", "com.hemju.threadmill.dashboard.spring.browser.ReplacedHandler"];
+  const answerPrompt = (dialog: Dialog) => void dialog.accept(answers.shift() ?? "");
+  page.on("dialog", answerPrompt);
   await replaceRow.getByRole("button", { name: "Replace" }).click();
   await expect(page.getByText(/replaced: 018f0000-0000-7000-8000-000000000101/)).toBeVisible();
-  await expect(jobRow(page, "com.example.ReplacedHandler")).toBeVisible();
+  await expect(jobRow(page, "com.hemju.threadmill.dashboard.spring.browser.ReplacedHandler")).toBeVisible();
+  page.off("dialog", answerPrompt);
 
   await page.getByRole("button", { name: /^FAILED/ }).click();
   const requeueRow = jobRow(page, "com.example.RequeueMeHandler");
