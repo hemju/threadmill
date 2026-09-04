@@ -95,7 +95,7 @@ public final class PostgresJobStore implements JobStore {
   private final JobStoreCapabilities capabilities;
   private final String serverVersion;
   private final String databaseName;
-  private final Map<String, String> pendingKeyCursors = new ConcurrentHashMap<>();
+  private final Map<String, PendingKeyCursor> pendingKeyCursors = new ConcurrentHashMap<>();
 
   public PostgresJobStore(DataSource dataSource) {
     this(dataSource, new JsonJobSerializer(), JobStoreCapabilities.defaults());
@@ -600,10 +600,12 @@ public final class PostgresJobStore implements JobStore {
               alreadyBatched.add(p.id);
               result.add(serializer.deserializeJob(newBody));
             }
-            // No claims and no quarantines means every gathered head is
-            // concurrency-inadmissible right now — a further pass would
-            // gather the same heads again. Quarantines are progress: the
-            // poison left ENQUEUED, so the next pass sees its successor.
+            // Every gathered head is concurrency-inadmissible right now.
+            // The keyed cursor has already advanced, so the next poll sees
+            // the next page. Do not chase pages inside this transaction:
+            // that would grow the FOR UPDATE lock set with key count.
+            // Quarantines are progress: the poison left ENQUEUED, so the
+            // next pass sees its successor.
             if (result.size() == before && quarantined == 0) {
               break;
             }
@@ -625,7 +627,10 @@ public final class PostgresJobStore implements JobStore {
   }
 
   /** Keys enumerated per gathering pass; a per-queue cursor rotates later polls through the rest. */
-  private static final int MAX_PENDING_KEYS_PER_PASS = 512;
+  static final int MAX_PENDING_KEYS_PER_PASS = 512;
+
+  /** Process-local fairness hints retained across dynamic queues. */
+  private static final int MAX_TRACKED_PENDING_KEY_CURSORS = 1024;
 
   /**
    * Gather and row-lock claim candidates with cost bounded by claimable
@@ -771,9 +776,15 @@ public final class PostgresJobStore implements JobStore {
    * Distinct concurrency keys with ENQUEUED members in this queue, via a
    * recursive-CTE loose scan over the queue-scoped pending index —
    * one index probe per key, independent of how many rows each key holds.
-   * Each queue keeps a process-local keyset cursor so a page of blocked
-   * early keys cannot permanently hide later claimable keys; reaching the
-   * end wraps the next scan to the first key.
+   * Each store instance keeps a bounded, process-local keyset cursor per
+   * active queue so a page of blocked early keys cannot permanently hide
+   * later claimable keys; reaching the end wraps the next scan to the first
+   * key. Cursor mutation is deliberately non-transactional: it is a
+   * disposable fairness hint, so a deadlock retry may skip or repeat a page
+   * without affecting claim correctness. PostgreSQL uses identity-checked
+   * cursor updates rather than holding a monitor across a JDBC round trip;
+   * the Redis sibling can synchronize because its scan and end marker arrive
+   * in one client call.
    * (Chosen over {@code SELECT DISTINCT}, whose plan may degrade to a full
    * index scan.) Claims are per-queue, so keys whose pending work lives
    * only in other queues must not be probed at all: a cross-queue key
@@ -781,31 +792,61 @@ public final class PostgresJobStore implements JobStore {
    * 415k backlog.
    */
   private List<String> distinctEnqueuedKeys(Connection conn, String queue) throws SQLException {
-    var after = pendingKeyCursors.get(queue);
+    var observedCursor = pendingKeyCursors.get(queue);
+    var after = observedCursor == null ? null : observedCursor.after;
     var keys = distinctEnqueuedKeysAfter(conn, queue, after);
-    if (keys.isEmpty() && after != null) {
-      if (!pendingKeyCursors.remove(queue, after)) {
-        // Another claimer advanced this queue while our query ran. Do not
-        // overwrite its newer cursor with a wrap based on stale state.
-        return List.of();
-      }
-      after = null;
-      keys = distinctEnqueuedKeysAfter(conn, queue, null);
+    if (keys.size() > MAX_PENDING_KEYS_PER_PASS) {
+      keys.removeLast();
+      advancePendingKeyCursor(queue, observedCursor, keys.getLast());
+      return keys;
     }
-    if (!keys.isEmpty()) {
-      if (after == null) {
-        pendingKeyCursors.putIfAbsent(queue, keys.getLast());
-      } else {
-        // A slow poll must never move the cursor behind a faster poll that
-        // already advanced it from the same starting point.
-        pendingKeyCursors.replace(queue, after, keys.getLast());
+
+    clearPendingKeyCursor(queue, observedCursor);
+    if (keys.isEmpty() && observedCursor != null) {
+      // The tail disappeared after the previous look-ahead (for example,
+      // another node claimed it). Restart now instead of reporting a false
+      // empty keyed lane for this poll. A concurrent cursor wins the
+      // identity-checked update; duplicate scanning is harmless.
+      keys = distinctEnqueuedKeysAfter(conn, queue, null);
+      if (keys.size() > MAX_PENDING_KEYS_PER_PASS) {
+        keys.removeLast();
+        advancePendingKeyCursor(queue, null, keys.getLast());
       }
     }
     return keys;
   }
 
+  private void advancePendingKeyCursor(String queue, PendingKeyCursor expected, String nextKey) {
+    var next = new PendingKeyCursor(nextKey);
+    synchronized (pendingKeyCursors) {
+      if (expected != null) {
+        pendingKeyCursors.replace(queue, expected, next);
+        return;
+      }
+      if (pendingKeyCursors.containsKey(queue)) {
+        return;
+      }
+      if (pendingKeyCursors.size() >= MAX_TRACKED_PENDING_KEY_CURSORS) {
+        var evicted = pendingKeyCursors.keySet().iterator().next();
+        pendingKeyCursors.remove(evicted);
+      }
+      pendingKeyCursors.put(queue, next);
+    }
+  }
+
+  private void clearPendingKeyCursor(String queue, PendingKeyCursor expected) {
+    if (expected == null) {
+      return;
+    }
+    synchronized (pendingKeyCursors) {
+      pendingKeyCursors.remove(queue, expected);
+    }
+  }
+
   private List<String> distinctEnqueuedKeysAfter(Connection conn, String queue, String after)
       throws SQLException {
+    // Keep the cursor predicate out of a nullable OR expression: this form
+    // stays sargable as a range scan on threadmill_jobs_queue_pending_idx.
     var cursorPredicate = after == null ? "" : " AND concurrency_key > ?";
     try (PreparedStatement ps = conn.prepareStatement("WITH RECURSIVE keys(k) AS ("
         + "  (SELECT concurrency_key FROM threadmill_jobs "
@@ -824,14 +865,22 @@ public final class PostgresJobStore implements JobStore {
         ps.setString(parameter++, after);
       }
       ps.setString(parameter++, queue);
-      ps.setInt(parameter, MAX_PENDING_KEYS_PER_PASS);
+      ps.setInt(parameter, MAX_PENDING_KEYS_PER_PASS + 1);
       try (ResultSet rs = ps.executeQuery()) {
-        var keys = new ArrayList<String>(MAX_PENDING_KEYS_PER_PASS);
+        var keys = new ArrayList<String>();
         while (rs.next()) {
           keys.add(rs.getString(1));
         }
         return keys;
       }
+    }
+  }
+
+  private static final class PendingKeyCursor {
+    private final String after;
+
+    private PendingKeyCursor(String after) {
+      this.after = after;
     }
   }
 
