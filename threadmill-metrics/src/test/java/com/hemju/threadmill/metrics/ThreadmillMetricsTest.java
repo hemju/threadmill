@@ -221,6 +221,34 @@ class ThreadmillMetricsTest {
   }
 
   @Test
+  void queueGaugeCallbackDuringRegistrationDoesNotReEnterTheRefresh() {
+    var store = new InMemoryJobStore();
+    store.insert(newJob("q1"));
+    var registry = new SimpleMeterRegistry();
+    // A registry that reads a meter from onMeterAdded observes the queue gauge
+    // while reconcileQueueMeters is still registering it. Re-entering the
+    // refresh from there would recurse into the ConcurrentHashMap mapping
+    // function that is computing that very queue's meters.
+    registry.config().onMeterAdded(meter -> {
+      if (meter instanceof Gauge gauge
+          && meter.getId().getName().equals("threadmill.queue.depth")) {
+        gauge.value();
+      }
+    });
+
+    new ThreadmillMetrics(registry, store, Duration.ofNanos(1), 10);
+
+    assertThat(registry.get("threadmill.queue.depth").tag("queue", "q1").gauge().value())
+        .isEqualTo(1d);
+    assertThat(registry.counter("threadmill.metrics.queue.meter.errors").count())
+        .as("a healthy store and registry must not report a meter-reconciliation failure")
+        .isZero();
+    assertThat(registry.counter("threadmill.metrics.refresh.errors").count()).isZero();
+    assertThat(registry.get("threadmill.metrics.snapshot.stale").gauge().value())
+        .isZero();
+  }
+
+  @Test
   void constructorRejectsInvalidRefreshAndQueueBounds() {
     var registry = new SimpleMeterRegistry();
     var store = new InMemoryJobStore();
