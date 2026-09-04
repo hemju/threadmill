@@ -3,6 +3,9 @@ package com.hemju.threadmill.core.engine;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
@@ -19,6 +22,7 @@ import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
+import com.hemju.threadmill.core.handler.JobExecutionContext.CancellationReason;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
 import com.hemju.threadmill.core.handler.JobPayload;
@@ -62,6 +66,17 @@ public final class JobRunner {
   // Set by the owning ProcessingNode; true once close() has begun. Lets the
   // failure path distinguish a shutdown interrupt from a handler fault.
   private volatile BooleanSupplier shuttingDown = () -> false;
+  // Every attempt currently inside run(); the node marks them all SHUTDOWN
+  // right before it interrupts the worker pool.
+  private final Set<ExecutionContext> inFlight = ConcurrentHashMap.newKeySet();
+  // The instant the owning node will interrupt still-running attempts; null
+  // until close() begins. Caps ctx.deadline() for every in-flight attempt.
+  private volatile Instant shutdownDeadline;
+  // Latched once the node has decided to interrupt the worker pool. Closes the
+  // race between the SHUTDOWN sweep over inFlight and a worker registering its
+  // context a moment later: that worker still receives shutdownNow()'s
+  // interrupt and must classify it as SHUTDOWN, not as a handler fault.
+  private volatile boolean forcedShutdown;
 
   public JobRunner(
       JobStore store,
@@ -96,6 +111,38 @@ public final class JobRunner {
     this.shuttingDown = Objects.requireNonNull(signal, "signal");
   }
 
+  /**
+   * Record that the owning node has begun closing and will interrupt any
+   * attempt still running at {@code deadline} — the end of its shutdown
+   * grace period. From this point every in-flight context's
+   * {@code deadline()} is capped at that instant, so a cooperative handler
+   * can wind down before the interrupt instead of being cut off mid-step.
+   */
+  public void beginShutdown(Instant deadline) {
+    this.shutdownDeadline = Objects.requireNonNull(deadline, "deadline");
+  }
+
+  /** The instant the owning node will interrupt still-running attempts, once it has begun closing. */
+  public Optional<Instant> shutdownDeadline() {
+    return Optional.ofNullable(shutdownDeadline);
+  }
+
+  /**
+   * Mark every in-flight attempt as cancelled for shutdown. The owning node
+   * calls this immediately before it interrupts the worker pool, so the
+   * record is already the fact when the interrupt lands and the failure
+   * path classifies the attempt as {@code SHUTDOWN} regardless of which
+   * exception the interrupt surfaces as. Forced shutdown is latched before the
+   * sweep, so an attempt that registers after the sweep iterated (the set
+   * iterator is weakly consistent) marks itself on the way in.
+   */
+  public void cancelInFlightForShutdown() {
+    forcedShutdown = true;
+    for (ExecutionContext ctx : inFlight) {
+      ctx.markCancelled(CancellationReason.SHUTDOWN);
+    }
+  }
+
   /** Stops the timeout watchdog. Intended for engine shutdown. */
   public void shutdown() {
     shutdownRequested.set(true);
@@ -109,18 +156,21 @@ public final class JobRunner {
    */
   public void run(Job job) {
     Objects.requireNonNull(job, "job");
-    var ctx = new ExecutionContext(
-        job,
-        store,
-        job.id(),
-        nodeId,
-        job.attempts(),
-        job.ownerHeartbeatAt().orElse(Instant.now()),
-        job.log(),
-        job.progress(),
-        job.metadata(),
-        serializer,
-        config);
+    var ctx = newContext(job);
+    inFlight.add(ctx);
+    // Both sides of the add-versus-sweep race: the sweep marks everything it
+    // sees, and anything it could not see yet marks itself here.
+    if (forcedShutdown) {
+      ctx.markCancelled(CancellationReason.SHUTDOWN);
+    }
+    try {
+      runTracked(job, ctx);
+    } finally {
+      inFlight.remove(ctx);
+    }
+  }
+
+  private void runTracked(Job job, ExecutionContext ctx) {
     interceptors.onProcessingStarting(job, ctx);
 
     // Resolve handler + payload first. A resolution failure is a poison
@@ -139,22 +189,27 @@ public final class JobRunner {
     }
 
     Thread carrier = Thread.currentThread();
-    AtomicBoolean timedOut = new AtomicBoolean(false);
-    // Resolve the effective timeout once, before scheduling: the per-job
-    // override must also drive the initial delay, and a malformed value
-    // must degrade to the global timeout instead of throwing inside the
+    // The deadline rule lives on the context (ExecutionContext.watchdogDeadline)
+    // so the watchdog and ctx.deadline() read one formula and can never
+    // drift. The effective timeout was resolved once at context creation:
+    // the per-job override drives the initial delay too, and a malformed
+    // value degrades to the global timeout instead of throwing inside the
     // periodic task (which would silently cancel all future checks).
-    Duration effectiveTimeout = resolveJobTimeout(job);
     ScheduledFuture<?> watchdog = timeoutExecutor.scheduleAtFixedRate(
         () -> {
           try {
-            var now = Instant.now();
-            var lastCheckIn = ctx.lastCheckInAt();
-            Instant deadline = lastCheckIn
-                .map(at -> at.plus(config.noProgressTimeout()))
-                .orElse(ctx.claimedAt().plus(effectiveTimeout));
-            if (!deadline.isAfter(now)) {
-              timedOut.set(true);
+            // Once cancelled, keep interrupting every tick until the handler
+            // returns: a check-in from cleanup code moves watchdogDeadline()
+            // forward, and without the latch repeated check-ins could keep a
+            // timed-out attempt alive indefinitely. This is the TIMEOUT
+            // guarantee only — a SHUTDOWN cancellation is delivered once,
+            // because ProcessingNode.close() stops this executor right after
+            // shutdownNow(); the branch merely re-asserts it for the few
+            // ticks the executor may still run.
+            if (ctx.isCancelled() || !ctx.watchdogDeadline().isAfter(Instant.now())) {
+              // Record the reason BEFORE interrupting, so ctx.cancellation()
+              // is already the fact when the handler observes the interrupt.
+              ctx.markCancelled(CancellationReason.TIMEOUT);
               carrier.interrupt();
             }
           } catch (Throwable t) {
@@ -162,7 +217,9 @@ public final class JobRunner {
           }
         },
         Math.max(
-            1L, Math.min(effectiveTimeout.toMillis(), config.noProgressTimeout().toMillis())),
+            1L,
+            Math.min(
+                ctx.effectiveTimeout().toMillis(), config.noProgressTimeout().toMillis())),
         Math.max(1L, Math.min(1000L, config.checkInMinInterval().toMillis())),
         TimeUnit.MILLISECONDS);
 
@@ -179,7 +236,7 @@ public final class JobRunner {
       watchdog.cancel(false);
       // Clear any straggler interrupt the watchdog may have raised after the handler returned.
       Thread.interrupted();
-      if (timedOut.get()) {
+      if (ctx.cancellation().orElse(null) == CancellationReason.TIMEOUT) {
         throw new HandlerTimeoutException();
       }
       ctx.flushBestEffort();
@@ -189,18 +246,28 @@ public final class JobRunner {
       Thread.interrupted();
       ctx.flushBestEffort();
       Throwable unwrapped = unwrap(t);
-      JobInterceptor.FailureCause cause;
-      if (t instanceof HandlerTimeoutException || timedOut.get()) {
-        cause = JobInterceptor.FailureCause.TIMEOUT;
-      } else if (unwrapped instanceof InterruptedException && shuttingDown.getAsBoolean()) {
-        // The node is closing and shutdownNow() interrupted the
-        // handler mid-run — not the job's fault.
-        cause = JobInterceptor.FailureCause.SHUTDOWN;
-      } else {
-        cause = JobInterceptor.FailureCause.EXCEPTION;
-      }
-      recordFailure(job, ctx, unwrapped, cause);
+      recordFailure(job, ctx, unwrapped, classify(ctx, unwrapped));
     }
+  }
+
+  /**
+   * Classify a failed attempt from the engine's own cancellation record
+   * first and from the exception only as a fallback. A handler interrupted
+   * inside socket I/O surfaces {@code SocketException}, not
+   * {@code InterruptedException}, so judging by exception type alone would
+   * bill a shutdown interrupt as a handler fault and burn a retry attempt.
+   */
+  private JobInterceptor.FailureCause classify(ExecutionContext ctx, Throwable unwrapped) {
+    return switch (ctx.cancellation().orElse(null)) {
+      case TIMEOUT -> JobInterceptor.FailureCause.TIMEOUT;
+      case SHUTDOWN -> JobInterceptor.FailureCause.SHUTDOWN;
+      // No record: an interrupt that reached the handler while the node is
+      // closing is still a shutdown, not the job's fault.
+      case null ->
+        unwrapped instanceof InterruptedException && shuttingDown.getAsBoolean()
+            ? JobInterceptor.FailureCause.SHUTDOWN
+            : JobInterceptor.FailureCause.EXCEPTION;
+    };
   }
 
   /**
@@ -215,36 +282,14 @@ public final class JobRunner {
    */
   public void releaseWithoutRunning(Job job, String reason) {
     Objects.requireNonNull(job, "job");
-    var ctx = new ExecutionContext(
-        job,
-        store,
-        job.id(),
-        nodeId,
-        job.attempts(),
-        job.ownerHeartbeatAt().orElse(Instant.now()),
-        job.log(),
-        job.progress(),
-        job.metadata(),
-        serializer,
-        config);
+    var ctx = newContext(job);
     recordFailure(
         job, ctx, new IllegalStateException(reason), JobInterceptor.FailureCause.SHUTDOWN);
   }
 
   /** Called by orphan-recovery code in MaintenanceCycle. */
   public void reclaimOrphan(Job job) {
-    var ctx = new ExecutionContext(
-        job,
-        store,
-        job.id(),
-        nodeId,
-        job.attempts(),
-        job.ownerHeartbeatAt().orElse(Instant.now()),
-        job.log(),
-        job.progress(),
-        job.metadata(),
-        serializer,
-        config);
+    var ctx = newContext(job);
     recordFailure(
         job,
         ctx,
@@ -407,6 +452,19 @@ public final class JobRunner {
             job.id());
         return jobTimeout;
       }
+      if (seconds > ProcessingNodeConfig.MAX_TIMEOUT.toSeconds()) {
+        // A value near Long.MAX_VALUE parses, but Duration.toMillis() and
+        // claimedAt.plus(...) overflow before the handler's try block, which
+        // would escape the single failure path and strand the claimed row
+        // in PROCESSING. Bad metadata must degrade, never disable or crash.
+        LOG.warn(
+            "Ignoring {}='{}' for job {} — exceeds the maximum timeout of {}; using the global job timeout",
+            META_TIMEOUT_SECONDS,
+            meta.get(),
+            job.id(),
+            ProcessingNodeConfig.MAX_TIMEOUT);
+        return jobTimeout;
+      }
       return Duration.ofSeconds(seconds);
     } catch (NumberFormatException malformed) {
       LOG.warn(
@@ -437,6 +495,30 @@ public final class JobRunner {
     } catch (ClassNotFoundException cnf) {
       throw new SerializationException("Unknown payload type: " + first.typeTag(), cnf);
     }
+  }
+
+  /**
+   * Build the context for one attempt. The effective timeout is resolved
+   * here, once, so the watchdog's initial delay, {@code ctx.deadline()},
+   * and the interceptor-visible contexts of releases and orphan reclaims
+   * all carry the same value: the attempt's deadline is defined for every
+   * context the engine hands out, not only for attempts that run.
+   */
+  private ExecutionContext newContext(Job job) {
+    return new ExecutionContext(
+        job,
+        store,
+        job.id(),
+        nodeId,
+        job.attempts(),
+        job.ownerHeartbeatAt().orElse(Instant.now()),
+        resolveJobTimeout(job),
+        this::shutdownDeadline,
+        job.log(),
+        job.progress(),
+        job.metadata(),
+        serializer,
+        config);
   }
 
   private static String kindReason(JobInterceptor.FailureCause kind) {

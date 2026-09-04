@@ -39,6 +39,16 @@ public record ProcessingNodeConfig(
     Duration deletedRetention,
     Duration quarantinedRetention) {
 
+  /**
+   * Upper bound for {@link #jobTimeout()}, {@link #noProgressTimeout()},
+   * {@link #shutdownGracePeriod()}, and the per-job
+   * {@code threadmill.job.timeoutSeconds} override: one hundred years. Anything larger
+   * overflows the millisecond arithmetic the watchdog and {@code JobExecutionContext.deadline()}
+   * perform on it (the shutdown deadline
+   * {@code ProcessingNode.close()} publishes uses the same arithmetic); the override degrades to {@link #jobTimeout()}, the config fails fast.
+   */
+  public static final Duration MAX_TIMEOUT = Duration.ofDays(36_500L);
+
   public ProcessingNodeConfig {
     if (workerCount <= 0) throw new IllegalArgumentException("workerCount must be positive");
     if (claimBatchSize <= 0) throw new IllegalArgumentException("claimBatchSize must be positive");
@@ -81,6 +91,9 @@ public record ProcessingNodeConfig(
     requirePositive("nodeHeartbeatRetention", nodeHeartbeatRetention);
     requirePositive("checkInMinInterval", checkInMinInterval);
     requirePositive("noProgressTimeout", noProgressTimeout);
+    requireAtMost("jobTimeout", jobTimeout, MAX_TIMEOUT);
+    requireAtMost("noProgressTimeout", noProgressTimeout, MAX_TIMEOUT);
+    requireAtMost("shutdownGracePeriod", shutdownGracePeriod, MAX_TIMEOUT);
     requirePositive("queueFamilyDiscoveryInterval", queueFamilyDiscoveryInterval);
     requirePositive("queueFamilyRetentionAfterEmpty", queueFamilyRetentionAfterEmpty);
     requirePositive("maxDedupTtl", maxDedupTtl);
@@ -378,6 +391,12 @@ public record ProcessingNodeConfig(
           failedRetention,
           deletedRetention,
           quarantinedRetention);
+    }
+  }
+
+  private static void requireAtMost(String name, Duration value, Duration max) {
+    if (value.compareTo(max) > 0) {
+      throw new IllegalArgumentException(name + " must not exceed " + max);
     }
   }
 

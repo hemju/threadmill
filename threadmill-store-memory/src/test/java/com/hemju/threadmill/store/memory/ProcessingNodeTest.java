@@ -24,11 +24,14 @@ import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.Dispatcher;
 import com.hemju.threadmill.core.engine.JobInterceptor;
+import com.hemju.threadmill.core.engine.JobInterceptors;
+import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.engine.QueueLane;
 import com.hemju.threadmill.core.engine.QueueWeights;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.handler.ReflectiveJobHandlerResolver;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.serialization.SerializationException;
 import com.hemju.threadmill.core.spec.JobArgument;
@@ -157,6 +160,185 @@ class ProcessingNodeTest {
       Job loaded = store.findById(job.id()).orElseThrow();
       assertThat(loaded.currentState()).isEqualTo(JobState.FAILED);
     });
+  }
+
+  @Test
+  void deadlineMatchesTheWatchdogRuleBeforeAndAfterCheckIn() {
+    // Guard for github issue #119: ctx.deadline() is the watchdog's own
+    // formula — claimedAt + the per-job override before the first check-in,
+    // lastCheckIn + noProgressTimeout after it.
+    JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("test"));
+    Job job = Job.builder()
+        .spec(
+            new JobSpec(EngineTestHandlers.DeadlineRecordingHandler.class.getName(), List.of(arg)))
+        .queue(fastConfig.defaultQueue())
+        .metadata("threadmill.job.timeoutSeconds", "7")
+        .build();
+    store.insert(job);
+    var noProgress = Duration.ofSeconds(3);
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofSeconds(60))
+            .noProgressTimeout(noProgress)
+            .build())
+        .build();
+    node.start();
+
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(() -> assertThat(store.findById(job.id()).orElseThrow().currentState())
+            .isEqualTo(JobState.SUCCEEDED));
+
+    assertThat(EngineTestHandlers.DeadlineRecordingHandler.START_DEADLINE.get())
+        .as("before any check-in the deadline is claimedAt + the per-job override")
+        .isEqualTo(EngineTestHandlers.DeadlineRecordingHandler.CLAIMED_AT.get().plusSeconds(7));
+    assertThat(EngineTestHandlers.DeadlineRecordingHandler.CHECK_IN_DEADLINE.get())
+        .as("after a check-in the deadline is that check-in + noProgressTimeout")
+        .isAfterOrEqualTo(
+            EngineTestHandlers.DeadlineRecordingHandler.BEFORE_CHECK_IN.get().plus(noProgress))
+        .isBeforeOrEqualTo(
+            EngineTestHandlers.DeadlineRecordingHandler.AFTER_CHECK_IN.get().plus(noProgress));
+  }
+
+  @Test
+  void cooperativeHandlerThatStopsOnRemainingIsNeverInterrupted() {
+    // Guard for github issue #119: a handler that checks ctx.remaining()
+    // against its step budget finishes SUCCEEDED and is never interrupted,
+    // even though running every step would overshoot the timeout.
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofSeconds(1))
+            .defaultMaxAttempts(1)
+            .build())
+        .build();
+    Job job =
+        enqueueHello(EngineTestHandlers.CooperativeStepHandler.class, fastConfig.defaultQueue());
+    node.start();
+
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(() -> assertThat(store.findById(job.id()).orElseThrow().currentState())
+            .isEqualTo(JobState.SUCCEEDED));
+    assertThat(EngineTestHandlers.CooperativeStepHandler.INTERRUPTS.get()).isZero();
+    assertThat(EngineTestHandlers.CooperativeStepHandler.STEPS.get())
+        .as("it took the steps the budget allowed and stopped short of the fourth")
+        .isBetween(1, 3);
+  }
+
+  @Test
+  void timeoutCancellationIsRecordedBeforeTheInterruptLands() {
+    // Guard for github issue #119: cancellation() is the fact, set before the
+    // interrupt, so cleanup code can read it instead of the interrupt flag.
+    var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofMillis(300))
+            .defaultMaxAttempts(1)
+            .build())
+        .interceptor(new JobInterceptor() {
+          @Override
+          public void onProcessingFailed(
+              Job j, JobExecutionContext c, Throwable cause, FailureCause kind) {
+            failureKinds.add(kind);
+          }
+        })
+        .build();
+    Job job =
+        enqueueHello(EngineTestHandlers.SocketLikeBlockingHandler.class, fastConfig.defaultQueue());
+    node.start();
+
+    await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+      assertThat(failureKinds).contains(JobInterceptor.FailureCause.TIMEOUT);
+      assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.FAILED);
+    });
+    assertThat(EngineTestHandlers.SocketLikeBlockingHandler.CANCELLATION.get())
+        .contains(JobExecutionContext.CancellationReason.TIMEOUT);
+  }
+
+  @Test
+  void shutdownInterruptSurfacingAsASocketFailureIsStillClassifiedAsShutdown() {
+    // Guard for github issue #119: on a virtual thread the shutdown interrupt
+    // aborts socket I/O and surfaces as SocketException, not
+    // InterruptedException. Classification reads the engine's own
+    // cancellation record, so the attempt is still SHUTDOWN: rescheduled
+    // immediately, no attempt burned.
+    Job job = enqueueHello(EngineTestHandlers.SocketLikeBlockingHandler.class, "default");
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofSeconds(30))
+            .shutdownGracePeriod(Duration.ofMillis(200))
+            .build())
+        .build();
+    node.start();
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .until(() -> store.findById(job.id()).orElseThrow().currentState() == JobState.PROCESSING);
+
+    node.close();
+
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .until(() -> store.findById(job.id()).orElseThrow().currentState() == JobState.SCHEDULED);
+    assertThat(store.findById(job.id()).orElseThrow().attempts())
+        .as("shutdown must not burn an attempt")
+        .isZero();
+    assertThat(EngineTestHandlers.SocketLikeBlockingHandler.CANCELLATION.get())
+        .contains(JobExecutionContext.CancellationReason.SHUTDOWN);
+  }
+
+  @Test
+  void closeCollapsesTheDeadlineToTheShutdownGracePeriod() throws Exception {
+    // Guard for github issue #119: once close() begins, ctx.deadline()
+    // reflects the end of the grace period rather than the far-off job
+    // timeout, while cancellation() stays empty until the interrupt is
+    // actually sent — forecast versus fact.
+    var grace = Duration.ofSeconds(2);
+    Job job = enqueueHello(EngineTestHandlers.ShutdownDeadlineObservingHandler.class, "default");
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofSeconds(60))
+            .shutdownGracePeriod(grace)
+            .build())
+        .build();
+    node.start();
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .until(() ->
+            EngineTestHandlers.ShutdownDeadlineObservingHandler.INITIAL_DEADLINE.get() != null);
+
+    Instant closeStarted = Instant.now();
+    Thread closer = Thread.ofVirtual().start(node::close);
+    assertThat(closer.join(Duration.ofSeconds(10)))
+        .as("the handler winds down before the grace period, so close() returns promptly")
+        .isTrue();
+
+    assertThat(EngineTestHandlers.ShutdownDeadlineObservingHandler.INITIAL_DEADLINE.get())
+        .isAfter(closeStarted.plus(Duration.ofSeconds(50)));
+    assertThat(EngineTestHandlers.ShutdownDeadlineObservingHandler.COLLAPSED_DEADLINE.get())
+        .isAfterOrEqualTo(closeStarted)
+        .isBeforeOrEqualTo(closeStarted.plus(grace).plus(Duration.ofSeconds(1)));
+    assertThat(EngineTestHandlers.ShutdownDeadlineObservingHandler.CANCELLED_AT_COLLAPSE.get())
+        .as("a collapsed deadline is a forecast; nothing has been cancelled yet")
+        .isFalse();
+    assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.SUCCEEDED);
+  }
+
+  @Test
+  void currentContextResolvesInsideRunAndIsEmptyOutside() {
+    assertThat(JobExecutionContext.current()).isEmpty();
+    node = ProcessingNode.builder(store).config(fastConfig).build();
+    Job job =
+        enqueueHello(EngineTestHandlers.CurrentContextHandler.class, fastConfig.defaultQueue());
+    node.start();
+
+    await()
+        .atMost(Duration.ofSeconds(5))
+        .untilAsserted(() -> assertThat(store.findById(job.id()).orElseThrow().currentState())
+            .isEqualTo(JobState.SUCCEEDED));
+    assertThat(EngineTestHandlers.CurrentContextHandler.CURRENT_IS_THIS_CONTEXT.get())
+        .as("code two calls below run() resolves the same context the handler was given")
+        .isTrue();
+    assertThat(JobExecutionContext.current()).isEmpty();
   }
 
   @Test
@@ -1198,6 +1380,116 @@ class ProcessingNodeTest {
       assertThat(failureKinds).contains(JobInterceptor.FailureCause.TIMEOUT);
       Job loaded = store.findById(job.id()).orElseThrow();
       assertThat(loaded.currentState()).isEqualTo(JobState.FAILED);
+    });
+  }
+
+  @Test
+  void timedOutHandlerThatChecksInDuringCleanupIsInterruptedAgain() {
+    // PR #121 review: markCancelled(TIMEOUT) is permanent, but the deadline
+    // formula is not — a checkIn() from cleanup code moves it forward. The
+    // watchdog must keep interrupting once cancellation is recorded, or
+    // repeated check-ins could keep a timed-out attempt alive indefinitely.
+    var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofMillis(300))
+            .noProgressTimeout(Duration.ofSeconds(60))
+            .checkInMinInterval(Duration.ofMillis(25))
+            .defaultMaxAttempts(1)
+            .build())
+        .interceptor(new JobInterceptor() {
+          @Override
+          public void onProcessingFailed(
+              Job j, JobExecutionContext c, Throwable cause, FailureCause kind) {
+            failureKinds.add(kind);
+          }
+        })
+        .build();
+    Job job = enqueueHello(
+        EngineTestHandlers.CheckInDuringCleanupHandler.class, fastConfig.defaultQueue());
+    node.start();
+
+    await().atMost(Duration.ofSeconds(5)).untilAsserted(() -> {
+      assertThat(EngineTestHandlers.CheckInDuringCleanupHandler.INTERRUPTS.get())
+          .isEqualTo(2);
+      assertThat(failureKinds).contains(JobInterceptor.FailureCause.TIMEOUT);
+      assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.FAILED);
+    });
+    Duration gap = Duration.between(
+        EngineTestHandlers.CheckInDuringCleanupHandler.FIRST_INTERRUPT_AT.get(),
+        EngineTestHandlers.CheckInDuringCleanupHandler.SECOND_INTERRUPT_AT.get());
+    assertThat(gap)
+        .as("the second interrupt arrives within the watchdog cadence, not after noProgressTimeout")
+        .isLessThan(Duration.ofSeconds(2));
+  }
+
+  @Test
+  void forcedShutdownLatchedBeforeTheSweepStillCancelsALateRegisteringAttempt() {
+    // PR #121 review: cancelInFlightForShutdown() iterates a weakly consistent
+    // set, so a worker registering its context after the sweep would receive
+    // shutdownNow()'s interrupt with no SHUTDOWN recorded and, if the
+    // interrupt surfaces socket-shaped, be billed as a handler fault. The
+    // sweep latches forced shutdown and run() checks the latch on the way in.
+    var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
+    var interceptors = new JobInterceptors().add(new JobInterceptor() {
+      @Override
+      public void onProcessingFailed(
+          Job j, JobExecutionContext c, Throwable cause, FailureCause kind) {
+        failureKinds.add(kind);
+      }
+    });
+    var nodeId = NodeId.newId();
+    var runner = new JobRunner(
+        store, nodeId, new ReflectiveJobHandlerResolver(), serializer, interceptors, fastConfig);
+    Job job = enqueueHello(
+        EngineTestHandlers.CancellationRecordingHandler.class, fastConfig.defaultQueue());
+    Job claimed =
+        store.claimReady(nodeId, fastConfig.defaultQueue(), 1, Instant.now()).getFirst();
+    try {
+      // The sweep runs first and sees nothing; the attempt registers afterwards.
+      runner.cancelInFlightForShutdown();
+      runner.run(claimed);
+    } finally {
+      runner.shutdown();
+    }
+
+    assertThat(EngineTestHandlers.CancellationRecordingHandler.CANCELLATION_AT_START.get())
+        .contains(JobExecutionContext.CancellationReason.SHUTDOWN);
+    assertThat(failureKinds).containsExactly(JobInterceptor.FailureCause.SHUTDOWN);
+  }
+
+  @Test
+  void absurdTimeoutMetadataFallsBackToTheGlobalTimeout() {
+    // PR #121 review: a per-job override near Long.MAX_VALUE parses but makes
+    // Duration.toMillis() and Instant.plus overflow before the handler's try
+    // block, escaping the single failure path and stranding the row in
+    // PROCESSING. It must degrade to the global timeout like malformed input.
+    var failureKinds = new CopyOnWriteArrayList<JobInterceptor.FailureCause>();
+    JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("test"));
+    Job job = Job.builder()
+        .spec(new JobSpec(EngineTestHandlers.HangingHandler.class.getName(), List.of(arg)))
+        .queue(fastConfig.defaultQueue())
+        .metadata("threadmill.job.timeoutSeconds", Long.toString(Long.MAX_VALUE))
+        .build();
+    store.insert(job);
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .jobTimeout(Duration.ofMillis(300))
+            .defaultMaxAttempts(1)
+            .build())
+        .interceptor(new JobInterceptor() {
+          @Override
+          public void onProcessingFailed(
+              Job j, JobExecutionContext c, Throwable cause, FailureCause kind) {
+            failureKinds.add(kind);
+          }
+        })
+        .build();
+    node.start();
+
+    await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+      assertThat(failureKinds).contains(JobInterceptor.FailureCause.TIMEOUT);
+      assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.FAILED);
     });
   }
 

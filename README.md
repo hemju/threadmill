@@ -200,7 +200,7 @@ binder or directly via `ProcessingNodeConfig.builder()`.
 | `threadmill.maintenancePollInterval` | 1s | Recurring materialization, scheduled promotion, and orphan-scan cadence |
 | `threadmill.retentionInterval` | 1h | Succeeded-job, dedup-key, and stale-node retention cadence |
 | `threadmill.heartbeatTimeout` | 60s | Orphan threshold |
-| `threadmill.jobTimeout` | 5m | Per-job runtime cap |
+| `threadmill.jobTimeout` | 5m | Per-attempt runtime cap; the worker thread is interrupted when it passes — handlers read `ctx.remaining()` to stop first ([Timeouts](docs/handlers.md#timeouts)) |
 | `threadmill.defaultMaxAttempts` | 5 | Retry budget for the global default policy |
 | `threadmill.retryInitialBackoff` | 5s | First retry's backoff |
 | `threadmill.claimBatchSize` | 10 | Maximum claim per dispatcher tick |
@@ -208,7 +208,7 @@ binder or directly via `ProcessingNodeConfig.builder()`.
 | `threadmill.remote-wake.enabled` | `true` | Spring auto-configured durable stores publish cross-node wake hints; dispatcher polling remains the fallback |
 | `threadmill.remote-wake.channel` | backend default | Optional channel override to isolate multiple Threadmill deployments sharing one datastore |
 | `threadmill.checkInMinInterval` | 5s | Minimum persisted check-in/progress flush interval |
-| `threadmill.noProgressTimeout` | 15m | Timeout after the last check-in |
+| `threadmill.noProgressTimeout` | 15m | Interrupt deadline after the last check-in; replaces `jobTimeout` once a handler has checked in |
 | `threadmill.maxDedupTtl` | 30d | Maximum producer-side deduplication window |
 
 ## Java 25

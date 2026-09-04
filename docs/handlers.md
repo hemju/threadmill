@@ -58,6 +58,15 @@ structure the engine serializes. It exposes:
 
 - **Identity and timing:** `jobId()`, `nodeId()`, `attempt()` (starting at 1),
   `claimedAt()`.
+- **`deadline()` / `remaining()`** — the instant the engine will interrupt
+  this attempt if it is still running, and the time left until then. Computed
+  by the same rule as the engine's watchdog (see [Timeouts](#timeouts)), so a
+  handler that checks `remaining()` against its next step's cost stops before
+  the interrupt instead of being cut off mid-step.
+- **`cancellation()` / `isCancelled()`** — why the engine has abandoned this
+  attempt (`TIMEOUT` or `SHUTDOWN`), set immediately before the worker thread
+  is interrupted and never cleared. Cleanup code reads this instead of the
+  thread's interrupt status or the exception it caught.
 - **`log(message)`** — appends an INFO entry to the bounded per-job log.
 - **`updateProgress(fraction)`** — reports fraction complete, `0.0`–`1.0`.
 - **`checkIn()` / `checkIn(message)`** — records that a long-running job is
@@ -83,6 +92,12 @@ structure the engine serializes. It exposes:
 See [Long-running jobs](long-running-jobs.md) for check-in patterns and the
 per-job log bounds.
 
+Code below the handler that has no `ctx` parameter reaches the running
+context through `JobExecutionContext.current()` (empty outside a job). It
+resolves the same scoped-value binding described next, so it works from
+anything the handler calls on its own thread and from structured-concurrency
+forks, but not on plain executor threads.
+
 ## Scoped values, not ThreadLocal
 
 Per-execution context (job id, attempt, MDC) is propagated with a
@@ -100,21 +115,92 @@ executor.submit(EngineScopedValues.capturing(() -> {
 
 ## Timeouts
 
-Every job runs under a wall-clock timeout (`threadmill.jobTimeout`, default
-5m). A per-job override lives in job metadata under
-`threadmill.job.timeoutSeconds` (`JobRunner.META_TIMEOUT_SECONDS`); Spring's
-`@Job(timeout = "PT2M")` writes it for you. Recurring tasks carry the same
-override on their definition — `@Job(timeout = ...)` on a `@Recurring`
-handler, or the `timeout` parameter of `Scheduler.defineCronTask` /
-`defineIntervalTask` / `defineRecurring` — and every materialized instance
-(including a manual dashboard trigger) inherits it. On timeout the watchdog
-interrupts the handler thread, and the failure routes through the same single
-failure path as a thrown exception.
+Every attempt runs under a deadline, and **when it passes the engine
+interrupts the worker thread**. The failure routes through the same single
+failure path as a thrown exception, with cause `TIMEOUT`.
 
-Once a job has checked in at least once, the wall-clock timeout no longer
-applies; instead `noProgressTimeout` (default 15m) runs from the most recent
-check-in. A handler that checks in regularly can run for hours; one that goes
-silent is killed.
+The deadline is computed by one rule, shared by the watchdog and
+`ctx.deadline()`:
+
+1. **Before the first `checkIn()`:** `claimedAt()` plus the job's effective
+   timeout — the per-job override in metadata under
+   `threadmill.job.timeoutSeconds` (`JobRunner.META_TIMEOUT_SECONDS`) when
+   present, else `threadmill.jobTimeout` (default 5m). Spring's
+   `@Job(timeout = "PT2M")` writes the override for you. Recurring tasks carry
+   it on their definition — `@Job(timeout = ...)` on a `@Recurring` handler,
+   or the `timeout` parameter of `Scheduler.defineCronTask` /
+   `defineIntervalTask` / `defineRecurring` — and every materialized instance
+   (including a manual dashboard trigger) inherits it.
+2. **After a check-in:** the most recent check-in plus `noProgressTimeout`
+   (default 15m). A handler that checks in between steps is bounded by how
+   long it may go silent, not by total runtime: it can run for hours, and one
+   that goes quiet is killed.
+3. **While the node is shutting down:** no later than the end of
+   `shutdownGracePeriod`, after which the draining worker pool interrupts
+   whatever is still running (see [Shutdown](operations.md#shutdown)).
+
+The watchdog checks about once a second, so the interrupt lands up to a
+second after `deadline()`.
+
+### What an interrupt does to your handler
+
+Workers are virtual threads, and on a virtual thread an interrupt is not a
+polite flag:
+
+- Blocking I/O in progress can be aborted. The JDK guarantees this for
+  `java.net.Socket` with the default implementation and for interruptible
+  channels: the socket is closed and `SocketException: Closed by interrupt`
+  (or `ClosedByInterruptException`) is thrown. That covers the JDBC, HTTP,
+  and Redis clients built on those primitives; a client that brings its own
+  transport may translate the interrupt differently or only notice it at its
+  next interruptible call.
+- The interrupt flag **stays set**. Only methods that throw
+  `InterruptedException` clear it; a `SocketException` does not, and the
+  for a `TIMEOUT` cancellation the watchdog re-asserts the interrupt every
+  tick until the handler returns — a `checkIn()` from cleanup code does not
+  lift it. A `SHUTDOWN` cancellation is delivered once, when the grace period
+  expires: the node is closing and stops its watchdog, so a handler that
+  swallows that interrupt runs on unobserved until the process exits. Every
+  later
+  blocking call on the thread can fail the same way, and each pooled
+  connection the handler borrows for cleanup may be destroyed on first use.
+
+So treat an interrupt as cancellation: stop issuing blocking calls, do not
+classify the failure as a fault of the external system you were talking to,
+and return or rethrow promptly. `ctx.cancellation()` tells cleanup code why
+the attempt was abandoned (`TIMEOUT` or `SHUTDOWN`) without inspecting
+exceptions or the interrupt flag; it is set immediately before the interrupt
+is sent and is never cleared.
+
+### Stopping before the deadline
+
+The engine never has to interrupt a cooperative handler. Before each costly
+step, compare `ctx.remaining()` with what the step needs:
+
+```java
+for (Step step : plan) {
+    if (ctx.remaining().compareTo(step.budget()) < 0) {
+        checkpoint(step);                                    // persist where we stopped
+        jobs.enqueue(new ResumePlan(payload.id(), step.index())); // continuation job
+        return;                                              // SUCCEEDED
+    }
+    step.run();
+    ctx.checkIn();
+}
+```
+
+There are two ways out and they mean different things. **Checkpoint and
+return** leaves the job `SUCCEEDED`, so the handler must make the remaining
+work reachable itself — a continuation job, or a persisted cursor its next run
+reads. **Throw** leaves the job `FAILED` and retried under the normal retry
+policy, which costs an attempt — including when the deadline collapsed
+because the node is closing. The free, immediate requeue applies only to an
+attempt the engine itself cancelled, that is once `ctx.cancellation()` reports
+`SHUTDOWN` because the interrupt landed; the engine cannot tell a deliberate
+early stop from a genuine failure, so a handler winding down early during a
+drain should checkpoint and return. Sizing a single long call is the same
+move — give the client a timeout of `remaining()` minus a margin, and the
+call ends cleanly before the socket is torn down under it.
 
 ## Retry
 
