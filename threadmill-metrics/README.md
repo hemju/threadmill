@@ -21,9 +21,9 @@ and rejected store writes.
 | `threadmill.jobs.orphan.reclaimed` | Counter | — | Orphaned attempts whose FAILED transition committed through the engine's single failure path. |
 | `threadmill.jobs.recurring.runs` | Counter | `origin` | Recurring instances by bounded origin (`schedule`, `nudge`, `manual`, `other`). |
 | `threadmill.jobs.processing.time` | Timer | — | Handler runtime from claim to terminal transition. |
-| `threadmill.claim.latency` | Timer | — | Time spent in `claimReady`. |
+| `threadmill.claim.latency` | Timer | — | Time spent in every `claimReady` call, including empty polls and failed calls. |
 | `threadmill.claim.failures` | Counter | — | `claimReady` calls that threw. Deliberately has no queue tag. |
-| `threadmill.store.writes.rejected` | Counter | `operation` | Store writes that threw, tagged by a fixed operation-name set. |
+| `threadmill.store.writes.rejected` | Counter | `operation` | Non-contractual store-write failures, tagged by a fixed operation-name set. Expected stale-version, oversize, invalid-argument, and duplicate-id rejections are excluded. Counts failed attempts, including retries, rather than distinct outages. |
 | `threadmill.metrics.refresh.errors` | Counter | — | Gauge-refresh failures (store unreachable etc.). |
 | `threadmill.metrics.snapshot.stale` | Gauge | — | `1` after a failed refresh; clears to `0` after the next successful refresh. |
 | `threadmill.metrics.snapshot.age` | Gauge | — | Milliseconds since the last successful store-derived snapshot (`-1` before any success). |
@@ -52,8 +52,13 @@ transition commits, including orphan reclaim.
 
 Store-derived gauges use a pull-through snapshot. The first gauge read after
 the one-second default interval performs one bounded refresh for all gauges,
-independent of job completions. There is no background thread to manage.
-`metrics.refresh()` remains available for an immediate host-driven refresh.
+independent of job completions. Concurrent gauge readers keep using the cached
+snapshot instead of waiting behind an in-flight refresh, and the refresh
+cooldown starts when the store reads finish. The reader that starts a refresh
+does perform those synchronous reads, so choose the interval and queue cap as
+store-load budgets as well as scrape-freshness/cardinality settings. There is
+no background thread. `metrics.refresh()` remains available for an immediate
+host-driven refresh.
 
 If a refresh fails, counts and queue depths retain the last successful values;
 age gauges continue advancing from their last known timestamps. The stale
@@ -75,7 +80,11 @@ var metrics = new ThreadmillMetrics(
 
 Set the last argument to `0` to disable per-queue meters. Claim meters carry
 no queue tag, and rejected writes use only Threadmill's fixed operation names,
-so those signals cannot introduce user-controlled tag cardinality.
+so those signals cannot introduce user-controlled tag cardinality. Unlike
+gauges, accumulated counter/timer series cannot safely reuse a drained queue's
+slot, so the bounded active-queue mechanism is intentionally not applied to
+claim events. When queue meters are deliberately disabled, the omitted-queue
+gauge remains zero.
 
 Under Spring Boot, the `MeterBinder` integration is held until SB4 GA — see
 `threadmill-spring-boot/README.md`. Until then, hosts wire `ThreadmillMetrics`
@@ -93,6 +102,8 @@ directly against their `MeterRegistry` bean.
   orphan recovery isn't keeping up; the master node may be unhealthy.
 - **`threadmill.claim.failures` rising or `threadmill.store.writes.rejected`
   rising** — the store is unavailable, saturated, or refusing capacity.
+  Rejected writes count failed attempts, so retry loops can increase the rate
+  several times during one logical outage.
 - **`threadmill.metrics.snapshot.stale` = 1** — gauge values are last-known
   data. Use snapshot age to decide whether they are too old for an operational
   decision; refresh errors identify repeated failures.

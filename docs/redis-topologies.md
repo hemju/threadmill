@@ -71,6 +71,9 @@ Monitor `evicted_keys`, `current_eviction_exceeded_time`, and
 `threadmill.store.writes.rejected`. If Redis runs out of memory under
 `noeviction`, Threadmill treats the write failure as a store outage and
 dispatcher recovery probes perform a small write before processing resumes.
+The rejected-write meter counts failed attempts, including retries, while
+excluding expected stale-version, oversize, invalid-argument, and duplicate-id
+outcomes.
 
 For managed Redis products that block `CONFIG GET`, document the external
 validation in the application's runbook before setting the override. The

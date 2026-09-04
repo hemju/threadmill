@@ -11,12 +11,15 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
@@ -41,6 +44,8 @@ import com.hemju.threadmill.core.store.JobStore;
  */
 public final class ThreadmillMetrics {
 
+  private static final Logger LOG = LoggerFactory.getLogger(ThreadmillMetrics.class);
+
   /** Default minimum interval between store-derived gauge refresh attempts. */
   public static final Duration DEFAULT_REFRESH_INTERVAL = Duration.ofSeconds(1);
 
@@ -55,6 +60,9 @@ public final class ThreadmillMetrics {
   private final AtomicReference<StoreSnapshot> snapshot =
       new AtomicReference<>(StoreSnapshot.empty());
   private final AtomicBoolean snapshotStale = new AtomicBoolean(true);
+  private final AtomicBoolean refreshInProgress = new AtomicBoolean();
+  private final AtomicInteger consecutiveRefreshFailures = new AtomicInteger();
+  private final AtomicInteger consecutiveMeterFailures = new AtomicInteger();
   private final Map<String, QueueMeters> queueMeters = new ConcurrentHashMap<>();
   private final Counter processedCounter;
   private final Counter refreshErrors;
@@ -97,13 +105,6 @@ public final class ThreadmillMetrics {
     this.maxQueueTags = maxQueueTags;
     this.meteredStore = new MeteredJobStore(store, this);
 
-    for (var state : JobState.values()) {
-      Gauge.builder("threadmill.jobs.count", this, metrics -> metrics.stateCount(state))
-          .tag("state", state.name())
-          .description("Number of Threadmill jobs in this state")
-          .strongReference(true)
-          .register(registry);
-    }
     this.processedCounter = Counter.builder("threadmill.jobs.processed")
         .description("Total successfully-processed Threadmill jobs since startup")
         .register(registry);
@@ -122,6 +123,16 @@ public final class ThreadmillMetrics {
     this.claimLatency = Timer.builder("threadmill.claim.latency")
         .description("Wall-clock time spent in JobStore claimReady calls")
         .register(registry);
+
+    // Register gauges only after every field their callbacks can reach has
+    // been assigned. Registries may read a gauge from an onMeterAdded hook.
+    for (var state : JobState.values()) {
+      Gauge.builder("threadmill.jobs.count", this, metrics -> metrics.stateCount(state))
+          .tag("state", state.name())
+          .description("Number of Threadmill jobs in this state")
+          .strongReference(true)
+          .register(registry);
+    }
     Gauge.builder(
             "threadmill.processing.oldest.heartbeat.age",
             this,
@@ -129,12 +140,13 @@ public final class ThreadmillMetrics {
         .description("Age in milliseconds of the oldest processing heartbeat")
         .strongReference(true)
         .register(registry);
-    Gauge.builder("threadmill.metrics.snapshot.stale", this, ThreadmillMetrics::snapshotStale)
+    Gauge.builder("threadmill.metrics.snapshot.stale", this, ThreadmillMetrics::snapshotStaleGauge)
         .description("One when the latest store-derived gauge refresh failed, otherwise zero")
         .strongReference(true)
         .register(registry);
     Gauge.builder("threadmill.metrics.snapshot.age", this, ThreadmillMetrics::snapshotAgeMillis)
-        .description("Milliseconds since the last successful store-derived gauge refresh")
+        .description(
+            "Milliseconds since the last successful store-derived gauge refresh; -1 before any success")
         .strongReference(true)
         .register(registry);
     Gauge.builder(
@@ -164,35 +176,57 @@ public final class ThreadmillMetrics {
    * {@code threadmill.metrics.refresh.errors} increments. Age gauges continue
    * advancing from their last known timestamps rather than dropping to zero.
    */
-  public synchronized void refresh() {
-    refreshAt(System.nanoTime());
+  public void refresh() {
+    refreshIfDue(true);
   }
 
-  private void refreshAt(long attemptNanos) {
-    lastRefreshNanos = attemptNanos;
+  private void refreshAt() {
+    Set<String> selectedQueues;
     try {
       var counts = new EnumMap<JobState, Long>(JobState.class);
       counts.putAll(store.countsByState());
       var depths = Map.copyOf(store.queueDepths());
-      var selectedQueues = selectQueues(depths.keySet());
+      selectedQueues = selectQueues(depths.keySet());
       var queues = new HashMap<String, QueueSnapshot>();
       for (var queue : selectedQueues) {
-        queues.put(
-            queue,
-            new QueueSnapshot(depths.getOrDefault(queue, 0L), store.oldestEnqueuedAt(queue)));
+        queues.put(queue, new QueueSnapshot(depths.get(queue), store.oldestEnqueuedAt(queue)));
       }
       var refreshed = new StoreSnapshot(
           Map.copyOf(counts),
           Map.copyOf(queues),
           store.oldestProcessingHeartbeat(),
           Instant.now(),
-          Math.max(0, depths.size() - selectedQueues.size()));
+          maxQueueTags == 0 ? 0 : Math.max(0, depths.size() - selectedQueues.size()));
       snapshot.set(refreshed);
-      reconcileQueueMeters(selectedQueues);
       snapshotStale.set(false);
+      var failures = consecutiveRefreshFailures.getAndSet(0);
+      if (failures > 0) {
+        LOG.info("Threadmill metrics store refresh recovered after {} failed attempts", failures);
+      }
     } catch (RuntimeException e) {
       snapshotStale.set(true);
       refreshErrors.increment();
+      var failures = consecutiveRefreshFailures.incrementAndGet();
+      if (failures == 1 || failures % 60 == 0) {
+        LOG.warn(
+            "Threadmill metrics store refresh has failed {} consecutive times; gauges are stale",
+            failures,
+            e);
+      }
+      return;
+    }
+
+    try {
+      reconcileQueueMeters(selectedQueues);
+      consecutiveMeterFailures.set(0);
+    } catch (RuntimeException e) {
+      var failures = consecutiveMeterFailures.incrementAndGet();
+      if (failures == 1 || failures % 60 == 0) {
+        LOG.warn(
+            "Threadmill queue-meter reconciliation has failed {} consecutive times; the store snapshot is current",
+            failures,
+            e);
+      }
     }
   }
 
@@ -242,14 +276,27 @@ public final class ThreadmillMetrics {
   }
 
   private void refreshThrottled() {
+    refreshIfDue(false);
+  }
+
+  private void refreshIfDue(boolean force) {
     var now = System.nanoTime();
-    if (!refreshDue(now, lastRefreshNanos)) {
+    if (!force && !refreshDue(now, lastRefreshNanos)) {
       return;
     }
-    synchronized (this) {
-      if (refreshDue(now, lastRefreshNanos)) {
-        refreshAt(now);
+    if (!refreshInProgress.compareAndSet(false, true)) {
+      return;
+    }
+    try {
+      now = System.nanoTime();
+      if (force || refreshDue(now, lastRefreshNanos)) {
+        refreshAt();
       }
+    } finally {
+      // Start the cooldown when the attempt finishes. Slow or failed reads
+      // must not provoke an immediate pile-up of retrying callers.
+      lastRefreshNanos = System.nanoTime();
+      refreshInProgress.set(false);
     }
   }
 
@@ -279,7 +326,7 @@ public final class ThreadmillMetrics {
     return ageMillis(snapshot.get().oldestProcessingHeartbeat());
   }
 
-  private double snapshotStale() {
+  private double snapshotStaleGauge() {
     refreshThrottled();
     return snapshotStale.get() ? 1d : 0d;
   }
@@ -301,8 +348,18 @@ public final class ThreadmillMetrics {
         .orElse(0d);
   }
 
-  /** Record an externally-observed claim latency. */
+  /**
+   * Record an externally-observed claim latency.
+   *
+   * @deprecated Pass {@link #meteredStore()} to the processing node instead;
+   *     calling both paths double-counts claims.
+   */
+  @Deprecated
   public void recordClaimLatency(Duration duration) {
+    recordClaimReadyLatency(duration);
+  }
+
+  void recordClaimReadyLatency(Duration duration) {
     claimLatency.record(duration);
   }
 
@@ -358,7 +415,6 @@ public final class ThreadmillMetrics {
       public void onProcessingSucceeded(Job job, JobExecutionContext ctx) {
         processedCounter.increment();
         recordElapsed(job);
-        refreshThrottled();
       }
 
       @Override
@@ -374,7 +430,6 @@ public final class ThreadmillMetrics {
           orphanReclaims.increment();
         }
         recordElapsed(job);
-        refreshThrottled();
       }
     };
   }

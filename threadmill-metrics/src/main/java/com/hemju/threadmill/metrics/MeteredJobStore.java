@@ -15,6 +15,8 @@ import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobReplacement;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.OversizedJobException;
+import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
@@ -103,7 +105,7 @@ final class MeteredJobStore implements JobStore {
       metrics.recordClaimFailure();
       throw failure;
     } finally {
-      metrics.recordClaimLatency(Duration.ofNanos(System.nanoTime() - started));
+      metrics.recordClaimReadyLatency(Duration.ofNanos(System.nanoTime() - started));
     }
   }
 
@@ -301,9 +303,19 @@ final class MeteredJobStore implements JobStore {
     try {
       return action.get();
     } catch (RuntimeException rejected) {
-      metrics.recordRejectedWrite(operation);
+      if (!isContractualRejection(operation, rejected)) {
+        metrics.recordRejectedWrite(operation);
+      }
       throw rejected;
     }
+  }
+
+  private static boolean isContractualRejection(String operation, RuntimeException failure) {
+    return failure instanceof StaleJobException
+        || failure instanceof OversizedJobException
+        || failure instanceof IllegalArgumentException
+        || failure instanceof IllegalStateException
+            && (operation.equals("insert") || operation.equals("insert_all"));
   }
 
   private void writeVoid(String operation, Runnable action) {

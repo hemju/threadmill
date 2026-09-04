@@ -42,12 +42,22 @@ keeps age gauges advancing from the last known timestamps, sets
 `threadmill.metrics.snapshot.stale` to `1`, and increments
 `threadmill.metrics.refresh.errors`. Treat those values as last-known data
 until stale clears; use `threadmill.metrics.snapshot.age` to judge their age.
+Concurrent readers use the cached snapshot while a refresh is in flight. The
+reader that starts the refresh performs the bounded store reads synchronously;
+the refresh interval and queue cap therefore budget store load as well as
+freshness and cardinality.
 
 Queue tags are capped at 100 active queues per metrics instance by default.
 `threadmill.metrics.queue.tags.omitted` reports how many active queues did not
 receive a tag slot. Drained queues release slots for newly appearing queues.
 The constructor overload accepts a different refresh interval and queue cap;
 zero disables per-queue meters.
+
+`threadmill.store.writes.rejected` counts failed write attempts, including
+retries during one logical outage. It excludes the SPI's expected
+stale-version, oversize, invalid-argument, and duplicate-id outcomes so normal
+multi-node races and caller validation errors do not masquerade as store
+health failures.
 
 ## Datastores
 
