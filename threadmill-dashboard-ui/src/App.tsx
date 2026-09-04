@@ -43,6 +43,7 @@ const states: JobState[] = [
   "DELETED",
   "QUARANTINED"
 ];
+const PAGE_SIZE = 50;
 
 function has(session: Session | null, permission: Permission) {
   return !!session && (session.permissions.includes("ADMIN") || session.permissions.includes(permission));
@@ -59,21 +60,31 @@ function canReplace(job: JobSummary) {
 export default function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [overview, setOverview] = useState<Overview | null>(null);
-  const [jobs, setJobs] = useState<JobList>({ jobs: [], limit: 50, offset: 0 });
+  const [jobs, setJobs] = useState<JobList>({ jobs: [], limit: PAGE_SIZE, offset: 0 });
   const [queues, setQueues] = useState<QueueView[]>([]);
   const [selected, setSelected] = useState<JobDetail | null>(null);
   const [state, setState] = useState<string>("ENQUEUED");
   const [filter, setFilter] = useState("");
+  const [submittedFilter, setSubmittedFilter] = useState("");
+  const [offset, setOffset] = useState(0);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  async function load() {
+  async function load(
+    requestedOffset = offset,
+    requestedFilter = submittedFilter,
+    requestedState = state
+  ) {
     try {
       const nextSession = await api<Session>("/session");
       setSession(nextSession);
       const query = new URLSearchParams();
-      if (state) query.set("state", state);
-      if (overview?.capabilities.supportsRichSearch && filter) query.set("handlerType", filter);
+      if (requestedState) query.set("state", requestedState);
+      if (overview?.capabilities.supportsRichSearch && requestedFilter) {
+        query.set("handlerType", requestedFilter);
+      }
+      query.set("limit", PAGE_SIZE.toString());
+      query.set("offset", requestedOffset.toString());
       const [nextOverview, nextJobs, nextQueues] = await Promise.all([
         api<Overview>("/overview", {}, nextSession),
         api<JobList>(`/jobs?${query}`, {}, nextSession),
@@ -82,6 +93,8 @@ export default function App() {
       setOverview(nextOverview);
       setJobs(nextJobs);
       setQueues(nextQueues);
+      setOffset(nextJobs.offset);
+      setSubmittedFilter(requestedFilter);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Dashboard request failed");
@@ -93,18 +106,25 @@ export default function App() {
     try {
       const response = await api<ActionResponse>(path, init, session);
       setMessage(`${success}: ${response.target}`);
-      await load();
+      setError(null);
+      await load(offset, submittedFilter);
       if (selected) {
         setSelected(await api<JobDetail>(`/jobs/${selected.summary.id}`, {}, session));
       }
     } catch (e) {
+      setMessage(null);
       setError(e instanceof Error ? e.message : "Mutation failed");
     }
   }
 
   async function openJob(job: JobSummary) {
     if (!session) return;
-    setSelected(await api<JobDetail>(`/jobs/${job.id}`, {}, session));
+    try {
+      setSelected(await api<JobDetail>(`/jobs/${job.id}`, {}, session));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Job detail request failed");
+    }
   }
 
   async function requeue(job: JobSummary) {
@@ -200,8 +220,8 @@ export default function App() {
   }
 
   useEffect(() => {
-    void load();
-  }, [state]);
+    void load(0, submittedFilter, state);
+  }, []);
 
   const total = useMemo(
     () => Object.values(overview?.countsByState ?? {}).reduce((sum, value) => sum + value, 0),
@@ -291,7 +311,7 @@ export default function App() {
         }
       }
     ],
-    [session, selected]
+    [session, selected, offset, submittedFilter, state]
   );
 
   const table = useReactTable({ data: jobs.jobs, columns, getCoreRowModel: getCoreRowModel() });
@@ -319,12 +339,28 @@ export default function App() {
         <aside className="min-h-[calc(100vh-3rem)] border-r border-border bg-panel p-3">
           <div className="mb-4 text-xs font-semibold uppercase text-muted-foreground">States</div>
           <div className="space-y-1">
-            <button className="state-filter" disabled={!richSearch} onClick={() => setState("")}>
+            <button
+              className="state-filter"
+              disabled={!richSearch}
+              onClick={() => {
+                setState("");
+                setSelected(null);
+                void load(0, submittedFilter, "");
+              }}
+            >
               <span>All</span>
               <span className="font-mono">{total}</span>
             </button>
             {states.map((s) => (
-              <button className="state-filter" key={s} onClick={() => setState(s)}>
+              <button
+                className="state-filter"
+                key={s}
+                onClick={() => {
+                  setState(s);
+                  setSelected(null);
+                  void load(0, submittedFilter, s);
+                }}
+              >
                 <span>{s}</span>
                 <span className="font-mono">{overview?.countsByState?.[s] ?? 0}</span>
               </button>
@@ -351,7 +387,10 @@ export default function App() {
               value={filter}
               onChange={(event) => setFilter(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter") void load();
+                if (event.key === "Enter") {
+                  setSelected(null);
+                  void load(0, filter);
+                }
               }}
             />
           </div>
@@ -396,6 +435,34 @@ export default function App() {
             </Table>
           </div>
 
+          <div className="mt-3 flex items-center justify-end gap-2 text-xs text-muted-foreground">
+            <span>
+              {jobs.jobs.length === 0 ? 0 : jobs.offset + 1}–{jobs.offset + jobs.jobs.length}
+            </span>
+            <Button
+              variant="secondary"
+              disabled={offset === 0}
+              aria-label="Previous page"
+              onClick={() => {
+                setSelected(null);
+                void load(Math.max(0, offset - PAGE_SIZE), submittedFilter);
+              }}
+            >
+              Previous
+            </Button>
+            <Button
+              variant="secondary"
+              disabled={jobs.jobs.length === 0 || jobs.jobs.length < PAGE_SIZE}
+              aria-label="Next page"
+              onClick={() => {
+                setSelected(null);
+                void load(offset + PAGE_SIZE, submittedFilter);
+              }}
+            >
+              Next
+            </Button>
+          </div>
+
           <div className="mt-4 grid grid-cols-2 gap-3">
             {queues.map((queue) => (
               <div className="border border-border bg-panel p-3" key={queue.queue}>
@@ -429,7 +496,12 @@ export default function App() {
             </div>
             <div className="divide-y divide-border">
               {(overview?.cronTasks ?? []).map(({ task, state: taskState }) => (
-                <div className="grid grid-cols-[1fr_auto] gap-3 p-3" key={task.name}>
+                <div
+                  aria-label={`Recurring task ${task.name}`}
+                  className="grid grid-cols-[1fr_auto] gap-3 p-3"
+                  key={task.name}
+                  role="group"
+                >
                   <div>
                     <div className="font-mono text-sm">{task.name}</div>
                     <div className="mt-1 text-xs text-muted-foreground">

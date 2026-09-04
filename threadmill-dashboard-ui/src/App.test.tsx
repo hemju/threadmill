@@ -33,7 +33,7 @@ const responses: Record<string, unknown> = {
       maxClaimBatch: 1000
     }
   },
-  "/threadmill/api/jobs?state=ENQUEUED": {
+  "/threadmill/api/jobs": {
     jobs: [
       {
         id: "018f0000-0000-7000-8000-000000000001",
@@ -89,10 +89,34 @@ const responses: Record<string, unknown> = {
   }
 };
 
+function fixtureFor(url: string) {
+  const normalized = url.replace("/admin/threadmill/api", "/threadmill/api");
+  return responses[new URL(normalized, "http://localhost").pathname];
+}
+
+function fullJobPage(handlerType: string, offset: number) {
+  const first = responses["/threadmill/api/jobs"] as {
+    jobs: Array<Record<string, unknown>>;
+  };
+  return {
+    jobs: Array.from({ length: 50 }, (_, index) => ({
+      ...first.jobs[0],
+      id:
+        index === 0
+          ? `018f0000-0000-7000-8000-${offset === 0 ? "000000000001" : "000000000002"}`
+          : `page-${offset}-job-${index}`,
+      handlerType: index === 0 ? handlerType : `com.example.Filler${offset}_${index}`
+    })),
+    limit: 50,
+    offset
+  };
+}
+
 beforeEach(() => {
   vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
     const url = input.toString();
-    const value = responses[url] ?? responses[url.replace(/state=[^&]+/, "").replace(/handlerType=[^&]+/, "")];
+    const value = fixtureFor(url);
+    if (value === undefined) throw new Error(`Unexpected request: GET ${url}`);
     return Promise.resolve({
       ok: true,
       json: () => Promise.resolve(value)
@@ -215,7 +239,7 @@ it("uses the runtime API base path override", async () => {
   vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
     const url = input.toString();
     calls.push(url);
-    const value = responses[url.replace("/admin/threadmill/api", "/threadmill/api")];
+    const value = fixtureFor(url);
     return Promise.resolve({
       ok: true,
       json: () => Promise.resolve(value)
@@ -238,4 +262,127 @@ it("opens job details when the job row is clicked", async () => {
 
   await waitFor(() => expect(screen.getByText("Sensitive details redacted.")).toBeInTheDocument());
   expect(row).toHaveAttribute("aria-selected", "true");
+});
+
+it("requests the next and previous job pages", async () => {
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+    const url = input.toString();
+    calls.push(url);
+    if (url.includes("/jobs?")) {
+      const secondPage = url.includes("offset=50");
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve(
+            fullJobPage(
+              secondPage ? "com.example.SecondHandler" : "com.example.ImportHandler",
+              secondPage ? 50 : 0
+            )
+          )
+      });
+    }
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve(responses[url])
+    });
+  });
+
+  render(<App />);
+
+  await screen.findByText("com.example.ImportHandler");
+  fireEvent.click(screen.getByLabelText("Next page"));
+  await screen.findByText("com.example.SecondHandler");
+  expect(calls).toContain("/threadmill/api/jobs?state=ENQUEUED&limit=50&offset=50");
+
+  fireEvent.click(screen.getByLabelText("Previous page"));
+  await screen.findByText("com.example.ImportHandler");
+  expect(calls.filter((url) => url.endsWith("offset=0"))).toHaveLength(2);
+});
+
+it("retries a failed next-page request without advancing the displayed page", async () => {
+  let failedNextPage = false;
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+    const url = input.toString();
+    calls.push(url);
+    if (url.includes("/jobs?")) {
+      const nextPage = url.includes("offset=50");
+      if (nextPage && !failedNextPage) {
+        failedNextPage = true;
+        return Promise.resolve({
+          ok: false,
+          status: 503,
+          statusText: "Service Unavailable",
+          json: () => Promise.resolve({})
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve(
+            fullJobPage(
+              nextPage ? "com.example.SecondHandler" : "com.example.ImportHandler",
+              nextPage ? 50 : 0
+            )
+          )
+      });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve(fixtureFor(url)) });
+  });
+
+  render(<App />);
+
+  await screen.findByText("com.example.ImportHandler");
+  fireEvent.click(screen.getByLabelText("Next page"));
+  expect(await screen.findByText("503 Service Unavailable")).toBeInTheDocument();
+  expect(screen.getByLabelText("Previous page")).toBeDisabled();
+
+  fireEvent.click(screen.getByLabelText("Next page"));
+  await screen.findByText("com.example.SecondHandler");
+  expect(calls.filter((url) => url.endsWith("offset=50"))).toHaveLength(2);
+});
+
+it("paginates with the last submitted handler filter", async () => {
+  const calls: string[] = [];
+  vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+    const url = input.toString();
+    calls.push(url);
+    if (url.endsWith("/overview")) {
+      const overview = responses["/threadmill/api/overview"] as Record<string, unknown>;
+      return Promise.resolve({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            ...overview,
+            capabilities: {
+              ...(overview.capabilities as Record<string, unknown>),
+              supportsRichSearch: true
+            }
+          })
+      });
+    }
+    if (url.includes("/jobs?")) {
+      const offset = url.includes("offset=50") ? 50 : 0;
+      return Promise.resolve({
+        ok: true,
+        json: () => Promise.resolve(fullJobPage("com.example.ImportHandler", offset))
+      });
+    }
+    return Promise.resolve({ ok: true, json: () => Promise.resolve(fixtureFor(url)) });
+  });
+
+  render(<App />);
+
+  const search = await screen.findByPlaceholderText("Handler type");
+  fireEvent.change(search, { target: { value: "com.example.Pending" } });
+  fireEvent.click(screen.getByLabelText("Next page"));
+  await waitFor(() => expect(calls.some((url) => url.endsWith("offset=50"))).toBe(true));
+  expect(calls.filter((url) => url.includes("/jobs?")).at(-1)).not.toContain("handlerType=");
+
+  fireEvent.keyDown(search, { key: "Enter" });
+  await waitFor(() =>
+    expect(calls.some((url) => url.includes("handlerType=com.example.Pending"))).toBe(true)
+  );
+  expect(calls.filter((url) => url.includes("/jobs?")).at(-1)).toContain("offset=0");
 });
