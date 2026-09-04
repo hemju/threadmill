@@ -50,12 +50,13 @@ queue / handler / dedup-key user input cannot escape the namespace.
 | `{threadmill}:queue_unkeyed:{queue}` | ZSET | ENQUEUED unkeyed job ids, scored like the queue ZSET. The unkeyed claim lane never pages past keyed work. |
 | `{threadmill}:queue_enqueued_at:{queue}` | ZSET | Every ENQUEUED job id in the queue, scored by `current_state_at` millis. `oldestEnqueuedAt` (the `threadmill.queue.oldest.enqueued.age` gauge and the dashboard queue view) reads its head with one `ZRANGE 0 0 WITHSCORES`, so the age gauge never scans the priority-ordered queue ZSET. Maintained inside the same atomic scripts as queue membership. |
 | `{threadmill}:layout:queue_enqueued_at` | STRING | Marker that the age index has been backfilled from a pre-index layout (v0.2.1 and earlier). See *Layout upgrades*. |
-| `{threadmill}:layout:queue_priority` | STRING | `priority_only_v1` after the queue and unkeyed-queue ZSETs have been rescored from the v0.2.1 priority-plus-time layout. See *Layout upgrades*. |
+| `{threadmill}:layout:queue_priority` | STRING | `rescored` after an exact pass while legacy-scoring nodes may remain; `priority_only_v1` after the final pass. See *Layout upgrades*. |
 | `{threadmill}:queue_pauses` | HASH | Paused queue → reason. |
 | `{threadmill}:cron_task_namespace:{namespace}` | SET | Cron task names owned by one reconciliation namespace. |
 | `{threadmill}:cron_task_namespaces` | SET | Known recurring reconciliation namespaces. |
 | `{threadmill}:nodes` | SET | Known NodeIds. |
 | `{threadmill}:node:heartbeat:{node}` | STRING with TTL | Key existence is the heartbeat; TTL is the timeout. |
+| `{threadmill}:node:layout:{node}` | STRING with heartbeat TTL | Redis layout version maintained by a live node: `1` knows the age index but writes legacy priority scores; `2` maintains both current layouts. Missing means v0.2.1 or earlier. |
 | `{threadmill}:lease:maintenance` | STRING | Maintenance-lease holder; refreshed via `lease_acquire.lua`. |
 | `{threadmill}:dedup:{queue}:{dedupKey}` | STRING | Dedup record. |
 | `{threadmill}:dedup_expiry` | ZSET | Dedup record expiries; maintenance cleanup reads this. |
@@ -68,6 +69,16 @@ queue / handler / dedup-key user input cannot escape the namespace.
 
 ## Layout upgrades
 
+When upgrading from v0.2.1, roll workers out normally. Current nodes advertise
+layout version `2` next to their heartbeat; the layout markers remain
+intermediate until every live legacy-node heartbeat is gone and a final exact
+pass completes. Stop any producer-only process on the old release before the
+rollout completes because it has no node heartbeat and therefore cannot be
+detected. If both layouts need work on the same start, Threadmill rescans each
+primary queue once for both the priority score and age index. Start and finish
+messages include the member count and key so a large upgrade is visible in
+application logs.
+
 ### Queue priority score
 
 v0.2.1 encoded both priority and enqueue time into one floating-point ZSET
@@ -77,17 +88,27 @@ current layout scores only `-priority`; all `int` values are exactly
 representable, and the UUIDv7 member provides the contract's job-id
 tie-break.
 
-When `{threadmill}:layout:queue_priority` is absent, store construction pages
-every registered queue and unkeyed-queue index with `ZSCAN`, pipelines the
-job-hash priority reads, applies the new scores idempotently, and writes
-`priority_only_v1` only after every page completes. Existing members keep the
-same job ids, so all Lua removal paths remain compatible.
+When `{threadmill}:layout:queue_priority` is absent or `rescored`, store
+construction pages every registered queue and unkeyed-queue index with
+`ZSCAN`. One bounded Lua call per page rechecks membership and current job
+state, reads the current priority, applies `ZADD XX`, and prunes dangling or
+non-ENQUEUED members. A job claimed between `ZSCAN` and the update cannot be
+resurrected, and a concurrently replaced priority cannot be overwritten by a
+stale Java-side read. Malformed priority data fails startup with the job id.
 
-**Upgrade procedure.** This score change requires a coordinated upgrade:
-stop every pre-upgrade worker and producer before starting the first new
-process, then keep them stopped. An old writer cannot understand the new
-layout marker and can reintroduce a priority-plus-time score after the
-one-time rescore.
+The marker becomes `rescored` after the first exact pass. It stays there while
+any live node advertises an older layout version. After the last such heartbeat
+expires, a current node performs one final exact pass in the background and
+writes `priority_only_v1`; no restart is needed. Later starts use two bounded
+score-range checks per queue and repair obvious legacy-score drift, a defence
+for old producer-only processes that cannot be observed through heartbeats.
+
+**Mixed-version guarantees.** Old nodes may temporarily reintroduce legacy
+scores while the marker is `rescored`, so strict priority ordering is restored
+by each new-node start and finally guaranteed after the terminal pass. The
+score layout never controls job state: mixed versions do not lose, duplicate,
+or resurrect jobs, and claims remain atomic. Stop old producer-only processes
+before completion as described above.
 
 ### Per-queue age index
 
@@ -107,8 +128,8 @@ serving a read:
   `backfilled`.
 - **`backfilled` → `complete`** as soon as no old-release node is live.
   New-release nodes write `{threadmill}:node:layout:{nodeId}` next to their
-  heartbeat with the same TTL, so a live heartbeat without it identifies an
-  old-release node. The transition is attempted at every start and, so the
+  heartbeat with the same TTL, so a live heartbeat without it identifies a
+  release that predates this index. The transition is attempted at every start and, so the
   last old node's exit needs no restart, from `oldestEnqueuedAt` once that
   node's heartbeat has expired: a final exact reconciliation in a background
   virtual thread, then the state write. Until then the read pays one `GET`
@@ -116,8 +137,8 @@ serving a read:
 - **`complete`**: two `ZCARD`s per queue at start, no scan, and a re-walk only
   where the index and queue cardinalities disagree.
 
-**Upgrade procedure.** Roll the new release out node by node as usual. Stop
-any producer-only process still on the old release (a Spring application
+**Upgrade procedure.** Roll the new release out node by node as described
+above. Stop any producer-only process still on the old release (a Spring application
 that enqueues but runs no `ProcessingNode`) before the rollout completes:
 such a process has no heartbeat, so the store cannot see it, and a job it
 enqueues after the layout is `complete` is missing from the index until it

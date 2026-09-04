@@ -666,7 +666,7 @@ public final class PostgresJobStore implements JobStore {
     return candidates.values().stream()
         .sorted(Comparator.comparingInt(PendingClaim::priority)
             .reversed()
-            .thenComparing(PendingClaim::id))
+            .thenComparing(claim -> claim.id().toString()))
         .limit(narrowClaimPageSize(want))
         .toList();
   }

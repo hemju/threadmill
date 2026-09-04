@@ -105,7 +105,7 @@ public final class InMemoryJobStore implements JobStore {
     // the relational backends' ORDER BY priority DESC.
     return Comparator.<Map.Entry<JobId, Entry>>comparingInt(e -> e.getValue().priority)
         .reversed()
-        .thenComparing(e -> e.getKey().asUuid());
+        .thenComparing(e -> e.getKey().toString());
   }
 
   private final ConcurrentHashMap<JobId, Entry> jobs = new ConcurrentHashMap<>();
@@ -544,7 +544,7 @@ public final class InMemoryJobStore implements JobStore {
         .sorted(
             Comparator.<Map.Entry<JobId, Entry>, Instant>comparing(e -> e.getValue().currentStateAt)
                 .reversed()
-                .thenComparing(e -> e.getKey().asUuid()))
+                .thenComparing(e -> e.getKey().toString()))
         .skip(search.offset())
         .limit(search.limit())
         .map(e -> serializer.deserializeJob(e.getValue().wire))
@@ -1035,7 +1035,7 @@ public final class InMemoryJobStore implements JobStore {
     var left = possibleEarlier.getValue().currentStateAt;
     var right = candidate.getValue().currentStateAt;
     if (left == null && right == null) {
-      return possibleEarlier.getKey().asUuid().compareTo(candidate.getKey().asUuid()) < 0;
+      return possibleEarlier.getKey().toString().compareTo(candidate.getKey().toString()) < 0;
     }
     if (left == null) {
       return false;
@@ -1047,7 +1047,7 @@ public final class InMemoryJobStore implements JobStore {
     if (timeOrder != 0) {
       return timeOrder < 0;
     }
-    return possibleEarlier.getKey().asUuid().compareTo(candidate.getKey().asUuid()) < 0;
+    return possibleEarlier.getKey().toString().compareTo(candidate.getKey().toString()) < 0;
   }
 
   private static Instant lastTransitionTime(JobSnapshot snapshot, JobState state) {

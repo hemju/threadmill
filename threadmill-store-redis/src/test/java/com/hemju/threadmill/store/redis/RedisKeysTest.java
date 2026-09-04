@@ -61,10 +61,13 @@ class RedisKeysTest {
   }
 
   @Test
-  @SuppressWarnings("deprecation")
+  @SuppressWarnings({"deprecation", "removal"})
   void queueScoreExactlyRepresentsTheFullIntPriorityRange() {
     assertThat(RedisKeys.queueScore(Integer.MAX_VALUE)).isEqualTo(-2_147_483_647d);
     assertThat(RedisKeys.queueScore(0)).isZero();
+    assertThat(Double.doubleToRawLongBits(RedisKeys.queueScore(0)))
+        .as("canonical positive-zero score")
+        .isZero();
     assertThat(RedisKeys.queueScore(Integer.MIN_VALUE)).isEqualTo(2_147_483_648d);
     assertThat(RedisKeys.queueScore(7, Long.MIN_VALUE))
         .isEqualTo(RedisKeys.queueScore(7, Long.MAX_VALUE));

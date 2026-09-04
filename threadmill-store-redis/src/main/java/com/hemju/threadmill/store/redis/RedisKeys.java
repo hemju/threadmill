@@ -61,11 +61,12 @@ import com.hemju.threadmill.core.NodeId;
  *       priority-ordered queue ZSET.</li>
  *   <li>{@code {threadmill}:layout:queue_enqueued_at} — STRING upgrade state
  *       of the age index ({@code backfilled} / {@code complete}).</li>
- *   <li>{@code {threadmill}:layout:queue_priority} — STRING recording that
- *       queue and unkeyed-queue ZSET scores use exact negated priorities.</li>
- *   <li>{@code {threadmill}:node:layout:{nodeId}} — STRING with the heartbeat
- *       TTL, written by nodes that maintain the age index; a live heartbeat
- *       without it identifies an old-release node during a rolling upgrade.</li>
+ *   <li>{@code {threadmill}:layout:queue_priority} — STRING priority-score
+ *       upgrade state ({@code rescored} / {@code priority_only_v1}).</li>
+ *   <li>{@code {threadmill}:node:layout:{nodeId}} — STRING layout version with
+ *       the heartbeat TTL. Value {@code 1} identifies an age-index-aware node
+ *       that still writes legacy priority scores; value {@code 2} maintains
+ *       both current layouts; a missing value identifies an older release.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflows} — HASH workflow root
  *       id → active outstanding hold count.</li>
  *   <li>{@code {threadmill}:concurrency:{key}:workflow_counts} — HASH workflow
@@ -101,8 +102,10 @@ public final class RedisKeys {
   public static final String QUEUE_ENQUEUED_AT_LAYOUT = PREFIX + "layout:queue_enqueued_at";
 
   /**
-   * STRING recording that the queue and unkeyed-queue ZSETs use the exact
-   * priority-only score introduced after v0.2.1.
+   * STRING recording the queue-score upgrade state. {@code rescored} means an
+   * exact pass ran while a legacy-scoring node may still be live;
+   * {@code priority_only_v1} means a final pass ran after those heartbeats
+   * disappeared.
    */
   public static final String QUEUE_PRIORITY_LAYOUT = PREFIX + "layout:queue_priority";
 
@@ -138,7 +141,7 @@ public final class RedisKeys {
     return PREFIX + "node:heartbeat:" + node;
   }
 
-  /** Written alongside the heartbeat by nodes whose release maintains the age index. */
+  /** Written alongside the heartbeat to advertise the node's maintained Redis layouts. */
   public static String nodeLayout(NodeId node) {
     Objects.requireNonNull(node, "node");
     return PREFIX + "node:layout:" + node;
@@ -252,6 +255,8 @@ public final class RedisKeys {
    * tie-break required by the store contract.
    */
   public static double queueScore(int priority) {
+    // Canonicalize zero: negation yields -0.0, while Redis returns +0.0 and
+    // boxed Double equality distinguishes their raw representations.
     return priority == 0 ? 0d : -(double) priority;
   }
 
@@ -265,7 +270,7 @@ public final class RedisKeys {
    * @return the exact negated-priority score
    * @deprecated use {@link #queueScore(int)}
    */
-  @Deprecated(since = "0.2.2")
+  @Deprecated(since = "0.2.2", forRemoval = true)
   public static double queueScore(int priority, long ignoredEnqueueMicros) {
     return queueScore(priority);
   }

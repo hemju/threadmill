@@ -37,6 +37,19 @@
   `ProcessingNodeConfig.MAX_TIMEOUT` (one hundred years) degrades to the global
   timeout instead of overflowing before the handler runs. The config rejects
   `jobTimeout`, `noProgressTimeout`, and `shutdownGracePeriod` above that bound.
+- Queue claim order is now exactly `(priority DESC, job id)` on every store
+  (issue #91). Redis queue and unkeyed-lane ZSET scores are exact negated
+  priorities, so a lower-priority job can no longer overtake after about 116
+  days and extreme priorities lose no timestamp precision; canonical UUID
+  string ordering breaks ties consistently across Redis, PostgreSQL, and the
+  in-memory store, including UUIDs across Java's signed comparison boundary.
+  Redis upgrades legacy scores in bounded, atomic pages that cannot resurrect
+  a concurrent claim or overwrite a replacement. The layout stays `rescored`
+  while a legacy-scoring node heartbeat is live, runs one final exact pass,
+  then becomes `priority_only_v1`; rolling upgrades may temporarily perturb
+  ordering but do not lose or duplicate jobs. The deprecated
+  `RedisKeys.queueScore(int, long)` compatibility overload is marked for
+  removal; enqueue time is ignored.
 - Redis `oldestEnqueuedAt` — the `threadmill.queue.oldest.enqueued.age`
   gauge and the dashboard queue view — is now one head read of a per-queue
   age index (`{threadmill}:queue_enqueued_at:{queue}`, scored by

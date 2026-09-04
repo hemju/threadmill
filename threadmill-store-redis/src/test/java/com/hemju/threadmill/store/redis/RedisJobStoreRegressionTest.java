@@ -21,6 +21,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisURI;
@@ -180,13 +181,195 @@ class RedisJobStoreRegressionTest {
     JobStore upgraded = store();
 
     assertThat(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT)).isEqualTo("priority_only_v1");
+    assertThat(r.zscore(queue, oldLowerPriority.id().toString()))
+        .isEqualTo(RedisKeys.queueScore(0));
     assertThat(r.zscore(queue, newHigherPriority.id().toString()))
         .isEqualTo(RedisKeys.queueScore(1));
+    assertThat(r.zscore(unkeyed, oldLowerPriority.id().toString()))
+        .isEqualTo(RedisKeys.queueScore(0));
     assertThat(r.zscore(unkeyed, newHigherPriority.id().toString()))
         .isEqualTo(RedisKeys.queueScore(1));
+    assertThat(r.zrange(queue, 0, -1))
+        .containsExactly(
+            newHigherPriority.id().toString(), oldLowerPriority.id().toString());
     assertThat(upgraded.claimReady(NodeId.newId(), "default", 1, newAt.plusSeconds(1)))
         .extracting(Job::id)
         .containsExactly(newHigherPriority.id());
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void priorityLayoutRescoreDoesNotResurrectConcurrentlyClaimedMembers() throws Exception {
+    JobStore writer = store();
+    var jobs = new ArrayList<Job>(3_000);
+    for (int i = 0; i < 3_000; i++) jobs.add(sample());
+    for (int start = 0; start < jobs.size(); start += 750) {
+      writer.insertAll(jobs.subList(start, Math.min(start + 750, jobs.size())));
+    }
+
+    RedisCommands<String, String> r = adminConnection.sync();
+    String queue = RedisKeys.queue("default");
+    String unkeyed = RedisKeys.queueUnkeyed("default");
+    var legacyScoresAndIds = new ArrayList<Object>(jobs.size() * 2);
+    for (int i = 0; i < jobs.size(); i++) {
+      legacyScoresAndIds.add(1e15 + i);
+      legacyScoresAndIds.add(jobs.get(i).id().toString());
+    }
+    r.zadd(queue, legacyScoresAndIds.toArray());
+    r.zadd(unkeyed, legacyScoresAndIds.toArray());
+    r.del(RedisKeys.QUEUE_PRIORITY_LAYOUT);
+
+    var start = new CountDownLatch(1);
+    var migrationFinished = new AtomicBoolean();
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      Future<JobStore> migration = executor.submit(() -> {
+        start.await();
+        try {
+          return store();
+        } finally {
+          migrationFinished.set(true);
+        }
+      });
+      Future<?> claimer = executor.submit(() -> {
+        start.await();
+        var nodeId = NodeId.newId();
+        while (!migrationFinished.get()) {
+          writer.claimReady(nodeId, "default", 20, Instant.now());
+        }
+        return null;
+      });
+      start.countDown();
+      migration.get(30, TimeUnit.SECONDS);
+      claimer.get(30, TimeUnit.SECONDS);
+    }
+
+    for (String id : r.zrange(queue, 0, -1)) {
+      assertThat(r.hget(RedisKeys.PREFIX + "job:" + id, "state"))
+          .as("queue member remains ENQUEUED: " + id)
+          .isEqualTo("ENQUEUED");
+    }
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void priorityRescorePageDoesNotResurrectMemberClaimedAfterItsScan() {
+    JobStore store = store();
+    Job job = sample();
+    store.insert(job);
+    RedisCommands<String, String> r = adminConnection.sync();
+    String queue = RedisKeys.queue("default");
+    assertThat(r.zrange(queue, 0, 0)).containsExactly(job.id().toString());
+
+    assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(job.id());
+    String result = r.eval(
+        RedisJobStore.RESCORE_QUEUE_PRIORITY_PAGE_LUA,
+        ScriptOutputType.VALUE,
+        new String[] {queue},
+        RedisKeys.PREFIX + "job:",
+        "default",
+        "0",
+        job.id().toString());
+
+    assertThat(result).isEqualTo("OK");
+    assertThat(r.zscore(queue, job.id().toString())).isNull();
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void priorityLayoutFinalizesOnlyAfterLegacyNodeExitsAndRunsOneLastExactPass() throws Exception {
+    store();
+    RedisCommands<String, String> r = adminConnection.sync();
+    r.set(RedisKeys.QUEUE_PRIORITY_LAYOUT, "rescored");
+    NodeId legacy = NodeId.newId();
+    r.sadd(RedisKeys.NODES, legacy.toString());
+    r.set(
+        RedisKeys.nodeHeartbeat(legacy),
+        Long.toString(System.currentTimeMillis()),
+        SetArgs.Builder.ex(60));
+    r.set(RedisKeys.nodeLayout(legacy), "1", SetArgs.Builder.ex(60));
+
+    JobStore upgraded = store();
+    assertThat(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT)).isEqualTo("rescored");
+    Job lower = Job.builder()
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"low\"")))
+        .priority(0)
+        .build();
+    Job higher = Job.builder()
+        .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"high\"")))
+        .priority(1)
+        .build();
+    upgraded.insert(lower);
+    upgraded.insert(higher);
+    String queue = RedisKeys.queue("default");
+    String unkeyed = RedisKeys.queueUnkeyed("default");
+    r.zadd(queue, 1d, lower.id().toString());
+    r.zadd(queue, 2d, higher.id().toString());
+    r.zadd(unkeyed, 1d, lower.id().toString());
+    r.zadd(unkeyed, 2d, higher.id().toString());
+
+    NodeId current = NodeId.newId();
+    upgraded.recordNodeHeartbeat(current, Instant.now());
+    assertThat(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT))
+        .as("a live legacy scorer keeps the layout intermediate")
+        .isEqualTo("rescored");
+
+    r.del(RedisKeys.nodeHeartbeat(legacy));
+    upgraded.recordNodeHeartbeat(current, Instant.now());
+    long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
+    while (!"priority_only_v1".equals(r.get(RedisKeys.QUEUE_PRIORITY_LAYOUT))) {
+      assertThat(System.nanoTime()).as("priority layout finalized within 10s").isLessThan(deadline);
+      Thread.sleep(20);
+    }
+    assertThat(r.zrange(queue, 0, -1))
+        .containsExactly(higher.id().toString(), lower.id().toString());
+    assertThat(r.zscore(queue, higher.id().toString())).isEqualTo(RedisKeys.queueScore(1));
+    assertThat(r.zscore(unkeyed, lower.id().toString())).isEqualTo(RedisKeys.queueScore(0));
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void terminalPriorityLayoutRepairsObviousLegacyScoreDrift() {
+    JobStore writer = store();
+    Job job = sample();
+    writer.insert(job);
+    RedisCommands<String, String> r = adminConnection.sync();
+    String queue = RedisKeys.queue("default");
+    String unkeyed = RedisKeys.queueUnkeyed("default");
+    r.zadd(queue, 1e15, job.id().toString());
+    r.zadd(unkeyed, 1e15, job.id().toString());
+
+    store();
+
+    assertThat(r.zscore(queue, job.id().toString())).isEqualTo(RedisKeys.queueScore(0));
+    assertThat(r.zscore(unkeyed, job.id().toString())).isEqualTo(RedisKeys.queueScore(0));
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void priorityLayoutPrunesDanglingMembersAndNamesMalformedJobs() {
+    store();
+    RedisCommands<String, String> r = adminConnection.sync();
+    JobId dangling = JobId.newId();
+    r.sadd(RedisKeys.QUEUES, "default");
+    r.zadd(RedisKeys.queue("default"), 1e15, dangling.toString());
+    r.zadd(RedisKeys.queueUnkeyed("default"), 1e15, dangling.toString());
+    r.del(RedisKeys.QUEUE_PRIORITY_LAYOUT);
+
+    store();
+
+    assertThat(r.zscore(RedisKeys.queue("default"), dangling.toString())).isNull();
+    assertThat(r.zscore(RedisKeys.queueUnkeyed("default"), dangling.toString())).isNull();
+
+    JobStore writer = store();
+    Job malformed = sample();
+    writer.insert(malformed);
+    r.hdel(RedisKeys.job(malformed.id()), "priority");
+    r.del(RedisKeys.QUEUE_PRIORITY_LAYOUT);
+    assertThatThrownBy(this::store)
+        .isInstanceOf(JobEngineFatalException.class)
+        .hasMessageContaining(malformed.id().toString());
   }
 
   private static double legacyQueueScore(int priority, Instant createdAt) {
