@@ -289,7 +289,7 @@ class ThreadmillDashboardApiControllerTest {
     });
 
     var adminController = new ThreadmillDashboardApiController(
-        new DashboardApiService(store, new LocalWakeBus(), replacement -> {}),
+        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), replacement -> {}),
         new SpringSecurityDashboardAuthorizer(),
         auditEvents::add,
         DashboardOptions.secureDefaults());
@@ -309,6 +309,60 @@ class ThreadmillDashboardApiControllerTest {
       assertThat(event.permission()).isEqualTo(DashboardPermission.ADMIN);
       assertThat(event.action()).isEqualTo("replace_job_definition");
       assertThat(event.outcome()).isEqualTo("replaced");
+    });
+  }
+
+  @Test
+  void recurringDefinitionReplacementRequiresAdminAndAuditsTheBoundary() {
+    var originalArgument = new JobArgument("com.hemju.threadmill.core.handler.NoPayload", "{}");
+    store.upsertCronTask(new CronTask(
+        "report",
+        new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
+        "com.example.OriginalHandler",
+        originalArgument,
+        "default",
+        0,
+        CronTask.MissedRunPolicy.DROP,
+        ZoneId.of("UTC"),
+        true));
+    var controller = new ThreadmillDashboardApiController(
+        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), replacement -> {}),
+        new SpringSecurityDashboardAuthorizer(),
+        auditEvents::add,
+        DashboardOptions.secureDefaults());
+    var request = new DashboardPayloads.UpdateRecurringRequest(
+        null,
+        null,
+        ArbitraryClasspathHandler.class.getName(),
+        originalArgument,
+        null,
+        null,
+        null,
+        null,
+        null);
+
+    assertThatThrownBy(() -> controller.updateRecurring(
+            auth("operator", "THREADMILL_UPDATE_RECURRING"), "report", request))
+        .isInstanceOf(ResponseStatusException.class)
+        .satisfies(error -> assertThat(((ResponseStatusException) error).getStatusCode())
+            .isEqualTo(HttpStatus.FORBIDDEN));
+    assertThat(store.findCronTask("report").orElseThrow().handlerType())
+        .isEqualTo("com.example.OriginalHandler");
+    assertThat(auditEvents).singleElement().satisfies(event -> {
+      assertThat(event.permission()).isEqualTo(DashboardPermission.ADMIN);
+      assertThat(event.action()).isEqualTo("update_recurring_definition");
+      assertThat(event.outcome()).isEqualTo("denied");
+    });
+
+    var response = controller.updateRecurring(auth("root", "THREADMILL_ADMIN"), "report", request);
+
+    assertThat(response.status()).isEqualTo("updated");
+    assertThat(store.findCronTask("report").orElseThrow().handlerType())
+        .isEqualTo(ArbitraryClasspathHandler.class.getName());
+    assertThat(auditEvents.getLast()).satisfies(event -> {
+      assertThat(event.permission()).isEqualTo(DashboardPermission.ADMIN);
+      assertThat(event.action()).isEqualTo("update_recurring_definition");
+      assertThat(event.outcome()).isEqualTo("updated");
     });
   }
 

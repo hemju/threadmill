@@ -1,7 +1,5 @@
 package com.hemju.threadmill.dashboard.spring;
 
-import java.util.Optional;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ListableBeanFactory;
@@ -29,6 +27,7 @@ import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.serialization.JobSerializer;
+import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.dashboard.api.DashboardApiService;
 import com.hemju.threadmill.dashboard.api.DashboardAuditSink;
@@ -88,9 +87,14 @@ public class ThreadmillDashboardApiConfiguration {
   @Bean
   @ConditionalOnMissingBean
   public DashboardJobDefinitionValidator threadmillDashboardJobDefinitionValidator(
-      ApplicationContext context, ObjectProvider<JobSerializer> serializer) {
+      ApplicationContext context,
+      ObjectProvider<JobSerializer> serializerProvider,
+      ObjectProvider<TypeNameAliases> aliasesProvider) {
+    var serializer = serializerProvider.getIfUnique();
+    if (serializer == null) return DashboardJobDefinitionValidator.denyAll();
+    var aliases = aliasesProvider.getIfUnique();
     return new SpringDashboardJobDefinitionValidator(
-        context.getClassLoader(), Optional.ofNullable(serializer.getIfAvailable()));
+        context.getClassLoader(), serializer, aliases == null ? TypeNameAliases.empty() : aliases);
   }
 
   @Bean
@@ -99,7 +103,7 @@ public class ThreadmillDashboardApiConfiguration {
       JobStore store,
       LocalWakeBus wakeBus,
       DashboardJobDefinitionValidator jobDefinitionValidator) {
-    return new DashboardApiService(store, wakeBus, jobDefinitionValidator);
+    return DashboardApiService.withDefinitionValidator(store, wakeBus, jobDefinitionValidator);
   }
 
   @Bean

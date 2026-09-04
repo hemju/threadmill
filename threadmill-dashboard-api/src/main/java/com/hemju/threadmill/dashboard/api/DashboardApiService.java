@@ -73,18 +73,20 @@ public final class DashboardApiService {
     this(store, wakeBus, DashboardJobDefinitionValidator.denyAll(), DEFAULT_SNAPSHOT_CACHE_TTL);
   }
 
-  public DashboardApiService(
+  /** Create a service that permits executable-definition edits accepted by {@code validator}. */
+  public static DashboardApiService withDefinitionValidator(
       JobStore store,
       LocalWakeBus wakeBus,
       DashboardJobDefinitionValidator jobDefinitionValidator) {
-    this(store, wakeBus, jobDefinitionValidator, DEFAULT_SNAPSHOT_CACHE_TTL);
+    return new DashboardApiService(
+        store, wakeBus, jobDefinitionValidator, DEFAULT_SNAPSHOT_CACHE_TTL);
   }
 
   public DashboardApiService(JobStore store, LocalWakeBus wakeBus, Duration snapshotCacheTtl) {
     this(store, wakeBus, DashboardJobDefinitionValidator.denyAll(), snapshotCacheTtl);
   }
 
-  public DashboardApiService(
+  private DashboardApiService(
       JobStore store,
       LocalWakeBus wakeBus,
       DashboardJobDefinitionValidator jobDefinitionValidator,
@@ -415,6 +417,10 @@ public final class DashboardApiService {
               : request.missedRunPolicy(),
           requestedZone == null ? existing.zone() : requestedZone,
           request.enabled() == null ? existing.enabled() : request.enabled());
+      if (request.replacesDefinition()) {
+        jobDefinitionValidator.validate(
+            new JobSpec(task.handlerType(), List.of(task.payloadArgument())));
+      }
       var prior = store.findCronTaskState(name);
       boolean pendingNudge = prior.isPresent()
           && prior.get().nudgeRequestedAt() != null

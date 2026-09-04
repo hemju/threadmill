@@ -253,7 +253,7 @@ public final class ThreadmillDashboardApiController {
     boolean replacesDefinition = request.replacesDefinition();
     return action(
         authentication,
-        replacesDefinition ? DashboardPermission.ADMIN : DashboardPermission.REPLACE_JOB,
+        request.requiredPermission(),
         replacesDefinition ? "replace_job_definition" : "replace_job",
         id,
         () -> service.replaceJob(JobId.parse(id), request));
@@ -275,10 +275,11 @@ public final class ThreadmillDashboardApiController {
       Authentication authentication,
       @PathVariable("name") String name,
       @RequestBody UpdateRecurringRequest request) {
+    boolean replacesDefinition = request.replacesDefinition();
     return action(
         authentication,
-        DashboardPermission.UPDATE_RECURRING,
-        "update_recurring",
+        request.requiredPermission(),
+        replacesDefinition ? "update_recurring_definition" : "update_recurring",
         name,
         () -> service.updateRecurring(name, request));
   }
@@ -373,6 +374,7 @@ public final class ThreadmillDashboardApiController {
           case BAD_REQUEST -> HttpStatus.BAD_REQUEST;
           case NOT_FOUND -> HttpStatus.NOT_FOUND;
           case CONFLICT -> HttpStatus.CONFLICT;
+          case NOT_SUPPORTED -> HttpStatus.NOT_IMPLEMENTED;
         };
     return ResponseEntity.status(status)
         .body(ProblemDetail.forStatusAndDetail(status, e.getMessage()));

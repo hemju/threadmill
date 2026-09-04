@@ -60,9 +60,17 @@ definition. The Spring adapter loads the named class without initialization,
 requires it to implement `JobHandler`, resolves its declared `JobPayload` type,
 and rejects missing, extra, or incompatible payload arguments before any store
 write. A host may provide a custom `DashboardJobDefinitionValidator` bean to add
-an application-specific handler allowlist. Definition changes are emitted to the
-audit sink as `replace_job_definition` with permission `ADMIN`; operational
-edits remain `replace_job` with permission `REPLACE_JOB`.
+an application-specific handler allowlist. The default validator uses the
+application's unique `JobSerializer` and `TypeNameAliases`; if no unique
+serializer is available, executable-definition edits return 501 and no write is
+attempted. Definition changes are emitted to the audit sink as
+`replace_job_definition` with permission `ADMIN`; operational edits remain
+`replace_job` with permission `REPLACE_JOB`.
+
+The same boundary applies to recurring tasks. Trigger, queue, priority, missed-run
+policy, zone, and enabled-state edits require `UPDATE_RECURRING`; supplying
+`handlerType` or `payloadArgument` requires `ADMIN`, uses the same validator, and
+is audited as `update_recurring_definition`.
 
 Recurring trigger, update, and delete actions take the same per-task store mutex
 as the maintenance materializer. When another node is already mutating the task,

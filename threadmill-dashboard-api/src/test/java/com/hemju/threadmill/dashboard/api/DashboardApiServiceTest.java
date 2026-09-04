@@ -458,12 +458,12 @@ class DashboardApiServiceTest {
     var originalArgument = new JobArgument("example.OriginalPayload", "{\"value\":\"old\"}");
     var replacementArgument = new JobArgument("example.ReplacementPayload", "{\"value\":\"new\"}");
     var job = Job.builder()
-        .spec(JobSpec.of("example.RegisteredHandler", originalArgument)
-            .withDedup("original-key", Duration.ofHours(1)))
+        .spec(JobSpec.of("example.RegisteredHandler", originalArgument))
         .build();
     store.insert(job);
     var validated = new ArrayList<JobSpec>();
-    var service = new DashboardApiService(store, new LocalWakeBus(), validated::add);
+    var service =
+        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), validated::add);
 
     service.replaceJob(
         job.id(),
@@ -472,10 +472,30 @@ class DashboardApiServiceTest {
     assertThat(validated).singleElement().satisfies(spec -> {
       assertThat(spec.handlerType()).isEqualTo("example.RegisteredHandler");
       assertThat(spec.arguments()).containsExactly(replacementArgument);
+    });
+    assertThat(store.findById(job.id()).orElseThrow().spec()).isEqualTo(validated.getFirst());
+  }
+
+  @Test
+  void definitionReplacementPreservesDeduplicationMetadata() {
+    var store = new InMemoryJobStore();
+    var originalSpec = JobSpec.of(
+            "example.OriginalHandler", new JobArgument("example.Payload", "{\"value\":\"old\"}"))
+        .withDedup("original-key", Duration.ofHours(1));
+    var job = Job.builder().spec(originalSpec).build();
+    store.insert(job);
+    var service =
+        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), replacement -> {});
+
+    service.replaceJob(
+        job.id(),
+        new ReplaceJobRequest(job.version(), null, null, null, "example.ReplacementHandler", null));
+
+    assertThat(store.findById(job.id()).orElseThrow().spec()).satisfies(spec -> {
+      assertThat(spec.handlerType()).isEqualTo("example.ReplacementHandler");
       assertThat(spec.dedupKey()).isEqualTo("original-key");
       assertThat(spec.dedupTtl()).isEqualTo(Duration.ofHours(1));
     });
-    assertThat(store.findById(job.id()).orElseThrow().spec()).isEqualTo(validated.getFirst());
   }
 
   @Test
@@ -492,9 +512,57 @@ class DashboardApiServiceTest {
                 job.version(), null, null, null, "example.ArbitraryHandler", null)))
         .isInstanceOf(DashboardApiException.class)
         .satisfies(error -> assertThat(((DashboardApiException) error).code())
-            .isEqualTo(DashboardApiException.Code.BAD_REQUEST));
+            .isEqualTo(DashboardApiException.Code.NOT_SUPPORTED));
 
     assertThat(store.findById(job.id()).orElseThrow().spec()).isEqualTo(originalSpec);
+  }
+
+  @Test
+  void recurringDefinitionReplacementIsValidatedBeforePersistence() {
+    var store = new InMemoryJobStore();
+    seedCronTask(store, "report");
+    var replacementArgument = new JobArgument("example.ReplacementPayload", "{\"value\":\"new\"}");
+    var validated = new ArrayList<JobSpec>();
+    var service =
+        DashboardApiService.withDefinitionValidator(store, new LocalWakeBus(), validated::add);
+
+    service.updateRecurring(
+        "report",
+        new UpdateRecurringRequest(
+            null,
+            null,
+            "example.ReplacementHandler",
+            replacementArgument,
+            null,
+            null,
+            null,
+            null,
+            null));
+
+    assertThat(validated)
+        .containsExactly(JobSpec.of("example.ReplacementHandler", replacementArgument));
+    assertThat(store.findCronTask("report").orElseThrow()).satisfies(task -> {
+      assertThat(task.handlerType()).isEqualTo("example.ReplacementHandler");
+      assertThat(task.payloadArgument()).isEqualTo(replacementArgument);
+    });
+  }
+
+  @Test
+  void recurringDefinitionReplacementWithoutAValidatorIsRejectedBeforePersistence() {
+    var store = new InMemoryJobStore();
+    seedCronTask(store, "report");
+    var original = store.findCronTask("report").orElseThrow();
+    var service = new DashboardApiService(store, new LocalWakeBus());
+
+    assertThatThrownBy(() -> service.updateRecurring(
+            "report",
+            new UpdateRecurringRequest(
+                null, null, "example.ArbitraryHandler", null, null, null, null, null, null)))
+        .isInstanceOf(DashboardApiException.class)
+        .satisfies(error -> assertThat(((DashboardApiException) error).code())
+            .isEqualTo(DashboardApiException.Code.NOT_SUPPORTED));
+
+    assertThat(store.findCronTask("report")).contains(original);
   }
 
   private static void seedQueues(InMemoryJobStore store) {

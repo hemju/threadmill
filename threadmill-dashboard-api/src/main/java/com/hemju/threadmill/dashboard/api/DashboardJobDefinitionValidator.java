@@ -1,7 +1,5 @@
 package com.hemju.threadmill.dashboard.api;
 
-import java.util.Objects;
-
 import com.hemju.threadmill.core.spec.JobSpec;
 
 /**
@@ -20,10 +18,20 @@ public interface DashboardJobDefinitionValidator {
 
   /** Secure default for adapters that have not supplied handler and payload validation. */
   static DashboardJobDefinitionValidator denyAll() {
-    return replacement -> {
-      Objects.requireNonNull(replacement, "replacement");
-      throw DashboardApiException.badRequest(
-          "job definition replacement is disabled because no DashboardJobDefinitionValidator is configured");
-    };
+    return DenyAllDashboardJobDefinitionValidator.INSTANCE;
+  }
+}
+
+final class DenyAllDashboardJobDefinitionValidator implements DashboardJobDefinitionValidator {
+
+  static final DashboardJobDefinitionValidator INSTANCE =
+      new DenyAllDashboardJobDefinitionValidator();
+
+  private DenyAllDashboardJobDefinitionValidator() {}
+
+  @Override
+  public void validate(JobSpec replacement) {
+    throw DashboardApiException.unsupported(
+        "executable-definition editing is disabled because no DashboardJobDefinitionValidator is configured");
   }
 }

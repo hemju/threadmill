@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- Hardened dashboard executable-definition edits (issue #95). Pending-job and
+  recurring-task updates that supply a handler or payload now require `ADMIN`,
+  pass through a host-aware `DashboardJobDefinitionValidator`, resolve the same
+  handler aliases as the runtime, reject raw or incompatible `JobHandler`
+  declarations, and deserialize the payload before any store write. This is an
+  intentional authorization change: `REPLACE_JOB` and `UPDATE_RECURRING` still
+  permit operational queue, priority, schedule, trigger, policy, zone, and
+  enabled-state edits, but no longer select executable classes. Spring securely
+  returns 501 for definition edits when it cannot select one `JobSerializer`;
+  ordinary edits remain available. Job replacement also preserves existing
+  producer-deduplication metadata when only the executable definition changes.
 - Handlers can see the engine's deadline coming (issue #119).
   `JobExecutionContext` gains `deadline()` and `remaining()`, computed by the
   same rule the timeout watchdog uses — `claimedAt` plus the effective timeout

@@ -5,14 +5,16 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.List;
-import java.util.Optional;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.context.support.GenericApplicationContext;
 
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.dashboard.api.DashboardApiException;
@@ -21,7 +23,7 @@ class SpringDashboardJobDefinitionValidatorTest {
 
   private final SpringDashboardJobDefinitionValidator validator =
       new SpringDashboardJobDefinitionValidator(
-          getClass().getClassLoader(), Optional.of(new JsonJobSerializer()));
+          getClass().getClassLoader(), new JsonJobSerializer(), TypeNameAliases.empty());
 
   @Test
   void compatiblePayloadIsAccepted() {
@@ -73,11 +75,71 @@ class SpringDashboardJobDefinitionValidatorTest {
     assertBadRequest(() -> validator.validate(spec), "does not implement JobHandler");
   }
 
+  @Test
+  void handlerTypeAliasesAreResolvedLikeTheRuntimeResolver() {
+    var aliases = TypeNameAliases.builder()
+        .alias("example.LegacyReportHandler", ReportHandler.class.getName())
+        .build();
+    var aliasAwareValidator = new SpringDashboardJobDefinitionValidator(
+        getClass().getClassLoader(), new JsonJobSerializer(), aliases);
+    var spec = JobSpec.of(
+        "example.LegacyReportHandler",
+        new JobArgument(ReportPayload.class.getName(), "{\"name\":\"daily\"}"));
+
+    assertThatCode(() -> aliasAwareValidator.validate(spec)).doesNotThrowAnyException();
+  }
+
+  @Test
+  void rawJobHandlerAndMissingPayloadAreRejected() {
+    var rawSpec = JobSpec.of(
+        RawHandler.class.getName(),
+        new JobArgument(ReportPayload.class.getName(), "{\"name\":\"daily\"}"));
+    var missingPayload = new JobSpec(ReportHandler.class.getName(), List.of());
+
+    assertBadRequest(() -> validator.validate(rawSpec), "implements raw JobHandler");
+    assertBadRequest(() -> validator.validate(missingPayload), "requires exactly one payload");
+  }
+
+  @Test
+  void missingOrAmbiguousSerializerSecurelyDisablesDefinitionReplacement() {
+    var config = new ThreadmillDashboardApiConfiguration();
+    var spec = JobSpec.of(
+        ReportHandler.class.getName(),
+        new JobArgument(ReportPayload.class.getName(), "{\"name\":\"daily\"}"));
+    try (var context = new GenericApplicationContext()) {
+      context.refresh();
+      var disabled = config.threadmillDashboardJobDefinitionValidator(
+          context,
+          context.getBeanProvider(JobSerializer.class),
+          context.getBeanProvider(TypeNameAliases.class));
+
+      assertUnsupported(() -> disabled.validate(spec));
+    }
+    try (var context = new GenericApplicationContext()) {
+      context.registerBean("firstSerializer", JobSerializer.class, () -> new JsonJobSerializer());
+      context.registerBean("secondSerializer", JobSerializer.class, () -> new JsonJobSerializer());
+      context.refresh();
+      var disabled = config.threadmillDashboardJobDefinitionValidator(
+          context,
+          context.getBeanProvider(JobSerializer.class),
+          context.getBeanProvider(TypeNameAliases.class));
+
+      assertUnsupported(() -> disabled.validate(spec));
+    }
+  }
+
   private static void assertBadRequest(Runnable action, String messagePart) {
     assertThatThrownBy(action::run).isInstanceOf(DashboardApiException.class).satisfies(error -> {
       var failure = (DashboardApiException) error;
       assertThat(failure.code()).isEqualTo(DashboardApiException.Code.BAD_REQUEST);
       assertThat(failure.getMessage()).contains(messagePart);
+    });
+  }
+
+  private static void assertUnsupported(Runnable action) {
+    assertThatThrownBy(action::run).isInstanceOf(DashboardApiException.class).satisfies(error -> {
+      var failure = (DashboardApiException) error;
+      assertThat(failure.code()).isEqualTo(DashboardApiException.Code.NOT_SUPPORTED);
     });
   }
 
@@ -97,5 +159,11 @@ class SpringDashboardJobDefinitionValidatorTest {
   private static final class BasePayloadHandler implements JobHandler<BasePayload> {
     @Override
     public void run(BasePayload payload, JobExecutionContext ctx) {}
+  }
+
+  @SuppressWarnings("rawtypes")
+  private static final class RawHandler implements JobHandler {
+    @Override
+    public void run(JobPayload payload, JobExecutionContext ctx) {}
   }
 }

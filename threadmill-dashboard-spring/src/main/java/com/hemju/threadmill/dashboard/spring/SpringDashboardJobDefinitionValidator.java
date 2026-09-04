@@ -1,37 +1,55 @@
 package com.hemju.threadmill.dashboard.spring;
 
+import static com.hemju.threadmill.dashboard.api.DashboardApiException.badRequest;
+
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
 import java.util.Objects;
-import java.util.Optional;
 
 import org.springframework.core.ResolvableType;
+import org.springframework.util.ClassUtils;
 
-import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.serialization.JobSerializer;
+import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
-import com.hemju.threadmill.dashboard.api.DashboardApiException;
 import com.hemju.threadmill.dashboard.api.DashboardJobDefinitionValidator;
 
 /** Spring-aware validation of dashboard-supplied handler and payload definitions. */
 final class SpringDashboardJobDefinitionValidator implements DashboardJobDefinitionValidator {
 
   private final ClassLoader classLoader;
-  private final Optional<JobSerializer> serializer;
+  private final JobSerializer serializer;
+  private final TypeNameAliases aliases;
 
   SpringDashboardJobDefinitionValidator(
-      ClassLoader classLoader, Optional<JobSerializer> serializer) {
+      ClassLoader classLoader, JobSerializer serializer, TypeNameAliases aliases) {
     this.classLoader = Objects.requireNonNull(classLoader, "classLoader");
     this.serializer = Objects.requireNonNull(serializer, "serializer");
+    this.aliases = Objects.requireNonNull(aliases, "aliases");
   }
 
   @Override
   public void validate(JobSpec replacement) {
     Objects.requireNonNull(replacement, "replacement");
     Class<?> handlerType = loadHandler(replacement.handlerType());
-    Class<?> payloadType =
-        ResolvableType.forClass(handlerType).as(JobHandler.class).getGeneric(0).resolve();
+    Class<?> payloadType;
+    try {
+      if (implementsJobHandlerRaw(handlerType)) {
+        throw badRequest("handler "
+            + replacement.handlerType()
+            + " implements raw JobHandler; use JobHandler<P> or JobAction");
+      }
+      payloadType = ResolvableType.forClass(handlerType)
+          .as(JobHandler.class)
+          .getGeneric(0)
+          .resolve();
+    } catch (LinkageError | TypeNotPresentException e) {
+      throw badRequest(
+          "cannot resolve the JobPayload type for handler " + replacement.handlerType());
+    }
     if (payloadType == null || !JobPayload.class.isAssignableFrom(payloadType)) {
       throw badRequest("cannot infer the JobPayload type for handler " + handlerType.getName());
     }
@@ -39,8 +57,9 @@ final class SpringDashboardJobDefinitionValidator implements DashboardJobDefinit
   }
 
   private Class<?> loadHandler(String handlerTypeName) {
+    String resolvedName = aliases.resolve(handlerTypeName);
     try {
-      Class<?> handlerType = Class.forName(handlerTypeName, false, classLoader);
+      Class<?> handlerType = ClassUtils.forName(resolvedName, classLoader);
       if (!JobHandler.class.isAssignableFrom(handlerType)) {
         throw badRequest("type " + handlerTypeName + " does not implement JobHandler");
       }
@@ -55,24 +74,17 @@ final class SpringDashboardJobDefinitionValidator implements DashboardJobDefinit
   private void validateArguments(JobSpec replacement, Class<?> payloadType) {
     var arguments = replacement.arguments();
     if (arguments.isEmpty()) {
-      if (!payloadType.isAssignableFrom(JobRunner.EmptyPayload.class)) {
-        throw badRequest(
-            "handler " + replacement.handlerType() + " requires payload " + payloadType.getName());
-      }
-      return;
+      throw badRequest("handler "
+          + replacement.handlerType()
+          + " requires exactly one payload argument of type "
+          + payloadType.getName());
     }
     if (arguments.size() != 1) {
       throw badRequest("job definitions currently accept exactly one payload argument");
     }
     JobArgument argument = arguments.getFirst();
-    if (argument == null) {
-      throw badRequest("payload argument must not be null");
-    }
-    JobArgument migrated =
-        serializer.map(value -> value.migrateArgument(argument)).orElse(argument);
-    String resolvedType = serializer
-        .map(value -> value.resolveTypeTag(migrated.typeTag()))
-        .orElse(migrated.typeTag());
+    JobArgument migrated = serializer.migrateArgument(argument);
+    String resolvedType = serializer.resolveTypeTag(migrated.typeTag());
     Class<?> argumentType = loadPayload(resolvedType);
     if (!payloadType.isAssignableFrom(argumentType)) {
       throw badRequest("payload type "
@@ -83,13 +95,12 @@ final class SpringDashboardJobDefinitionValidator implements DashboardJobDefinit
           + payloadType.getName()
           + ")");
     }
-    serializer.ifPresent(
-        value -> deserialize(value, argument, argumentType, replacement.handlerType()));
+    deserialize(serializer, argument, argumentType, replacement.handlerType());
   }
 
   private Class<?> loadPayload(String payloadTypeName) {
     try {
-      Class<?> payloadType = Class.forName(payloadTypeName, false, classLoader);
+      Class<?> payloadType = ClassUtils.forName(payloadTypeName, classLoader);
       if (!JobPayload.class.isAssignableFrom(payloadType)) {
         throw badRequest("argument type " + payloadTypeName + " does not implement JobPayload");
       }
@@ -117,7 +128,18 @@ final class SpringDashboardJobDefinitionValidator implements DashboardJobDefinit
     }
   }
 
-  private static DashboardApiException badRequest(String message) {
-    return DashboardApiException.badRequest(message);
+  private static boolean implementsJobHandlerRaw(Class<?> handlerType) {
+    Class<?> cursor = handlerType;
+    while (cursor != null && cursor != Object.class) {
+      for (Type iface : cursor.getGenericInterfaces()) {
+        if (iface == JobHandler.class) return true;
+        if (iface instanceof ParameterizedType parameterized
+            && parameterized.getRawType() == JobHandler.class) {
+          return false;
+        }
+      }
+      cursor = cursor.getSuperclass();
+    }
+    return false;
   }
 }

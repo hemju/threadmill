@@ -127,8 +127,14 @@ public final class DashboardPayloads {
     public boolean replacesDefinition() {
       return handlerType != null || arguments != null;
     }
+
+    /** Permission required by the fields present in this request. */
+    public DashboardPermission requiredPermission() {
+      return replacesDefinition() ? DashboardPermission.ADMIN : DashboardPermission.REPLACE_JOB;
+    }
   }
 
+  /** Recurring-task update; omitted fields preserve the current definition. */
   public record UpdateRecurringRequest(
       String triggerKind,
       String triggerValue,
@@ -138,7 +144,19 @@ public final class DashboardPayloads {
       Integer priority,
       CronTask.MissedRunPolicy missedRunPolicy,
       String zone,
-      Boolean enabled) {}
+      Boolean enabled) {
+
+    public boolean replacesDefinition() {
+      return handlerType != null || payloadArgument != null;
+    }
+
+    /** Permission required by the fields present in this request. */
+    public DashboardPermission requiredPermission() {
+      return replacesDefinition()
+          ? DashboardPermission.ADMIN
+          : DashboardPermission.UPDATE_RECURRING;
+    }
+  }
 
   public record ActionResponse(String status, String target) {}
 }

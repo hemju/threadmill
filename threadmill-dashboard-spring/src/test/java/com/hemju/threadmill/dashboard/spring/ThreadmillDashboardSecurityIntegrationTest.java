@@ -35,6 +35,7 @@ import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.serialization.TypeNameAliases;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
@@ -199,6 +200,54 @@ class ThreadmillDashboardSecurityIntegrationTest {
   }
 
   @Test
+  void adminCanReplaceAJobDefinitionThroughAnAlias() throws Exception {
+    var store = context.getBean(JobStore.class);
+    var pending = Job.builder()
+        .spec(JobSpec.of(
+            OriginalHandler.class.getName(),
+            new JobArgument(OriginalPayload.class.getName(), "{\"value\":\"safe\"}")))
+        .build();
+    store.insert(pending);
+
+    mvc.perform(patch("/threadmill/api/jobs/" + pending.id())
+            .with(user("root").authorities(authority("THREADMILL_ADMIN")))
+            .with(csrf())
+            .contentType("application/json")
+            .content("{\"expectedVersion\":" + pending.version()
+                + ",\"handlerType\":\"example.LegacyOriginalHandler\"}"))
+        .andExpect(status().isOk())
+        .andExpect(jsonPath("$.status").value("replaced"));
+
+    assertThat(store.findById(pending.id()).orElseThrow().spec().handlerType())
+        .isEqualTo("example.LegacyOriginalHandler");
+  }
+
+  @Test
+  void updateRecurringOnlyPrincipalCannotSelectAnArbitraryClasspathHandler() throws Exception {
+    var store = context.getBean(JobStore.class);
+    store.upsertCronTask(new CronTask(
+        "report-definition",
+        new CronTask.Trigger.Interval(Duration.ofMinutes(5)),
+        OriginalHandler.class.getName(),
+        new JobArgument(OriginalPayload.class.getName(), "{\"value\":\"safe\"}"),
+        "default",
+        0,
+        CronTask.MissedRunPolicy.DROP,
+        ZoneId.of("UTC"),
+        true));
+
+    mvc.perform(put("/threadmill/api/recurring/report-definition")
+            .with(user("ada").authorities(authority("THREADMILL_UPDATE_RECURRING")))
+            .with(csrf())
+            .contentType("application/json")
+            .content("{\"handlerType\":\"" + ArbitraryClasspathHandler.class.getName() + "\"}"))
+        .andExpect(status().isForbidden());
+
+    assertThat(store.findCronTask("report-definition").orElseThrow().handlerType())
+        .isEqualTo(OriginalHandler.class.getName());
+  }
+
+  @Test
   void incompatibleReplacementPayloadIsRejectedBeforePersistence() throws Exception {
     var store = context.getBean(JobStore.class);
     var originalSpec = JobSpec.of(
@@ -237,6 +286,13 @@ class ThreadmillDashboardSecurityIntegrationTest {
     @Bean
     JobSerializer jobSerializer() {
       return new JsonJobSerializer();
+    }
+
+    @Bean
+    TypeNameAliases typeNameAliases() {
+      return TypeNameAliases.builder()
+          .alias("example.LegacyOriginalHandler", OriginalHandler.class.getName())
+          .build();
     }
   }
 
