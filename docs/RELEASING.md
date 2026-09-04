@@ -76,18 +76,20 @@ GitHub Environment named `release` with required reviewers for an approval gate.
 
 1. Make sure `main` is green (the `CI` workflow runs `./gradlew check` on every
    push and PR) and `CHANGELOG.md` is updated.
-2. Set the version in
-   `buildSrc/src/main/kotlin/threadmill.java-base.gradle.kts`
-   (e.g. `version = "0.1.0"`). Releases must not be `-SNAPSHOT`.
+2. Set `ThreadmillVersion.CURRENT` in
+   `buildSrc/src/main/kotlin/com/hemju/threadmill/gradle/ThreadmillVersion.kt`
+   (e.g. `"0.1.0"`). Releases must not be `-SNAPSHOT`.
 3. Commit, tag, and push the tag:
    ```sh
    git commit -am "release: v0.1.0"
    git tag v0.1.0
    git push origin main --tags
    ```
-4. The tag push triggers `.github/workflows/release.yml`, which runs
-   `./gradlew publishAggregationToCentralPortal`. This signs all 11 published
-   modules, assembles one bundle, and uploads it to the Central Portal.
+4. The tag push triggers `.github/workflows/release.yml`. The publication task
+   first requires the tag to exactly equal `v` plus the Gradle project version,
+   rejects snapshot versions, and runs the complete `productionCheck` gate from
+   clean outputs. The same task graph then signs the verified artifacts,
+   assembles one bundle, and uploads it to the Central Portal.
 5. The build uses `publishingType = "AUTOMATIC"`, so the deployment is
    validated and then **published to Maven Central automatically** — no manual
    click. Sync to `repo.maven.apache.org` takes ~15–30 min; the search UI can

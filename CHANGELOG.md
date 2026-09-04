@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Release publication is now fail-closed (issue #99): `productionCheck` cleans
+  and checks every subproject from one ordered task graph, supported aggregate
+  Central Portal publication requires that gate, direct per-module publication
+  is rejected, and a tag is rejected before the expensive build unless it
+  exactly matches the effective non-SNAPSHOT versions of all published modules.
 - Hardened dashboard executable-definition edits (issue #95). Pending-job and
   recurring-task updates that supply a handler or payload now require `ADMIN`,
   pass through a host-aware `DashboardJobDefinitionValidator`, resolve the same

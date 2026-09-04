@@ -10,6 +10,27 @@ plugins {
     id("com.gradleup.nmcp")
 }
 
+// Configure Nmcp's direct per-module Central tasks even though the root build
+// replaces them with an explicit refusal in favor of the atomic aggregation.
+// Nmcp validates credentials as soon as one of those task lanes enters the
+// graph, so fallbacks let the refusal explain the supported command even on a
+// machine without release credentials. If the refusal wiring is ever removed,
+// these sentinel credentials still make the remote call fail closed.
+@Suppress("DEPRECATION")
+nmcp {
+    publishAllPublicationsToCentralPortal {
+        username =
+            rootProject.providers
+                .gradleProperty("centralPortalUsername")
+                .orElse("threadmill-direct-module-publication-disabled")
+        password =
+            rootProject.providers
+                .gradleProperty("centralPortalPassword")
+                .orElse("threadmill-direct-module-publication-disabled")
+        publishingType = "AUTOMATIC"
+    }
+}
+
 // A stable JPMS module name so a later jar rename cannot break downstream
 // `requires` clauses. Derived deterministically from the artifact id.
 tasks.named<Jar>("jar") {

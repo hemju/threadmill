@@ -13,4 +13,15 @@ dependencies {
     // files to the root nmcp aggregation. Keep this version in lock-step with
     // the `nmcp` version in gradle/libs.versions.toml.
     implementation("com.gradleup.nmcp:com.gradleup.nmcp.gradle.plugin:1.6.1")
+
+    testImplementation(gradleTestKit())
+    testImplementation(platform(libs.junit.bom))
+    testImplementation(libs.junit.jupiter)
+    testRuntimeOnly(libs.junit.platform.launcher)
+    testImplementation(libs.assertj.core)
+}
+
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
+    systemProperty("threadmill.repositoryRoot", rootDir.parentFile.absolutePath)
 }
