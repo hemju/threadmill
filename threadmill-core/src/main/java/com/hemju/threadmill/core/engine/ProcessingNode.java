@@ -35,6 +35,10 @@ import com.hemju.threadmill.core.store.JobStore;
  * may run more than once — after a node crash, after a long GC pause that
  * makes the heartbeat look expired, or after a store outage that resets
  * a partial save. Handlers must be idempotent.
+ *
+ * <p>Process-fatal JVM errors escape Threadmill's handler and loop boundaries.
+ * Applications should expose uncaught failures to their process-fatal policy
+ * and run nodes under a supervisor that restarts a terminated JVM.
  */
 public final class ProcessingNode implements AutoCloseable {
 

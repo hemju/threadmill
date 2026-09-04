@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.store.JobStore;
 
 /**
@@ -88,6 +89,7 @@ public final class NodeRegistry {
       store.recordNodeHeartbeat(nodeId, Instant.EPOCH);
       store.releaseMaintenanceLease(nodeId);
     } catch (Throwable ignored) {
+      FatalErrors.rethrowIfFatal(ignored);
       // best-effort
     }
   }
@@ -115,7 +117,8 @@ public final class NodeRegistry {
         masterUntil = renewalStart.plus(maintenanceLeaseDuration);
       }
       master = elected;
-    } catch (Throwable t) {
+    } catch (RuntimeException t) {
+      FatalErrors.rethrowIfFatal(t);
       LOG.warn("NodeRegistry tick failed", t);
       master = false; // refuse to act as master under store uncertainty
     }

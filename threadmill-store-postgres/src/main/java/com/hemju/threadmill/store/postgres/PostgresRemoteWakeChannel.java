@@ -20,6 +20,7 @@ import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
+import com.hemju.threadmill.core.internal.FatalErrors;
 
 /** PostgreSQL {@code LISTEN}/{@code NOTIFY} implementation of {@link RemoteWakeChannel}. */
 public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
@@ -66,6 +67,7 @@ public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
       ps.setString(2, queue);
       ps.execute();
     } catch (SQLException e) {
+      FatalErrors.rethrowIfFatal(e);
       LOG.debug(
           "Threadmill remote wake publish failed; dispatcher polling remains the fallback", e);
     }
@@ -96,6 +98,7 @@ public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
       try {
         conn.close();
       } catch (SQLException e) {
+        FatalErrors.rethrowIfFatal(e);
         LOG.debug("Failed to close PostgreSQL remote wake listener connection", e);
       }
     }
@@ -122,6 +125,7 @@ public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
           }
         }
       } catch (SQLException | RuntimeException e) {
+        FatalErrors.rethrowIfFatal(e);
         // RuntimeException too: a pooled/proxy DataSource throwing
         // IllegalStateException during pool transitions must not kill
         // the daemon silently — wake is latency-only, but the listener
@@ -157,6 +161,7 @@ public final class PostgresRemoteWakeChannel implements RemoteWakeChannel {
     try {
       wakeSink.accept(Names.requireName("queue", queue));
     } catch (RuntimeException e) {
+      FatalErrors.rethrowIfFatal(e);
       LOG.debug("Ignoring invalid PostgreSQL remote wake payload", e);
     }
   }

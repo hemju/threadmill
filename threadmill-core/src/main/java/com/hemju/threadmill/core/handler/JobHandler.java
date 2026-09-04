@@ -19,6 +19,11 @@ package com.hemju.threadmill.core.handler;
  * may be invoked more than once for the same logical job (for example after
  * a node crash). Implementations must therefore be idempotent.
  *
+ * <p>Ordinary exceptions and {@link AssertionError} are isolated to the job.
+ * {@link VirtualMachineError} and {@link ThreadDeath}, including either error
+ * wrapped in a cause chain, escape the engine as process-fatal conditions and
+ * are never converted into a job failure or retry.
+ *
  * @param <P> the payload type this handler consumes
  */
 public interface JobHandler<P extends JobPayload> {
@@ -28,9 +33,9 @@ public interface JobHandler<P extends JobPayload> {
    *
    * @param payload the typed payload to operate on
    * @param ctx     the per-execution context
-   * @throws Exception any exception thrown here funnels through the engine's
-   *                   single failure path: state transition to {@code FAILED}
-   *                   plus interceptor notification
+   * @throws Exception any non-fatal exception thrown here funnels through the
+   *                   engine's single failure path: state transition to
+   *                   {@code FAILED} plus interceptor notification
    */
   void run(P payload, JobExecutionContext ctx) throws Exception;
 }

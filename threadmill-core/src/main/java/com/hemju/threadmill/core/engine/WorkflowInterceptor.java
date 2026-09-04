@@ -16,6 +16,7 @@ import com.hemju.threadmill.core.JobRelationship;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 
@@ -176,6 +177,7 @@ public final class WorkflowInterceptor implements JobInterceptor {
           // Another node beat us; the refetch sees the fresh state.
           progressed++;
         } catch (Throwable t) {
+          FatalErrors.rethrowIfFatal(t);
           LOG.warn(
               "Failed to {} workflow successor {} of {}", what, candidate.id(), predecessorId, t);
         }

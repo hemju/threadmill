@@ -14,6 +14,7 @@ import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.StaleJobException;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.schedule.RecurringMaterializer;
 import com.hemju.threadmill.core.store.JobStore;
 
@@ -165,7 +166,8 @@ public final class MaintenanceCycle {
             LOG.warn("Owner-heartbeat refresh recovered on node {} — resuming claiming", nodeId);
           }
         }
-      } catch (Throwable t) {
+      } catch (RuntimeException t) {
+        FatalErrors.rethrowIfFatal(t);
         consecutiveFailures++;
         LOG.warn(
             "Owner-heartbeat refresh failed on node {} ({} consecutive)",
@@ -210,7 +212,8 @@ public final class MaintenanceCycle {
           }
         }
         sleep(config.maintenancePollInterval());
-      } catch (Throwable t) {
+      } catch (RuntimeException t) {
+        FatalErrors.rethrowIfFatal(t);
         LOG.warn("Maintenance cycle failed", t);
         sleep(config.maintenancePollInterval());
       }

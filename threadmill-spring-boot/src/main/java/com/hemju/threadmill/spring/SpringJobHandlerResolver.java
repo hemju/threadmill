@@ -8,6 +8,7 @@ import org.springframework.util.ClassUtils;
 
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobHandlerResolver;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.serialization.TypeNameAliases;
 
 /**
@@ -57,6 +58,7 @@ public final class SpringJobHandlerResolver implements JobHandlerResolver {
         Object bean = context.getBean(type);
         return (JobHandler<?>) bean;
       } catch (BeansException ignored) {
+        FatalErrors.rethrowIfFatal(ignored);
         // Not a registered bean — fall back to autowire-by-type construction.
         Object instance = context.getAutowireCapableBeanFactory().createBean(type);
         return (JobHandler<?>) instance;
@@ -64,6 +66,7 @@ public final class SpringJobHandlerResolver implements JobHandlerResolver {
     } catch (ClassNotFoundException cnf) {
       throw new HandlerResolutionException("Handler type not found: " + handlerTypeName, cnf);
     } catch (Exception e) {
+      FatalErrors.rethrowIfFatal(e);
       throw new HandlerResolutionException("Cannot resolve handler " + handlerTypeName, e);
     }
   }

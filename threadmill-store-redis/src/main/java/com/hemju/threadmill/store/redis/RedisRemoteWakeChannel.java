@@ -20,6 +20,7 @@ import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
+import com.hemju.threadmill.core.internal.FatalErrors;
 
 /** Redis Pub/Sub implementation of {@link RemoteWakeChannel}. */
 public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
@@ -95,6 +96,7 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     try {
       publisher.publish(queue);
     } catch (RuntimeException e) {
+      FatalErrors.rethrowIfFatal(e);
       LOG.debug(
           "Threadmill Redis remote wake publish failed; dispatcher polling remains the fallback",
           e);
@@ -111,10 +113,12 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
         try {
           wakeSink.accept(Names.requireName("queue", queue));
         } catch (RuntimeException e) {
+          FatalErrors.rethrowIfFatal(e);
           LOG.debug("Ignoring invalid Redis remote wake payload", e);
         }
       });
     } catch (RuntimeException e) {
+      FatalErrors.rethrowIfFatal(e);
       running.set(false);
       LOG.debug(
           "Threadmill Redis remote wake subscribe failed; dispatcher polling remains the fallback",
@@ -128,6 +132,7 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     try {
       subscriber.unsubscribe();
     } catch (RuntimeException e) {
+      FatalErrors.rethrowIfFatal(e);
       LOG.debug("Failed to unsubscribe Redis remote wake channel", e);
     }
     closeQuietly(pubSubConnection, "pub/sub");
@@ -139,6 +144,7 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     try {
       closeable.close();
     } catch (Exception e) {
+      FatalErrors.rethrowIfFatal(e);
       LOG.debug("Failed to close Redis remote wake {} connection", label, e);
     }
   }
@@ -175,6 +181,7 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     try {
       return connectStandalone(client, channel);
     } catch (RuntimeException connectFailure) {
+      FatalErrors.rethrowIfFatal(connectFailure);
       client.shutdown();
       throw connectFailure;
     }
@@ -187,11 +194,13 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     try {
       pubSubConnection = client.connectPubSub();
     } catch (RuntimeException pubSubFailure) {
+      FatalErrors.rethrowIfFatal(pubSubFailure);
       // Partial connect must not leak the already-open command
       // connection (and the owned client's event loops).
       try {
         commandConnection.close();
       } catch (RuntimeException closeFailure) {
+        FatalErrors.rethrowIfFatal(closeFailure);
         pubSubFailure.addSuppressed(closeFailure);
       }
       throw pubSubFailure;
@@ -243,6 +252,7 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     try {
       return connectClusterClient(client, channel);
     } catch (RuntimeException connectFailure) {
+      FatalErrors.rethrowIfFatal(connectFailure);
       // The cluster client is always created (owned) here.
       client.shutdown();
       throw connectFailure;
@@ -256,9 +266,11 @@ public final class RedisRemoteWakeChannel implements RemoteWakeChannel {
     try {
       pubSubConnection = client.connectPubSub();
     } catch (RuntimeException pubSubFailure) {
+      FatalErrors.rethrowIfFatal(pubSubFailure);
       try {
         commandConnection.close();
       } catch (RuntimeException closeFailure) {
+        FatalErrors.rethrowIfFatal(closeFailure);
         pubSubFailure.addSuppressed(closeFailure);
       }
       throw pubSubFailure;

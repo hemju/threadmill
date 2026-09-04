@@ -24,6 +24,25 @@ the terminal save completes normally. If the node shuts down first, its retry
 and heartbeats stop; the maintenance leader then reclaims the job after
 `heartbeatTimeout` under the usual at-least-once semantics.
 
+## Fatal JVM Errors and Process Supervision
+
+Threadmill contains ordinary handler exceptions and `AssertionError` as
+per-job failures. Handler linkage and initialization failures can be safely
+quarantined. It does not contain `VirtualMachineError` (including
+`OutOfMemoryError` and `StackOverflowError`) or `ThreadDeath`, even when one is
+wrapped in a simple cause chain. Those errors escape handler, interceptor,
+dispatcher, maintenance, registry, and remote-wake boundaries before logging,
+failure serialization, interceptor callbacks, or retry logic can treat the JVM
+as healthy.
+
+Run production nodes under a process supervisor configured to restart the
+service after fatal JVM termination, and route uncaught engine-thread errors to
+the host's process-fatal policy. Threadmill deliberately does not call
+`System.exit` or `Runtime.halt`; the host owns termination policy. If the
+process terminates with a job still `PROCESSING`, normal heartbeat expiry and
+orphan recovery provide at-least-once redelivery on a surviving node, so the
+handler must remain idempotent.
+
 ## Metrics
 
 Use `ThreadmillMetrics` with a Micrometer registry. Key meters include job
