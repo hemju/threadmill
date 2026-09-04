@@ -68,8 +68,8 @@ class LuaProtocolTest {
   }
 
   @Test
-  void optionalKeySentinelMatchesTheJavaProtocol() {
-    var scripts = List.of(
+  void sentinelConventionScriptsUseTheJavaProtocolValue() {
+    var sentinelConventionScripts = List.of(
         LuaScripts.insert(),
         LuaScripts.insertAll(),
         LuaScripts.enqueueIfAbsent(),
@@ -80,7 +80,7 @@ class LuaProtocolTest {
         LuaScripts.replaceJob(),
         LuaScripts.quarantineUnreadable());
 
-    assertThat(scripts)
+    assertThat(sentinelConventionScripts)
         .allSatisfy(script -> assertThat(script).contains("'" + RedisKeys.NO_KEY + "'"));
   }
 }
