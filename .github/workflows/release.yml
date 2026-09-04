@@ -45,6 +45,24 @@ jobs:
       - name: Set up OSV Scanner
         uses: ./.github/actions/setup-osv-scanner
 
+      # productionCheck gates publication and pulls in
+      # :threadmill-dashboard-spring:browserTest, which drives Playwright
+      # against the packaged UI. Without a browser the release gate fails on a
+      # missing Chromium executable, not on a real defect. Mirrors the CI
+      # workflow's browser job.
+      - name: Install dashboard dependencies
+        run: ./gradlew :threadmill-dashboard-ui:npmInstall
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('threadmill-dashboard-ui/package-lock.json') }}
+
+      - name: Install Chromium
+        working-directory: threadmill-dashboard-ui
+        run: npx playwright install --with-deps chromium
+
       - name: Scan locked dependencies
         run: ./gradlew dependencySecurityScan -PdependencyScanRequired=true --stacktrace
 
