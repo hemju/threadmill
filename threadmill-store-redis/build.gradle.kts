@@ -5,8 +5,8 @@ plugins {
 
 dependencies {
     api(project(":threadmill-core"))
-    // Force Netty to a CVE-patched floor (>= 4.1.118: CVE-2025-24970 SslHandler
-    // crash, CVE-2025-25193) regardless of Lettuce's transitive pin.
+    // Force Netty to the current security floor (4.1.137: SNI parsing and
+    // routing fixes) regardless of Lettuce's transitive pin.
     api(platform(libs.netty.bom))
     api(libs.lettuce.core)
 

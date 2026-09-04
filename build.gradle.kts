@@ -94,7 +94,8 @@ tasks.named("check") { dependsOn("spotlessCheck") }
 
 tasks.register("dependencySecurityScan") {
     group = "verification"
-    description = "Run an OSV dependency scan when osv-scanner is installed."
+    description = "Scan every committed Gradle and npm lockfile for known vulnerabilities."
+    dependsOn(":threadmill-dashboard-ui:npmAudit")
     doLast {
         val osv =
             providers
@@ -126,20 +127,37 @@ tasks.register("dependencySecurityScan") {
             )
         }
         val lockfiles =
-            fileTree(rootDir) {
-                    include("**/gradle.lockfile", "**/package-lock.json")
-                    exclude(
-                        "**/build/**",
-                        "**/.gradle/**",
-                        "**/node_modules/**",
-                        "**/.worktrees/**",
+            providers
+                .exec {
+                    workingDir(rootDir)
+                    commandLine(
+                        "git",
+                        "ls-files",
+                        "-z",
+                        "--",
+                        "*gradle.lockfile",
+                        "*package-lock.json",
                     )
                 }
-                .files
+                .standardOutput
+                .asText
+                .get()
+                .split('\u0000')
+                .filter(String::isNotBlank)
+                .map(rootProject::file)
+                .onEach {
+                    if (!it.isFile) {
+                        throw GradleException("Committed lockfile does not exist: $it")
+                    }
+                }
                 .sortedBy { it.absolutePath }
         if (lockfiles.isEmpty()) {
             throw GradleException("dependencySecurityScan found no supported lockfiles")
         }
+        logger.lifecycle(
+            "Scanning ${lockfiles.size} committed dependency lockfiles:\n" +
+                lockfiles.joinToString("\n") { "- ${it.relativeTo(rootDir)}" }
+        )
         val arguments =
             mutableListOf(
                 "scan",
@@ -152,9 +170,15 @@ tasks.register("dependencySecurityScan") {
                 "--format",
                 "table",
             )
-        lockfiles.forEach {
+        lockfiles.forEach { lockfile ->
             arguments.add("--lockfile")
-            arguments.add(it.absolutePath)
+            arguments.add(
+                if (lockfile.name.endsWith("gradle.lockfile")) {
+                    "gradle.lockfile:${lockfile.absolutePath}"
+                } else {
+                    lockfile.absolutePath
+                }
+            )
         }
         val scan =
             providers.exec {

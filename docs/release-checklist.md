@@ -33,12 +33,12 @@ jar tf threadmill-core/build/libs/threadmill-core-*.jar
 
 Confirm no test classes, no local development material, no dynamic dependency
 versions, no unresolved security findings, and a non-SNAPSHOT release version.
-The `dependencySecurityScan` task requires OSV Scanner for releases and scans
-the committed Gradle/npm lockfiles; `npm audit` for the dashboard lockfile must
-also report zero vulnerabilities. Any entry in `osv-scanner.toml` must identify
-one advisory, explain why the reported installed version is not vulnerable, and
-carry a near-term expiry so the exception is reviewed instead of becoming
-permanent policy.
+The CI and tag-release workflows install the pinned, checksum-verified OSV
+Scanner and run `dependencySecurityScan`. The task scans every Git-tracked
+Gradle/npm lockfile and runs `npm audit` at the `low` threshold; either scanner
+fails the build on any known advisory. See
+[Dependency security](dependency-security.md) for the exact policy,
+reachability record, and the strict process for temporary exceptions.
 
 ## Publish
 

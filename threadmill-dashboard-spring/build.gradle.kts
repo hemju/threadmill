@@ -5,10 +5,19 @@ plugins {
 
 dependencies {
     constraints {
-        // Spring Boot 4.0.7's BOM resolves tools.jackson.core:jackson-databind
-        // 3.1.4 (GHSA-5gvw-p9qm-jgwh) onto the test classpath; constrain the
-        // patched release until a Boot patch carries it. Remove when the
-        // springBoot pin advances past 4.0.7.
+        // Spring Boot 4.0.8's BOM resolves Tomcat 11.0.24, which remains below
+        // the 11.0.25 security floor. These test-only starters still execute in
+        // CI, so constrain the complete embedded-Tomcat set rather than ignore
+        // the advisories.
+        testImplementation(
+            "org.apache.tomcat.embed:tomcat-embed-core:${libs.versions.tomcat.get()}"
+        )
+        testImplementation("org.apache.tomcat.embed:tomcat-embed-el:${libs.versions.tomcat.get()}")
+        testImplementation(
+            "org.apache.tomcat.embed:tomcat-embed-websocket:${libs.versions.tomcat.get()}"
+        )
+
+        // Keep the patched Jackson release until Spring Boot's BOM catches up.
         testImplementation(libs.jackson3.databind)
     }
     api(project(":threadmill-core"))

@@ -20,6 +20,15 @@ val npmTest by
         commandLine("npm", "run", "test")
     }
 
+val npmAudit by
+    tasks.registering(Exec::class) {
+        group = "verification"
+        description = "Fail on any known vulnerability in the committed npm lockfile."
+        inputs.file("package.json")
+        inputs.file("package-lock.json")
+        commandLine("npm", "audit", "--package-lock-only", "--audit-level=low")
+    }
+
 val npmBuild by
     tasks.registering(Exec::class) {
         dependsOn(npmInstall)
