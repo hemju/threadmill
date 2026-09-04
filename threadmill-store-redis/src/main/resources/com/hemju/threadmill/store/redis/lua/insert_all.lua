@@ -10,6 +10,7 @@
 -- the 0-based index of the offending job — and no writes have been made
 -- (existence is pre-validated for every job before any write).
 
+local no_key = '__THREADMILL_NO_KEY__'
 local n = tonumber(ARGV[1])
 if n == nil or n <= 0 then
     return 'OK'
@@ -80,26 +81,26 @@ for i = 1, n do
         'version', '1'
     )
 
-    if active_key ~= '' and active_score ~= nil then
+    if active_key ~= no_key and active_score ~= nil then
         redis.call('ZADD', active_key, active_score, job_id)
     end
-    if concurrency_key ~= '' and pending_key ~= '' and pending_member ~= '' and
+    if concurrency_key ~= '' and pending_key ~= no_key and pending_member ~= '' and
        (state == 'ENQUEUED' or state == 'SCHEDULED' or state == 'AWAITING') then
         redis.call('ZADD', pending_key, pending_score, pending_member)
-        if pending_root_key ~= '' then
+        if pending_root_key ~= no_key then
             redis.call('ZADD', pending_root_key, pending_score, pending_member)
         end
     end
-    if concurrency_key ~= '' and workflows_key ~= '' and
+    if concurrency_key ~= '' and workflows_key ~= no_key and
        redis.call('HGET', workflows_key, workflow_root_id) ~= false and
        (state == 'ENQUEUED' or state == 'SCHEDULED' or state == 'AWAITING' or state == 'PROCESSING') then
         redis.call('HINCRBY', workflows_key, workflow_root_id, 1)
     end
-    if concurrency_key ~= '' and workflow_counts_key ~= '' and
+    if concurrency_key ~= '' and workflow_counts_key ~= no_key and
        (state == 'ENQUEUED' or state == 'SCHEDULED' or state == 'AWAITING' or state == 'PROCESSING') then
         redis.call('HINCRBY', workflow_counts_key, workflow_root_id, 1)
     end
-    if awaiting_parent_key ~= '' and state == 'AWAITING' then
+    if awaiting_parent_key ~= no_key and state == 'AWAITING' then
         redis.call('SADD', awaiting_parent_key, job_id)
     end
     if state == 'ENQUEUED' then

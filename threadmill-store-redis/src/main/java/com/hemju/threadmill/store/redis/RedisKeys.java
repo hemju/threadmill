@@ -90,6 +90,8 @@ public final class RedisKeys {
   public static final String QUEUES = PREFIX + "queues";
   public static final String NODES = PREFIX + "nodes";
   public static final String MAINTENANCE_LEASE = PREFIX + "lease:maintenance";
+  /** Same-slot sentinel passed for optional Lua KEYS entries that are absent. */
+  public static final String NO_KEY = PREFIX + "no_key";
   /** HASH queue-name &rarr; pause-reason (empty string if no reason supplied). */
   public static final String QUEUE_PAUSES = PREFIX + "queue_pauses";
 

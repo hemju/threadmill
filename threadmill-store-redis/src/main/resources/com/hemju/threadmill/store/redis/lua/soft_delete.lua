@@ -3,19 +3,19 @@
 --
 -- KEYS:
 --   [1] job hash
---   [2] old active key, or empty
---   [3] old active per-node key, or empty
+--   [2] old active key, or no-key sentinel
+--   [3] old active per-node key, or no-key sentinel
 --   [4] old by_state_time
 --   [5] new by_state_time (DELETED)
 --   [6] counts hash
---   [7] old concurrency pending ZSET, or empty
---   [8] old concurrency counters HASH, or empty
---   [9] old concurrency workflows HASH, or empty
---   [10] old concurrency workflow counts HASH, or empty
---   [11] awaiting_by_parent SET, or empty
+--   [7] old concurrency pending ZSET, or no-key sentinel
+--   [8] old concurrency counters HASH, or no-key sentinel
+--   [9] old concurrency workflows HASH, or no-key sentinel
+--   [10] old concurrency workflow counts HASH, or no-key sentinel
+--   [11] awaiting_by_parent SET, or no-key sentinel
 --   [12] old queue_keys HASH (key -> ENQUEUED count in old queue)
 --   [13] old queue_unkeyed ZSET
---   [14] old concurrency pending_root ZSET, or empty
+--   [14] old concurrency pending_root ZSET, or no-key sentinel
 --   [15] old queue_enqueued_at ZSET (ENQUEUED ids scored by current_state_at millis)
 --
 -- ARGV:
@@ -32,6 +32,7 @@
 -- Returns 1 on success, 0 if already DELETED, -1 if vanished, -2 if the
 -- live version no longer matches expected_version (caller must re-read).
 
+local no_key             = '__THREADMILL_NO_KEY__'
 local job_key            = KEYS[1]
 local old_active_key     = KEYS[2]
 local old_active_node    = KEYS[3]
@@ -81,16 +82,16 @@ if old_version ~= expected_version then
 end
 local new_version = old_version + 1
 
-if old_active_key ~= '' then
+if old_active_key ~= no_key then
     redis.call('ZREM', old_active_key, job_id)
 end
-if old_active_node ~= '' then
+if old_active_node ~= no_key then
     redis.call('ZREM', old_active_node, job_id)
 end
 redis.call('ZREM', old_state_time_key, job_id)
-if old_pending_key ~= '' and old_pending_member ~= '' then
+if old_pending_key ~= no_key and old_pending_member ~= '' then
     redis.call('ZREM', old_pending_key, old_pending_member)
-    if old_pending_root_key ~= '' then
+    if old_pending_root_key ~= no_key then
         redis.call('ZREM', old_pending_root_key, old_pending_member)
     end
 end
@@ -105,14 +106,14 @@ if old_state == 'ENQUEUED' then
         redis.call('ZREM', old_unkeyed_key, job_id)
     end
 end
-if awaiting_parent_key ~= '' and old_state == 'AWAITING' then
+if awaiting_parent_key ~= no_key and old_state == 'AWAITING' then
     redis.call('SREM', awaiting_parent_key, job_id)
 end
 redis.call('HINCRBY', counts_key, old_state, -1)
 redis.call('HINCRBY', counts_key, 'DELETED', 1)
 
-if old_concurrency_key ~= '' and old_workflows_key ~= '' and old_counters_key ~= '' and not is_terminal(old_state) then
-    if old_workflow_counts_key ~= '' then
+if old_concurrency_key ~= '' and old_workflows_key ~= no_key and old_counters_key ~= no_key and not is_terminal(old_state) then
+    if old_workflow_counts_key ~= no_key then
         local workflow_count = redis.call('HINCRBY', old_workflow_counts_key, old_workflow_root_id, -1)
         if workflow_count <= 0 then
             redis.call('HDEL', old_workflow_counts_key, old_workflow_root_id)

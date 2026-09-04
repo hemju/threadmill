@@ -8,7 +8,7 @@
 --   [1] job hash
 --   [2] by_state_time ZSET for the expected state
 --   [3] counts hash
---   [4] by_handler SET observed during the scan
+--   [4] by_handler SET observed during the scan, or no-key sentinel
 --
 -- ARGV:
 --   [1] job id
@@ -17,6 +17,7 @@
 --
 -- Returns 1 if the job was deleted, 0 if it was skipped.
 
+local no_key = '__THREADMILL_NO_KEY__'
 local now_ms = tonumber(ARGV[3])
 
 local state = redis.call('HGET', KEYS[1], 'state')
@@ -40,7 +41,7 @@ if dedup_key and dedup_key ~= false then
 end
 redis.call('DEL', KEYS[1])
 redis.call('ZREM', KEYS[2], ARGV[1])
-if KEYS[4] ~= '' then
+if KEYS[4] ~= no_key then
     redis.call('SREM', KEYS[4], ARGV[1])
 end
 redis.call('HINCRBY', KEYS[3], ARGV[2], -1)

@@ -5,27 +5,27 @@
 --
 -- KEYS:
 --   [1] job hash
---   [2] new active-state key, or empty   (queue / scheduled / awaiting / processing_all)
---   [3] new active-state per-node key, or empty (processing per-node)
+--   [2] new active-state key, or no-key sentinel (queue / scheduled / awaiting / processing_all)
+--   [3] new active-state per-node key, or no-key sentinel (processing per-node)
 --   [4] new by_state_time
---   [5] old active-state key, or empty
---   [6] old active-state per-node key, or empty (processing per-node)
+--   [5] old active-state key, or no-key sentinel
+--   [6] old active-state per-node key, or no-key sentinel (processing per-node)
 --   [7] old by_state_time
 --   [8] counts hash
---   [9] old concurrency pending ZSET, or empty
---   [10] new concurrency pending ZSET, or empty
---   [11] old concurrency counters HASH, or empty
---   [12] old concurrency workflows HASH, or empty
---   [13] old concurrency workflow counts HASH, or empty
---   [14] new concurrency workflow counts HASH, or empty
---   [15] awaiting_by_parent SET, or empty (relationship is immutable)
+--   [9] old concurrency pending ZSET, or no-key sentinel
+--   [10] new concurrency pending ZSET, or no-key sentinel
+--   [11] old concurrency counters HASH, or no-key sentinel
+--   [12] old concurrency workflows HASH, or no-key sentinel
+--   [13] old concurrency workflow counts HASH, or no-key sentinel
+--   [14] new concurrency workflow counts HASH, or no-key sentinel
+--   [15] awaiting_by_parent SET, or no-key sentinel (relationship is immutable)
 --   [16] queue registry SET
 --   [17] old queue_keys HASH (key -> ENQUEUED count in old queue)
 --   [18] new queue_keys HASH
 --   [19] old queue_unkeyed ZSET
 --   [20] new queue_unkeyed ZSET
---   [21] old concurrency pending_root ZSET, or empty
---   [22] new concurrency pending_root ZSET, or empty
+--   [21] old concurrency pending_root ZSET, or no-key sentinel
+--   [22] new concurrency pending_root ZSET, or no-key sentinel
 --   [23] old queue_enqueued_at ZSET (ENQUEUED ids scored by current_state_at millis)
 --   [24] new queue_enqueued_at ZSET
 --
@@ -57,6 +57,7 @@
 -- Returns 'ok' on success, 'stale' on version mismatch, 'vanished' if the job
 -- has been hard-deleted.
 
+local no_key                 = '__THREADMILL_NO_KEY__'
 local job_key                = KEYS[1]
 local new_active_key         = KEYS[2]
 local new_active_node_key    = KEYS[3]
@@ -111,7 +112,7 @@ local function is_terminal(state)
 end
 
 local function decrement_workflow_count(key, root_id)
-    if key == '' or root_id == '' then
+    if key == no_key or root_id == '' then
         return
     end
     local count = redis.call('HINCRBY', key, root_id, -1)
@@ -130,16 +131,16 @@ if persisted_version ~= expected_version then
 end
 
 -- Remove from the prior active structure(s).
-if old_active_key ~= '' then
+if old_active_key ~= no_key then
     redis.call('ZREM', old_active_key, job_id)
 end
-if old_active_node_key ~= '' then
+if old_active_node_key ~= no_key then
     redis.call('ZREM', old_active_node_key, job_id)
 end
 redis.call('ZREM', old_state_time_key, job_id)
-if old_pending_key ~= '' and old_pending_member ~= '' then
+if old_pending_key ~= no_key and old_pending_member ~= '' then
     redis.call('ZREM', old_pending_key, old_pending_member)
-    if old_pending_root_key ~= '' then
+    if old_pending_root_key ~= no_key then
         redis.call('ZREM', old_pending_root_key, old_pending_member)
     end
 end
@@ -169,11 +170,11 @@ local same_workflow_count = old_counted and new_counted and
 if old_counted and not same_workflow_count then
     decrement_workflow_count(old_workflow_counts_key, old_workflow_root_id)
 end
-if new_counted and not same_workflow_count and new_workflow_counts_key ~= '' then
+if new_counted and not same_workflow_count and new_workflow_counts_key ~= no_key then
     redis.call('HINCRBY', new_workflow_counts_key, workflow_root_id, 1)
 end
 
-if old_concurrency_key ~= '' and old_workflows_key ~= '' and old_counters_key ~= '' and
+if old_concurrency_key ~= '' and old_workflows_key ~= no_key and old_counters_key ~= no_key and
    (not is_terminal(old_state)) and is_terminal(new_state) then
     local outstanding = redis.call('HINCRBY', old_workflows_key, old_workflow_root_id, -1)
     if outstanding <= 0 then
@@ -194,14 +195,14 @@ end
 -- hold, otherwise the job is decremented twice and an EXCLUSIVE key can be
 -- released while a descendant still runs. A missing hold entry is fine — a
 -- standalone job re-acquires it at the next claim.
-if old_concurrency_key ~= '' and old_workflows_key ~= '' and
+if old_concurrency_key ~= '' and old_workflows_key ~= no_key and
    is_terminal(old_state) and (not is_terminal(new_state)) then
     if redis.call('HEXISTS', old_workflows_key, old_workflow_root_id) == 1 then
         redis.call('HINCRBY', old_workflows_key, old_workflow_root_id, 1)
     end
 end
 
-if awaiting_parent_key ~= '' then
+if awaiting_parent_key ~= no_key then
     if old_state == 'AWAITING' and new_state ~= 'AWAITING' then
         redis.call('SREM', awaiting_parent_key, job_id)
     elseif new_state == 'AWAITING' and old_state ~= 'AWAITING' then
@@ -227,7 +228,7 @@ redis.call('HSET', job_key,
 )
 
 -- Add to the new active structure(s).
-if new_active_key ~= '' and new_active_score ~= nil then
+if new_active_key ~= no_key and new_active_score ~= nil then
     redis.call('ZADD', new_active_key, new_active_score, job_id)
 end
 if new_state == 'ENQUEUED' then
@@ -239,13 +240,13 @@ if new_state == 'ENQUEUED' then
         redis.call('ZADD', new_unkeyed_key, new_active_score, job_id)
     end
 end
-if new_active_node_key ~= '' and new_active_score ~= nil then
+if new_active_node_key ~= no_key and new_active_score ~= nil then
     redis.call('ZADD', new_active_node_key, new_active_score, job_id)
 end
-if concurrency_key ~= '' and new_pending_key ~= '' and new_pending_member ~= '' and
+if concurrency_key ~= '' and new_pending_key ~= no_key and new_pending_member ~= '' and
    (new_state == 'ENQUEUED' or new_state == 'SCHEDULED' or new_state == 'AWAITING') then
     redis.call('ZADD', new_pending_key, new_pending_score, new_pending_member)
-    if new_pending_root_key ~= '' then
+    if new_pending_root_key ~= no_key then
         redis.call('ZADD', new_pending_root_key, new_pending_score, new_pending_member)
     end
 end

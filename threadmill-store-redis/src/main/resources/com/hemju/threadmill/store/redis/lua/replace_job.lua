@@ -3,11 +3,11 @@
 --
 -- KEYS:
 --   [1] job hash
---   [2] new active key, or empty            (queue / scheduled / awaiting)
---   [3] old active key, or empty            (queue / scheduled / awaiting)
+--   [2] new active key, or no-key sentinel  (queue / scheduled / awaiting)
+--   [3] old active key, or no-key sentinel  (queue / scheduled / awaiting)
 --   [4] new by_state_time                   (always the same state — only updated for the score)
---   [5] old concurrency pending ZSET, or empty
---   [6] new concurrency pending ZSET, or empty
+--   [5] old concurrency pending ZSET, or no-key sentinel
+--   [6] new concurrency pending ZSET, or no-key sentinel
 --   [7] old by_handler SET
 --   [8] new by_handler SET
 --   [9] queue registry SET
@@ -15,7 +15,7 @@
 --   [11] new queue_keys HASH
 --   [12] old queue_unkeyed ZSET
 --   [13] new queue_unkeyed ZSET
---   [14] concurrency pending_root ZSET, or empty (key/mode/root are preserved)
+--   [14] concurrency pending_root ZSET, or no-key sentinel (key/mode/root preserved)
 --   [15] old queue_enqueued_at ZSET (ENQUEUED ids scored by current_state_at millis)
 --   [16] new queue_enqueued_at ZSET
 --
@@ -39,6 +39,7 @@
 --
 -- Returns 'OK', 'STALE' (version mismatch), 'WRONG_STATE', or 'VANISHED'.
 
+local no_key        = '__THREADMILL_NO_KEY__'
 local job_key       = KEYS[1]
 local new_active    = KEYS[2]
 local old_active    = KEYS[3]
@@ -86,21 +87,21 @@ if state ~= 'ENQUEUED' and state ~= 'SCHEDULED' and state ~= 'AWAITING' then
 end
 
 -- Move within the active structure if it changed (e.g. queue rename).
-if old_active ~= '' then
+if old_active ~= no_key then
     redis.call('ZREM', old_active, job_id)
 end
-if new_active ~= '' and new_score ~= nil then
+if new_active ~= no_key and new_score ~= nil then
     redis.call('ZADD', new_active, new_score, job_id)
 end
-if old_pending_k ~= '' and old_pending_member ~= '' then
+if old_pending_k ~= no_key and old_pending_member ~= '' then
     redis.call('ZREM', old_pending_k, old_pending_member)
-    if pending_root_key ~= '' then
+    if pending_root_key ~= no_key then
         redis.call('ZREM', pending_root_key, old_pending_member)
     end
 end
-if concurrency_key ~= '' and new_pending_k ~= '' and new_pending_member ~= '' then
+if concurrency_key ~= '' and new_pending_k ~= no_key and new_pending_member ~= '' then
     redis.call('ZADD', new_pending_k, new_pending_score, new_pending_member)
-    if pending_root_key ~= '' then
+    if pending_root_key ~= no_key then
         redis.call('ZADD', pending_root_key, new_pending_score, new_pending_member)
     end
 end

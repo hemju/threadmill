@@ -575,7 +575,16 @@ public class ThreadmillProperties {
   public static final class SentinelProperties {
     private String masterName;
     private List<String> nodes = new ArrayList<>();
+    private String dataNodeUsername;
+    private String dataNodePassword;
+    // Compatibility aliases: sentinel.password pre-dates separate control-plane credentials.
+    private String username;
     private String password;
+    private String sentinelUsername;
+    private String sentinelPassword;
+    private boolean tls;
+    private boolean verifyPeer = true;
+    private String verifyMode;
 
     public String getMasterName() {
       return masterName;
@@ -600,11 +609,80 @@ public class ThreadmillProperties {
     public void setPassword(String password) {
       this.password = password;
     }
+
+    public String getUsername() {
+      return username;
+    }
+
+    public void setUsername(String username) {
+      this.username = username;
+    }
+
+    public String getDataNodeUsername() {
+      return dataNodeUsername == null || dataNodeUsername.isBlank() ? username : dataNodeUsername;
+    }
+
+    public void setDataNodeUsername(String dataNodeUsername) {
+      this.dataNodeUsername = dataNodeUsername;
+    }
+
+    public String getDataNodePassword() {
+      return dataNodePassword == null || dataNodePassword.isBlank() ? password : dataNodePassword;
+    }
+
+    public void setDataNodePassword(String dataNodePassword) {
+      this.dataNodePassword = dataNodePassword;
+    }
+
+    public String getSentinelUsername() {
+      return sentinelUsername;
+    }
+
+    public void setSentinelUsername(String sentinelUsername) {
+      this.sentinelUsername = sentinelUsername;
+    }
+
+    public String getSentinelPassword() {
+      return sentinelPassword;
+    }
+
+    public void setSentinelPassword(String sentinelPassword) {
+      this.sentinelPassword = sentinelPassword;
+    }
+
+    public boolean isTls() {
+      return tls;
+    }
+
+    public void setTls(boolean tls) {
+      this.tls = tls;
+    }
+
+    public boolean isVerifyPeer() {
+      return verifyPeer;
+    }
+
+    public void setVerifyPeer(boolean verifyPeer) {
+      this.verifyPeer = verifyPeer;
+    }
+
+    public String getVerifyMode() {
+      return verifyMode;
+    }
+
+    public void setVerifyMode(String verifyMode) {
+      this.verifyMode = verifyMode;
+    }
   }
 
   public static final class ClusterProperties {
     private List<String> nodes = new ArrayList<>();
     private String readPolicy = "master";
+    private String username;
+    private String password;
+    private boolean tls;
+    private boolean verifyPeer = true;
+    private String verifyMode;
 
     public List<String> getNodes() {
       return nodes;
@@ -620,6 +698,46 @@ public class ThreadmillProperties {
 
     public void setReadPolicy(String readPolicy) {
       this.readPolicy = readPolicy;
+    }
+
+    public String getUsername() {
+      return username;
+    }
+
+    public void setUsername(String username) {
+      this.username = username;
+    }
+
+    public String getPassword() {
+      return password;
+    }
+
+    public void setPassword(String password) {
+      this.password = password;
+    }
+
+    public boolean isTls() {
+      return tls;
+    }
+
+    public void setTls(boolean tls) {
+      this.tls = tls;
+    }
+
+    public boolean isVerifyPeer() {
+      return verifyPeer;
+    }
+
+    public void setVerifyPeer(boolean verifyPeer) {
+      this.verifyPeer = verifyPeer;
+    }
+
+    public String getVerifyMode() {
+      return verifyMode;
+    }
+
+    public void setVerifyMode(String verifyMode) {
+      this.verifyMode = verifyMode;
     }
   }
 }

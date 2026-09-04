@@ -24,6 +24,7 @@ class RedisKeysTest {
         RedisKeys.QUEUES,
         RedisKeys.NODES,
         RedisKeys.MAINTENANCE_LEASE,
+        RedisKeys.NO_KEY,
         RedisKeys.job(JobId.newId()),
         RedisKeys.queue("default"),
         RedisKeys.queue("spaces/slashes:unicode-\uD83D\uDE80"),
