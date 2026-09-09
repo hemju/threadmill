@@ -101,14 +101,33 @@ reserved, but the row doesn't exist yet. This mode avoids jobs that point to
 rolled-back application rows, but it has one remaining failure window: the
 business transaction can commit and the after-commit job insert can still fail.
 
-Each deferred enqueue is isolated from the others: if one after-commit insert
-fails (store outage, oversized job), the failure is contained and logged at
-ERROR with the lost `JobId` and handler type, and every other deferred enqueue
-registered in the same transaction still runs. The lost job is **not**
-retried — after-commit mode is at-most-once for the job insert itself, so
-monitor for the `after-commit enqueue failed` log line, or use
-`join_transaction` (Postgres) when the enqueue must be exactly as durable as
-the business rows.
+Each deferred enqueue is isolated: a store failure is logged and the remaining
+callbacks still run. The auto-configured scheduler also publishes
+`AfterCommitEnqueueFailure` with the reserved ids and cause. Persistence is
+**unconfirmed**, because a lost acknowledgement can follow a successful write.
+Inspect those ids before recovering; Threadmill does not automatically repeat
+the insert. Listener failures are contained. The scheduler's
+`deferredEnqueueFailureCount()` counts affected ids and can be exported through
+a Micrometer `FunctionCounter`.
+
+```java
+@EventListener
+void onDeferredEnqueueFailure(AfterCommitEnqueueFailure failure) {
+    enqueueAlerts.recordUnconfirmed(failure.jobIds(), failure.cause());
+}
+```
+
+The event is an in-process observation, not durable recovery: a process crash
+can prevent its delivery. Use `join_transaction` with the same PostgreSQL
+`DataSource` for atomic business and job writes, or an application-owned durable
+outbox when crossing datastores. Handlers still require idempotency under
+Threadmill's at-least-once delivery guarantee.
+
+Deferred job bodies are validated synchronously. Per scheduler and transaction,
+submissions are limited to 1,000 jobs and 8 MiB of combined encoded bodies,
+including separate enqueue calls. A rejected submission leaves earlier accepted
+callbacks intact; the caller can roll back or use smaller transactions. Callbacks
+retain enqueue order and each bulk call remains one atomic store operation.
 
 **`enqueueIfAbsent(...)` is the exception: it is always immediate in this
 mode.** Its synchronous `EnqueueResult` (Created vs Coalesced) cannot be
@@ -345,33 +364,42 @@ property you want when the scheduler's belief is the thing that was wrong.
 
 ## Can I get exactly-once-successful side effects?
 
-Not from Threadmill alone. No library can without two-phase commit. The two
-patterns that work in practice:
+Threadmill provides **at-least-once** execution after a successful durable enqueue,
+subject to the datastore's persistence and replication configuration. Exactly-once
+external effects require cooperation from the destination. These two patterns
+make the boundaries explicit:
 
 ### 1. Transactional outbox
 
-The handler writes to its own database with an idempotency record keyed by
-`JobId`. A re-run sees the record and short-circuits.
+Write business changes and an outgoing intent in one application database
+transaction. A unique constraint on the intent's idempotency key makes repeated
+and concurrent handler attempts produce one intent. `insertIfAbsent` below is an
+application repository operation implemented with an atomic insert, such as
+`INSERT ... ON CONFLICT DO NOTHING`; it is not an exists-then-insert race.
 
 ```java
 @Transactional
 public void run(SendEmail payload, JobExecutionContext ctx) {
-    String key = ctx.jobId().toString();
-    if (outboxRepo.existsById(key)) return;       // already done
-    emailService.send(payload.to(), payload.body());
-    outboxRepo.save(new OutboxEntry(key, Instant.now()));
+    outboxRepo.insertIfAbsent(ctx.jobId().toString(), payload.to(), payload.body());
 }
 ```
 
-The `existsById` check + the `save` happen in the same transaction. If
-either the `existsById` or the `save` fails, the `send` doesn't matter — on
-retry the existsById sees the row (if it was committed) or doesn't (if not),
-and the handler does the right thing either way.
+A separate publisher claims pending intents, sends them, and marks delivery.
+The publisher must itself tolerate retries. A crash after a remote send but before
+the delivery marker can send twice: the SQL transaction cannot roll back a remote
+email or HTTP request. Forward the intent's stable key to a destination that
+actually supports idempotency, and honor that destination's key scope and retention
+window. Without that support, duplicate external delivery remains possible.
+
+Do not put a remote send before an outbox marker inside `@Transactional` and
+describe it as atomic. The outbox guarantees durable intent and local deduplication;
+downstream cooperation determines the external-effect guarantee.
 
 ### 2. Idempotency-key handshake with the downstream
 
 The handler forwards `ctx.jobId()` to the receiver; the receiver dedups on
-its side. Most modern HTTP APIs accept an `Idempotency-Key` header for this.
+its side. Use this only when the destination documents idempotency semantics for
+the specific operation; a header alone does not provide deduplication.
 
 ```java
 public void run(ChargeCustomer payload, JobExecutionContext ctx) {
@@ -477,25 +505,24 @@ hops without value.
 
 ## Worked example
 
-```java
-@SpringBootApplication
-class WelcomeApp { … }
+This PostgreSQL example uses `threadmill.spring.enqueue-mode=join_transaction`
+and the same application `DataSource` for business writes and Threadmill. The
+user row and job insert commit together. The default `after_commit` mode has a
+separate post-commit enqueue failure window and does not provide this atomicity.
 
+```java
 @Component
 @Job(queue = "email", timeout = "PT30S", maxAttempts = 5)
 class SendEmailHandler implements JobHandler<SendEmail> {
-    private final EmailGateway gateway;
     private final OutboxRepository outbox;
 
-    SendEmailHandler(EmailGateway g, OutboxRepository o) { this.gateway = g; this.outbox = o; }
+    SendEmailHandler(OutboxRepository outbox) { this.outbox = outbox; }
 
     @Override
     @Transactional
     public void run(SendEmail payload, JobExecutionContext ctx) {
-        String key = ctx.jobId().toString();
-        if (outbox.existsById(key)) return;                       // (a) idempotency
-        gateway.send(payload.to(), payload.body());               // (b) side effect
-        outbox.save(new OutboxEntry(key, Instant.now()));         // (c) outbox commit
+        // Atomic insert with a unique key; no remote send in this transaction.
+        outbox.insertIfAbsent(ctx.jobId().toString(), payload.to(), payload.body());
     }
 }
 
@@ -504,45 +531,32 @@ class WelcomeService {
     private final UserRepo users;
     private final JobScheduler jobs;
 
-    WelcomeService(UserRepo u, JobScheduler j) { this.users = u; this.jobs = j; }
+    WelcomeService(UserRepo users, JobScheduler jobs) { this.users = users; this.jobs = jobs; }
 
     @Transactional
-    public JobId welcome(NewUser cmd) {
-        var user = users.save(cmd.toUser());                       // (d) pending write
-        return jobs.enqueue(SendEmailHandler.class, new SendEmail(user.email(), template())); // (e) pending enqueue
-        // (f) on commit: row saved, then job inserted.
-        // (g) on rollback: neither happens — workers never see this job.
+    public JobId welcome(NewUser command) {
+        var user = users.save(command.toUser());
+        return jobs.enqueue(SendEmailHandler.class, new SendEmail(user.email(), template()));
     }
 }
 ```
 
-Six diff-readable scenarios:
+`OutboxRepository`, its unique-key schema, and the publisher belong to the
+application. The publisher reads pending intents, sends them with the same
+stable idempotency key where supported, and records delivery. A Threadmill
+recurring [outbox pump](wake-driven-pollers.md) can drive that publisher.
 
-1. **Happy path.** `welcome(...)` commits → user row saved, job inserted →
-   worker claims, runs `send`, commits outbox row → done.
-2. **Rollback after enqueue.** `welcome(...)` throws before commit → user
-   row + enqueue both discarded.
-3. **Worker crash mid-handler.** Worker dies after `gateway.send(...)` but
-   before `outbox.save(...)` → orphan recovery reclaims → second attempt
-   sees `outbox.existsById(...)` is false → re-sends. **At-least-once.** The
-   handler must accept that real emails can go twice on this exact failure
-   shape. If the gateway is `Idempotency-Key`-aware (Stripe, SendGrid, …),
-   forward `ctx.jobId()` as the key to make it exactly-once on the gateway
-   side.
-4. **Handler throws.** `gateway.send` throws → `run`'s `@Transactional` rolls
-   back; outbox row never written. Threadmill's failure path records the
-   failure cleanly; retry runs the whole handler again on the same job.
-5. **Worker crash after outbox save but before Threadmill saves SUCCEEDED.**
-   Outbox row committed; Threadmill still thinks the job is PROCESSING.
-   Orphan recovery reclaims; retry runs the handler again; the
-   `outbox.existsById(...)` check short-circuits at line (a). Threadmill
-   transitions to SUCCEEDED on this attempt.
-6. **`outbox.save` throws.** Whole handler transaction rolls back; outbox
-   row not written; Threadmill records failure; retry runs the whole
-   handler again.
+| Failure point | Durable result and recovery |
+|---|---|
+| Business transaction succeeds | User and job commit together; the handler later commits one outgoing intent. |
+| Business transaction rolls back | Neither user nor job is committed with `join_transaction`. |
+| Handler dies before its outbox transaction commits | No outgoing intent commits; retry can insert it. No remote effect has happened in this handler. |
+| Handler commits the intent, then dies before SUCCEEDED | Retry's atomic insert encounters the same unique key and does not create another intent. |
+| Publisher sends, then dies before recording delivery | The intent is retried. A destination with the agreed idempotency contract deduplicates; otherwise duplicate delivery is possible. |
+| Two attempts or publishers overlap | The database unique key prevents duplicate local intents. External duplicate prevention still depends on publisher claiming and the destination's idempotency contract. |
 
-The outbox makes scenarios 3 and 5 safe. Without the outbox, scenario 3
-results in a duplicate email.
+The application must retain the idempotency record for its required replay
+window. Threadmill job retention and producer deduplication do not replace it.
 
 ## See also
 

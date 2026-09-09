@@ -232,3 +232,10 @@ A recurring task that must never run two instances at once declares
 `Scheduler.defineRecurring`), which serializes its instances at claim time
 under a derived key instead of leaving you to hand-roll an advisory lock. See
 [Exclusive recurring tasks](concurrency.md#exclusive-recurring-tasks).
+
+Handler and payload type names use the same application classloader, supplied by
+`JobHandlerResolver.classLoader()`. Spring uses its application context loader.
+`ReflectiveJobHandlerResolver` captures the constructing thread's context loader;
+an explicit loader constructor is available for layered deployments. Construct a
+new resolver for a new deployment loader. Both handlers and payloads are loaded
+without initialization, then checked for the required interface before use.

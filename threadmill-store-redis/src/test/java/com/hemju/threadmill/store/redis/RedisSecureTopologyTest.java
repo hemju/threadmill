@@ -122,6 +122,24 @@ class RedisSecureTopologyTest {
   }
 
   @Test
+  void verifiedTlsRejectsAServerCertificateOutsideTheConfiguredTrustRoots() throws Exception {
+    try (var cluster = startClusterContainer(false)) {
+      prepareCluster(cluster.container());
+      var config = new RedisStoreConfig.Cluster(
+          List.of(new RedisStoreConfig.HostAndPort("localhost", cluster.hostPort())),
+          "master",
+          new RedisStoreConfig.Credentials(DATA_USERNAME, DATA_PASSWORD),
+          RedisStoreConfig.Tls.verified());
+      // The default trust roots deliberately do not contain this private test CA.
+      var failure = catchThrowable(() -> new RedisJobStore(config));
+      assertThat(failure)
+          .isInstanceOf(RedisConnectionException.class)
+          .hasMessageContaining("TLS negotiation failed");
+      assertThat(stackTrace(failure)).doesNotContain(DATA_USERNAME, DATA_PASSWORD);
+    }
+  }
+
+  @Test
   void authenticatedTlsStartupFailureDoesNotExposeCredentials() throws Exception {
     try (var cluster = startClusterContainer(false)) {
       var redis = cluster.container();
@@ -461,7 +479,7 @@ class RedisSecureTopologyTest {
   private static final class SecureRedisContainer extends GenericContainer<SecureRedisContainer> {
 
     private SecureRedisContainer() {
-      super(DockerImageName.parse("redis:7-alpine"));
+      super(DockerImageName.parse("redis:7.4-alpine"));
     }
 
     private SecureRedisContainer bindFixedPort(int hostPort, int containerPort) {

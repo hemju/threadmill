@@ -13,6 +13,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Bean;
 
 import com.hemju.threadmill.core.Names;
@@ -228,10 +229,12 @@ public class ThreadmillAutoConfiguration {
       ThreadmillJobRegistry registry,
       ProcessingNodeConfig config,
       ThreadmillProperties properties,
-      LocalWakeBus wakeBus) {
+      LocalWakeBus wakeBus,
+      ApplicationEventPublisher events) {
     return switch (properties.getSpring().getEnqueueMode()) {
       case AFTER_COMMIT ->
-        new TransactionAwareJobScheduler(store, serializer, registry, config, wakeBus);
+        new TransactionAwareJobScheduler(
+            store, serializer, registry, config, wakeBus, events::publishEvent);
       case IMMEDIATE -> new JobScheduler(store, serializer, registry, config, wakeBus);
       case JOIN_TRANSACTION -> {
         // Routed through the generic JobStore SPI flag so this method does not

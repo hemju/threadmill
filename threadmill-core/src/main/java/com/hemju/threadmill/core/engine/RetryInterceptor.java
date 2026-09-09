@@ -2,7 +2,6 @@ package com.hemju.threadmill.core.engine;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -10,9 +9,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.hemju.threadmill.core.FailureDecision;
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
-import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
 import com.hemju.threadmill.core.internal.FatalErrors;
@@ -50,6 +50,7 @@ public final class RetryInterceptor implements JobInterceptor {
 
   private final JobStore store;
   private final RetryPolicy defaultPolicy;
+  private JobId recoveryAfter;
   // Iterated from concurrent worker virtual threads while policyFor may
   // still register entries; most-specific matching scans every entry, so
   // iteration order is irrelevant.
@@ -70,105 +71,80 @@ public final class RetryInterceptor implements JobInterceptor {
   }
 
   @Override
-  public void onProcessingFailed(
+  public FailureDecision onProcessingFailureDecision(
       Job job, JobExecutionContext ctx, Throwable cause, FailureCause kind) {
-    if (kind == FailureCause.QUARANTINE) return;
-    if (kind == FailureCause.SHUTDOWN) {
-      rescheduleShutdownInterrupted(job);
-      return;
-    }
-    RetryPolicy policy = effectivePolicy(job, cause);
-    if (job.attempts() >= policy.maxAttempts()) {
-      return;
-    }
-    rescheduleWithBackoff(job, policy, "engine.retry-after-failure");
-  }
-
-  private void rescheduleWithBackoff(Job job, RetryPolicy policy, String reason) {
-    int attempts = job.attempts();
-    // Stores increment attempts at claim, so attempts is already 1 on the
-    // first failure: the first retry waits exactly initialBackoff and the
-    // delay doubles per subsequent attempt. Computed in millis so a
-    // sub-second policy is not truncated to an immediate retry.
+    if (kind == FailureCause.QUARANTINE) return FailureDecision.finalFailure();
+    if (kind == FailureCause.SHUTDOWN) return new FailureDecision(Instant.now(), true);
+    var policy = effectivePolicy(job, cause);
+    if (job.attempts() >= policy.maxAttempts()) return FailureDecision.finalFailure();
     long capMillis = Duration.ofHours(1).toMillis();
     long initialMillis = Math.max(0, policy.initialBackoff().toMillis());
     long backoffMillis = initialMillis >= capMillis
         ? capMillis
-        : Math.min(capMillis, initialMillis << Math.min(Math.max(0, attempts - 1), 10));
-    var next = Instant.now().plusMillis(backoffMillis);
+        : Math.min(capMillis, initialMillis << Math.min(Math.max(0, job.attempts() - 1), 10));
+    return new FailureDecision(Instant.now().plusMillis(backoffMillis), false);
+  }
+
+  @Override
+  public void onProcessingFailed(
+      Job job, JobExecutionContext ctx, Throwable cause, FailureCause kind) {
+    if (kind == FailureCause.QUARANTINE || job.currentState() != JobState.FAILED) return;
+    if (job.failureDecision().isEmpty()) {
+      // Also support direct SPI callers. The engine normally persisted the
+      // decision with FAILED before reaching this notification hook.
+      job.setFailureDecision(onProcessingFailureDecision(job, ctx, cause, kind));
+      saveRescheduleWithRetry(job, job.version());
+    }
+    rescheduleDecidedFailure(job, "engine.retry-after-failure");
+  }
+
+  private boolean rescheduleDecidedFailure(Job job, String reason) {
+    if (job.currentState() != JobState.FAILED) return false;
+    var decision = job.failureDecision().orElse(null);
+    if (decision == null || !decision.willRetry()) return false;
     long expectedVersion = job.version();
     try {
+      if (decision.refundAttempt()) job.revertAttempt();
       job.transitionTo(
           JobState.SCHEDULED,
           Instant.now(),
-          reason,
-          "retry " + (attempts + 1) + " of " + policy.maxAttempts());
-      job.scheduleAt(next);
+          decision.refundAttempt() ? "engine.retry-after-shutdown" : reason,
+          decision.refundAttempt() ? "requeued by node shutdown" : "retry " + (job.attempts() + 1));
+      job.scheduleAt(decision.retryAt());
       job.clearOwner();
       saveRescheduleWithRetry(job, expectedVersion);
+      return true;
     } catch (StaleJobException ignored) {
-      // Another node beat us to the next state for this job — fine.
+      return false;
     }
   }
 
   /**
-   * Recovery scan for jobs stranded in FAILED with unspent retry budget —
-   * the crash window between the terminal FAILED save and this
-   * interceptor's reschedule save leaves exactly that shape, and without a
-   * scan such jobs are stranded forever. Pages through the whole FAILED
-   * population; only jobs older than {@code minAge} are touched, so a
-   * reschedule that is mid-flight on another node is never raced.
-   *
-   * <p>The original exception is gone, so per-exception-type policies
-   * cannot apply here: the ceiling is the per-job metadata override or the
-   * global default. A stranded job possibly getting one extra retry beats
-   * a stranded job never running again — handlers are idempotent by
-   * contract. Runs on the maintenance leader at the retention cadence,
-   * BEFORE the workflow reconciliation sweep, so a recovered parent is
-   * SCHEDULED again by the time the sweep judges its AWAITING children.
+   * Recover persisted retry decisions after a crash between FAILED and SCHEDULED.
+   * Legacy failures without a decision remain unchanged: their exception-specific
+   * policy is unknown. A young or final failure never becomes an inferred retry.
+   * Each call inspects at most one page with a cooperative 200 ms budget.
+   * An exclusive job-id cursor survives deletions and resumes on the next call.
    */
   public int recoverStrandedFailures(int pageSize, Duration minAge) {
-    Instant cutoff = Instant.now().minus(minAge);
+    Objects.requireNonNull(minAge, "minAge");
+    if (minAge.isNegative()) throw new IllegalArgumentException("minAge must not be negative");
+    var cutoff = Instant.now().minus(minAge);
+    int size = Math.clamp(pageSize, 1, JobSearch.MAX_LIMIT);
+    var failed = store.scanJobs(JobState.FAILED, recoveryAfter, size);
+    long deadline = System.nanoTime() + Duration.ofMillis(200).toNanos();
+    int inspected = 0;
     int recovered = 0;
-    int size = Math.max(1, pageSize);
-    for (int offset = 0; ; offset += size) {
-      List<Job> failed = store.searchJobs(new JobSearch(JobState.FAILED, null, null, size, offset));
-      for (Job job : failed) {
-        List<JobStateEntry> history = job.stateHistory();
-        if (history.isEmpty()) continue;
-        if (history.getLast().at().isAfter(cutoff)) continue;
-        RetryPolicy policy = effectivePolicy(job, null);
-        if (job.attempts() >= policy.maxAttempts()) continue;
-        rescheduleWithBackoff(job, policy, "engine.retry-recovered");
-        recovered++;
-      }
-      if (failed.size() < size) {
-        return recovered;
-      }
+    for (var job : failed) {
+      if (inspected > 0 && System.nanoTime() >= deadline) break;
+      recoveryAfter = job.id();
+      inspected++;
+      var history = job.stateHistory();
+      if (!history.getLast().at().isAfter(cutoff)
+          && rescheduleDecidedFailure(job, "engine.retry-recovered")) recovered++;
     }
-  }
-
-  /**
-   * A shutdown-interrupted attempt is not the job's fault: reschedule it
-   * immediately (a surviving node picks it up at the next promotion) and
-   * revert the claim-time attempt increment so rolling deploys never
-   * consume retry budget. Never final — budget is not consulted.
-   */
-  private void rescheduleShutdownInterrupted(Job job) {
-    long expectedVersion = job.version();
-    try {
-      job.revertAttempt();
-      job.transitionTo(
-          JobState.SCHEDULED,
-          Instant.now(),
-          "engine.retry-after-shutdown",
-          "requeued by node shutdown");
-      job.scheduleAt(Instant.now());
-      job.clearOwner();
-      saveRescheduleWithRetry(job, expectedVersion);
-    } catch (StaleJobException ignored) {
-      // Another node beat us to the next state for this job — fine.
-    }
+    if (inspected == failed.size() && failed.size() < size) recoveryAfter = null;
+    return recovered;
   }
 
   /**

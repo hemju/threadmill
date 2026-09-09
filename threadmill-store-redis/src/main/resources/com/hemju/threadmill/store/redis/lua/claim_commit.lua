@@ -19,6 +19,7 @@
 --   [13] queue_unkeyed ZSET
 --   [14] concurrency pending_root ZSET, or no-key sentinel
 --   [15] queue_enqueued_at ZSET (ENQUEUED ids scored by current_state_at millis)
+--   [16] ordered concurrency counter registry
 
 -- ARGV:
 --   [1] job id
@@ -62,39 +63,16 @@ local concurrency_mode = ARGV[9]
 local workflow_root_id = ARGV[10]
 local pending_member = ARGV[11]
 
-local function member_job_id(member)
-    local sep = string.find(member, ':', 1, true)
-    if sep == nil then
-        return member
-    end
-    return string.sub(member, sep + 1)
-end
-
-local function member_matches(member, exclusive_only)
-    return not exclusive_only or string.sub(member, 1, 10) == 'EXCLUSIVE:'
-end
-
 local function has_earlier_pending(exclusive_only)
-    if pending_key == no_key or pending_member == '' then
-        return false
-    end
+    if pending_key == no_key or pending_member == '' then return false end
     local score = redis.call('ZSCORE', pending_key, pending_member)
-    if score == false then
-        return true
-    end
-    local earlier = redis.call('ZRANGEBYSCORE', pending_key, '-inf', '(' .. score)
-    for _, member in ipairs(earlier) do
-        if member ~= pending_member and member_matches(member, exclusive_only) then
-            return true
-        end
-    end
-    local same_score = redis.call('ZRANGEBYSCORE', pending_key, score, score)
-    for _, member in ipairs(same_score) do
-        if member ~= pending_member and member_matches(member, exclusive_only) and member_job_id(member) < job_id then
-            return true
-        end
-    end
-    return false
+    if score == false then return true end
+    local index = exclusive_only and (pending_key .. ':exclusive') or pending_key
+    local head = redis.call('ZRANGE', index, 0, 0, 'WITHSCORES')
+    if #head == 0 then return false end
+    local head_score = tonumber(head[2])
+    return head_score < tonumber(score) or
+        (head_score == tonumber(score) and head[1] < pending_member)
 end
 
 if redis.call('EXISTS', job_key) == 0 then
@@ -137,26 +115,24 @@ if concurrency_key ~= '' then
         end
         redis.call('HSET', workflows_key, workflow_root_id, tostring(outstanding_count))
     end
-    redis.call('ZREM', pending_key, pending_member)
+    redis.call('ZADD', KEYS[16], 0, counters_key)
+    tm_pending_remove(pending_key, pending_member, queue_keys_key)
     if pending_root_key ~= no_key then
         redis.call('ZREM', pending_root_key, pending_member)
     end
 end
 
 if concurrency_key ~= '' then
-    local remaining = redis.call('HINCRBY', queue_keys_key, concurrency_key, -1)
-    if remaining <= 0 then
-        redis.call('HDEL', queue_keys_key, concurrency_key)
-    end
+    tm_queue_remove(queue_keys_key, concurrency_key)
 else
     redis.call('ZREM', unkeyed_key, job_id)
 end
 redis.call('ZREM', queue_key, job_id)
 redis.call('ZREM', enqueued_at_key, job_id)
-redis.call('ZREM', enqueued_state_time, job_id)
+tm_state_remove(enqueued_state_time, job_id)
 redis.call('ZADD', processing_all, heartbeat_ms, job_id)
 redis.call('ZADD', processing_node, heartbeat_ms, job_id)
-redis.call('ZADD', processing_state_time, heartbeat_ms, job_id)
+tm_state_add(processing_state_time, heartbeat_ms, job_id)
 redis.call('HINCRBY', counts_key, 'ENQUEUED', -1)
 redis.call('HINCRBY', counts_key, 'PROCESSING', 1)
 
@@ -168,6 +144,7 @@ redis.call('HSET', job_key,
     'last_checkin_at', '',
     'current_state_at', tostring(heartbeat_ms),
     'version', new_version,
-    'attempts', attempts
+    'attempts', attempts,
+    'execution_revision', '0'
 )
 return 'OK'

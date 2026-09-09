@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -18,7 +19,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
+import com.hemju.threadmill.core.FailureDecision;
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.NodeId;
@@ -1332,6 +1335,22 @@ class ProcessingNodeTest {
     });
   }
 
+  @Test
+  void unfinishedRetentionResumesNextTickEvenWithAnHourlyInterval() {
+    insertTerminal(JobState.SUCCEEDED, Instant.now().minus(Duration.ofDays(40)), 5101);
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .maintenancePollInterval(Duration.ofMillis(20))
+            .retentionInterval(Duration.ofHours(1))
+            .build())
+        .build();
+    node.start();
+    await()
+        .atMost(Duration.ofSeconds(15))
+        .untilAsserted(
+            () -> assertThat(store.countsByState().get(JobState.SUCCEEDED)).isZero());
+  }
+
   private void insertTerminal(JobState terminal, Instant at, int n) {
     JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("x"));
     for (int i = 0; i < n; i++) {
@@ -1343,6 +1362,7 @@ class ProcessingNodeTest {
               new JobStateEntry(JobState.PROCESSING, at, "test", null),
               new JobStateEntry(terminal, at, "test", null)))
           .build();
+      if (terminal == JobState.FAILED) j.setFailureDecision(FailureDecision.finalFailure());
       store.insert(j);
     }
   }
@@ -1523,6 +1543,88 @@ class ProcessingNodeTest {
       Job loaded = store.findById(job.id()).orElseThrow();
       assertThat(loaded.currentState()).isEqualTo(JobState.FAILED);
     });
+  }
+
+  @Test
+  void quarantineRetainsFinalizationThroughTransientStoreFailures() {
+    var saves = new AtomicInteger();
+    var hooks = new AtomicInteger();
+    var failing = new ForwardingJobStore(store) {
+      @Override
+      public void saveAtomic(Job job, long expectedVersion) {
+        if (job.currentState() == JobState.QUARANTINED && saves.getAndIncrement() < 3) {
+          throw new IllegalStateException("transient quarantine outage");
+        }
+        super.saveAtomic(job, expectedVersion);
+      }
+    };
+    var poison = Job.builder()
+        .spec(JobSpec.of("com.example.DoesNotExist"))
+        .concurrencyKey("quarantine-outage")
+        .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+        .build();
+    store.insert(poison);
+    pauseForOrdering();
+    var follower = enqueueHello(
+        EngineTestHandlers.CountingHandler.class,
+        fastConfig.defaultQueue(),
+        "quarantine-outage",
+        ConcurrencyMode.EXCLUSIVE);
+    node = ProcessingNode.builder(failing)
+        .config(fastConfig)
+        .interceptor(new JobInterceptor() {
+          @Override
+          public void onProcessingFailed(
+              Job job, JobExecutionContext context, Throwable cause, FailureCause kind) {
+            if (kind == FailureCause.QUARANTINE) hooks.incrementAndGet();
+          }
+        })
+        .build();
+    node.start();
+    await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+      assertThat(store.findById(poison.id()).orElseThrow().currentState())
+          .isEqualTo(JobState.QUARANTINED);
+      assertThat(store.findById(follower.id()).orElseThrow().currentState())
+          .isEqualTo(JobState.SUCCEEDED);
+      assertThat(hooks).hasValue(1);
+    });
+    assertThat(saves).hasValue(4);
+  }
+
+  @Test
+  void successFailureRetainsFinalizationThroughTransientReloadFailures() {
+    var reads = new AtomicInteger();
+    var rejectedSuccess = new AtomicBoolean();
+    var job = enqueueHello(EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue());
+    var failing = new ForwardingJobStore(store) {
+      @Override
+      public void saveAtomic(Job candidate, long expectedVersion) {
+        if (candidate.currentState() == JobState.SUCCEEDED) {
+          rejectedSuccess.set(true);
+          throw new SerializationException("rejected success snapshot");
+        }
+        super.saveAtomic(candidate, expectedVersion);
+      }
+
+      @Override
+      public Optional<Job> findById(JobId id) {
+        if (rejectedSuccess.get() && reads.getAndIncrement() < 3) {
+          throw new IllegalStateException("transient reload outage");
+        }
+        return super.findById(id);
+      }
+    };
+    node = ProcessingNode.builder(failing)
+        .config(fastConfig.toBuilder().defaultMaxAttempts(1).build())
+        .build();
+    node.start();
+    await()
+        .atMost(Duration.ofSeconds(10))
+        .untilAsserted(() -> assertThat(store.findById(job.id()).orElseThrow().currentState())
+            .isEqualTo(JobState.FAILED));
+    assertThat(reads.get()).isGreaterThanOrEqualTo(4);
+    assertThat(EngineTestHandlers.CountingHandler.COUNT.get(job.id().toString()))
+        .hasValue(1);
   }
 
   @Test

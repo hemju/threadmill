@@ -26,6 +26,7 @@ import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
+import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
  * {@link JobStore} decorator that emits OpenTelemetry spans for store operations.
@@ -266,6 +267,14 @@ public final class TracingJobStore extends ForwardingJobStore {
     return trace("threadmill.store.find_by_handler_signature", span -> {
       span.setAttribute(ThreadmillTracing.HANDLER, handlerType);
       return delegate().findByHandlerSignature(handlerType, max);
+    });
+  }
+
+  @Override
+  public RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after) {
+    return trace("threadmill.store.delete_finished_page", span -> {
+      span.setAttribute(ThreadmillTracing.FINAL_STATE, state.name());
+      return delegate().deleteFinishedPage(cutoff, state, max, after);
     });
   }
 

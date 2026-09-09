@@ -56,6 +56,7 @@ public final class PostgresHarnessFixture implements BackendFixture {
           + "threadmill_dedup_keys, threadmill_concurrency_groups, "
           + "threadmill_concurrency_workflow_holds RESTART IDENTITY CASCADE");
       st.execute("UPDATE threadmill_job_counts SET count = 0");
+      st.execute("TRUNCATE threadmill_queue_counts");
     } catch (SQLException e) {
       throw new JobEngineFatalException(
           "could not truncate Postgres tables before run: " + e.getMessage(), e);

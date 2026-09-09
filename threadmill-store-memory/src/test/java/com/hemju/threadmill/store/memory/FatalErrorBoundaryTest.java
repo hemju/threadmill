@@ -297,7 +297,7 @@ class FatalErrorBoundaryTest {
     var release = new CountDownLatch(1);
     var store = new ForwardingJobStore(inner) {
       @Override
-      public List<CronTask> listCronTasks() {
+      public List<CronTask> scanCronTasks(String after, int max) {
         entered.countDown();
         awaitRelease(release);
         throw new IllegalStateException("wrapped fatal maintenance failure", fatal);

@@ -18,6 +18,13 @@ implementation("com.hemju.threadmill:threadmill-store-postgres:0.3.0")
 // or: implementation("com.hemju.threadmill:threadmill-store-redis:0.3.0")
 ```
 
+The default Spring enqueue mode is `after_commit`: returned ids are reserved
+before persistence, and the job insert can fail after the business transaction
+commits. Observe `AfterCommitEnqueueFailure`, or choose `join_transaction` with
+the same PostgreSQL DataSource for atomic business/job writes. Cross-datastore
+atomicity requires an application-owned durable outbox. See
+[transaction modes](transactions.md#after_commit-default).
+
 ## Handler
 
 ```java
@@ -98,8 +105,10 @@ caller's SQL transaction.
 
 ## Configure A Store
 
-Without durable store configuration Spring creates an in-memory store and logs
-one warning. That is useful locally only.
+Without a configured durable store or an application-provided `JobStore`,
+startup fails. For disposable local development only, explicitly set
+`threadmill.store.memory.enabled=true`; all jobs are lost when that process
+stops. Configure PostgreSQL or Redis for durable work.
 
 ```yaml
 threadmill:

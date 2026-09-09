@@ -96,7 +96,7 @@ enqueue.
 public void scheduleWelcome(UserCreated created) {
     userRepo.save(created.toUser());         // pending write
     jobs.enqueue(SendEmailHandler.class, new SendEmail(...)); // also pending
-    // Both happen — or neither: the job insert fires on afterCommit.
+    // Business commit happens first; the deferred job insert can still fail.
 }
 ```
 
@@ -105,6 +105,15 @@ public void scheduleWelcome(UserCreated created) {
 actual `store.insert(...)` via `TransactionSynchronizationManager`. If no
 synchronisation is active, the insert is immediate — identical to the
 non-Spring path.
+
+A returned id is a reservation. If a deferred insert fails after the business
+commit, Spring publishes `AfterCommitEnqueueFailure`; the scheduler also exposes
+`deferredEnqueueFailureCount()`. The write may have committed before its
+acknowledgement was lost. Observe and reconcile the reserved ids; use
+`join_transaction` with the same PostgreSQL DataSource for atomic business/job
+writes, or a durable outbox across datastores. Deferred submissions are validated
+before returning and bounded to 1,000 jobs / 8 MiB per scheduler and transaction.
+See [transaction semantics](../docs/transactions.md#after_commit-default).
 
 Use immediate writes with:
 

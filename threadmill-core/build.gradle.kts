@@ -19,3 +19,6 @@ dependencies {
     testImplementation(libs.assertj.core)
     testImplementation(libs.slf4j.simple)
 }
+
+// Frozen wire fixtures also travel with the shared store contract.
+sourceSets.test { resources.srcDir("../threadmill-test-support/src/main/resources") }

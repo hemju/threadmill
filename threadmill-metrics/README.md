@@ -62,6 +62,26 @@ no background thread. `metrics.refresh()` waits for any in-flight pull and then
 runs its own pass, so a host-requested refresh observes writes made after the
 earlier pull began.
 
+For a latency-critical scrape endpoint, supply a caller-owned asynchronous
+executor. Gauge reads then return the last snapshot immediately and request at
+most one queued/running refresh. The initial snapshot is also asynchronous, so
+counts begin at zero with snapshot age `-1` until the first successful refresh.
+
+```java
+var refreshExecutor = Executors.newSingleThreadExecutor(
+    Thread.ofVirtual().name("threadmill-metrics-refresh").factory());
+var metrics = new ThreadmillMetrics(
+    registry, backingStore, Duration.ofSeconds(5), 100, refreshExecutor);
+// During application shutdown: refreshExecutor.shutdownNow();
+```
+
+Use a dedicated executor that dispatches work asynchronously; an inline executor
+would execute reads on the scrape thread. Bound datastore connection/command
+waits. Threadmill does not own or shut down the supplied executor, registry or
+store. Rejected submissions mark the snapshot stale, increment refresh errors,
+and honor the refresh cooldown. `metrics.refresh()` remains an explicit blocking
+refresh in both modes.
+
 If a refresh fails, counts and queue depths retain the last successful values;
 age gauges continue advancing from their last known timestamps. The stale
 gauge becomes `1`, the error counter increments once per attempted refresh,
@@ -121,3 +141,15 @@ directly against their `MeterRegistry` bean.
 ```
 ./gradlew :threadmill-metrics:test
 ```
+
+Maintenance exports `threadmill.maintenance.oldest.age{state}` in milliseconds
+(due-time age for `SCHEDULED`, state-entry age otherwise) and
+`threadmill.retention.deleted{kind}` for actual job/dedup deletions through the
+metered store. Ages share the cached store snapshot; recovery and retention
+eligibility require the additional interpretation in [operations](../docs/operations.md).
+
+`threadmill.executions.active` counts tracked local execution contexts;
+`threadmill.executions.unconfirmed` counts exits without a confirmed completion
+notification. Attempt timers use monotonic time and are cleared by the engine's
+cleanup hook even when a stale write skips the ordinary outcome hooks. Recovery
+cannot remove another attempt's timing entry.

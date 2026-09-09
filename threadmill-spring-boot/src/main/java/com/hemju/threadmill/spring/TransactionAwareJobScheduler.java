@@ -1,10 +1,13 @@
 package com.hemju.threadmill.spring;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.LongAdder;
+import java.util.function.Consumer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,7 +21,9 @@ import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.serialization.JobSerializer;
+import com.hemju.threadmill.core.store.BulkInsertBudget;
 import com.hemju.threadmill.core.store.JobStore;
 
 /**
@@ -52,6 +57,11 @@ import com.hemju.threadmill.core.store.JobStore;
  *       or a plain {@code enqueue()} without dedup.</li>
  * </ul>
  *
+ * <p>Deferred submissions are validated before returning, with at most the store
+ * bulk-insert job/byte budget per scheduler and transaction. Unconfirmed writes
+ * increment {@link #deferredEnqueueFailureCount()} and notify the configured observer.
+ * The business commit cannot be rolled back by this observation.
+ *
  * <p>Recurring tasks defined through {@link #enqueueRecurring(Class, JobPayload, String)}
  * are <em>not</em> after-commit deferred — cron-task definitions are
  * configuration, not work, and registering them on rollback would be
@@ -61,12 +71,15 @@ public final class TransactionAwareJobScheduler extends JobScheduler {
 
   private static final Logger LOG = LoggerFactory.getLogger(TransactionAwareJobScheduler.class);
 
+  private final Consumer<AfterCommitEnqueueFailure> failureListener;
+  private final LongAdder deferredEnqueueFailures = new LongAdder();
+
   public TransactionAwareJobScheduler(
       JobStore store,
       JobSerializer serializer,
       ThreadmillJobRegistry registry,
       ProcessingNodeConfig config) {
-    super(store, serializer, registry, config);
+    this(store, serializer, registry, config, new LocalWakeBus());
   }
 
   public TransactionAwareJobScheduler(
@@ -75,7 +88,19 @@ public final class TransactionAwareJobScheduler extends JobScheduler {
       ThreadmillJobRegistry registry,
       ProcessingNodeConfig config,
       LocalWakeBus wakeBus) {
+    this(store, serializer, registry, config, wakeBus, failure -> {});
+  }
+
+  /** Create a scheduler with an observer for unconfirmed after-commit inserts. */
+  public TransactionAwareJobScheduler(
+      JobStore store,
+      JobSerializer serializer,
+      ThreadmillJobRegistry registry,
+      ProcessingNodeConfig config,
+      LocalWakeBus wakeBus,
+      Consumer<AfterCommitEnqueueFailure> failureListener) {
     super(store, serializer, registry, config, wakeBus);
+    this.failureListener = Objects.requireNonNull(failureListener, "failureListener");
   }
 
   @Override
@@ -116,6 +141,7 @@ public final class TransactionAwareJobScheduler extends JobScheduler {
       Class<? extends JobHandler<P>> handler, List<? extends P> payloads) {
     Objects.requireNonNull(payloads, "payloads");
     if (payloads.isEmpty()) return List.of();
+    new BulkInsertBudget(payloads.size(), store.capabilities());
     ThreadmillJobRegistry.Registration registration = null;
     var jobs = new ArrayList<Job>(payloads.size());
     for (P p : payloads) {
@@ -124,27 +150,7 @@ public final class TransactionAwareJobScheduler extends JobScheduler {
     }
     String queueToWake = registration.queue();
     if (TransactionSynchronizationManager.isSynchronizationActive()) {
-      TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-        @Override
-        public void afterCommit() {
-          // Spring invokes after-commit callbacks in a bare loop
-          // with no per-item isolation: a throw here would silently
-          // skip every later-registered synchronization in this
-          // transaction — including other deferred enqueues.
-          // Contain the failure and log the lost jobs loudly; the
-          // business transaction is already durably committed.
-          try {
-            store.insertAll(jobs);
-            wakeBus.wake(queueToWake);
-          } catch (RuntimeException e) {
-            LOG.error(
-                "Threadmill after-commit bulk enqueue failed; {} job(s) were NOT inserted: {}",
-                jobs.size(),
-                jobs.stream().map(j -> j.id().toString()).toList(),
-                e);
-          }
-        }
-      });
+      defer(jobs, () -> store.insertAll(jobs), queueToWake);
     } else {
       store.insertAll(jobs);
       wakeBus.wake(queueToWake);
@@ -190,28 +196,87 @@ public final class TransactionAwareJobScheduler extends JobScheduler {
    */
   private JobId deferredOrImmediate(Job job, String queueToWake) {
     if (TransactionSynchronizationManager.isSynchronizationActive()) {
-      TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
-        @Override
-        public void afterCommit() {
-          // See enqueueAll: per-synchronization isolation so one
-          // failing insert cannot silently cancel every later
-          // deferred enqueue in the same transaction.
-          try {
-            store.insert(job);
-            if (queueToWake != null) wakeBus.wake(queueToWake);
-          } catch (RuntimeException e) {
-            LOG.error(
-                "Threadmill after-commit enqueue failed; job {} ({}) was NOT inserted",
-                job.id(),
-                job.spec().handlerType(),
-                e);
-          }
-        }
-      });
+      defer(List.of(job), () -> store.insert(job), queueToWake);
       return job.id();
     }
     store.insert(job);
     if (queueToWake != null) wakeBus.wake(queueToWake);
     return job.id();
+  }
+
+  /** Number of reserved job ids whose after-commit persistence was unconfirmed. */
+  public long deferredEnqueueFailureCount() {
+    return deferredEnqueueFailures.sum();
+  }
+
+  private void defer(List<Job> jobs, Runnable insert, String queueToWake) {
+    long bytes = 0;
+    for (var job : jobs) {
+      bytes += serializer
+          .serializeJob(job.snapshot(), store.capabilities())
+          .getBytes(StandardCharsets.UTF_8)
+          .length;
+    }
+    DeferredBudget budget = null;
+    for (var synchronization : TransactionSynchronizationManager.getSynchronizations()) {
+      if (synchronization instanceof DeferredBudget candidate && candidate.owner == this) {
+        budget = candidate;
+        break;
+      }
+    }
+    if (budget == null) {
+      budget = new DeferredBudget(this);
+      // Reserve before registering, so a rejected submission has no callback.
+      budget.reserve(jobs.size(), bytes);
+      TransactionSynchronizationManager.registerSynchronization(budget);
+    } else {
+      budget.reserve(jobs.size(), bytes);
+    }
+    var ids = jobs.stream().map(Job::id).toList();
+    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+      @Override
+      public void afterCommit() {
+        try {
+          insert.run();
+        } catch (RuntimeException failure) {
+          deferredEnqueueFailures.add(ids.size());
+          LOG.error(
+              "Threadmill after-commit enqueue failed; persistence is unconfirmed for jobs {}",
+              ids,
+              failure);
+          try {
+            failureListener.accept(new AfterCommitEnqueueFailure(ids, failure));
+          } catch (Throwable observerFailure) {
+            FatalErrors.rethrowIfFatal(observerFailure);
+            LOG.error("Threadmill after-commit failure observer failed", observerFailure);
+          }
+          return;
+        }
+        if (queueToWake != null) wakeBus.wake(queueToWake);
+      }
+    });
+  }
+
+  // Synchronization-scoped, so REQUIRES_NEW suspension cannot borrow an outer budget.
+  private static final class DeferredBudget implements TransactionSynchronization {
+    private final TransactionAwareJobScheduler owner;
+    private int count;
+    private long bytes;
+
+    DeferredBudget(TransactionAwareJobScheduler owner) {
+      this.owner = owner;
+    }
+
+    void reserve(int additionalCount, long additionalBytes) {
+      var capabilities = owner.store.capabilities();
+      if ((long) count + additionalCount > capabilities.maxBulkInsertJobs()
+          || bytes + additionalBytes > capabilities.maxBulkInsertBytes()) {
+        throw new IllegalArgumentException("Deferred enqueue transaction exceeds "
+            + capabilities.maxBulkInsertJobs() + " jobs or " + capabilities.maxBulkInsertBytes()
+            + " serialized bytes; use smaller transactions");
+      }
+      count += additionalCount;
+      bytes += additionalBytes;
+    }
   }
 }

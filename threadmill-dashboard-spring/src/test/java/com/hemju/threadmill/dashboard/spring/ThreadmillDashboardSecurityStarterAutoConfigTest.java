@@ -15,6 +15,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.http.MediaType;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.context.WebApplicationContext;
 
 import com.hemju.threadmill.core.store.JobStore;
@@ -58,20 +60,35 @@ class ThreadmillDashboardSecurityStarterAutoConfigTest {
   }
 
   @Test
-  void unrelatedRoutesRemainOutsideTheThreadmillSecurityChain() throws Exception {
+  void addingDashboardPreservesAuthenticationForExistingHostEndpoints() throws Exception {
     var mvc =
         MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
 
-    mvc.perform(get("/outside-threadmill").accept(MediaType.TEXT_HTML))
-        .andExpect(status().isNotFound());
+    mvc.perform(get("/outside-threadmill").accept(MediaType.APPLICATION_JSON))
+        .andExpect(status().isUnauthorized());
+    mvc.perform(get("/outside-threadmill").with(user("host-user")))
+        .andExpect(status().isOk());
   }
 
   @SpringBootConfiguration
   @EnableAutoConfiguration
   static class TestApp {
     @Bean
+    HostController hostController() {
+      return new HostController();
+    }
+
+    @Bean
     JobStore jobStore() {
       return new InMemoryJobStore();
+    }
+  }
+
+  @RestController
+  static class HostController {
+    @GetMapping("/outside-threadmill")
+    String hostEndpoint() {
+      return "host data";
     }
   }
 }

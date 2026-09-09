@@ -25,6 +25,7 @@ import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
+import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
@@ -32,6 +33,7 @@ import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
+import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
  * Wraps the in-memory store with a fault-injecting delegate so the engine
@@ -114,6 +116,30 @@ class StoreOutageTest {
 
     private void check() {
       if (outage.get()) throw new RuntimeException("store unreachable");
+    }
+
+    @Override
+    public Optional<Instant> oldestMaintenanceAt(JobState state) {
+      check();
+      return delegate.oldestMaintenanceAt(state);
+    }
+
+    @Override
+    public long deleteIdleConcurrencyGroups(int max) {
+      check();
+      return delegate.deleteIdleConcurrencyGroups(max);
+    }
+
+    @Override
+    public List<Job> scanJobs(JobState state, JobId after, int max) {
+      check();
+      return delegate.scanJobs(state, after, max);
+    }
+
+    @Override
+    public List<CronTask> scanCronTasks(String after, int max) {
+      check();
+      return delegate.scanCronTasks(after, max);
     }
 
     @Override
@@ -324,6 +350,12 @@ class StoreOutageTest {
     public List<Job> findByHandlerSignature(String handlerType, int max) {
       check();
       return delegate.findByHandlerSignature(handlerType, max);
+    }
+
+    @Override
+    public RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after) {
+      check();
+      return delegate.deleteFinishedPage(cutoff, state, max, after);
     }
 
     @Override

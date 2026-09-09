@@ -20,6 +20,25 @@ public final class ReflectiveJobHandlerResolver implements JobHandlerResolver {
 
   private final Map<String, JobHandler<?>> cache = new ConcurrentHashMap<>();
 
+  private final ClassLoader classLoader;
+
+  /** Capture the constructing thread's application loader for this resolver's lifetime. */
+  public ReflectiveJobHandlerResolver() {
+    this(Objects.requireNonNullElse(
+        Thread.currentThread().getContextClassLoader(),
+        ReflectiveJobHandlerResolver.class.getClassLoader()));
+  }
+
+  /** Resolve both handler and payload types through an explicit application loader. */
+  public ReflectiveJobHandlerResolver(ClassLoader classLoader) {
+    this.classLoader = Objects.requireNonNull(classLoader, "classLoader");
+  }
+
+  @Override
+  public ClassLoader classLoader() {
+    return classLoader;
+  }
+
   @Override
   public JobHandler<?> resolve(String handlerTypeName) throws HandlerResolutionException {
     Objects.requireNonNull(handlerTypeName, "handlerTypeName");
@@ -31,7 +50,7 @@ public final class ReflectiveJobHandlerResolver implements JobHandlerResolver {
       // producer-controlled persisted data; loading it with the
       // initializing Class.forName(String) would let a job producer trigger
       // an arbitrary classpath class's <clinit> side effects on a worker.
-      Class<?> klass = Class.forName(handlerTypeName, false, getClass().getClassLoader());
+      Class<?> klass = Class.forName(handlerTypeName, false, classLoader);
       if (!JobHandler.class.isAssignableFrom(klass)) {
         throw new HandlerResolutionException(
             "Type " + handlerTypeName + " does not implement JobHandler");

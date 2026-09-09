@@ -48,6 +48,9 @@ public interface JobSerializer {
    *       {@link JobStoreCapabilities#maxFailureMetadataBytes()} bytes,
    *       preserving the leading content and appending a truncation
    *       sentinel.</li>
+   *   <li>Reserves lifecycle space for initial jobs and bounds progress text.
+   *       Attempted jobs may compact optional diagnostics further to fit the
+   *       actual encoded size without changing the work description.</li>
    *   <li>Then enforces the overall
    *       {@link JobStoreCapabilities#maxSerializedJobBytes()} cap; if the
    *       truncated body still exceeds the cap (e.g. a metadata explosion),

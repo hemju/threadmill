@@ -2,14 +2,17 @@ package com.hemju.threadmill.metrics;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -35,7 +38,9 @@ import com.hemju.threadmill.core.store.JobStore;
  * the configured refresh interval reloads one atomic snapshot from the store.
  * This keeps gauges current while processing is stalled or queues are paused,
  * without a background thread or a store read per meter. A failed refresh
- * retains the last successful snapshot and marks it stale.
+ * retains the last successful snapshot and marks it stale. A caller-owned
+ * asynchronous executor can move refresh work off the scrape thread; snapshots
+ * then update after the scrape returns.
  *
  * <p>Register the {@link #asInterceptor()} return value with the
  * {@code ProcessingNode.Builder} for job lifecycle meters. Use the
@@ -58,6 +63,8 @@ public final class ThreadmillMetrics {
   private final JobStore meteredStore;
   private final long refreshIntervalNanos;
   private final int maxQueueTags;
+  private final Executor refreshExecutor;
+  private final AtomicBoolean refreshQueued = new AtomicBoolean();
   private final AtomicReference<StoreSnapshot> snapshot =
       new AtomicReference<>(StoreSnapshot.empty());
   private final AtomicBoolean snapshotStale = new AtomicBoolean(true);
@@ -65,6 +72,8 @@ public final class ThreadmillMetrics {
   private final AtomicInteger consecutiveRefreshFailures = new AtomicInteger();
   private final AtomicInteger consecutiveMeterFailures = new AtomicInteger();
   private final Map<String, QueueMeters> queueMeters = new ConcurrentHashMap<>();
+  private final Map<String, Counter> retentionCounters = new ConcurrentHashMap<>();
+  private final Counter unconfirmedCounter;
   private final Counter processedCounter;
   private final Counter refreshErrors;
   private final Counter meterReconciliationErrors;
@@ -75,7 +84,8 @@ public final class ThreadmillMetrics {
   private final Map<String, Counter> rejectedWriteCounters = new ConcurrentHashMap<>();
   private final Timer processingTime;
   private final Timer claimLatency;
-  private final ConcurrentHashMap<String, Instant> inFlightStart = new ConcurrentHashMap<>();
+  private final Map<JobExecutionContext, Long> inFlightStart =
+      Collections.synchronizedMap(new IdentityHashMap<>());
 
   private volatile long lastRefreshNanos = Long.MIN_VALUE;
 
@@ -94,6 +104,25 @@ public final class ThreadmillMetrics {
    */
   public ThreadmillMetrics(
       MeterRegistry registry, JobStore store, Duration refreshInterval, int maxQueueTags) {
+    this(registry, store, refreshInterval, maxQueueTags, null);
+  }
+
+  /**
+   * Create metrics whose gauge-triggered refreshes run on a caller-owned executor.
+   * At most one refresh task is queued or running per metrics instance. The
+   * executor must dispatch asynchronously (not execute inline); use a dedicated
+   * executor with bounded datastore timeouts. Null selects synchronous pull-through
+   * behavior. Construction also schedules the initial refresh in asynchronous mode.
+   * Explicit {@link #refresh()} remains synchronous. Threadmill never shuts down
+   * the supplied executor, store or registry.
+   */
+  public ThreadmillMetrics(
+      MeterRegistry registry,
+      JobStore store,
+      Duration refreshInterval,
+      int maxQueueTags,
+      Executor refreshExecutor) {
+    this.refreshExecutor = refreshExecutor;
     this.registry = Objects.requireNonNull(registry, "registry");
     this.store = Objects.requireNonNull(store, "store");
     Objects.requireNonNull(refreshInterval, "refreshInterval");
@@ -107,6 +136,9 @@ public final class ThreadmillMetrics {
     this.maxQueueTags = maxQueueTags;
     this.meteredStore = new MeteredJobStore(store, this);
 
+    this.unconfirmedCounter = Counter.builder("threadmill.executions.unconfirmed")
+        .description("Execution exits without a confirmed success/failure notification")
+        .register(registry);
     this.processedCounter = Counter.builder("threadmill.jobs.processed")
         .description("Total successfully-processed Threadmill jobs since startup")
         .register(registry);
@@ -129,9 +161,24 @@ public final class ThreadmillMetrics {
         .description("Wall-clock time spent in JobStore claimReady calls")
         .register(registry);
 
+    Gauge.builder("threadmill.executions.active", inFlightStart, Map::size)
+        .description("Locally tracked execution attempts awaiting completion or cleanup")
+        .strongReference(true)
+        .register(registry);
+
     // Register gauges only after every field their callbacks can reach has
     // been assigned. Registries may read a gauge from an onMeterAdded hook.
     for (var state : JobState.values()) {
+      Gauge.builder("threadmill.maintenance.oldest.age", this, metrics -> {
+            metrics.refreshThrottled();
+            return ageMillis(
+                metrics.snapshot.get().oldestMaintenance.getOrDefault(state, Optional.empty()));
+          })
+          .tag("state", state.name())
+          .description(
+              "Oldest due-time age for SCHEDULED; state-entry age otherwise, in milliseconds")
+          .strongReference(true)
+          .register(registry);
       Gauge.builder("threadmill.jobs.count", this, metrics -> metrics.stateCount(state))
           .tag("state", state.name())
           .description("Number of Threadmill jobs in this state")
@@ -159,7 +206,8 @@ public final class ThreadmillMetrics {
         .description("Active queues omitted because the configured queue-tag cap was reached")
         .strongReference(true)
         .register(registry);
-    refresh();
+    if (refreshExecutor == null) refresh();
+    else refreshThrottled();
   }
 
   /**
@@ -202,8 +250,11 @@ public final class ThreadmillMetrics {
       for (var queue : selectedQueues) {
         queues.put(queue, new QueueSnapshot(depths.get(queue), store.oldestEnqueuedAt(queue)));
       }
+      var oldest = new EnumMap<JobState, Optional<Instant>>(JobState.class);
+      for (var state : JobState.values()) oldest.put(state, store.oldestMaintenanceAt(state));
       var refreshed = new StoreSnapshot(
           Map.copyOf(counts),
+          Map.copyOf(oldest),
           Map.copyOf(queues),
           store.oldestProcessingHeartbeat(),
           Instant.now(),
@@ -288,6 +339,29 @@ public final class ThreadmillMetrics {
   }
 
   private void refreshThrottled() {
+    if (refreshExecutor == null) {
+      refreshOnCurrentThread();
+      return;
+    }
+    if (!refreshDue(System.nanoTime(), lastRefreshNanos)
+        || !refreshQueued.compareAndSet(false, true)) return;
+    try {
+      refreshExecutor.execute(() -> {
+        try {
+          refreshOnCurrentThread();
+        } finally {
+          refreshQueued.set(false);
+        }
+      });
+    } catch (RuntimeException rejected) {
+      lastRefreshNanos = System.nanoTime();
+      snapshotStale.set(true);
+      refreshErrors.increment();
+      refreshQueued.set(false);
+    }
+  }
+
+  private void refreshOnCurrentThread() {
     if (refreshLock.isHeldByCurrentThread()) {
       // A registry callback can read a gauge while reconcileQueueMeters is
       // still registering it. tryLock() would succeed for the holder, and the
@@ -375,6 +449,18 @@ public final class ThreadmillMetrics {
     claimFailures.increment();
   }
 
+  void recordRetention(String kind, long count) {
+    if (count <= 0) return;
+    retentionCounters
+        .computeIfAbsent(
+            kind,
+            value -> Counter.builder("threadmill.retention.deleted")
+                .tag("kind", value)
+                .description("Records deleted by retention since startup")
+                .register(registry))
+        .increment(count);
+  }
+
   void recordRejectedWrite(String operation) {
     rejectedWriteCounters
         .computeIfAbsent(
@@ -409,7 +495,7 @@ public final class ThreadmillMetrics {
     return new JobInterceptor() {
       @Override
       public void onProcessingStarting(Job job, JobExecutionContext ctx) {
-        inFlightStart.put(job.id().toString(), Instant.now());
+        if (ctx != null) inFlightStart.putIfAbsent(ctx, System.nanoTime());
         // This hook fires once per attempt, but the meter counts recurring
         // instances so retries cannot distort the trigger-origin ratio.
         if (job.attempts() <= 1) {
@@ -422,7 +508,7 @@ public final class ThreadmillMetrics {
       @Override
       public void onProcessingSucceeded(Job job, JobExecutionContext ctx) {
         processedCounter.increment();
-        recordElapsed(job);
+        recordElapsed(ctx);
       }
 
       @Override
@@ -437,16 +523,21 @@ public final class ThreadmillMetrics {
         if (kind == FailureCause.ORPHAN_RECLAIM) {
           orphanReclaims.increment();
         }
-        recordElapsed(job);
+        recordElapsed(ctx);
+      }
+
+      @Override
+      public void onProcessingFinished(Job job, JobExecutionContext ctx) {
+        if (recordElapsed(ctx)) unconfirmedCounter.increment();
       }
     };
   }
 
-  private void recordElapsed(Job job) {
-    var started = inFlightStart.remove(job.id().toString());
-    if (started != null) {
-      processingTime.record(Duration.between(started, Instant.now()));
-    }
+  private boolean recordElapsed(JobExecutionContext ctx) {
+    var started = inFlightStart.remove(ctx);
+    if (started == null) return false;
+    processingTime.record(Duration.ofNanos(System.nanoTime() - started));
+    return true;
   }
 
   private record QueueMeters(Gauge depth, Gauge oldestAge) {}
@@ -455,13 +546,14 @@ public final class ThreadmillMetrics {
 
   private record StoreSnapshot(
       Map<JobState, Long> counts,
+      Map<JobState, Optional<Instant>> oldestMaintenance,
       Map<String, QueueSnapshot> queues,
       Optional<Instant> oldestProcessingHeartbeat,
       Instant refreshedAt,
       int omittedQueueTags) {
 
     private static StoreSnapshot empty() {
-      return new StoreSnapshot(Map.of(), Map.of(), Optional.empty(), null, 0);
+      return new StoreSnapshot(Map.of(), Map.of(), Map.of(), Optional.empty(), null, 0);
     }
   }
 }

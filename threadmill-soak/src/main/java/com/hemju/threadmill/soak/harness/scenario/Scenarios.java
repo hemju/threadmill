@@ -5,7 +5,7 @@ import java.util.Map;
 import java.util.function.Supplier;
 
 /**
- * Registry of the nine scenarios shipped with the harness. New scenarios
+ * Registry of the scenarios shipped with the harness. New scenarios
  * are added by dropping a class into this package and registering it here.
  */
 public final class Scenarios {
@@ -22,6 +22,7 @@ public final class Scenarios {
     REGISTRY.put("bulk-enqueue", BulkEnqueueScenario::new);
     REGISTRY.put("crash-recover", CrashRecoverScenario::new);
     REGISTRY.put("nudge-pump", NudgePumpScenario::new);
+    REGISTRY.put("retention-churn", RetentionChurnScenario::new);
   }
 
   private Scenarios() {}

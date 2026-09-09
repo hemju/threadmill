@@ -81,8 +81,8 @@ The harness is distinct from:
 |---|---|---|
 | `-Pscenario=<name>` | `mixed-workload` | Which scenario to run. |
 | `-Pduration=<duration>` | `120s` | Wall-clock time the load generator runs (`90ms` / `30s` / `5m` / `8h`). |
-| `-PjobsPerSecond=<int>` | `100` | Target enqueue rate for the whole run (split across producers). Real backends typically take 2–4× this; tune via `-P`. |
-| `-Pproducers=<int>` | `1` | Concurrent producer threads. A single producer is capped by synchronous enqueue latency (~13/s on Postgres on a laptop); stress runs want 10+. `crash-recover` and `pause-resume` reject >1. |
+| `-PjobsPerSecond=<int>` | `100` | Target enqueue rate for the whole run (split across producers). Pacing waits until each deadline; achieved rate is bounded by store capacity. |
+| `-Pproducers=<int>` | `1` | Concurrent producer threads. Synchronous enqueue latency limits each producer. `crash-recover`, `pause-resume`, and `retention-churn` reject >1. |
 | `-PworkerCount=<int>` | `8` | Workers per node. |
 | `-Pnodes=<int>` | `1` | How many `ProcessingNode`s in the same JVM. |
 | `-PnodeChurn=<duration>` | off | Close-and-replace one node every interval (requires `-Pnodes=2`+). |
@@ -92,7 +92,7 @@ The harness is distinct from:
 | `-PprogressInterval=<duration>` | `30s` | How often `progress.json` is rewritten. |
 | `-PpostgresUrl=<jdbc>` | unset → Testcontainers | External JDBC URL alternative. |
 | `-PredisUrl=<redis://…>` | unset → Testcontainers | External Redis alternative. Only the `{threadmill}:*` namespace is reset — never `FLUSHDB`. |
-| `-PredisTopology=<topology>` | `standalone` | v1 supports `standalone` only. |
+| `-PredisTopology=<topology>` | `standalone` | `standalone`; `sentinel`/`cluster` require an external topology URL. |
 | `-Pforce=<bool>` | `false` | Allow overwriting an existing `-PoutputDir`. |
 
 ### Live verification, `progress.json`, and fail-fast
@@ -136,6 +136,7 @@ result.
 
 | Scenario | Description |
 |---|---|
+| `retention-churn` | 10-second retention, fresh concurrency/dedup keys, 8 KiB payloads, deterministic retries and workflows; one producer. |
 | `mixed-workload` (default) | 20 resources × EXCLUSIVE imports + SHARED exports over a queue-family lane. |
 | `rw-lock-stress` | Single concurrency key, 95% SHARED + 5% EXCLUSIVE — strict in-group order check. |
 | `weighted-queues` | Three queues with 10:3:1 weighting under one queue-family lane. |
@@ -155,7 +156,7 @@ Each run writes ten files. The brief one-liner:
 - `progress.json` — live status while the run is underway (phase, counts, invariant snapshot).
 - `trace.jsonl` — every lifecycle event, JSON-lines.
 - `lock-events.jsonl` — derived from trace; one row per acquire/release pair with hold duration.
-- `metrics.jsonl` — once-per-second snapshots of queue depths, per-state counts, in-flight.
+- `metrics.jsonl` — one-second state/depth/age/heap snapshots, bounded dashboard-shaped polling, recent operation p50/p95/p99 timings (4,096 samples), cumulative failures, and actual job/group deletions.
 - `latencies.jsonl` — per-job timings for the four lifecycle stages.
 - `invariants.json` — invariant check results (also embedded in `summary.json`).
 - `config.json` — the run's effective configuration.
@@ -318,3 +319,13 @@ The harness's *output-contract* tests — invariant-violation, summary-schema,
 and a fast in-memory smoke — are untagged and run in every `check`. They
 guarantee a regression that breaks the harness's output shape can't sneak
 in without CI noticing.
+
+## 1.0 qualification
+
+Follow the [separate PostgreSQL and Redis soak plans](../docs/soak-plan-1.0.md)
+for 12-hour history-growth and 12-hour retention phases, baseline comparisons,
+fault schedules, topology runs, and acceptance thresholds. The plan is not
+completed endurance evidence. External Sentinel uses a Lettuce Sentinel URI;
+Cluster uses comma-separated data-node URIs with matching credentials/TLS.
+Use the per-backend `soakRedis` task for these external topologies;
+`soakEndurance` retains its standalone Redis configuration.

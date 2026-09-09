@@ -8,7 +8,7 @@ import {
   ShieldAlert,
   Trash2
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ColumnDef,
   flexRender,
@@ -70,14 +70,36 @@ export default function App() {
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const [pending, setPending] = useState(false);
+  const mutationPending = useRef(false);
+  const mounted = useRef(true);
+  const loadGeneration = useRef(0);
+  const loadController = useRef<AbortController | null>(null);
+  const detailGeneration = useRef(0);
+  const detailController = useRef<AbortController | null>(null);
+  const selectedId = useRef<string | null>(null);
+  const view = useRef({ offset: 0, filter: "", state: "ENQUEUED" });
+
+  function clearSelection() {
+    selectedId.current = null;
+    detailGeneration.current++;
+    detailController.current?.abort();
+    setSelected(null);
+  }
+
   async function load(
-    requestedOffset = offset,
-    requestedFilter = submittedFilter,
-    requestedState = state
+    requestedOffset = view.current.offset,
+    requestedFilter = view.current.filter,
+    requestedState = view.current.state
   ) {
+    view.current = { offset: requestedOffset, filter: requestedFilter, state: requestedState };
+    const generation = ++loadGeneration.current;
+    loadController.current?.abort();
+    const controller = new AbortController();
+    loadController.current = controller;
     try {
-      const nextSession = await api<Session>("/session");
-      setSession(nextSession);
+      const nextSession = await api<Session>("/session", { signal: controller.signal });
+      if (!mounted.current || generation !== loadGeneration.current) return;
       const query = new URLSearchParams();
       if (requestedState) query.set("state", requestedState);
       if (overview?.capabilities.supportsRichSearch && requestedFilter) {
@@ -85,46 +107,72 @@ export default function App() {
       }
       query.set("limit", PAGE_SIZE.toString());
       query.set("offset", requestedOffset.toString());
+      const init = { signal: controller.signal };
       const [nextOverview, nextJobs, nextQueues] = await Promise.all([
-        api<Overview>("/overview", {}, nextSession),
-        api<JobList>(`/jobs?${query}`, {}, nextSession),
-        api<QueueView[]>("/queues", {}, nextSession)
+        api<Overview>("/overview", init, nextSession),
+        api<JobList>(`/jobs?${query}`, init, nextSession),
+        api<QueueView[]>("/queues", init, nextSession)
       ]);
+      if (!mounted.current || generation !== loadGeneration.current) return;
+      setSession(nextSession);
       setOverview(nextOverview);
       setJobs(nextJobs);
       setQueues(nextQueues);
       setOffset(nextJobs.offset);
+      view.current.offset = nextJobs.offset;
       setSubmittedFilter(requestedFilter);
       setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Dashboard request failed");
+      if (mounted.current && generation === loadGeneration.current && !controller.signal.aborted) {
+        setError(e instanceof Error ? e.message : "Dashboard request failed");
+      }
     }
   }
 
   async function mutate(path: string, init: RequestInit, success: string) {
-    if (!session) return;
+    if (!session || mutationPending.current) return;
+    mutationPending.current = true;
+    setPending(true);
     try {
       const response = await api<ActionResponse>(path, init, session);
+      if (!mounted.current) return;
       setMessage(`${success}: ${response.target}`);
       setError(null);
-      await load(offset, submittedFilter);
-      if (selected) {
-        setSelected(await api<JobDetail>(`/jobs/${selected.summary.id}`, {}, session));
-      }
+      await load();
+      if (mounted.current && selectedId.current) await openJobId(selectedId.current);
     } catch (e) {
-      setMessage(null);
-      setError(e instanceof Error ? e.message : "Mutation failed");
+      if (mounted.current) {
+        setMessage(null);
+        setError(e instanceof Error ? e.message : "Mutation failed");
+      }
+    } finally {
+      mutationPending.current = false;
+      if (mounted.current) setPending(false);
+    }
+  }
+
+  async function openJobId(id: string) {
+    if (!session) return;
+    selectedId.current = id;
+    const generation = ++detailGeneration.current;
+    detailController.current?.abort();
+    const controller = new AbortController();
+    detailController.current = controller;
+    setSelected(null);
+    try {
+      const detail = await api<JobDetail>(`/jobs/${id}`, { signal: controller.signal }, session);
+      if (!mounted.current || generation !== detailGeneration.current) return;
+      setSelected(detail);
+      setError(null);
+    } catch (e) {
+      if (mounted.current && generation === detailGeneration.current && !controller.signal.aborted) {
+        setError(e instanceof Error ? e.message : "Job detail request failed");
+      }
     }
   }
 
   async function openJob(job: JobSummary) {
-    if (!session) return;
-    try {
-      setSelected(await api<JobDetail>(`/jobs/${job.id}`, {}, session));
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Job detail request failed");
-    }
+    await openJobId(job.id);
   }
 
   async function requeue(job: JobSummary) {
@@ -220,7 +268,15 @@ export default function App() {
   }
 
   useEffect(() => {
+    mounted.current = true;
     void load(0, submittedFilter, state);
+    return () => {
+      mounted.current = false;
+      loadGeneration.current++;
+      detailGeneration.current++;
+      loadController.current?.abort();
+      detailController.current?.abort();
+    };
   }, []);
 
   const total = useMemo(
@@ -273,7 +329,7 @@ export default function App() {
               <Button
                 variant="ghost"
                 size="icon"
-                disabled={!has(session, "REQUEUE_JOB") || !canRequeue(job)}
+                disabled={pending || !has(session, "REQUEUE_JOB") || !canRequeue(job)}
                 aria-label="Requeue"
                 onClick={() => void requeue(job)}
               >
@@ -282,7 +338,7 @@ export default function App() {
               <Button
                 variant="ghost"
                 size="icon"
-                disabled={!has(session, "REQUEUE_JOB") || job.state !== "FAILED"}
+                disabled={pending || !has(session, "REQUEUE_JOB") || job.state !== "FAILED"}
                 aria-label="Retry"
                 onClick={() => void retry(job)}
               >
@@ -291,7 +347,7 @@ export default function App() {
               <Button
                 variant="ghost"
                 size="icon"
-                disabled={!has(session, "REPLACE_JOB") || !canReplace(job)}
+                disabled={pending || !has(session, "REPLACE_JOB") || !canReplace(job)}
                 aria-label="Replace"
                 onClick={() => void replaceJob(job)}
               >
@@ -300,7 +356,7 @@ export default function App() {
               <Button
                 variant="ghost"
                 size="icon"
-                disabled={!has(session, "DELETE_JOB")}
+                disabled={pending || !has(session, "DELETE_JOB")}
                 aria-label="Delete"
                 onClick={() => void deleteJob(job)}
               >
@@ -311,7 +367,7 @@ export default function App() {
         }
       }
     ],
-    [session, selected, offset, submittedFilter, state]
+    [session, selected, offset, submittedFilter, state, pending]
   );
 
   const table = useReactTable({ data: jobs.jobs, columns, getCoreRowModel: getCoreRowModel() });
@@ -344,7 +400,7 @@ export default function App() {
               disabled={!richSearch}
               onClick={() => {
                 setState("");
-                setSelected(null);
+                clearSelection();
                 void load(0, submittedFilter, "");
               }}
             >
@@ -357,7 +413,7 @@ export default function App() {
                 key={s}
                 onClick={() => {
                   setState(s);
-                  setSelected(null);
+                  clearSelection();
                   void load(0, submittedFilter, s);
                 }}
               >
@@ -388,7 +444,7 @@ export default function App() {
               onChange={(event) => setFilter(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
-                  setSelected(null);
+                  clearSelection();
                   void load(0, filter);
                 }
               }}
@@ -444,7 +500,7 @@ export default function App() {
               disabled={offset === 0}
               aria-label="Previous page"
               onClick={() => {
-                setSelected(null);
+                clearSelection();
                 void load(Math.max(0, offset - PAGE_SIZE), submittedFilter);
               }}
             >
@@ -455,7 +511,7 @@ export default function App() {
               disabled={jobs.jobs.length === 0 || jobs.jobs.length < PAGE_SIZE}
               aria-label="Next page"
               onClick={() => {
-                setSelected(null);
+                clearSelection();
                 void load(offset + PAGE_SIZE, submittedFilter);
               }}
             >
@@ -473,14 +529,14 @@ export default function App() {
                 <div className="mt-2 flex gap-2">
                   <Button
                     variant="secondary"
-                    disabled={!has(session, "PAUSE_QUEUE") || queue.paused}
+                    disabled={pending || !has(session, "PAUSE_QUEUE") || queue.paused}
                     onClick={() => void pauseQueue(queue)}
                   >
                     <Pause className="h-4 w-4" /> Pause
                   </Button>
                   <Button
                     variant="secondary"
-                    disabled={!has(session, "RESUME_QUEUE") || !queue.paused}
+                    disabled={pending || !has(session, "RESUME_QUEUE") || !queue.paused}
                     onClick={() => void resumeQueue(queue)}
                   >
                     <Play className="h-4 w-4" /> Resume
@@ -512,7 +568,7 @@ export default function App() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      disabled={!has(session, "TRIGGER_RECURRING")}
+                      disabled={pending || !has(session, "TRIGGER_RECURRING")}
                       aria-label="Trigger recurring"
                       onClick={() => void triggerRecurring(task.name)}
                     >
@@ -521,7 +577,7 @@ export default function App() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      disabled={!has(session, "UPDATE_RECURRING")}
+                      disabled={pending || !has(session, "UPDATE_RECURRING")}
                       aria-label="Edit recurring"
                       onClick={() => void updateRecurring(task.name)}
                     >
@@ -530,7 +586,7 @@ export default function App() {
                     <Button
                       variant="ghost"
                       size="icon"
-                      disabled={!has(session, "DELETE_RECURRING")}
+                      disabled={pending || !has(session, "DELETE_RECURRING")}
                       aria-label="Delete recurring"
                       onClick={() => void deleteRecurring(task.name)}
                     >
@@ -580,9 +636,13 @@ export default function App() {
                 <div className="mb-1 text-xs font-semibold uppercase text-muted-foreground">History</div>
                 <div className="space-y-1">
                   {selected.stateHistory.map((entry) => (
-                    <div className="flex justify-between gap-2 text-xs" key={`${entry.state}-${entry.at}`}>
-                      <span>{entry.state}</span>
-                      <span className="font-mono text-muted-foreground">{entry.at}</span>
+                    <div className="space-y-1 text-xs" key={`${entry.state}-${entry.at}`}>
+                      <div className="flex justify-between gap-2">
+                        <span>{entry.state}</span>
+                        <span className="font-mono text-muted-foreground">{entry.at}</span>
+                      </div>
+                      {entry.reason ? <div>{entry.reason}</div> : null}
+                      {entry.message ? <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words">{entry.message}</pre> : null}
                     </div>
                   ))}
                 </div>

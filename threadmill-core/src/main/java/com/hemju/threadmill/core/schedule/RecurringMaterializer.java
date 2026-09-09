@@ -94,6 +94,7 @@ public final class RecurringMaterializer {
 
   private final JobStore store;
   private final LocalWakeBus wakeBus;
+  private String scanAfter;
 
   public RecurringMaterializer(JobStore store) {
     this(store, new LocalWakeBus());
@@ -104,10 +105,16 @@ public final class RecurringMaterializer {
     this.wakeBus = Objects.requireNonNull(wakeBus, "wakeBus");
   }
 
-  /** Examine every cron task; for those due, materialize new instances per policy. */
+  /** Resume a page of at most 64 definitions, yielding between tasks after 200 ms. */
   public void tick(Instant now) {
-    List<CronTask> tasks = store.listCronTasks();
+    int limit = 64;
+    List<CronTask> tasks = store.scanCronTasks(scanAfter, limit);
+    long deadline = System.nanoTime() + 200_000_000L;
+    int inspected = 0;
     for (CronTask task : tasks) {
+      if (inspected > 0 && System.nanoTime() >= deadline) break;
+      scanAfter = task.name();
+      inspected++;
       if (!task.enabled()) continue;
       try {
         tickOne(task, now);
@@ -116,6 +123,7 @@ public final class RecurringMaterializer {
         LOG.warn("Recurring tick failed for task {}", task.name(), t);
       }
     }
+    if (inspected == tasks.size() && tasks.size() < limit) scanAfter = null;
   }
 
   private void tickOne(CronTask task, Instant now) {
@@ -291,23 +299,19 @@ public final class RecurringMaterializer {
    * alongside a retrying one. Treating every FAILED as blocking would let a
    * retry-exhausted instance deadlock the task forever.
    *
-   * <p>So FAILED blocks only while it is <em>plausibly</em> mid-handoff:
-   * the retry budget is not provably spent <strong>and</strong> the failure
-   * is younger than {@link #FAILED_RETRY_HANDOFF_GRACE}. Both halves carry
-   * weight. The budget test alone is only approximate, because the
-   * effective ceiling depends on the exception that caused the failure
-   * (per-exception-type policies are registered on the interceptor and are
-   * not readable from the job), so a job that is genuinely terminal under a
-   * stricter policy looks budget-remaining here; the age bound is what
-   * stops that job from blocking its task until
-   * {@link RetryInterceptor#recoverStrandedFailures} happens to reach it.
-   * The budget test in turn keeps the common terminal failure from delaying
-   * the next run at all.
+   * <p>New failures persist the effective retry decision alongside FAILED:
+   * a pending retry blocks until it is recovered, and a final failure never
+   * blocks. Legacy records without that decision retain the bounded age and
+   * per-job budget heuristic below; their exception-specific policy cannot
+   * be reconstructed from the old wire format.
    */
   private static boolean blocksNextMaterialization(Job inFlight, Instant now) {
     JobState current = inFlight.currentState();
     if (current != JobState.FAILED) {
       return !current.isTerminal();
+    }
+    if (inFlight.failureDecision().isPresent()) {
+      return inFlight.failureDecision().orElseThrow().willRetry();
     }
     if (retryBudgetProvablySpent(inFlight)) return false;
     List<JobStateEntry> history = inFlight.stateHistory();
@@ -338,8 +342,8 @@ public final class RecurringMaterializer {
    * The most recent nominal fire time at or before {@code now}, starting
    * from the (overdue) {@code overdueFire}. Intervals are computed
    * arithmetically so a tiny interval with a huge backlog cannot spin the
-   * maintenance thread; cron triggers step fire-by-fire, which is bounded
-   * by one iteration per missed firing (cron granularity is one minute).
+   * maintenance thread; cron triggers use a reverse calendar search rather
+   * than visiting every missed firing.
    */
   private static Instant latestFireAtOrBefore(CronTask task, Instant overdueFire, Instant now) {
     return switch (task.trigger()) {
@@ -347,15 +351,7 @@ public final class RecurringMaterializer {
         long missed = Duration.between(overdueFire, now).dividedBy(interval.interval());
         yield overdueFire.plus(interval.interval().multipliedBy(missed));
       }
-      case CronTask.Trigger.CronExpr cron -> {
-        Instant fire = overdueFire;
-        Instant next = task.trigger().nextAfter(fire, task.zone());
-        while (!next.isAfter(now)) {
-          fire = next;
-          next = task.trigger().nextAfter(fire, task.zone());
-        }
-        yield fire;
-      }
+      case CronTask.Trigger.CronExpr cron -> cron.expression().previousOrSame(now, task.zone());
     };
   }
 

@@ -36,6 +36,7 @@ public final class SoakRunContext {
   private final Instant runStart;
   private final Supplier<List<ProcessingNode>> nodesSupplier;
   private final AtomicBoolean abortRequested;
+  private final long deadlineNanos;
 
   public SoakRunContext(
       SoakHarnessConfig config,
@@ -59,6 +60,7 @@ public final class SoakRunContext {
     this.runStart = Objects.requireNonNull(runStart, "runStart");
     this.nodesSupplier = Objects.requireNonNull(nodesSupplier, "nodesSupplier");
     this.abortRequested = Objects.requireNonNull(abortRequested, "abortRequested");
+    this.deadlineNanos = System.nanoTime() + config.duration().toNanos();
   }
 
   public SoakHarnessConfig config() {
@@ -82,13 +84,17 @@ public final class SoakRunContext {
   }
 
   /**
-   * The instant the producer loop should stop. Once an abort is requested
+   * A wall-clock view of the monotonic workload deadline, measured from
+   * context creation after node setup. Clock adjustments cannot shorten the
+   * configured elapsed duration. Once an abort is requested
    * this returns {@link Instant#MIN}, so the loop's next
    * {@code Instant.now().isBefore(...)} check exits immediately.
    */
   public Instant runDeadline() {
     if (abortRequested.get()) return Instant.MIN;
-    return runStart.plus(config.duration());
+    long remaining = deadlineNanos - System.nanoTime();
+    if (remaining <= 0) return Instant.MIN;
+    return Instant.now().plusNanos(remaining);
   }
 
   /** True once the harness has requested an early abort (fail-fast). */

@@ -28,7 +28,7 @@ import com.hemju.threadmill.store.redis.RedisJobStore;
 final class NudgeSimulationStores {
 
   private static final String POSTGRES_IMAGE = "postgres:18-alpine";
-  private static final String REDIS_IMAGE = "redis:7-alpine";
+  private static final String REDIS_IMAGE = "redis:7.4-alpine";
   private static final String REDIS_DRAIN_SCRIPT =
       "local values = redis.call('SMEMBERS', KEYS[1]); "
           + "if #values > 0 then redis.call('DEL', KEYS[1]); end; return values";

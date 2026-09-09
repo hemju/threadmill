@@ -28,16 +28,20 @@ import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.serialization.SerializationException;
+import com.hemju.threadmill.core.store.BulkInsertBudget;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
+import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
  * Concurrency-safe in-memory {@link JobStore}.
@@ -202,6 +206,7 @@ public final class InMemoryJobStore implements JobStore {
   public List<JobId> insertAll(List<Job> jobsToInsert) {
     Objects.requireNonNull(jobsToInsert, "jobs");
     if (jobsToInsert.isEmpty()) return List.of();
+    var budget = new BulkInsertBudget(jobsToInsert.size(), capabilities);
 
     // Phase 1 — serialize every job first so a single OversizedJobException
     // rejects the whole batch before any state changes.
@@ -211,6 +216,7 @@ public final class InMemoryJobStore implements JobStore {
       Names.requireName("queue", j.queue());
       JobSnapshot snap = snapshotForInsert(j, 1L);
       String wire = serializer.serializeJob(snap, capabilities);
+      budget.include(wire);
       prepared.add(new PreparedInsert(j, snap, wire));
     }
 
@@ -351,36 +357,60 @@ public final class InMemoryJobStore implements JobStore {
           .collect(Collectors.toList());
 
       List<Job> result = new ArrayList<>(Math.min(cap, candidates.size()));
-      for (var ce : candidates) {
-        if (result.size() >= cap) break;
-        Entry existing = ce.getValue();
-        if (!canClaim(ce)) continue;
-        Job j = serializer.deserializeJob(existing.wire);
-        j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
-        j.assignOwner(nodeId, heartbeatAt);
-        j.incrementAttempts();
-        long nextVersion = existing.version + 1;
-        JobSnapshot snap = withVersion(j, nextVersion);
-        String wire = serializer.serializeJob(snap, capabilities);
-        Entry updated = entryFromSnapshot(snap, wire, nextVersion);
-        // Defensive re-validation — the in-memory analog of Postgres's
-        // SKIP-LOCKED-plus-version-matched UPDATE: never overwrite an
-        // entry that changed since the candidate snapshot was taken.
-        Entry committed = jobs.compute(ce.getKey(), (k, current) -> {
-          if (current == null
-              || current.version != existing.version
-              || current.state != JobState.ENQUEUED) {
-            return current;
+      var previous = new HashMap<JobId, Entry>();
+      try {
+        for (var ce : candidates) {
+          if (result.size() >= cap) break;
+          Entry existing = ce.getValue();
+          if (!canClaim(ce)) continue;
+          Job j = serializer.deserializeJob(existing.wire);
+          j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
+          j.assignOwner(nodeId, heartbeatAt);
+          j.incrementAttempts();
+          long nextVersion = existing.version + 1;
+          JobSnapshot snap = withVersion(j, nextVersion);
+          String wire;
+          try {
+            wire = serializer.serializeJob(snap, capabilities);
+          } catch (OversizedJobException | SerializationException poison) {
+            var quarantined = serializer.deserializeJob(existing.wire);
+            quarantined.transitionTo(
+                JobState.QUARANTINED,
+                heartbeatAt,
+                "engine.claim-poison",
+                "Cannot serialize processing state");
+            var rejected = withVersion(quarantined, nextVersion);
+            var rejectedWire = serializer.serializeJob(rejected, capabilities);
+            previous.put(ce.getKey(), existing);
+            jobs.put(ce.getKey(), entryFromSnapshot(rejected, rejectedWire, nextVersion));
+            continue;
           }
-          return updated;
-        });
-        if (committed != updated) {
-          continue;
+          Entry updated = entryFromSnapshot(snap, wire, nextVersion);
+          // Defensive re-validation — the in-memory analog of Postgres's
+          // SKIP-LOCKED-plus-version-matched UPDATE: never overwrite an
+          // entry that changed since the candidate snapshot was taken.
+          previous.put(ce.getKey(), existing);
+          Entry committed = jobs.compute(ce.getKey(), (k, current) -> {
+            if (current == null
+                || current.version != existing.version
+                || current.state != JobState.ENQUEUED) {
+              return current;
+            }
+            return updated;
+          });
+          if (committed != updated) {
+            continue;
+          }
+          Job loaded = serializer.deserializeJob(wire);
+          result.add(loaded);
         }
-        Job loaded = serializer.deserializeJob(wire);
-        result.add(loaded);
+        return result;
+      } catch (RuntimeException | Error failure) {
+        // A custom serializer can fail even on quarantine. No failed batch
+        // may leave earlier claims unreturned; the mutex makes rollback exact.
+        previous.forEach(jobs::put);
+        throw failure;
       }
-      return result;
     }
   }
 
@@ -412,25 +442,30 @@ public final class InMemoryJobStore implements JobStore {
   public boolean saveExecutionUpdate(Job job, NodeId nodeId) {
     Objects.requireNonNull(job, "job");
     Objects.requireNonNull(nodeId, "nodeId");
-    var changed = new AtomicReference<Boolean>(false);
+    var incoming = job.snapshot();
     synchronized (claimMutex) {
-      jobs.compute(job.id(), (id, existing) -> {
-        if (existing == null || existing.state != JobState.PROCESSING) return existing;
-        // Reject zombie writers from a previous attempt: a stale
-        // flush from attempt N (job orphan-reclaimed, retried, and
-        // re-claimed by this same node as attempt N+1) must not
-        // overwrite the live attempt's wire form or refresh its
-        // check-in time.
-        if (existing.attempts != job.attempts()) return existing;
-        Job persisted = serializer.deserializeJob(existing.wire);
-        if (persisted.ownerNodeId().filter(nodeId::equals).isEmpty()) return existing;
-        JobSnapshot snap = withVersion(job, existing.version);
-        String wire = serializer.serializeJob(snap, capabilities);
-        changed.set(true);
-        return entryFromSnapshot(snap, wire, existing.version);
-      });
+      var existing = jobs.get(job.id());
+      if (existing == null
+          || existing.state != JobState.PROCESSING
+          || existing.version != incoming.version()
+          || existing.attempts != incoming.attempts()) return false;
+      var persisted = serializer.deserializeJob(existing.wire);
+      if (persisted.ownerNodeId().filter(nodeId::equals).isEmpty()
+          || persisted.executionRevision() != incoming.executionRevision()) return false;
+      if (existing.lastCheckinAt != null
+          && (incoming.lastCheckinAt() == null
+              || incoming.lastCheckinAt().isBefore(existing.lastCheckinAt))) return false;
+      var heartbeat = incoming.ownerHeartbeatAt();
+      if (heartbeat == null
+          || existing.ownerHeartbeatAt != null && heartbeat.isBefore(existing.ownerHeartbeatAt)) {
+        heartbeat = existing.ownerHeartbeatAt;
+      }
+      var updated = incoming.withExecutionUpdate(incoming.executionRevision() + 1, heartbeat);
+      var wire = serializer.serializeJob(updated, capabilities);
+      jobs.put(job.id(), entryFromSnapshot(updated, wire, existing.version));
+      job.adoptExecutionRevision(updated.executionRevision());
+      return true;
     }
-    return Boolean.TRUE.equals(changed.get());
   }
 
   // ---------------------------------------------------------------- queue pauses
@@ -558,6 +593,27 @@ public final class InMemoryJobStore implements JobStore {
   }
 
   @Override
+  public List<Job> scanJobs(JobState state, JobId after, int max) {
+    Objects.requireNonNull(state, "state");
+    return jobs.entrySet().stream()
+        .filter(e -> e.getValue().state == state)
+        .filter(e -> after == null || e.getKey().compareTo(after) > 0)
+        .sorted(Map.Entry.comparingByKey())
+        .limit(Math.clamp(max, 0, 500))
+        .map(e -> serializer.deserializeJob(e.getValue().wire))
+        .toList();
+  }
+
+  @Override
+  public List<CronTask> scanCronTasks(String after, int max) {
+    return cronTasks.values().stream()
+        .filter(task -> after == null || task.name().compareTo(after) > 0)
+        .sorted(Comparator.comparing(CronTask::name))
+        .limit(Math.clamp(max, 0, 500))
+        .toList();
+  }
+
+  @Override
   public List<Job> searchJobs(JobSearch search) {
     Objects.requireNonNull(search, "search");
     return jobs.entrySet().stream()
@@ -581,6 +637,16 @@ public final class InMemoryJobStore implements JobStore {
         .filter(e -> e.state == JobState.ENQUEUED)
         .filter(e -> queue.equals(e.queue))
         .map(e -> e.currentStateAt)
+        .filter(Objects::nonNull)
+        .min(Instant::compareTo);
+  }
+
+  @Override
+  public Optional<Instant> oldestMaintenanceAt(JobState state) {
+    Objects.requireNonNull(state, "state");
+    return jobs.values().stream()
+        .filter(entry -> entry.state == state)
+        .map(entry -> state == JobState.SCHEDULED ? entry.scheduledFor : entry.currentStateAt)
         .filter(Objects::nonNull)
         .min(Instant::compareTo);
   }
@@ -615,6 +681,12 @@ public final class InMemoryJobStore implements JobStore {
   }
 
   @Override
+  public long deleteIdleConcurrencyGroups(int max) {
+    // Admission is derived from persisted entries; no separate group rows exist.
+    return 0;
+  }
+
+  @Override
   public long deleteExpiredDedupKeys(Instant now, int max) {
     Objects.requireNonNull(now, "now");
     if (max <= 0) return 0L;
@@ -645,31 +717,49 @@ public final class InMemoryJobStore implements JobStore {
   // ---------------------------------------------------------------- retention
 
   @Override
-  public long deleteFinishedOlderThan(Instant cutoff, JobState state, int max) {
-    long[] removed = {0L};
-    List<JobId> toRemove = new ArrayList<>();
-    // Keep terminal jobs whose dedup key is still live: deleting them would
-    // end the producer-dedup window early (mirrors the real backends).
-    var now = Instant.now();
-    Set<JobId> liveDedup = dedupKeys.values().stream()
-        .filter(r -> r.expiresAt().isAfter(now))
-        .map(DedupRecord::jobId)
-        .collect(Collectors.toSet());
-    for (var e : jobs.entrySet()) {
-      if (toRemove.size() >= max) break;
-      if (e.getValue().state == state
-          && e.getValue().currentStateAt != null
-          && !e.getValue().currentStateAt.isAfter(cutoff)
-          && !liveDedup.contains(e.getKey())) {
-        toRemove.add(e.getKey());
+  public RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after) {
+    Objects.requireNonNull(cutoff, "cutoff");
+    if (state != JobState.SUCCEEDED
+        && state != JobState.FAILED
+        && state != JobState.DELETED
+        && state != JobState.QUARANTINED)
+      throw new IllegalArgumentException("Retention requires a finished state");
+    int limit = Math.clamp(max, 0, 100);
+    if (limit == 0) return new RetentionPage(0, null);
+    synchronized (claimMutex) {
+      var candidates = jobs.entrySet().stream()
+          .filter(entry -> entry.getValue().state == state
+              && (after == null || entry.getKey().compareTo(after) > 0))
+          .sorted(Map.Entry.comparingByKey())
+          .limit(limit)
+          .toList();
+      var now = Instant.now();
+      var liveDedup = dedupKeys.values().stream()
+          .filter(record -> record.expiresAt().isAfter(now))
+          .map(DedupRecord::jobId)
+          .collect(Collectors.toSet());
+      long deleted = 0;
+      for (var candidate : candidates) {
+        var entry = candidate.getValue();
+        if (entry.currentStateAt.isAfter(cutoff) || liveDedup.contains(candidate.getKey()))
+          continue;
+        if (state == JobState.FAILED) {
+          try {
+            if (serializer
+                .deserializeJob(entry.wire)
+                .failureDecision()
+                .map(decision -> decision.willRetry())
+                .orElse(true)) continue;
+          } catch (SerializationException unreadable) {
+            continue;
+          }
+        }
+        if (!findAwaitingByParent(candidate.getKey(), 1).isEmpty()) continue;
+        if (jobs.remove(candidate.getKey(), entry)) deleted++;
       }
+      return new RetentionPage(
+          deleted, candidates.size() == limit ? candidates.getLast().getKey() : null);
     }
-    for (JobId id : toRemove) {
-      if (jobs.remove(id) != null) {
-        removed[0]++;
-      }
-    }
-    return removed[0];
   }
 
   // ---------------------------------------------------------------- relationships & mutexes
@@ -918,6 +1008,10 @@ public final class InMemoryJobStore implements JobStore {
   }
 
   private JobSnapshot snapshotForInsert(Job job, long version) {
+    if (job.version() > version) {
+      throw new IllegalStateException(
+          "Insert requires a new job; persisted version cannot be reset to " + version);
+    }
     JobSnapshot s = withVersion(job, version);
     if (s.relationship() == null) {
       return s;
@@ -947,7 +1041,9 @@ public final class InMemoryJobStore implements JobStore {
         s.lastCheckinAt(),
         s.scheduledFor(),
         s.result(),
-        s.attempts());
+        s.attempts(),
+        s.failureDecision(),
+        s.executionRevision());
   }
 
   private boolean canClaim(Map.Entry<JobId, Entry> candidateEntry) {
@@ -1114,7 +1210,9 @@ public final class InMemoryJobStore implements JobStore {
         s.lastCheckinAt(),
         s.scheduledFor(),
         s.result(),
-        s.attempts());
+        s.attempts(),
+        s.failureDecision(),
+        s.executionRevision());
   }
 
   private static boolean isTerminal(JobState state) {

@@ -13,6 +13,14 @@ maintenance lease. Only the lease holder promotes scheduled jobs, materializes
 recurring jobs, reclaims orphans, and runs retention. If the store is
 unreachable, nodes stop acting as maintenance leader.
 
+Shutdown immediately revokes local leadership and waits up to one second for
+the registry loop to finish its current write. It withdraws the heartbeat and
+lease both during shutdown and after the loop's last in-flight write, so a
+datastore call that ignores interruption cannot leave a renewed lease behind
+after it returns. Withdrawal is best effort during an outage; lease expiry
+remains the fallback. Cleanup temporarily clears and then restores interruption
+so interrupt-sensitive clients can send the final withdrawal.
+
 ## Store Outages During Completion
 
 If a handler finishes while its job store is unavailable, the worker remains
@@ -223,3 +231,74 @@ Invocation cheat-sheet:
 
 See `threadmill-soak/README.md` for the full `-P` property list, the output
 directory layout, and the AI-drop-in workflow.
+
+### Maintenance capacity and backlog ages
+
+Correctness recovery runs on every `maintenancePollInterval`, independently of
+retention. Retry recovery and workflow reconciliation each inspect at most 500
+jobs per tick, retaining an exclusive job-id cursor across ticks. Recurring
+materialization visits at most 64 definitions per tick with a stable name cursor.
+Promotion handles at most 500 candidates. These activities yield between records
+at a cooperative 200 ms budget; a single datastore call or interceptor can exceed
+that budget, so configure datastore timeouts as well. A full sweep takes at least
+`ceil(population / page size)` ticks, and can take longer under load. Monitor lag
+when sizing the maintenance interval and recurring-definition population.
+
+Retention still uses batches of 100 with at most 50 batches per terminal state
+and a cooperative 200 ms budget. When a sweep exhausts either budget, it resumes
+on the next maintenance tick. `retentionInterval` is the delay after a completed
+sweep, rather than a throttle limiting cleanup to 5,000 records per hour. Expired
+deduplication cleanup follows the same rule. Correctness activities run first;
+a nonfatal failure in one activity does not suppress the others.
+
+Retention scans at most 100 state/id candidates per store call. Its cursor
+advances past protected or recent records, so they cannot hide later eligible
+jobs. Deletion atomically checks state/version, live dedup protection, and waiting
+children. A successful workflow predecessor remains until its waiting children
+have been promoted; `FAILED` jobs remain while a retry is pending or their legacy
+retry decision is unknown. Unreadable failure decisions also remain for operator
+review. Use `JobStore.deleteFinishedPage` and its returned cursor for manual
+bounded maintenance; `deleteFinishedOlderThan` inspects only the first page.
+
+With `ThreadmillMetrics.meteredStore()`, `threadmill.retention.deleted` counts
+actual deletions by terminal state or `dedup`; its rate measures cleanup capacity.
+`threadmill.maintenance.oldest.age` reports milliseconds since the oldest due time
+for `SCHEDULED`, and since the oldest state entry for other states. The scheduled
+gauge is promotion lag. `AWAITING` and `FAILED` ages are investigation signals:
+they include legitimate waiting children and final failures, respectively. For
+terminal states, subtract the configured retention age to estimate overdue
+storage. This is an upper bound: active deduplication windows can protect old
+records. The gauges share the normal cached snapshot and staleness indicators.
+
+A release soak must shorten retention enough to reach steady state, then compare
+input and deletion rates, record count and storage size, and promotion/recovery
+latency while cleanup is active. An eight-hour run with seven-day retention cannot
+validate retention capacity.
+
+Maintenance also inspects at most 100 persisted concurrency groups per poll,
+using resumable cursors. It removes counters only when no active hold or
+nonterminal work needs the key. PostgreSQL locks and rechecks the candidate;
+Redis checks and removes it in one Lua call. New work can safely recreate the
+bookkeeping. This bounds accumulation from one-use business-operation keys once
+their workflows finish. The metered store exports these deletions with
+`threadmill.retention.deleted{kind="concurrency"}`. The in-memory store derives
+admission from its stored jobs and has no separate counter rows to reclaim.
+
+Execution resources are released through `JobInterceptor.onProcessingFinished`,
+which runs in an engine `finally` block in reverse interceptor order. It also
+runs for stale or rejected completion writes, fatal errors, shutdown release and
+orphan recovery. Cleanup does not certify that the job reached a persisted
+terminal state. Use the context instance to identify an execution: job ID and
+attempt number alone can collide with concurrent recovery or a refunded retry.
+
+Metrics expose `threadmill.executions.active` and
+`threadmill.executions.unconfirmed`. Unconfirmed exits include attempts whose
+completion lost an optimistic-lock race; they do not imply that durable work was
+lost. OpenTelemetry spans include `threadmill.execution.completion_confirmed`;
+when false, the local attempt ended without a confirmed outcome notification.
+An orphan-recovery span never borrows or closes the original execution's scope.
+
+For scrape endpoints with strict latency budgets, configure the optional
+[asynchronous metrics refresh executor](../threadmill-metrics/README.md#wiring).
+A store outage then leaves cached values and increasing snapshot age visible
+without blocking the scrape. Explicit refresh calls remain synchronous.

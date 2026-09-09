@@ -3,21 +3,21 @@ if redis.call('HGET', KEYS[1], 'state') ~= 'ENQUEUED' then return 0 end
 if redis.call('HGET', KEYS[1], 'version') ~= ARGV[3] then return 0 end
 redis.call('HSET', KEYS[1], 'state', 'QUARANTINED', 'current_state_at', ARGV[2],
   'version', tostring(tonumber(ARGV[3]) + 1))
+if ARGV[8] and ARGV[8] ~= '' then redis.call('HSET', KEYS[1], 'body', ARGV[8]) end
 redis.call('ZREM', KEYS[2], ARGV[1])
-redis.call('ZREM', KEYS[3], ARGV[1])
+tm_state_remove(KEYS[3], ARGV[1])
 redis.call('ZREM', KEYS[13], ARGV[1])
-redis.call('ZADD', KEYS[4], tonumber(ARGV[2]), ARGV[1])
+tm_state_add(KEYS[4], tonumber(ARGV[2]), ARGV[1])
 redis.call('HINCRBY', KEYS[5], 'ENQUEUED', -1)
 redis.call('HINCRBY', KEYS[5], 'QUARANTINED', 1)
 if KEYS[6] ~= no_key and ARGV[4] ~= '' then
-  redis.call('ZREM', KEYS[6], ARGV[4])
+  tm_pending_remove(KEYS[6], ARGV[4], KEYS[10])
 end
 if KEYS[12] ~= no_key and ARGV[4] ~= '' then
   redis.call('ZREM', KEYS[12], ARGV[4])
 end
 if ARGV[7] ~= '' then
-  local remaining = redis.call('HINCRBY', KEYS[10], ARGV[7], -1)
-  if remaining <= 0 then redis.call('HDEL', KEYS[10], ARGV[7]) end
+  tm_queue_remove(KEYS[10], ARGV[7])
 else
   redis.call('ZREM', KEYS[11], ARGV[1])
 end

@@ -35,6 +35,18 @@ TLS resources or client options, inject a caller-managed `RedisClient` or
 Threadmill topology descriptions and wrapped connection failures never include
 ACL usernames or passwords.
 
+Redis **7.4 or later** is required on every data node, including replicas that
+may be promoted. Startup checks the connected server with `INFO server` against this tested
+support baseline. Keep all nodes in a topology on supported
+versions. Managed services that restrict `INFO`/`CONFIG` may use
+`RedisSafetyValidation.externallyValidatedMode()` only after independently
+verifying both the version and the no-eviction policy. Tests and examples use
+the minimum supported 7.4 release line.
+
+`RedisJobStore` implements `AutoCloseable`: use try-with-resources for manually
+owned stores. Closing a store closes its connection; a caller-injected client
+remains owned by the caller.
+
 Durability is Redis-level. Run with `--appendonly yes`. Out of the box,
 Redis is less durable than PostgreSQL — a crash within 1 s of a state
 change may lose the state change depending on `appendfsync` setting.
@@ -75,7 +87,7 @@ indexes remain in the same slot too.
 | `{threadmill}:by_state_time:{STATE}` | ZSET | Ids scored by `current_state_at`. Used for retention. |
 | `{threadmill}:counts` | HASH | State → cardinality. `HINCRBY` inside every state-changing script. **Never** `SCARD` / `ZCARD` for live counts. |
 | `{threadmill}:queues` | SET | Active queue names (membership maintained by `claim_commit`). |
-| `{threadmill}:queue_keys:{queue}` | HASH | Concurrency key → count of ENQUEUED keyed jobs of that key in the queue. The claim path uses a rotating bounded HSCAN cursor, so one pass stays bounded even at high key cardinality. |
+| `{threadmill}:queue_keys:{queue}` | HASH | Concurrency key → count of ENQUEUED keyed jobs of that key in the queue. An ordered ZSET mirror (`:ordered`) supplies bounded lexicographic registry pages. |
 | `{threadmill}:queue_unkeyed:{queue}` | ZSET | ENQUEUED unkeyed job ids, scored like the queue ZSET. The unkeyed claim lane never pages past keyed work. |
 | `{threadmill}:queue_enqueued_at:{queue}` | ZSET | Every ENQUEUED job id in the queue, scored by `current_state_at` millis. `oldestEnqueuedAt` (the `threadmill.queue.oldest.enqueued.age` gauge and the dashboard queue view) reads its head with one `ZRANGE 0 0 WITHSCORES`, so the age gauge never scans the priority-ordered queue ZSET. Maintained inside the same atomic scripts as queue membership. |
 | `{threadmill}:queue_pauses` | HASH | Paused queue → reason. |
@@ -143,21 +155,19 @@ server (single-threaded execution).
 
 Never a destructive `BLPOP` / `ZPOPMIN`. The flow is:
 
-1. Java gathers candidates from bounded, key-driven lanes — unkeyed heads
-   from `{threadmill}:queue_unkeyed:{queue}`, per-concurrency-key
-   pending-order head runs discovered through a rotating HSCAN over
-   `{threadmill}:queue_keys:{queue}`,
-   and active-workflow-hold members via the `pending_root` mirrors — then
-   sorts them by queue-ZSET score and UUID member, exactly `(priority DESC,
-   id)`. Per-key admission reads
-   and queue-score probes are asynchronously pipelined. Each pass is bounded
-   by a key-page budget and never scales with backlog depth or requires one
-   network round trip per registered key.
+1. Java gathers unkeyed heads and bounded windows from each selected key's
+   queue-specific ready ZSET. A lexicographic cursor pages the ordered queue-key
+   registry; per-key windows rotate so active workflow members remain reachable
+   behind blocked heads. Reads are pipelined, then candidates sort by priority
+   and UUID. No global pending window is filtered after truncation, and no pass
+   enumerates every active workflow hold.
 2. For each candidate, Java prepares the new body with the `PROCESSING`
    state-history entry appended and the version bumped.
 3. `claim_commit.lua` verifies version / state / queue membership plus the
    concurrency admission rules (it is the single admission authority — the
-   gathering reads are unlocked approximations) and commits the new body +
+   gathering reads are unlocked approximations). It reads only the earliest
+   pending or earliest EXCLUSIVE member, ordered by score then `id:MODE`,
+   and commits the new body +
    every index update + counts in one atomic call.
 
 A crash before step 3 leaves the job in ENQUEUED. A crash after step 3
@@ -191,5 +201,34 @@ per script:
 ./gradlew :threadmill-store-redis:test
 ```
 
-Runs against a `redis:7-alpine` Testcontainer. 72 tests: 61 contract + 9
-regression + 2 keys-tests.
+Runs the shared store contract and backend regressions against real
+`redis:7.4-alpine` Testcontainers. The Gradle test report is the source for
+current executed, skipped, and failed test counts.
+
+### Admission index format 2
+
+The global pending ZSET uses `id:MODE` members, scored in microseconds. Its
+`:exclusive` mirror contains only EXCLUSIVE members. Its
+`:ready:<queue-keys-key>` mirror contains only ENQUEUED members of one queue.
+The queue-key count hash has a `:ordered` ZSET mirror. All these indexes change
+atomically with the job through the shared `pending_indexes.lua` helpers.
+
+Registry pages contain at most 256 keys. Per-key candidate windows divide the
+claim budget across those keys; a shrinking window may require one extra read
+to wrap. A claim call makes at most 20 passes. Cursor caches retain 1,024 active
+entries; eviction resets scan progress and can increase delay for cold queues
+or keys. These bounds constrain each call; they are not a latency SLA under
+unbounded queue/key growth. One namespace still occupies one Redis Cluster
+slot; Cluster support provides topology and failover integration, not horizontal
+sharding of that namespace.
+
+Existing v0.3 data requires the offline upgrade documented in
+[Redis topologies](../docs/redis-topologies.md#upgrading-existing-redis-data).
+
+`searchJobs` accepts a state with pagination. It rejects state-less requests and
+queue/handler filters with `IllegalArgumentException`, matching the advertised
+`supportsRichSearch=false` capability and the dashboard's existing validation.
+It never returns a filtered fragment of an unrelated global page. State-only
+pages preserve the Redis index order: newest transition millisecond first, then
+descending canonical job ID for ties. The order is independent of page size;
+concurrent state changes can still move records between pages.

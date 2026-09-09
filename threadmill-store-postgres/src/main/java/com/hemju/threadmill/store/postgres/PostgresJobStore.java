@@ -38,6 +38,7 @@ import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.Names;
 import com.hemju.threadmill.core.NodeId;
+import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.schedule.CronExpression;
@@ -45,12 +46,15 @@ import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
+import com.hemju.threadmill.core.serialization.SerializationException;
 import com.hemju.threadmill.core.spec.JobArgument;
+import com.hemju.threadmill.core.store.BulkInsertBudget;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.Mutexes;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
+import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
  * PostgreSQL implementation of {@link JobStore}.
@@ -252,6 +256,7 @@ public final class PostgresJobStore implements JobStore {
   public List<JobId> insertAll(List<Job> jobsToInsert) {
     Objects.requireNonNull(jobsToInsert, "jobs");
     if (jobsToInsert.isEmpty()) return List.of();
+    var budget = new BulkInsertBudget(jobsToInsert.size(), capabilities);
 
     // Pre-flight: serialize every snapshot up front. OversizedJobException
     // here rejects the whole batch before any DB write — no Job in the
@@ -265,6 +270,7 @@ public final class PostgresJobStore implements JobStore {
       // we re-snapshot inside the transaction below. Here we only validate size.
       JobSnapshot probe = j.snapshot();
       String body = serializer.serializeJob(probe, capabilities);
+      budget.include(body);
       prepared.add(new Prepared(j, probe, body, lastTransitionTime(probe, probe.currentState())));
     }
 
@@ -273,12 +279,14 @@ public final class PostgresJobStore implements JobStore {
       writeTransaction(conn -> {
         // Re-snapshot inside the txn so workflow_root_id is resolved
         // against the live store state; re-serialize matches.
+        var finalBudget = new BulkInsertBudget(prepared.size(), capabilities);
         var finalSnapshots = new ArrayList<JobSnapshot>(prepared.size());
         var finalBodies = new ArrayList<String>(prepared.size());
         var finalStateAt = new ArrayList<Instant>(prepared.size());
         for (var p : prepared) {
           JobSnapshot snap = snapshotForInsert(conn, p.job, version);
           String body = serializer.serializeJob(snap, capabilities);
+          finalBudget.include(body);
           finalSnapshots.add(snap);
           finalBodies.add(body);
           finalStateAt.add(lastTransitionTime(snap, snap.currentState()));
@@ -395,12 +403,12 @@ public final class PostgresJobStore implements JobStore {
   @Override
   public Optional<Job> findById(JobId id) {
     try (Connection conn = dataSource.getConnection();
-        PreparedStatement ps =
-            conn.prepareStatement("SELECT body FROM threadmill_jobs WHERE id = ?")) {
+        PreparedStatement ps = conn.prepareStatement(
+            "SELECT body, owner_heartbeat_at FROM threadmill_jobs WHERE id = ?")) {
       ps.setObject(1, id.asUuid());
       try (ResultSet rs = ps.executeQuery()) {
         if (!rs.next()) return Optional.empty();
-        return Optional.of(serializer.deserializeJob(rs.getString(1)));
+        return Optional.of(readJobWithHeartbeat(rs));
       }
     } catch (SQLException e) {
       throw new JdbcException("findById failed", e);
@@ -554,7 +562,7 @@ public final class PostgresJobStore implements JobStore {
         // a silent double-claim into a loud failure.
         try (PreparedStatement ps = conn.prepareStatement(
             "UPDATE threadmill_jobs SET state = 'PROCESSING', owner_node_id = ?, "
-                + "owner_heartbeat_at = ?, last_checkin_at = NULL, current_state_at = ?, version = ?, body = ? "
+                + "owner_heartbeat_at = ?, last_checkin_at = NULL, execution_revision = 0, current_state_at = ?, version = ?, body = ? "
                 + "WHERE id = ? AND version = ?")) {
           var alreadyBatched = new HashSet<UUID>();
           while (result.size() < cap) {
@@ -583,17 +591,24 @@ public final class PostgresJobStore implements JobStore {
                 // whole claim and wedge the queue. Quarantine it via a
                 // body-independent scalar update so it leaves the
                 // ENQUEUED claim path, and continue with the rest.
-                quarantineUnreadable(conn, p.id, p.version, heartbeatAt);
+                quarantineUnreadable(conn, p.id, p.version, heartbeatAt, bodies.get(p.id));
                 quarantined++;
                 continue;
               }
-              acquireWorkflowHold(conn, j.snapshot());
               j.transitionTo(JobState.PROCESSING, heartbeatAt, "engine.claim", null);
               j.assignOwner(nodeId, heartbeatAt);
               j.incrementAttempts();
               long nextVersion = p.version + 1;
               JobSnapshot snap = withVersion(j, nextVersion);
-              String newBody = serializer.serializeJob(snap, capabilities);
+              String newBody;
+              try {
+                newBody = serializer.serializeJob(snap, capabilities);
+              } catch (OversizedJobException | SerializationException poison) {
+                quarantineUnreadable(conn, p.id, p.version, heartbeatAt, bodies.get(p.id));
+                quarantined++;
+                continue;
+              }
+              acquireWorkflowHold(conn, j.snapshot());
               ps.setObject(1, nodeId.asUuid());
               ps.setTimestamp(2, Timestamp.from(heartbeatAt));
               ps.setTimestamp(3, Timestamp.from(heartbeatAt));
@@ -908,24 +923,39 @@ public final class PostgresJobStore implements JobStore {
     }
   }
 
+  private String quarantineBody(String original, long version, Instant now) {
+    try {
+      var rejected = serializer.deserializeJob(original);
+      rejected.transitionTo(
+          JobState.QUARANTINED, now, "engine.claim-poison", "Cannot prepare processing state");
+      return serializer.serializeJob(withVersion(rejected, version), capabilities);
+    } catch (OversizedJobException | SerializationException unreadable) {
+      // Preserve raw evidence when no valid bounded envelope can be written.
+      return null;
+    }
+  }
+
   /**
    * Move an ENQUEUED job with an unreadable body out of the claim path via a
    * scalar update — no body deserialize needed. Runs in the claim transaction;
    * the counts trigger reconciles ENQUEUED → QUARANTINED.
    */
-  private void quarantineUnreadable(Connection conn, UUID id, long version, Instant now)
+  private void quarantineUnreadable(
+      Connection conn, UUID id, long version, Instant now, String originalBody)
       throws SQLException {
+    String rejectedBody = quarantineBody(originalBody, version + 1, now);
     String concurrencyKey;
     String concurrencyMode;
     UUID workflowRoot;
     try (PreparedStatement ps = conn.prepareStatement(
-        "UPDATE threadmill_jobs SET state = 'QUARANTINED', current_state_at = ?, version = ? "
+        "UPDATE threadmill_jobs SET state = 'QUARANTINED', current_state_at = ?, version = ?, body = COALESCE(?, body) "
             + "WHERE id = ? AND version = ? AND state = 'ENQUEUED' "
             + "RETURNING concurrency_key, concurrency_mode, workflow_root_id")) {
       ps.setTimestamp(1, Timestamp.from(now));
       ps.setLong(2, version + 1);
-      ps.setObject(3, id);
-      ps.setLong(4, version);
+      ps.setString(3, rejectedBody);
+      ps.setObject(4, id);
+      ps.setLong(5, version);
       try (ResultSet rs = ps.executeQuery()) {
         if (!rs.next()) {
           return; // raced away — nothing was quarantined
@@ -964,7 +994,9 @@ public final class PostgresJobStore implements JobStore {
         "SELECT concurrency_key FROM threadmill_concurrency_groups WHERE concurrency_key = ? FOR UPDATE")) {
       for (String key : sorted) {
         ps.setString(1, key);
-        ps.execute();
+        try (var row = ps.executeQuery()) {
+          if (!row.next()) lockConcurrencyGroup(conn, key);
+        }
       }
     }
   }
@@ -1182,8 +1214,8 @@ public final class PostgresJobStore implements JobStore {
   public void touchOwnerHeartbeat(NodeId nodeId, Instant now) {
     try {
       ownedTransaction(conn -> {
-        try (PreparedStatement ps =
-            conn.prepareStatement("UPDATE threadmill_jobs SET owner_heartbeat_at = ? "
+        try (PreparedStatement ps = conn.prepareStatement(
+            "UPDATE threadmill_jobs SET owner_heartbeat_at = GREATEST(owner_heartbeat_at, ?) "
                 + "WHERE state = 'PROCESSING' AND owner_node_id = ?")) {
           ps.setTimestamp(1, Timestamp.from(now));
           ps.setObject(2, nodeId.asUuid());
@@ -1200,30 +1232,47 @@ public final class PostgresJobStore implements JobStore {
   public boolean saveExecutionUpdate(Job job, NodeId nodeId) {
     Objects.requireNonNull(job, "job");
     Objects.requireNonNull(nodeId, "nodeId");
-    JobSnapshot snapshot = withVersion(job, job.version());
-    String body = serializer.serializeJob(snapshot, capabilities);
+    var incoming = job.snapshot();
     try {
-      return ownedTransaction(conn -> {
-        // The version guard rejects a zombie flush from a previous
-        // attempt: a claim bumps version while a check-in does not,
-        // so an attempt-N flush whose job was orphan-reclaimed,
-        // retried, and re-claimed (as attempt N+1) by the same node
-        // no longer matches the live row's version and is dropped.
-        try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
-            + "owner_heartbeat_at = ?, last_checkin_at = ?, body = ? "
-            + "WHERE id = ? AND state = 'PROCESSING' AND owner_node_id = ? AND version = ?")) {
-          Instant heartbeat = snapshot.lastCheckinAt() == null
-              ? snapshot.ownerHeartbeatAt()
-              : snapshot.lastCheckinAt();
-          setNullableTimestamp(ps, 1, heartbeat);
-          setNullableTimestamp(ps, 2, snapshot.lastCheckinAt());
-          ps.setString(3, body);
-          ps.setObject(4, snapshot.id().asUuid());
-          ps.setObject(5, nodeId.asUuid());
-          ps.setLong(6, snapshot.version());
-          return ps.executeUpdate() > 0;
+      boolean saved = ownedTransaction(conn -> {
+        Instant heartbeat = incoming.ownerHeartbeatAt();
+        try (var select =
+            conn.prepareStatement("SELECT owner_heartbeat_at, last_checkin_at FROM threadmill_jobs "
+                + "WHERE id = ? AND state = 'PROCESSING' AND owner_node_id = ? AND version = ? "
+                + "AND execution_revision = ? FOR UPDATE")) {
+          select.setObject(1, incoming.id().asUuid());
+          select.setObject(2, nodeId.asUuid());
+          select.setLong(3, incoming.version());
+          select.setLong(4, incoming.executionRevision());
+          try (var rs = select.executeQuery()) {
+            if (!rs.next()) return false;
+            var persistedHeartbeat = rs.getTimestamp(1);
+            var persistedCheckIn = rs.getTimestamp(2);
+            if (persistedCheckIn != null
+                && (incoming.lastCheckinAt() == null
+                    || incoming.lastCheckinAt().isBefore(persistedCheckIn.toInstant())))
+              return false;
+            if (persistedHeartbeat != null
+                && (heartbeat == null || heartbeat.isBefore(persistedHeartbeat.toInstant()))) {
+              heartbeat = persistedHeartbeat.toInstant();
+            }
+          }
+        }
+        var updated = incoming.withExecutionUpdate(incoming.executionRevision() + 1, heartbeat);
+        var body = serializer.serializeJob(updated, capabilities);
+        try (var update =
+            conn.prepareStatement("UPDATE threadmill_jobs SET owner_heartbeat_at = ?, "
+                + "last_checkin_at = ?, body = ?, execution_revision = ? WHERE id = ?")) {
+          setNullableTimestamp(update, 1, heartbeat);
+          setNullableTimestamp(update, 2, updated.lastCheckinAt());
+          update.setString(3, body);
+          update.setLong(4, updated.executionRevision());
+          update.setObject(5, updated.id().asUuid());
+          return update.executeUpdate() == 1;
         }
       });
+      if (saved) job.adoptExecutionRevision(incoming.executionRevision() + 1);
+      return saved;
     } catch (SQLException e) {
       throw new JdbcException("saveExecutionUpdate failed", e);
     }
@@ -1374,7 +1423,7 @@ public final class PostgresJobStore implements JobStore {
     Map<String, Long> depths = new HashMap<>();
     try (Connection conn = dataSource.getConnection();
         PreparedStatement ps = conn.prepareStatement(
-            "SELECT queue, count(*) FROM threadmill_jobs WHERE state = 'ENQUEUED' GROUP BY queue");
+            "SELECT queue, SUM(count) FROM threadmill_queue_counts GROUP BY queue HAVING SUM(count) > 0");
         ResultSet rs = ps.executeQuery()) {
       while (rs.next()) {
         depths.put(rs.getString(1), rs.getLong(2));
@@ -1387,17 +1436,39 @@ public final class PostgresJobStore implements JobStore {
 
   @Override
   public List<String> listEnqueuedQueues() {
-    List<String> queues = new ArrayList<>();
-    try (Connection conn = dataSource.getConnection();
-        PreparedStatement ps = conn.prepareStatement(
-            "SELECT DISTINCT queue FROM threadmill_jobs WHERE state = 'ENQUEUED' ORDER BY queue");
-        ResultSet rs = ps.executeQuery()) {
-      while (rs.next()) {
-        queues.add(rs.getString(1));
+    return queueDepths().keySet().stream().sorted().toList();
+  }
+
+  @Override
+  public List<Job> scanJobs(JobState state, JobId after, int max) {
+    Objects.requireNonNull(state, "state");
+    return queryJobs(
+        "SELECT body FROM threadmill_jobs WHERE state = ? " + (after == null ? "" : "AND id > ? ")
+            + "ORDER BY id LIMIT ?",
+        ps -> {
+          ps.setString(1, state.name());
+          if (after != null) ps.setObject(2, after.asUuid());
+          ps.setInt(after == null ? 2 : 3, Math.clamp(max, 0, 500));
+        });
+  }
+
+  @Override
+  public List<CronTask> scanCronTasks(String after, int max) {
+    var result = new ArrayList<CronTask>();
+    try (var connection = dataSource.getConnection();
+        var statement = connection.prepareStatement(
+            "SELECT name, trigger_kind, trigger_value, handler_signature, payload_type_tag, "
+                + "payload_serialized, queue, priority, timeout_seconds, max_attempts, exclusive, "
+                + "missed_run_policy, time_zone, enabled FROM threadmill_cron_tasks "
+                + (after == null ? "" : "WHERE name > ? ") + "ORDER BY name LIMIT ?")) {
+      if (after != null) statement.setString(1, after);
+      statement.setInt(after == null ? 1 : 2, Math.clamp(max, 0, 500));
+      try (var rows = statement.executeQuery()) {
+        while (rows.next()) result.add(readCronTask(rows));
       }
-      return queues;
+      return result;
     } catch (SQLException e) {
-      throw new JdbcException("listEnqueuedQueues failed", e);
+      throw new JdbcException("scanCronTasks failed", e);
     }
   }
 
@@ -1441,6 +1512,23 @@ public final class PostgresJobStore implements JobStore {
       }
     } catch (SQLException e) {
       throw new JdbcException("oldestEnqueuedAt failed", e);
+    }
+  }
+
+  @Override
+  public Optional<Instant> oldestMaintenanceAt(JobState state) {
+    Objects.requireNonNull(state, "state");
+    String column = state == JobState.SCHEDULED ? "scheduled_at" : "current_state_at";
+    try (var conn = dataSource.getConnection();
+        var ps =
+            conn.prepareStatement("SELECT " + column + " FROM threadmill_jobs WHERE state = ? AND "
+                + column + " IS NOT NULL ORDER BY " + column + " LIMIT 1")) {
+      ps.setString(1, state.name());
+      try (var rs = ps.executeQuery()) {
+        return rs.next() ? Optional.of(rs.getTimestamp(1).toInstant()) : Optional.empty();
+      }
+    } catch (SQLException failure) {
+      throw new JdbcException("oldestMaintenanceAt failed", failure);
     }
   }
 
@@ -1491,6 +1579,51 @@ public final class PostgresJobStore implements JobStore {
     }
   }
 
+  private String idleGroupAfter;
+
+  private record IdleGroupPage(List<String> keys, long removed) {}
+
+  @Override
+  public synchronized long deleteIdleConcurrencyGroups(int max) {
+    int limit = Math.clamp(max, 0, 100);
+    if (limit == 0) return 0;
+    try {
+      var page = writeTransaction(conn -> {
+        var keys = new ArrayList<String>();
+        try (var query =
+            conn.prepareStatement("SELECT concurrency_key FROM threadmill_concurrency_groups "
+                + "WHERE exclusive_in_flight=0 AND shared_in_flight=0 "
+                + (idleGroupAfter == null ? "" : "AND concurrency_key > ? ")
+                + "ORDER BY concurrency_key LIMIT ? FOR UPDATE SKIP LOCKED")) {
+          int parameter = 1;
+          if (idleGroupAfter != null) query.setString(parameter++, idleGroupAfter);
+          query.setInt(parameter, limit);
+          try (var rows = query.executeQuery()) {
+            while (rows.next()) keys.add(rows.getString(1));
+          }
+        }
+        long removed = 0;
+        try (var delete = conn.prepareStatement("""
+            DELETE FROM threadmill_concurrency_groups g WHERE concurrency_key=?
+            AND exclusive_in_flight=0 AND shared_in_flight=0
+            AND NOT EXISTS (SELECT 1 FROM threadmill_concurrency_workflow_holds h WHERE h.concurrency_key=g.concurrency_key)
+            AND NOT EXISTS (SELECT 1 FROM threadmill_jobs j WHERE j.concurrency_key=g.concurrency_key
+              AND j.state NOT IN ('SUCCEEDED','FAILED','DELETED','QUARANTINED'))
+            """)) {
+          for (var key : keys) {
+            delete.setString(1, key);
+            removed += delete.executeUpdate();
+          }
+        }
+        return new IdleGroupPage(keys, removed);
+      });
+      idleGroupAfter = page.keys().size() < limit ? null : page.keys().getLast();
+      return page.removed();
+    } catch (SQLException failure) {
+      throw new JdbcException("deleteIdleConcurrencyGroups failed", failure);
+    }
+  }
+
   @Override
   public long deleteExpiredDedupKeys(Instant now, int max) {
     Objects.requireNonNull(now, "now");
@@ -1525,28 +1658,56 @@ public final class PostgresJobStore implements JobStore {
   // ---------------------------------------------------------------- retention
 
   @Override
-  public long deleteFinishedOlderThan(Instant cutoff, JobState state, int max) {
+  public RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after) {
+    Objects.requireNonNull(cutoff, "cutoff");
+    if (state != JobState.SUCCEEDED
+        && state != JobState.FAILED
+        && state != JobState.DELETED
+        && state != JobState.QUARANTINED)
+      throw new IllegalArgumentException("Retention requires a finished state");
+    int limit = Math.clamp(max, 0, 100);
+    if (limit == 0) return new RetentionPage(0, null);
     try {
       return ownedTransaction(conn -> {
-        // Skip a terminal job that still has an unexpired dedup
-        // row: the FK is ON DELETE CASCADE, so deleting it here
-        // would drop a live dedup key and silently cap the dedup
-        // TTL at the retention age. Keep the job until its dedup
-        // expires; the next sweep then removes both.
-        try (PreparedStatement ps = conn.prepareStatement(
-            "DELETE FROM threadmill_jobs WHERE id IN (" + "SELECT j.id FROM threadmill_jobs j "
-                + "WHERE j.state = ? AND j.current_state_at <= ? "
-                + "AND NOT EXISTS (SELECT 1 FROM threadmill_dedup_keys d "
-                + "WHERE d.job_id = j.id AND d.expires_at > clock_timestamp()) "
-                + "LIMIT ?)")) {
-          ps.setString(1, state.name());
-          ps.setTimestamp(2, Timestamp.from(cutoff));
-          ps.setInt(3, Math.max(0, max));
-          return (long) ps.executeUpdate();
+        long deleted = 0;
+        int inspected = 0;
+        JobId last = null;
+        try (var candidates = conn.prepareStatement(
+                "SELECT id, current_state_at, body FROM threadmill_jobs WHERE state = ? "
+                    + (after == null ? "" : "AND id > ? ")
+                    + "ORDER BY id LIMIT ? FOR UPDATE SKIP LOCKED");
+            var remove = conn.prepareStatement(
+                "DELETE FROM threadmill_jobs j WHERE id = ? "
+                    + "AND NOT EXISTS (SELECT 1 FROM threadmill_dedup_keys d WHERE d.job_id = j.id AND d.expires_at > clock_timestamp()) "
+                    + "AND NOT EXISTS (SELECT 1 FROM threadmill_jobs child WHERE child.parent_job_id = j.id AND child.state = 'AWAITING')")) {
+          candidates.setString(1, state.name());
+          if (after != null) candidates.setObject(2, after.asUuid());
+          candidates.setInt(after == null ? 2 : 3, limit);
+          try (var rows = candidates.executeQuery()) {
+            while (rows.next()) {
+              inspected++;
+              last = JobId.of(rows.getObject("id", UUID.class));
+              if (rows.getTimestamp("current_state_at").toInstant().isAfter(cutoff)) continue;
+              if (state == JobState.FAILED) {
+                try {
+                  if (serializer
+                      .deserializeJob(rows.getString("body"))
+                      .failureDecision()
+                      .map(decision -> decision.willRetry())
+                      .orElse(true)) continue;
+                } catch (SerializationException unreadable) {
+                  continue; // Preserve unknown failure outcomes, but advance the scan.
+                }
+              }
+              remove.setObject(1, last.asUuid());
+              deleted += remove.executeUpdate();
+            }
+          }
         }
+        return new RetentionPage(deleted, inspected == limit ? last : null);
       });
     } catch (SQLException e) {
-      throw new JdbcException("deleteFinishedOlderThan failed", e);
+      throw new JdbcException("deleteFinishedPage failed", e);
     }
   }
 
@@ -2040,14 +2201,23 @@ public final class PostgresJobStore implements JobStore {
     void apply(PreparedStatement ps) throws SQLException;
   }
 
+  private Job readJobWithHeartbeat(ResultSet rs) throws SQLException {
+    var job = serializer.deserializeJob(rs.getString(1));
+    var heartbeat = rs.getTimestamp(2);
+    if (heartbeat != null && job.ownerNodeId().isPresent())
+      job.updateHeartbeat(heartbeat.toInstant());
+    return job;
+  }
+
   private List<Job> queryJobs(String sql, StatementSetup setup) {
     List<Job> out = new ArrayList<>();
     try (Connection conn = dataSource.getConnection();
-        PreparedStatement ps = conn.prepareStatement(sql)) {
+        PreparedStatement ps = conn.prepareStatement(
+            sql.replace("SELECT body FROM", "SELECT body, owner_heartbeat_at FROM"))) {
       setup.apply(ps);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
-          out.add(serializer.deserializeJob(rs.getString(1)));
+          out.add(readJobWithHeartbeat(rs));
         }
       }
     } catch (SQLException e) {
@@ -2090,6 +2260,10 @@ public final class PostgresJobStore implements JobStore {
 
   private JobSnapshot snapshotForInsert(Connection conn, Job job, long version)
       throws SQLException {
+    if (job.version() > version) {
+      throw new IllegalStateException(
+          "Insert requires a new job; persisted version cannot be reset to " + version);
+    }
     JobSnapshot s = withVersion(job, version);
     if (s.relationship() == null) {
       return s;
@@ -2126,7 +2300,9 @@ public final class PostgresJobStore implements JobStore {
             s.lastCheckinAt(),
             s.scheduledFor(),
             s.result(),
-            s.attempts());
+            s.attempts(),
+            s.failureDecision(),
+            s.executionRevision());
       }
     }
   }
@@ -2142,17 +2318,21 @@ public final class PostgresJobStore implements JobStore {
   }
 
   private static void lockConcurrencyGroup(Connection conn, String key) throws SQLException {
-    try (PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_concurrency_groups "
-        + "(concurrency_key, exclusive_in_flight, shared_in_flight, last_modified) "
-        + "VALUES (?, 0, 0, clock_timestamp()) "
-        + "ON CONFLICT (concurrency_key) DO NOTHING")) {
-      ps.setString(1, key);
-      ps.executeUpdate();
-    }
-    try (PreparedStatement ps = conn.prepareStatement(
-        "SELECT concurrency_key FROM threadmill_concurrency_groups WHERE concurrency_key = ? FOR UPDATE")) {
-      ps.setString(1, key);
-      ps.execute();
+    // A conflict seen by INSERT can disappear before SELECT acquires its lock.
+    // Re-create and retry until a real row is locked; never proceed without it.
+    try (var insert = conn.prepareStatement("INSERT INTO threadmill_concurrency_groups "
+            + "(concurrency_key, exclusive_in_flight, shared_in_flight, last_modified) "
+            + "VALUES (?,0,0,clock_timestamp()) ON CONFLICT (concurrency_key) DO NOTHING");
+        var lock = conn.prepareStatement(
+            "SELECT concurrency_key FROM threadmill_concurrency_groups WHERE concurrency_key=? FOR UPDATE")) {
+      insert.setString(1, key);
+      lock.setString(1, key);
+      while (true) {
+        insert.executeUpdate();
+        try (var row = lock.executeQuery()) {
+          if (row.next()) return;
+        }
+      }
     }
   }
 
@@ -2403,7 +2583,9 @@ public final class PostgresJobStore implements JobStore {
         s.lastCheckinAt(),
         s.scheduledFor(),
         s.result(),
-        s.attempts());
+        s.attempts(),
+        s.failureDecision(),
+        s.executionRevision());
   }
 
   private static boolean isTerminal(JobState state) {

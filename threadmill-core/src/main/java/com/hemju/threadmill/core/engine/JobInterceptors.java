@@ -4,6 +4,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
 
+import com.hemju.threadmill.core.FailureDecision;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
@@ -42,9 +43,50 @@ public final class JobInterceptors implements JobInterceptor {
   }
 
   @Override
+  public FailureDecision onProcessingFailureDecision(
+      Job job, JobExecutionContext ctx, Throwable cause, FailureCause kind) {
+    for (var interceptor : chain) {
+      try {
+        var decision = interceptor.onProcessingFailureDecision(job, ctx, cause, kind);
+        if (decision != null) return decision;
+      } catch (Throwable failure) {
+        FatalErrors.rethrowIfFatal(failure);
+        LOG.warn(
+            "Interceptor {} could not resolve failure disposition",
+            interceptor.getClass().getName(),
+            failure);
+      }
+    }
+    return FailureDecision.finalFailure();
+  }
+
+  @Override
   public void onProcessingFailed(
       Job job, JobExecutionContext ctx, Throwable cause, FailureCause kind) {
     for (JobInterceptor i : chain) safe(() -> i.onProcessingFailed(job, ctx, cause, kind), i);
+  }
+
+  @Override
+  public void onProcessingFinished(Job job, JobExecutionContext ctx) {
+    Error fatal = null;
+    for (var interceptor : snapshot().reversed()) {
+      try {
+        interceptor.onProcessingFinished(job, ctx);
+      } catch (Throwable failure) {
+        try {
+          FatalErrors.rethrowIfFatal(failure);
+        } catch (Error fatalFailure) {
+          if (fatal == null) fatal = fatalFailure;
+          else if (fatal != fatalFailure) fatal.addSuppressed(fatalFailure);
+          continue;
+        }
+        LOG.warn(
+            "Interceptor {} cleanup failed — continuing cleanup",
+            interceptor.getClass().getName(),
+            failure);
+      }
+    }
+    if (fatal != null) throw fatal;
   }
 
   @Override

@@ -63,3 +63,15 @@ counted, but they are not thrown into user handler code.
 - `logMaxBytes` (default `256KB` of message text)
 
 Older entries are discarded first when size limits are exceeded.
+
+## Ordering execution updates
+
+Progress, log, and check-in flushes from one execution context are serialized.
+Each confirmed flush advances an attempt-local execution revision, separately
+from the job state version. An older snapshot is rejected, including when both
+snapshots have the same check-in timestamp. Claim resets the revision for the
+next attempt. Custom `JobStore` implementations must preserve this contract.
+
+Owner heartbeats and check-in times never move backward. Store reads merge the
+current heartbeat scalar into the job view; PostgreSQL and Redis can therefore
+refresh node liveness without rewriting every job body on each heartbeat tick.

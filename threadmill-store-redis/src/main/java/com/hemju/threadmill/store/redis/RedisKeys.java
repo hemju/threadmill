@@ -50,7 +50,7 @@ import com.hemju.threadmill.core.NodeId;
  *       scanning the whole pending population.</li>
  *   <li>{@code {threadmill}:queue_keys:{queue}} — HASH concurrency-key &rarr;
  *       count of ENQUEUED keyed jobs of that key in the queue. The claim
- *       path advances a bounded rotating HSCAN cursor over this registry.</li>
+ *       path advances a bounded lexicographic cursor over its ordered ZSET mirror.</li>
  *   <li>{@code {threadmill}:queue_unkeyed:{queue}} — ZSET of ENQUEUED
  *       unkeyed job ids, scored like the queue ZSET, so the unkeyed claim
  *       lane never pages past keyed work.</li>
@@ -74,6 +74,9 @@ public final class RedisKeys {
   public static final String PREFIX = "{threadmill}:";
 
   public static final String COUNTS = PREFIX + "counts";
+  /** Ordered registry of allocated concurrency counter hashes, for bounded reclamation. */
+  public static final String CONCURRENCY_COUNTERS = PREFIX + "concurrency_counters";
+
   public static final String SCHEDULED = PREFIX + "scheduled";
   public static final String AWAITING = PREFIX + "awaiting";
   public static final String PROCESSING_ALL = PREFIX + "processing";
@@ -204,10 +207,20 @@ public final class RedisKeys {
     return PREFIX + "concurrency:" + userSegment(key) + ":workflow_counts";
   }
 
+  /** ENQUEUED members for one queue/key, in the global admission order. */
+  public static String concurrencyReady(String key, String queue) {
+    return concurrencyPending(key) + ":ready:" + queueKeys(queue);
+  }
+
+  /** Lexicographic registry used for bounded queue-key enumeration. */
+  public static String orderedQueueKeys(String queue) {
+    return queueKeys(queue) + ":ordered";
+  }
+
   public static String concurrencyPendingMember(ConcurrencyMode mode, JobId id) {
     Objects.requireNonNull(mode, "mode");
     Objects.requireNonNull(id, "id");
-    return mode.name() + ":" + id;
+    return id + ":" + mode.name();
   }
 
   public static String userSegment(String value) {

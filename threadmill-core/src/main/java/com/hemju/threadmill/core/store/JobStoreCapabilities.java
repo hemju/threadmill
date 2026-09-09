@@ -28,8 +28,8 @@ package com.hemju.threadmill.core.store;
  * @param maxClaimBatch          maximum number of jobs that can be claimed
  *                               in one call (a backend may further reduce
  *                               this internally)
- * @param supportsRichSearch     whether the store can search by arbitrary
- *                               metadata keys; key-value stores typically
+ * @param supportsRichSearch     whether the store supports queue/handler filters
+ *                               before pagination; key-value stores typically
  *                               return {@code false}
  * @param supportsExactCounts    whether per-state counts are point-in-time
  *                               exact; {@code false} indicates approximate
@@ -64,6 +64,24 @@ public record JobStoreCapabilities(
     boolean ordersByCreationTime,
     int maxMetadataBytes,
     int maxStateHistoryEntries) {
+
+  /**
+   * Initial job budget, reserving up to 16 KiB (one quarter for smaller caps)
+   * for claim ownership, retry decisions, and bounded lifecycle history.
+   */
+  public long maxInitialJobBytes() {
+    return maxSerializedJobBytes - Math.min(16 * 1024L, maxSerializedJobBytes / 4);
+  }
+
+  /** Maximum number of jobs in one atomic bulk insert. */
+  public int maxBulkInsertJobs() {
+    return 1000;
+  }
+
+  /** Maximum combined encoded job-body bytes in one atomic bulk insert (8 MiB). */
+  public long maxBulkInsertBytes() {
+    return 8L * 1024 * 1024;
+  }
 
   /** A reasonable default of 256 KiB per serialized job. */
   public static final long DEFAULT_MAX_SERIALIZED_BYTES = 256L * 1024L;

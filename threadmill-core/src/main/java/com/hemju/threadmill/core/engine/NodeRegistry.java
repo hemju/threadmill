@@ -68,7 +68,7 @@ public final class NodeRegistry {
    * the expired lease.
    */
   public boolean isMaster() {
-    return master && Instant.now().isBefore(masterUntil);
+    return running.get() && master && Instant.now().isBefore(masterUntil);
   }
 
   public void start() {
@@ -90,25 +90,66 @@ public final class NodeRegistry {
 
   public void stop() {
     running.set(false);
+    master = false;
+    masterUntil = Instant.EPOCH;
     Thread t = loopThread.getAndSet(null);
-    if (t != null) t.interrupt();
+    if (t != null) {
+      t.interrupt();
+      if (t != Thread.currentThread()) {
+        try {
+          // Finish ordinary in-flight writes before returning. An unresponsive
+          // store must not make this join unbounded; the loop's finally still
+          // withdraws if its last write completes after this wait.
+          t.join(Duration.ofSeconds(1));
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+        }
+      }
+    }
+    withdrawFromStore();
+  }
+
+  private void withdrawFromStore() {
+    // Let interrupt-sensitive clients send the final withdrawal; restore the
+    // caller's cancellation state after the datastore operation.
+    boolean interrupted = Thread.interrupted();
     try {
       store.recordNodeHeartbeat(nodeId, Instant.EPOCH);
       store.releaseMaintenanceLease(nodeId);
     } catch (Throwable cleanupFailure) {
       FatalErrors.rethrowIfFatal(cleanupFailure);
       // best-effort
+    } finally {
+      if (interrupted) Thread.currentThread().interrupt();
     }
   }
 
   private void loop() {
-    while (running.get() && !Thread.currentThread().isInterrupted()) {
-      tickOnce();
+    Throwable primaryFailure = null;
+    try {
+      while (running.get() && !Thread.currentThread().isInterrupted()) {
+        tickOnce();
+        try {
+          Thread.sleep(heartbeatInterval.toMillis());
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+          break;
+        }
+      }
+    } catch (RuntimeException | Error failure) {
+      primaryFailure = failure;
+      throw failure;
+    } finally {
+      master = false;
+      masterUntil = Instant.EPOCH;
+      // A datastore call may ignore interruption and commit after stop()'s
+      // immediate withdrawal. This cleanup follows the last possible tick write.
       try {
-        Thread.sleep(heartbeatInterval.toMillis());
-      } catch (InterruptedException ie) {
-        Thread.currentThread().interrupt();
-        break;
+        withdrawFromStore();
+      } catch (RuntimeException | Error cleanupFailure) {
+        if (primaryFailure != null) {
+          if (cleanupFailure != primaryFailure) primaryFailure.addSuppressed(cleanupFailure);
+        } else throw cleanupFailure;
       }
     }
   }
@@ -119,11 +160,11 @@ public final class NodeRegistry {
       // after this instant, so the local deadline is conservative.
       Instant renewalStart = Instant.now();
       store.recordNodeHeartbeat(nodeId, renewalStart);
-      boolean elected = electedMaster();
+      boolean elected = running.get() && electedMaster();
       if (elected) {
         masterUntil = renewalStart.plus(maintenanceLeaseDuration);
       }
-      master = elected;
+      master = running.get() && elected;
     } catch (RuntimeException t) {
       FatalErrors.rethrowIfFatal(t);
       LOG.warn("NodeRegistry tick failed", t);

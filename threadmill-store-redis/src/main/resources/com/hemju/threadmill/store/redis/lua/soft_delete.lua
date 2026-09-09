@@ -88,9 +88,9 @@ end
 if old_active_node ~= no_key then
     redis.call('ZREM', old_active_node, job_id)
 end
-redis.call('ZREM', old_state_time_key, job_id)
+tm_state_remove(old_state_time_key, job_id)
 if old_pending_key ~= no_key and old_pending_member ~= '' then
-    redis.call('ZREM', old_pending_key, old_pending_member)
+    tm_pending_remove(old_pending_key, old_pending_member, old_queue_keys_key)
     if old_pending_root_key ~= no_key then
         redis.call('ZREM', old_pending_root_key, old_pending_member)
     end
@@ -98,10 +98,7 @@ end
 if old_state == 'ENQUEUED' then
     redis.call('ZREM', old_enqueued_at_key, job_id)
     if old_concurrency_key ~= '' then
-        local remaining = redis.call('HINCRBY', old_queue_keys_key, old_concurrency_key, -1)
-        if remaining <= 0 then
-            redis.call('HDEL', old_queue_keys_key, old_concurrency_key)
-        end
+        tm_queue_remove(old_queue_keys_key, old_concurrency_key)
     else
         redis.call('ZREM', old_unkeyed_key, job_id)
     end
@@ -146,5 +143,5 @@ redis.call('HSET', job_key,
     'version', tostring(new_version),
     'body', new_body
 )
-redis.call('ZADD', new_state_time_key, now_ms, job_id)
+tm_state_add(new_state_time_key, now_ms, job_id)
 return 1

@@ -95,3 +95,38 @@ This drops only Threadmill-owned tables and functions, then runs migrations. It
 does not drop the database or schema, but it does delete all Threadmill jobs,
 cron definitions, dedup records, queue pauses, leases, and metrics counters.
 Use normal forward migrations for production.
+
+### Execution update revision (V7)
+
+`V7__execution_revision.sql` adds `threadmill_jobs.execution_revision` as a
+non-negative bigint with default zero. Progress/log/check-in writes compare and
+advance it without changing the state version. Claim resets it. Existing rows
+upgrade in place; stop old workers before starting workers that use this revision.
+
+Migration `V8__maintenance_scan.sql` adds `(state, id)` for resumable maintenance
+pages. Recovery never uses offset pagination across a population it mutates.
+
+Migration `V9__queue_monitoring.sql` adds `threadmill_queue_counts`, with up to
+16 counter shards per queue, and an ENQUEUED partial index on
+`(queue, current_state_at)`. Queue depth and queue discovery aggregate the counter
+table; they no longer scan queued jobs. Individual shards may be negative; only
+the sum is meaningful. Insert, state change, queue replacement and delete update
+the counters in the same transaction as the job. The migration locks writes while
+backfilling existing jobs and installing the trigger. Schedule migration downtime
+for the backfill and index build on large installations.
+
+Use `:threadmill-soak:benchmarkPostgresMonitoring` for the opt-in PostgreSQL 18
+benchmark with 10k/100k/1m jobs, four pooled claimers and a concurrent monitoring
+query mix. It writes `threadmill-soak/build/soak/postgres-monitoring/claims.csv`.
+This short benchmark measures claim cost; it does not establish durability or
+long-running retention capacity.
+
+V9 also indexes `(state, current_state_at DESC, id)` for state-only dashboard
+history pages. Matching the full ordering avoids a large sort when many jobs
+share one transition timestamp, a case exercised by the monitoring benchmark.
+
+`V10__idle_concurrency_groups.sql` adds a partial ordered index for zero-count
+groups. Maintenance locks a bounded page and removes a group only after checking
+for active workflow holds and nonterminal jobs. Group acquisition retries if a
+conflict row disappears before its row lock is obtained, so cleanup cannot leave
+a new claim without the group lock.

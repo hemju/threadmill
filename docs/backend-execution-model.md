@@ -191,8 +191,9 @@ slot.
   script can commit a claim.
 - Candidate gathering is key-driven, never backlog-walking: unkeyed heads come
   from a per-queue unkeyed ZSET, keyed candidates come from each key's
-  pending-order head (keys are discovered through a per-queue key registry),
-  and active-workflow-hold members come from per-root pending mirrors. A
+  queue-specific ready index (keys are discovered through a bounded ordered
+  registry page). Rotating windows reach active-workflow-hold members behind
+  blocked heads; admission probes only the earliest pending barrier. A
   blocked hot key costs a handful of reads per pass regardless of how many
   jobs are queued behind it.
 - Different concurrency keys avoid logical interference, although they still

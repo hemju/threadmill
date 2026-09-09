@@ -166,9 +166,26 @@ public final class JobRunner {
       ctx.markCancelled(CancellationReason.SHUTDOWN);
     }
     try {
-      runTracked(job, ctx);
+      runWithCleanup(job, ctx, () -> runTracked(job, ctx));
     } finally {
       inFlight.remove(ctx);
+    }
+  }
+
+  private void runWithCleanup(Job job, ExecutionContext ctx, Runnable work) {
+    Throwable original = null;
+    try {
+      work.run();
+    } catch (Throwable failure) {
+      original = failure;
+      throw failure;
+    } finally {
+      try {
+        interceptors.onProcessingFinished(job, ctx);
+      } catch (Throwable cleanup) {
+        if (original == null) throw cleanup;
+        if (cleanup != original) original.addSuppressed(cleanup);
+      }
     }
   }
 
@@ -302,18 +319,24 @@ public final class JobRunner {
   public void releaseWithoutRunning(Job job, String reason) {
     Objects.requireNonNull(job, "job");
     var ctx = newContext(job);
-    recordFailure(
-        job, ctx, new IllegalStateException(reason), JobInterceptor.FailureCause.SHUTDOWN);
+    runWithCleanup(
+        job,
+        ctx,
+        () -> recordFailure(
+            job, ctx, new IllegalStateException(reason), JobInterceptor.FailureCause.SHUTDOWN));
   }
 
   /** Called by orphan-recovery code in MaintenanceCycle. */
   public void reclaimOrphan(Job job) {
     var ctx = newContext(job);
-    recordFailure(
+    runWithCleanup(
         job,
         ctx,
-        new IllegalStateException("Job orphaned — owner node's heartbeat expired"),
-        JobInterceptor.FailureCause.ORPHAN_RECLAIM);
+        () -> recordFailure(
+            job,
+            ctx,
+            new IllegalStateException("Job orphaned — owner node's heartbeat expired"),
+            JobInterceptor.FailureCause.ORPHAN_RECLAIM));
   }
 
   // ---------------------------------------------------------------- the single failure path
@@ -324,6 +347,7 @@ public final class JobRunner {
   private void recordFailure(
       Job job, ExecutionContext ctx, Throwable cause, JobInterceptor.FailureCause kind) {
     try {
+      job.setFailureDecision(interceptors.onProcessingFailureDecision(job, ctx, cause, kind));
       long version = job.version();
       JobState from = job.currentState();
       job.transitionTo(
@@ -424,15 +448,32 @@ public final class JobRunner {
   }
 
   private Job reloadForFailure(Job job) {
-    try {
-      return store.findById(job.id()).orElse(null);
-    } catch (RuntimeException e) {
-      FatalErrors.rethrowIfFatal(e);
-      LOG.error(
-          "Could not reload job {} after a failed SUCCEEDED save; it stays PROCESSING until reclaim",
-          job.id(),
-          e);
-      return null;
+    int failures = 0;
+    while (true) {
+      try {
+        return store.findById(job.id()).orElse(null);
+      } catch (SerializationException | OversizedJobException deterministic) {
+        throw deterministic;
+      } catch (RuntimeException e) {
+        FatalErrors.rethrowIfFatal(e);
+        if (isShuttingDown()) return null;
+        failures++;
+        if (failures == 3 || failures % 30 == 0) {
+          LOG.warn(
+              "Finalization reload for job {} failed {} times; retaining responsibility",
+              job.id(),
+              failures,
+              e);
+        }
+        try {
+          Thread.sleep(Math.min(
+              TERMINAL_SAVE_MAX_BACKOFF_MS,
+              TERMINAL_SAVE_BACKOFF_MS * (1L << Math.min(failures - 1, 5))));
+        } catch (InterruptedException interrupted) {
+          Thread.currentThread().interrupt();
+          return null;
+        }
+      }
     }
   }
 
@@ -446,7 +487,7 @@ public final class JobRunner {
           "engine.quarantine",
           cause == null ? null : cause.getMessage());
       job.clearOwner();
-      store.saveAtomic(job, version);
+      saveTerminalWithRetry(job, version);
       interceptors.onStateChange(job, from, JobState.QUARANTINED);
       interceptors.onProcessingFailed(job, ctx, cause, JobInterceptor.FailureCause.QUARANTINE);
     } catch (Throwable t) {
@@ -510,7 +551,7 @@ public final class JobRunner {
       // Load without initialization: the assignability check must run
       // before any static initializer of a persisted, attacker-influenced
       // class name can execute.
-      Class<?> klass = Class.forName(first.typeTag(), false, JobRunner.class.getClassLoader());
+      Class<?> klass = Class.forName(first.typeTag(), false, resolver.classLoader());
       if (!JobPayload.class.isAssignableFrom(klass)) {
         throw new SerializationException("Argument type is not a JobPayload: " + first.typeTag());
       }

@@ -17,9 +17,18 @@ public final class LuaScripts {
 
   private static final String ROOT = "com/hemju/threadmill/store/redis/lua/";
   private static final String NO_KEY_TOKEN = "__THREADMILL_NO_KEY__";
+  private static final String INDEX_HELPERS = read("pending_indexes.lua");
   private static final Map<String, String> CACHE = new ConcurrentHashMap<>();
 
   private LuaScripts() {}
+
+  static String cleanupConcurrency() {
+    return load("cleanup_concurrency.lua");
+  }
+
+  static String migratePending() {
+    return load("migrate_pending.lua");
+  }
 
   public static String insert() {
     return load("insert.lua");
@@ -82,15 +91,17 @@ public final class LuaScripts {
   }
 
   private static String load(String name) {
-    return CACHE.computeIfAbsent(name, n -> {
-      try (InputStream in =
-          Thread.currentThread().getContextClassLoader().getResourceAsStream(ROOT + n)) {
-        if (in == null) throw new IllegalStateException("Lua script not found: " + ROOT + n);
-        return new String(in.readAllBytes(), StandardCharsets.UTF_8)
-            .replace(NO_KEY_TOKEN, RedisKeys.NO_KEY);
-      } catch (IOException e) {
-        throw new IllegalStateException("Failed to read Lua script: " + ROOT + n, e);
-      }
-    });
+    return CACHE.computeIfAbsent(name, n -> INDEX_HELPERS + "\n" + read(n));
+  }
+
+  private static String read(String name) {
+    try (InputStream in =
+        Thread.currentThread().getContextClassLoader().getResourceAsStream(ROOT + name)) {
+      if (in == null) throw new IllegalStateException("Lua script not found: " + ROOT + name);
+      return new String(in.readAllBytes(), StandardCharsets.UTF_8)
+          .replace(NO_KEY_TOKEN, RedisKeys.NO_KEY);
+    } catch (IOException e) {
+      throw new IllegalStateException("Failed to read Lua script: " + ROOT + name, e);
+    }
   }
 }
