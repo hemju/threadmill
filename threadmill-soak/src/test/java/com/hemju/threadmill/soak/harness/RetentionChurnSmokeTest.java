@@ -26,7 +26,10 @@ class RetentionChurnSmokeTest {
     var config = new SoakHarnessConfig(
         backend,
         "retention-churn",
-        Duration.ofSeconds(24),
+        // Real stores retain idle concurrency metadata for one minute. Run
+        // beyond that grace plus a complete bounded pass, without weakening
+        // the assertion that the sustained profile actually deletes keys.
+        Duration.ofSeconds(backend.equals("memory") ? 24 : 85),
         30,
         1,
         8,
