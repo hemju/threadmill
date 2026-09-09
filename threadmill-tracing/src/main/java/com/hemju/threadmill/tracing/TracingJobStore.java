@@ -134,6 +134,14 @@ public final class TracingJobStore extends ForwardingJobStore {
   }
 
   @Override
+  public void touchExecutionHeartbeats(NodeId nodeId, Map<JobId, Long> activeClaims, Instant now) {
+    traceVoid("threadmill.store.touch_execution_heartbeats", span -> {
+      span.setAttribute(ThreadmillTracing.NODE_ID, nodeId.toString());
+      delegate().touchExecutionHeartbeats(nodeId, activeClaims, now);
+    });
+  }
+
+  @Override
   public void touchOwnerHeartbeat(NodeId nodeId, Instant now) {
     traceVoid("threadmill.store.touch_owner_heartbeat", span -> {
       span.setAttribute(ThreadmillTracing.NODE_ID, nodeId.toString());

@@ -62,6 +62,7 @@ import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.StoreCapacityExceededException;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
+import com.hemju.threadmill.core.internal.ExecutionHeartbeats;
 import com.hemju.threadmill.core.internal.RetentionPosition;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
@@ -1268,6 +1269,30 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
   public Set<String> listPausedQueues() {
     var keys = sync().hkeys(RedisKeys.QUEUE_PAUSES);
     return keys == null ? Set.of() : Set.copyOf(keys);
+  }
+
+  @Override
+  public void touchExecutionHeartbeats(NodeId nodeId, Map<JobId, Long> activeClaims, Instant now) {
+    Objects.requireNonNull(nodeId, "nodeId");
+    Objects.requireNonNull(now, "now");
+    var claims = ExecutionHeartbeats.snapshot(activeClaims);
+    if (claims.isEmpty()) return;
+    var keys = new ArrayList<String>();
+    keys.add(RedisKeys.processingFor(nodeId));
+    keys.add(RedisKeys.PROCESSING_ALL);
+    var args = new ArrayList<String>();
+    args.add(nodeId.toString());
+    args.add(Long.toString(now.toEpochMilli()));
+    claims.forEach((id, version) -> {
+      keys.add(RedisKeys.job(id));
+      args.add(id.toString());
+      args.add(Long.toString(version));
+    });
+    evalScript(
+        LuaScripts.touchExecutionHeartbeats(),
+        ScriptOutputType.INTEGER,
+        keys.toArray(String[]::new),
+        args.toArray(String[]::new));
   }
 
   @Override

@@ -66,6 +66,10 @@ public final class LuaScripts {
     return load("touch_heartbeat.lua");
   }
 
+  static String touchExecutionHeartbeats() {
+    return load("touch_execution_heartbeats.lua");
+  }
+
   public static String dedupDelete() {
     return load("dedup_delete.lua");
   }

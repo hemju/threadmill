@@ -1821,13 +1821,41 @@ class ProcessingNodeTest {
   }
 
   @Test
+  void aLostClaimReplyExpiresWithoutHeartbeatingUnreturnedJobsForever() {
+    var loseReply = new AtomicBoolean(true);
+    var uncertain = new ForwardingJobStore(store) {
+      @Override
+      public List<Job> claimReady(NodeId owner, String queue, int max, Instant now) {
+        var claimed = super.claimReady(owner, queue, max, now);
+        if (!claimed.isEmpty() && loseReply.compareAndSet(true, false))
+          throw new IllegalStateException("lost claim acknowledgement after commit");
+        return claimed;
+      }
+    };
+    var job = enqueueHello(EngineTestHandlers.CountingHandler.class, "default");
+    node = ProcessingNode.builder(uncertain)
+        .config(fastConfig.toBuilder()
+            .maintenancePollInterval(Duration.ofMillis(50))
+            .build())
+        .build();
+    node.start();
+    await().atMost(Duration.ofSeconds(8)).untilAsserted(() -> {
+      var persisted = store.findById(job.id()).orElseThrow();
+      assertThat(persisted.currentState()).isEqualTo(JobState.SUCCEEDED);
+      assertThat(persisted.attempts()).isEqualTo(2);
+    });
+    assertThat(EngineTestHandlers.CountingHandler.COUNT.get(job.id().toString()).get())
+        .isEqualTo(1);
+  }
+
+  @Test
   void persistentHeartbeatFailureSuspendsClaimingAndRecovers() throws Exception {
     var heartbeatDown = new AtomicInteger(1); // 1 = failing
     var failingStore = new ForwardingJobStore(store) {
       @Override
-      public void touchOwnerHeartbeat(NodeId n, Instant now) {
+      public void touchExecutionHeartbeats(NodeId n, Map<JobId, Long> activeClaims, Instant now) {
         if (heartbeatDown.get() == 1) throw new RuntimeException("heartbeat write failing");
-        super.touchOwnerHeartbeat(n, now);
+        super.touchExecutionHeartbeats(n, activeClaims, now);
       }
     };
     node = ProcessingNode.builder(failingStore)
@@ -1836,6 +1864,7 @@ class ProcessingNodeTest {
             .heartbeatTimeout(Duration.ofMillis(200))
             .build())
         .build();
+    enqueueHello(EngineTestHandlers.HangingHandler.class, "default");
     node.start();
 
     // Heartbeats fail for ~heartbeatTimeout, so the node suspends claiming.

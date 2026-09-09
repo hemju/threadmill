@@ -33,6 +33,7 @@ import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
+import com.hemju.threadmill.core.internal.ExecutionHeartbeats;
 import com.hemju.threadmill.core.internal.RetentionPosition;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
@@ -481,6 +482,24 @@ public final class InMemoryJobStore implements JobStore {
         previous.forEach(this::putEntry);
         throw failure;
       }
+    }
+  }
+
+  @Override
+  public void touchExecutionHeartbeats(NodeId nodeId, Map<JobId, Long> activeClaims, Instant now) {
+    Objects.requireNonNull(nodeId, "nodeId");
+    Objects.requireNonNull(now, "now");
+    var claims = ExecutionHeartbeats.snapshot(activeClaims);
+    synchronized (claimMutex) {
+      claims.forEach((id, version) -> computeEntryIfPresent(id, (key, existing) -> {
+        if (existing.state != JobState.PROCESSING || existing.version != version) return existing;
+        var job = serializer.deserializeJob(existing.wire);
+        if (!job.ownerNodeId().filter(nodeId::equals).isPresent()) return existing;
+        job.updateHeartbeat(now);
+        var snapshot = job.snapshot();
+        return entryFromSnapshot(
+            snapshot, serializer.serializeJob(snapshot, capabilities), existing.version);
+      }));
     }
   }
 

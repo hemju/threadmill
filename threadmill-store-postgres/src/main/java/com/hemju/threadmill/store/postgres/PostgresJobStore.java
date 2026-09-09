@@ -11,6 +11,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.EnumMap;
 import java.util.HashMap;
@@ -41,6 +42,7 @@ import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
+import com.hemju.threadmill.core.internal.ExecutionHeartbeats;
 import com.hemju.threadmill.core.internal.RetentionPosition;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
@@ -1213,6 +1215,35 @@ public final class PostgresJobStore implements JobStore {
   }
 
   @Override
+  public void touchExecutionHeartbeats(NodeId nodeId, Map<JobId, Long> activeClaims, Instant now) {
+    Objects.requireNonNull(nodeId, "nodeId");
+    Objects.requireNonNull(now, "now");
+    var claims = ExecutionHeartbeats.snapshot(activeClaims);
+    if (claims.isEmpty()) return;
+    var values = String.join(",", Collections.nCopies(claims.size(), "(?::uuid,?::bigint)"));
+    try {
+      ownedTransaction(conn -> {
+        try (var update = conn.prepareStatement(
+            "UPDATE threadmill_jobs j SET owner_heartbeat_at=GREATEST(j.owner_heartbeat_at,?) "
+                + "FROM (VALUES " + values + ") AS active(id,version) WHERE j.id=active.id "
+                + "AND j.version=active.version AND j.owner_node_id=? AND j.state='PROCESSING'")) {
+          update.setTimestamp(1, Timestamp.from(now));
+          int parameter = 2;
+          for (var claim : claims.entrySet()) {
+            update.setObject(parameter++, claim.getKey().asUuid());
+            update.setLong(parameter++, claim.getValue());
+          }
+          update.setObject(parameter, nodeId.asUuid());
+          update.executeUpdate();
+        }
+        return null;
+      });
+    } catch (SQLException failure) {
+      throw new JdbcException("touchExecutionHeartbeats failed", failure);
+    }
+  }
+
+  @Override
   public void touchOwnerHeartbeat(NodeId nodeId, Instant now) {
     try {
       ownedTransaction(conn -> {
@@ -1637,12 +1668,21 @@ public final class PostgresJobStore implements JobStore {
     try {
       var page = writeTransaction(conn -> {
         var queues = new ArrayList<String>();
-        try (var query = conn.prepareStatement("SELECT DISTINCT queue FROM threadmill_queue_counts "
-            + (idleQueueAfter == null ? "" : "WHERE queue > ? ") + "ORDER BY queue LIMIT ?")) {
+        var idleQueues = new ArrayList<String>();
+        try (var query = conn.prepareStatement(
+            "WITH candidates AS MATERIALIZED (SELECT queue, SUM(count) AS total FROM threadmill_queue_counts "
+                + (idleQueueAfter == null ? "" : "WHERE queue > ? ")
+                + "GROUP BY queue ORDER BY queue LIMIT ?) "
+                + "SELECT c.queue, c.total=0 AND NOT EXISTS (SELECT 1 FROM threadmill_jobs j "
+                + "WHERE j.queue=c.queue AND j.state='ENQUEUED') AS idle FROM candidates c ORDER BY c.queue")) {
           if (idleQueueAfter != null) query.setString(1, idleQueueAfter);
           query.setInt(idleQueueAfter == null ? 1 : 2, limit);
           try (var rows = query.executeQuery()) {
-            while (rows.next()) queues.add(rows.getString(1));
+            while (rows.next()) {
+              var queue = rows.getString(1);
+              queues.add(queue);
+              if (rows.getBoolean(2)) idleQueues.add(queue);
+            }
           }
         }
         long removed = 0;
@@ -1660,7 +1700,10 @@ public final class PostgresJobStore implements JobStore {
           // Delete only the locked, zero-sum subset, never newly inserted
           // shards. This preserves exact totals even with negative shards or
           // concurrent trigger writes on shards absent from this snapshot.
-          for (var queue : queues) {
+          // Busy queues advance the bounded candidate cursor without taking
+          // counter-row locks. Recheck idle candidates under lock because a
+          // producer may have arrived since the read-only prefilter.
+          for (var queue : idleQueues) {
             delete.setString(1, queue);
             removed += delete.executeUpdate();
           }

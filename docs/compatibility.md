@@ -33,6 +33,10 @@ module versions in one process.
 Before 1.0, custom stores must implement the complete `JobStore` contract,
 including monotonic execution revisions, bounded maintenance scans, retention
 pages, concurrency metadata reclamation, capabilities, and atomic bulk budgets.
+Implement `touchExecutionHeartbeats(nodeId, activeClaims, now)` with exact
+job-ID/state-version/owner checks and the 500-claim bound. The engine renews only
+confirmed active execution/finalization contexts; mapping this operation to the
+old owner-wide heartbeat can strand a claim whose acknowledgement was lost.
 Use `ForwardingJobStore` for decorators and run the shared store contract plus
 the reflection-based decorator coverage. A capability describes actual behavior;
 unsupported operations must fail explicitly. In particular, Redis job search

@@ -53,6 +53,14 @@ final class MeasuredJobStore extends ForwardingJobStore {
   }
 
   @Override
+  public void touchExecutionHeartbeats(NodeId nodeId, Map<JobId, Long> activeClaims, Instant now) {
+    measure("executionHeartbeat", () -> {
+      super.touchExecutionHeartbeats(nodeId, activeClaims, now);
+      return null;
+    });
+  }
+
+  @Override
   public void saveAtomic(Job job, long version) {
     String operation = job.currentState().isTerminal() || job.currentState() == JobState.FAILED
         ? "terminalSave"

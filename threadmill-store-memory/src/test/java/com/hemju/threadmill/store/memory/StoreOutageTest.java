@@ -240,6 +240,13 @@ class StoreOutageTest {
     }
 
     @Override
+    public void touchExecutionHeartbeats(
+        NodeId nodeId, Map<JobId, Long> activeClaims, Instant now) {
+      check();
+      delegate.touchExecutionHeartbeats(nodeId, activeClaims, now);
+    }
+
+    @Override
     public void touchOwnerHeartbeat(NodeId nodeId, Instant now) {
       check();
       delegate.touchOwnerHeartbeat(nodeId, now);

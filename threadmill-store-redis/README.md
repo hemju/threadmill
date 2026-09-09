@@ -155,7 +155,8 @@ server (single-threaded execution).
 | `enqueue_if_absent.lua` | Producer-side dedup: insert iff `(queue, dedupKey)` isn't already mapped to an active job. |
 | `save_atomic.lua` | Version-matched conditional update — the optimistic-lock save. |
 | `claim_commit.lua` | The reliable-fetch claim. Java prepares the PROCESSING body first, then this script verifies version / state / queue membership and commits body, scalars, indexes (queue → processing + per-node), attempts, owner heartbeat, and counts together. Consults concurrency counters, pending members, workflow counts, and workflow holds before committing. A crash before this script leaves the job ENQUEUED; a crash after leaves a complete PROCESSING record for orphan recovery. |
-| `touch_heartbeat.lua` | Rescore every owned PROCESSING id in the per-node ZSET. Does not bump optimistic-lock version. |
+| `touch_heartbeat.lua` | Explicit owner-wide heartbeat helper for external callers. Does not bump optimistic-lock version. |
+| `touch_execution_heartbeats.lua` | Engine heartbeat: refresh at most 500 confirmed ID/version/owner-matching PROCESSING attempts; unreturned claims can expire into recovery. |
 | `replace_job.lua` | Atomic in-place definition swap for non-running jobs. Moves the row between queue ZSETs if the queue changes. |
 | `soft_delete.lua` | Move a job to DELETED, removing it from active indexes and per-handler set, decrementing counts. |
 | `mutex_acquire.lua` | Acquire-or-refresh a named mutex with a millisecond-precision lease. One Lua call removes the race window that `SET NX` + `PEXPIRE` would have. |

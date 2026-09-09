@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.EnumMap;
 import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -15,9 +16,11 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.StaleJobException;
+import com.hemju.threadmill.core.internal.ExecutionHeartbeats;
 import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.schedule.RecurringMaterializer;
 import com.hemju.threadmill.core.store.JobStore;
@@ -170,7 +173,7 @@ public final class MaintenanceCycle {
     int consecutiveFailures = 0;
     while (running.get() && !Thread.currentThread().isInterrupted()) {
       try {
-        store.touchOwnerHeartbeat(nodeId, Instant.now());
+        refreshActiveHeartbeats();
         if (consecutiveFailures > 0) {
           consecutiveFailures = 0;
           if (claimSuspended != null && claimSuspended.compareAndSet(true, false)) {
@@ -248,6 +251,19 @@ public final class MaintenanceCycle {
         sleep(config.maintenancePollInterval());
       }
     }
+  }
+
+  private void refreshActiveHeartbeats() {
+    var now = Instant.now();
+    var batch = new HashMap<JobId, Long>();
+    for (var claim : runner.activeClaims().entrySet()) {
+      batch.put(claim.getKey(), claim.getValue());
+      if (batch.size() == ExecutionHeartbeats.MAX_BATCH) {
+        store.touchExecutionHeartbeats(nodeId, batch, now);
+        batch.clear();
+      }
+    }
+    if (!batch.isEmpty()) store.touchExecutionHeartbeats(nodeId, batch, now);
   }
 
   private static void runActivity(String name, Runnable activity) {

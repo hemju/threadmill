@@ -145,6 +145,11 @@ public class ForwardingJobStore implements JobStore {
   }
 
   @Override
+  public void touchExecutionHeartbeats(NodeId nodeId, Map<JobId, Long> activeClaims, Instant now) {
+    delegate.touchExecutionHeartbeats(nodeId, activeClaims, now);
+  }
+
+  @Override
   public boolean saveExecutionUpdate(Job job, NodeId nodeId) {
     return delegate.saveExecutionUpdate(job, nodeId);
   }

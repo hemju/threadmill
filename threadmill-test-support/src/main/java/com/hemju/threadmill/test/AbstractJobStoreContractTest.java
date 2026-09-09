@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -94,6 +95,46 @@ public abstract class AbstractJobStoreContractTest {
   @BeforeEach
   void freshStore() {
     store = createStore();
+  }
+
+  @Test
+  void executionHeartbeatsRefreshOnlyConfirmedMatchingAttemptsAndRejectOversizedBatches() {
+    var at = Instant.now().minusSeconds(30).truncatedTo(ChronoUnit.MILLIS);
+    store.insertAll(List.of(Jobs.enqueued("one"), Jobs.enqueued("two")));
+    var owner = NodeId.newId();
+    var claimed = store.claimReady(owner, "default", 2, at);
+    var active = claimed.getFirst();
+    var unreturned = claimed.getLast();
+    long oldVersion = active.version();
+    var advanced = at.plusSeconds(5);
+    store.touchExecutionHeartbeats(owner, Map.of(active.id(), oldVersion), advanced);
+    assertThat(store.findById(active.id()).orElseThrow().ownerHeartbeatAt()).contains(advanced);
+    assertThat(store.findById(unreturned.id()).orElseThrow().ownerHeartbeatAt()).contains(at);
+    store.touchExecutionHeartbeats(owner, Map.of(active.id(), oldVersion), at);
+    assertThat(store.findById(active.id()).orElseThrow().ownerHeartbeatAt()).contains(advanced);
+    assertThat(store.findById(active.id()).orElseThrow().version()).isEqualTo(oldVersion);
+    assertThat(store.findById(active.id()).orElseThrow().executionRevision()).isZero();
+
+    for (var state : List.of(JobState.FAILED, JobState.SCHEDULED, JobState.ENQUEUED)) {
+      active.transitionTo(state, advanced);
+      store.saveAtomic(active, active.version());
+    }
+    var newer = store.claimReady(owner, "default", 1, advanced).getFirst();
+    var later = advanced.plusSeconds(5);
+    store.touchExecutionHeartbeats(owner, Map.of(active.id(), oldVersion), later);
+    store.touchExecutionHeartbeats(NodeId.newId(), Map.of(newer.id(), newer.version()), later);
+    assertThat(store.findById(newer.id()).orElseThrow().ownerHeartbeatAt()).contains(advanced);
+    store.touchExecutionHeartbeats(owner, Map.of(newer.id(), newer.version()), later);
+    assertThat(store.findById(newer.id()).orElseThrow().ownerHeartbeatAt()).contains(later);
+
+    var excessive = new HashMap<JobId, Long>();
+    excessive.put(newer.id(), newer.version());
+    for (int i = 0; i < 500; i++) excessive.put(JobId.newId(), 1L);
+    assertThatThrownBy(() -> store.touchExecutionHeartbeats(owner, excessive, later.plusSeconds(5)))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(store.findById(newer.id()).orElseThrow().ownerHeartbeatAt()).contains(later);
+    store.touchExecutionHeartbeats(owner, Map.of(JobId.newId(), 1L), later);
+    store.touchExecutionHeartbeats(owner, Map.of(), later);
   }
 
   @Test

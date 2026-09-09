@@ -45,12 +45,11 @@ as healthy.
 
 Escaping an engine boundary terminates that engine thread, not necessarily the
 JVM. Threadmill deliberately does not call `System.exit` or `Runtime.halt`; the
-host owns termination policy. Without a host policy, a fatal error on a worker
-can leave its job `PROCESSING` while the node's owner heartbeat continues to
-refresh it. Orphan recovery cannot reclaim that job, and its claim-time
-concurrency slot remains held, until the node stops and its heartbeat expires.
-A fatal error on a long-lived engine loop can similarly leave a live but
-impaired process.
+host owns termination policy. Worker cleanup unregisters an exited attempt from
+execution heartbeats, allowing its persisted `PROCESSING` claim to expire even
+while the node remains alive. Fatal JVM failures can prevent cleanup or disable
+a long-lived engine loop, however; heartbeat expiry is no substitute for
+terminating an impaired process.
 
 Production deployments must therefore convert uncaught process-fatal errors
 into process termination and run the service under a supervisor that restarts
@@ -299,7 +298,22 @@ PostgreSQL also inspects at most 100 queue-counter groups per poll through
 `deleteIdleQueueMetadata`. It deletes only locked, zero-sum shard rows of empty
 queues; negative individual shards and concurrent producers remain valid.
 `threadmill.retention.deleted{kind="queue_metadata"}` counts removed rows.
+
+Queue cleanup reads at most 100 queue groups per page and locks only candidates
+whose counters sum to zero and which have no enqueued jobs. It rechecks both
+conditions while deleting the locked shards. Active queues advance the cursor
+without counter-row locks. Metadata cleanup remains on the maintenance poll:
+an hourly 100-key/page limit would accumulate metadata under sustained unique-key
+or unique-queue churn. Its bounded pages and idle-group grace limit the work;
+the soak must verify that cleanup capacity exceeds metadata creation.
 The in-memory and Redis stores need no corresponding empty-queue counter cleanup.
+
+Execution heartbeats renew only confirmed active job IDs and their captured
+claim versions, in batches of at most 500. A committed claim whose response is
+lost is absent from that active set and can expire into normal orphan recovery,
+even while its node remains alive. A stale attempt cannot refresh a newer claim
+of the same job. Active terminal finalizers retain their heartbeat while retrying
+a store outage. At-least-once delivery still requires idempotent handlers.
 
 Execution resources are released through `JobInterceptor.onProcessingFinished`,
 which runs in an engine `finally` block in reverse interceptor order. It also

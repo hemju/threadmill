@@ -235,8 +235,19 @@ public interface JobStore {
 
   /**
    * Update the heartbeat for all jobs this node currently owns to {@code now}.
+   * This owner-wide operation is for explicit external callers. The engine uses
+   * {@link #touchExecutionHeartbeats} so unacknowledged claims can expire.
    */
   void touchOwnerHeartbeat(NodeId nodeId, Instant now);
+
+  /**
+   * Refresh at most 500 confirmed active claims, keyed by job ID and persisted
+   * state version. Update only matching PROCESSING jobs owned by {@code nodeId};
+   * missing, stale, unlisted and differently owned attempts remain unchanged.
+   * Never regress a heartbeat or alter state/execution versions. Reject invalid
+   * or oversized batches before any write. An empty batch is a no-op.
+   */
+  void touchExecutionHeartbeats(NodeId nodeId, Map<JobId, Long> activeClaims, Instant now);
 
   /**
    * Persist execution-time updates such as check-ins, progress, and logs

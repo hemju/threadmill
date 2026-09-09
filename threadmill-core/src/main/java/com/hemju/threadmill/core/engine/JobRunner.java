@@ -2,9 +2,10 @@ package com.hemju.threadmill.core.engine;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -18,6 +19,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.OversizedJobException;
@@ -68,9 +70,15 @@ public final class JobRunner {
   // Set by the owning ProcessingNode; true once close() has begun. Lets the
   // failure path distinguish a shutdown interrupt from a handler fault.
   private volatile BooleanSupplier shuttingDown = () -> false;
-  // Every attempt currently inside run(); the node marks them all SHUTDOWN
+  // Every execution/finalization context; the node marks them all SHUTDOWN
   // right before it interrupts the worker pool.
-  private final Set<ExecutionContext> inFlight = ConcurrentHashMap.newKeySet();
+  private final Map<ExecutionContext, Long> inFlight = new ConcurrentHashMap<>();
+
+  Map<JobId, Long> activeClaims() {
+    var claims = new HashMap<JobId, Long>();
+    inFlight.forEach((context, version) -> claims.merge(context.jobId(), version, Math::max));
+    return claims;
+  }
   // The instant the owning node will interrupt still-running attempts; null
   // until close() begins. Caps ctx.deadline() for every in-flight attempt.
   private volatile Instant shutdownDeadline;
@@ -140,7 +148,7 @@ public final class JobRunner {
    */
   public void cancelInFlightForShutdown() {
     forcedShutdown = true;
-    for (ExecutionContext ctx : inFlight) {
+    for (ExecutionContext ctx : inFlight.keySet()) {
       ctx.markCancelled(CancellationReason.SHUTDOWN);
     }
   }
@@ -159,20 +167,16 @@ public final class JobRunner {
   public void run(Job job) {
     Objects.requireNonNull(job, "job");
     var ctx = newContext(job);
-    inFlight.add(ctx);
     // Both sides of the add-versus-sweep race: the sweep marks everything it
     // sees, and anything it could not see yet marks itself here.
-    if (forcedShutdown) {
-      ctx.markCancelled(CancellationReason.SHUTDOWN);
-    }
-    try {
-      runWithCleanup(job, ctx, () -> runTracked(job, ctx));
-    } finally {
-      inFlight.remove(ctx);
-    }
+    runWithCleanup(job, ctx, () -> {
+      if (forcedShutdown) ctx.markCancelled(CancellationReason.SHUTDOWN);
+      runTracked(job, ctx);
+    });
   }
 
   private void runWithCleanup(Job job, ExecutionContext ctx, Runnable work) {
+    inFlight.put(ctx, job.version());
     Throwable original = null;
     try {
       work.run();
@@ -185,6 +189,8 @@ public final class JobRunner {
       } catch (Throwable cleanup) {
         if (original == null) throw cleanup;
         if (cleanup != original) original.addSuppressed(cleanup);
+      } finally {
+        inFlight.remove(ctx);
       }
     }
   }
@@ -389,7 +395,7 @@ public final class JobRunner {
       // failure transition would be illegal on it. Reload the persisted
       // PROCESSING row and route the reloaded job through the single
       // failure path — otherwise the job stays PROCESSING forever,
-      // shielded from orphan reclaim by the node-wide heartbeat.
+      // shielded from orphan reclaim by this active finalization context.
       LOG.error("SUCCEEDED save failed for job {} — routing through the failure path", job.id(), t);
       Job fresh = reloadForFailure(job);
       if (fresh != null) {

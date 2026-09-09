@@ -2,6 +2,7 @@ package com.hemju.threadmill.store.postgres;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -641,6 +642,47 @@ class PostgresJobStoreRegressionTest {
           "SELECT count(*) FROM threadmill_queue_counts WHERE queue<>'active'")) {
         rows.next();
         assertThat(rows.getLong(1)).isZero();
+      }
+    }
+  }
+
+  @Test
+  void idleQueueCleanupDoesNotLockActiveQueueCountersWhileDeletingAnotherQueue() throws Exception {
+    var store = store();
+    store.insert(
+        Job.builder().queue("a-active").spec(JobSpec.of("example.Handler")).build());
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement()) {
+      statement.executeUpdate("INSERT INTO threadmill_queue_counts VALUES ('z-idle',0,0)");
+      statement.execute("""
+          CREATE FUNCTION cleanup_test_gate() RETURNS trigger AS $$
+          BEGIN PERFORM pg_advisory_xact_lock(136029); RETURN OLD; END;
+          $$ LANGUAGE plpgsql
+          """);
+      statement.execute("CREATE TRIGGER cleanup_test_gate BEFORE DELETE ON threadmill_queue_counts "
+          + "FOR EACH ROW EXECUTE FUNCTION cleanup_test_gate()");
+      statement.execute("SELECT pg_advisory_lock(136029)");
+      try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+        var cleanup = executor.submit(() -> store.deleteIdleQueueMetadata(100));
+        try {
+          await().atMost(Duration.ofSeconds(5)).until(() -> {
+            try (var rows = statement.executeQuery(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=136029 AND NOT granted)")) {
+              rows.next();
+              return rows.getBoolean(1);
+            }
+          });
+          statement.execute("SET lock_timeout='1s'");
+          assertThat(statement.executeUpdate(
+                  "UPDATE threadmill_queue_counts SET count=count WHERE queue='a-active'"))
+              .isPositive();
+        } finally {
+          statement.execute("SELECT pg_advisory_unlock(136029)");
+        }
+        assertThat(cleanup.get(5, TimeUnit.SECONDS)).isEqualTo(1);
+      } finally {
+        statement.execute("DROP TRIGGER cleanup_test_gate ON threadmill_queue_counts");
+        statement.execute("DROP FUNCTION cleanup_test_gate()");
       }
     }
   }
