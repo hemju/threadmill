@@ -43,7 +43,7 @@ package com.hemju.threadmill.core.store;
  *                               {@code JobMetadata} portion of a job. At
  *                               serialization time the largest user entries
  *                               are dropped first ({@code threadmill.}-prefixed
- *                               engine entries are kept longest) until the
+ *                               engine entries are always preserved) until the
  *                               metadata fits this budget; an elision marker
  *                               entry records the omission. Defaults to
  *                               {@code maxSerializedJobBytes / 4}, capped at 64 KiB.

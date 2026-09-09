@@ -63,8 +63,8 @@ for i = 1, n do
     local pending_member   = ARGV[arg_offset + 17]
     local pending_score    = tonumber(ARGV[arg_offset + 18])
 
-    redis.call('SETNX', '{threadmill}:storage_format', '2')
-redis.call('HSET', job_key,
+    redis.call('SETNX', '__THREADMILL_STORAGE_FORMAT_KEY__', '__THREADMILL_STORAGE_FORMAT__')
+    redis.call('HSET', job_key,
         'body', body,
         'state', state,
         'queue', queue,

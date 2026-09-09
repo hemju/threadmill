@@ -249,6 +249,11 @@ public class ForwardingJobStore implements JobStore {
   }
 
   @Override
+  public long deleteIdleQueueMetadata(int max) {
+    return delegate.deleteIdleQueueMetadata(max);
+  }
+
+  @Override
   public long deleteExpiredDedupKeys(Instant now, int max) {
     return delegate.deleteExpiredDedupKeys(now, max);
   }
@@ -261,7 +266,8 @@ public class ForwardingJobStore implements JobStore {
   // ---------------------------------------------------------------- retention
 
   @Override
-  public RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after) {
+  public RetentionPage deleteFinishedPage(
+      Instant cutoff, JobState state, int max, RetentionCursor after) {
 
     return delegate.deleteFinishedPage(cutoff, state, max, after);
   }

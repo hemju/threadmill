@@ -15,13 +15,13 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.Job;
-import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.schedule.RecurringMaterializer;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.RetentionCursor;
 
 /**
  * Master-only housekeeping loop. Runs on the elected master node only;
@@ -43,7 +43,7 @@ import com.hemju.threadmill.core.store.JobStore;
  * <p>Three independent cadences share one loop thread to avoid coupling
  * latency-sensitive ops to slow housekeeping:
  * <ul>
- *   <li>{@code maintenancePollInterval} (the loop tick) bounds materialization,
+ *   <li>{@code maintenancePollInterval} (the loop tick) paces materialization,
  *       promotion, and orphan reclaim latency. Default 1 s.</li>
  *   <li>{@code claimHeartbeat} drives owner-heartbeat refresh — slow enough not
  *       to thrash the store, fast enough to stay well below {@code heartbeatTimeout}.
@@ -73,6 +73,9 @@ public final class MaintenanceCycle {
   private final LocalWakeBus wakeBus;
   private final WorkflowInterceptor workflowInterceptor;
   private Instant nextRetention = Instant.EPOCH;
+  private Instant nextRetryRecovery = Instant.EPOCH;
+  private Instant nextWorkflowReconciliation = Instant.EPOCH;
+  private static final Duration RECOVERY_PASS_INTERVAL = Duration.ofSeconds(30);
   private final AtomicBoolean running = new AtomicBoolean(false);
   private final AtomicReference<Thread> loopThread = new AtomicReference<>();
   private final AtomicReference<Thread> heartbeatThread = new AtomicReference<>();
@@ -198,7 +201,7 @@ public final class MaintenanceCycle {
 
   private void loop() {
     // Two cadences share the master thread:
-    //   - the loop ticks at maintenancePollInterval (fast; bounds materialize/promote/orphan
+    //   - the loop ticks at maintenancePollInterval (fast; resumes materialize/promote/orphan
     // latency)
     //   - retention sweeps fire at retentionInterval (slowest; deletion is not time-sensitive)
     // Owner-heartbeat refresh runs on its own thread (see start()).
@@ -208,15 +211,32 @@ public final class MaintenanceCycle {
         if (registry.isMaster()) {
           runActivity("promotion", this::promoteScheduled);
           runActivity("recurring", () -> materializer.tick(now));
-          runActivity("retry recovery", this::recoverStrandedFailedJobs);
-          runActivity("workflow reconciliation", this::reconcileOrphanedWorkflowChildren);
+          if (!now.isBefore(nextRetryRecovery)) {
+            runActivity("retry recovery", () -> {
+              recoverStrandedFailedJobs();
+              if (retryInterceptor.recoveryPassComplete())
+                nextRetryRecovery = Instant.now().plus(RECOVERY_PASS_INTERVAL);
+            });
+          }
+          if (!now.isBefore(nextWorkflowReconciliation)) {
+            runActivity("workflow reconciliation", () -> {
+              reconcileOrphanedWorkflowChildren();
+              if (workflowInterceptor.reconciliationPassComplete())
+                nextWorkflowReconciliation = Instant.now().plus(RECOVERY_PASS_INTERVAL);
+            });
+          }
           runActivity("orphan recovery", this::reclaimOrphans);
           runActivity("concurrency metadata", () -> store.deleteIdleConcurrencyGroups(100));
+          runActivity("queue metadata", () -> store.deleteIdleQueueMetadata(100));
           if (!now.isBefore(nextRetention)) {
             runActivity("retention", () -> {
               boolean more = retentionSweep();
               more |= dedupRetentionSweep();
               nodeHeartbeatRetentionSweep();
+              if (!more) {
+                completedRetentionStates.clear();
+                retentionCutoffs.clear();
+              }
               nextRetention = more ? now : now.plus(config.retentionInterval());
             });
           }
@@ -307,14 +327,15 @@ public final class MaintenanceCycle {
    * Recover workflow children stranded in AWAITING because their predecessor
    * reached a terminal state but the promote/abandon hook never ran (a crash
    * between the terminal save and the interceptor). Reuses the workflow
-   * interceptor's idempotent transitions. The cursor advances every maintenance
-   * tick independently of retention.
+   * interceptor's idempotent transitions. An unfinished pass advances every
+   * maintenance tick; complete passes pause for 30 seconds independently of retention.
    */
   private void reconcileOrphanedWorkflowChildren() {
     workflowInterceptor.reconcileOrphanedAwaitingChildren(WORKFLOW_RECONCILE_SCAN);
   }
 
-  private final Map<JobState, JobId> retentionCursors = new EnumMap<>(JobState.class);
+  private final Map<JobState, RetentionCursor> retentionCursors = new EnumMap<>(JobState.class);
+  private final Map<JobState, Instant> retentionCutoffs = new EnumMap<>(JobState.class);
 
   private final Set<JobState> completedRetentionStates = EnumSet.noneOf(JobState.class);
 
@@ -324,16 +345,16 @@ public final class MaintenanceCycle {
     more |= sweepTerminalState(JobState.FAILED, now.minus(config.failedRetention()));
     more |= sweepTerminalState(JobState.DELETED, now.minus(config.deletedRetention()));
     more |= sweepTerminalState(JobState.QUARANTINED, now.minus(config.quarantinedRetention()));
-    if (!more) completedRetentionStates.clear();
     return more;
   }
 
   private boolean sweepTerminalState(JobState state, Instant cutoff) {
     if (completedRetentionStates.contains(state)) return false;
+    var passCutoff = retentionCutoffs.computeIfAbsent(state, ignored -> cutoff);
     long deadline = System.nanoTime() + 200_000_000L;
     for (int i = 0; i < MAX_RETENTION_BATCHES_PER_TICK; i++) {
       var page =
-          store.deleteFinishedPage(cutoff, state, RETENTION_BATCH, retentionCursors.get(state));
+          store.deleteFinishedPage(passCutoff, state, RETENTION_BATCH, retentionCursors.get(state));
       if (page.nextAfter() == null) {
         retentionCursors.remove(state);
         completedRetentionStates.add(state);

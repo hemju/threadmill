@@ -1,6 +1,6 @@
 package com.hemju.threadmill.core.store;
 
-import java.nio.charset.StandardCharsets;
+import com.hemju.threadmill.core.internal.Utf8;
 
 /** Internal preflight budget shared by atomic bulk-insert implementations. */
 public final class BulkInsertBudget {
@@ -19,7 +19,7 @@ public final class BulkInsertBudget {
 
   /** Include one encoded body, rejecting the whole batch if its byte budget is exceeded. */
   public void include(String body) {
-    bytes += body.getBytes(StandardCharsets.UTF_8).length;
+    bytes += Utf8.length(body);
     if (bytes > maxBytes) {
       throw new IllegalArgumentException("Atomic bulk insert exceeds " + maxBytes
           + " serialized bytes; split the submission into smaller atomic batches");

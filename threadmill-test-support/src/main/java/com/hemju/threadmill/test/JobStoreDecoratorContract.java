@@ -41,6 +41,7 @@ import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStore.NudgeOutcome;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
+import com.hemju.threadmill.core.store.RetentionCursor;
 import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
@@ -225,6 +226,7 @@ public final class JobStoreDecoratorContract {
           "decorated-" + label, Instant.parse("2026-01-02T03:04:05Z"), "fingerprint");
     }
     if (raw == RetentionPage.class) return new RetentionPage(1, null);
+    if (raw == RetentionCursor.class) return new RetentionCursor("opaque-" + label);
     return fail("add a sample for JobStore type " + type);
   }
 

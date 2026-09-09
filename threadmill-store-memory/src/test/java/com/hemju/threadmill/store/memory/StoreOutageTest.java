@@ -33,6 +33,7 @@ import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
+import com.hemju.threadmill.core.store.RetentionCursor;
 import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
@@ -353,7 +354,8 @@ class StoreOutageTest {
     }
 
     @Override
-    public RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after) {
+    public RetentionPage deleteFinishedPage(
+        Instant cutoff, JobState state, int max, RetentionCursor after) {
       check();
       return delegate.deleteFinishedPage(cutoff, state, max, after);
     }

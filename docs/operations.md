@@ -234,9 +234,14 @@ directory layout, and the AI-drop-in workflow.
 
 ### Maintenance capacity and backlog ages
 
-Correctness recovery runs on every `maintenancePollInterval`, independently of
-retention. Retry recovery and workflow reconciliation each inspect at most 500
-jobs per tick, retaining an exclusive job-id cursor across ticks. Recurring
+Unfinished correctness-recovery passes resume on each `maintenancePollInterval`,
+independently of retention. Retry recovery and workflow reconciliation each
+inspect at most 500 jobs per tick, retaining an exclusive job-id cursor across
+ticks. After a complete pass each activity pauses for 30 seconds, so retained
+final failures and legitimate waiting children are not continuously re-read.
+Workflow reconciliation reads each distinct parent once per page. Recovery of a
+crashed completion hook can therefore wait that interval plus one pass; stranded
+retry recovery also requires a five-minute-old failure. Recurring
 materialization visits at most 64 definitions per tick with a stable name cursor.
 Promotion handles at most 500 candidates. These activities yield between records
 at a cooperative 200 ms budget; a single datastore call or interceptor can exceed
@@ -251,9 +256,12 @@ sweep, rather than a throttle limiting cleanup to 5,000 records per hour. Expire
 deduplication cleanup follows the same rule. Correctness activities run first;
 a nonfatal failure in one activity does not suppress the others.
 
-Retention scans at most 100 state/id candidates per store call. Its cursor
-advances past protected or recent records, so they cannot hide later eligible
-jobs. Deletion atomically checks state/version, live dedup protection, and waiting
+Retention scans at most 100 cutoff-eligible candidates per store call, ordered
+by transition time and ID in the bundled stores. Recent jobs do not consume its
+page budget or require body reads. Its opaque `RetentionCursor` advances past
+protected records and survives deletion of the previous cursor's job, including
+timestamp ties. Keep the state and cutoff fixed for an entire pass. Deletion
+atomically checks state/version, live dedup protection, and waiting
 children. A successful workflow predecessor remains until its waiting children
 have been promoted; `FAILED` jobs remain while a retry is pending or their legacy
 retry decision is unknown. Unreadable failure decisions also remain for operator
@@ -277,12 +285,21 @@ validate retention capacity.
 
 Maintenance also inspects at most 100 persisted concurrency groups per poll,
 using resumable cursors. It removes counters only when no active hold or
-nonterminal work needs the key. PostgreSQL locks and rechecks the candidate;
+nonterminal work needs the key, with a one-minute idle grace to avoid deleting
+hot keys between consecutive jobs. PostgreSQL measures from `last_modified`;
+Redis starts the grace when cleanup first observes the idle key and resets it
+on a new claim. PostgreSQL locks and rechecks the candidate;
 Redis checks and removes it in one Lua call. New work can safely recreate the
 bookkeeping. This bounds accumulation from one-use business-operation keys once
 their workflows finish. The metered store exports these deletions with
 `threadmill.retention.deleted{kind="concurrency"}`. The in-memory store derives
 admission from its stored jobs and has no separate counter rows to reclaim.
+
+PostgreSQL also inspects at most 100 queue-counter groups per poll through
+`deleteIdleQueueMetadata`. It deletes only locked, zero-sum shard rows of empty
+queues; negative individual shards and concurrent producers remain valid.
+`threadmill.retention.deleted{kind="queue_metadata"}` counts removed rows.
+The in-memory and Redis stores need no corresponding empty-queue counter cleanup.
 
 Execution resources are released through `JobInterceptor.onProcessingFinished`,
 which runs in an engine `finally` block in reverse interceptor order. It also

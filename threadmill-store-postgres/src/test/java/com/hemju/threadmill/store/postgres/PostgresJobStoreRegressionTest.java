@@ -21,6 +21,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -595,12 +596,112 @@ class PostgresJobStoreRegressionTest {
   }
 
   @Test
+  void recentlyUsedConcurrencyKeysSurviveCleanupUntilTheirIdleGraceExpires() throws SQLException {
+    var store = store();
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "INSERT INTO threadmill_concurrency_groups VALUES ('recent',0,0,clock_timestamp())");
+      assertThat(store.deleteIdleConcurrencyGroups(100)).isZero();
+      statement.executeUpdate(
+          "UPDATE threadmill_concurrency_groups SET last_modified=clock_timestamp()-interval '2 minutes'");
+      assertThat(store.deleteIdleConcurrencyGroups(100)).isEqualTo(1);
+    }
+  }
+
+  @Test
+  void emptyQueueCleanupRemovesBalancedShardsWithoutErasingLockedCounterChanges()
+      throws SQLException {
+    var store = store();
+    var active =
+        Job.builder().queue("active").spec(JobSpec.of("example.Handler")).build();
+    store.insert(active);
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "INSERT INTO threadmill_queue_counts SELECT 'old-'||lpad(n::text,4,'0'),s,CASE WHEN s=0 THEN 5 ELSE -5 END FROM generate_series(1,250) n CROSS JOIN generate_series(0,1) s");
+      connection.setAutoCommit(false);
+      statement
+          .executeQuery(
+              "SELECT * FROM threadmill_queue_counts WHERE queue='old-0001' AND shard=0 FOR UPDATE")
+          .close();
+      for (int i = 0; i < 4; i++) store.deleteIdleQueueMetadata(1000);
+      // A negative shard alone is not zero-sum and cannot be deleted while
+      // its positive counterpart is locked by a concurrent writer.
+      try (var rows = statement.executeQuery(
+          "SELECT count(*),sum(count) FROM threadmill_queue_counts WHERE queue='old-0001'")) {
+        rows.next();
+        assertThat(rows.getLong(1)).isEqualTo(2);
+        assertThat(rows.getLong(2)).isZero();
+      }
+      connection.rollback();
+      for (int i = 0; i < 4; i++) store.deleteIdleQueueMetadata(1000);
+      assertThat(store.queueDepths()).containsExactly(Map.entry("active", 1L));
+      try (var rows = statement.executeQuery(
+          "SELECT count(*) FROM threadmill_queue_counts WHERE queue<>'active'")) {
+        rows.next();
+        assertThat(rows.getLong(1)).isZero();
+      }
+    }
+  }
+
+  @Test
+  void queueCleanupRacingProducerAndClaimTriggersPreservesExactCounts() throws Exception {
+    var store = store();
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      var futures = new ArrayList<Future<?>>();
+      for (int worker = 0; worker < 4; worker++) {
+        int lane = worker;
+        futures.add(executor.submit(() -> {
+          for (int i = 0; i < 30; i++) {
+            var job = Job.builder()
+                .queue("churn-" + lane + "-" + i)
+                .spec(JobSpec.of("example.Handler"))
+                .build();
+            store.insert(job);
+            store.softDelete(job.id());
+          }
+        }));
+      }
+      for (int sample = 0; sample < 30; sample++) {
+        store.deleteIdleQueueMetadata(100);
+        assertThat(store.queueDepths().values()).allMatch(depth -> depth >= 0);
+      }
+      for (var future : futures) future.get(30, TimeUnit.SECONDS);
+    }
+    for (int i = 0; i < 4; i++) store.deleteIdleQueueMetadata(100);
+    assertThat(store.queueDepths()).isEmpty();
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement();
+        var rows = statement.executeQuery("SELECT count(*) FROM threadmill_queue_counts")) {
+      rows.next();
+      assertThat(rows.getLong(1)).isZero();
+    }
+  }
+
+  @Test
+  void retentionCandidatePlanUsesCutoffAndTimeIdIndexWithoutSorting() throws SQLException {
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement()) {
+      statement.execute("SET enable_seqscan=off");
+      try (var rows = statement.executeQuery(
+          "EXPLAIN (FORMAT TEXT) SELECT id,current_state_at FROM threadmill_jobs WHERE state='SUCCEEDED' AND current_state_at<='2026-01-01' AND (current_state_at,id)>('2025-01-01','00000000-0000-4000-8000-000000000001') ORDER BY current_state_at,id LIMIT 100 FOR UPDATE SKIP LOCKED")) {
+        var plan = new StringBuilder();
+        while (rows.next()) plan.append(rows.getString(1));
+        assertThat(plan.toString())
+            .contains("threadmill_jobs_retention_idx", "Index Cond")
+            .doesNotContain("Sort", "Seq Scan");
+      }
+    }
+  }
+
+  @Test
   void idleConcurrencyReclamationIsBoundedAndResumesAfterDeletedPages() throws SQLException {
     var store = store();
     try (var connection = dataSource.getConnection();
         var statement = connection.createStatement()) {
       statement.executeUpdate(
-          "INSERT INTO threadmill_concurrency_groups SELECT 'old-'||lpad(n::text,4,'0'),0,0,now() FROM generate_series(1,250) n");
+          "INSERT INTO threadmill_concurrency_groups SELECT 'old-'||lpad(n::text,4,'0'),0,0,now()-interval '2 minutes' FROM generate_series(1,250) n");
     }
     assertThat(store.deleteIdleConcurrencyGroups(1000)).isEqualTo(100);
     assertThat(store.deleteIdleConcurrencyGroups(1000)).isEqualTo(100);
@@ -940,7 +1041,7 @@ class PostgresJobStoreRegressionTest {
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
         assertThat(rs.next()).isTrue();
         // One history row per shipped migration.
-        assertThat(rs.getInt(1)).isEqualTo(10);
+        assertThat(rs.getInt(1)).isEqualTo(11);
       }
     }
     new MigrationRunner(dataSource).validate();
@@ -985,7 +1086,7 @@ class PostgresJobStoreRegressionTest {
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
         assertThat(rs.next()).isTrue();
         // One history row per shipped migration.
-        assertThat(rs.getInt(1)).isEqualTo(10);
+        assertThat(rs.getInt(1)).isEqualTo(11);
       }
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_job_counts")) {
         assertThat(rs.next()).isTrue();
@@ -1204,7 +1305,7 @@ class PostgresJobStoreRegressionTest {
         ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
       assertThat(rs.next()).isTrue();
       // One history row per shipped migration.
-      assertThat(rs.getInt(1)).isEqualTo(10);
+      assertThat(rs.getInt(1)).isEqualTo(11);
     }
   }
 

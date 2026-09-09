@@ -63,6 +63,11 @@ these intervals; invalid requests and partially visible ambiguous batches fail
 the run. This is harness behavior, not an automatic retry guarantee of the
 public `Scheduler`. Real Redis regressions pause the server longer than its
 command timeout and require both mixed and retention producers to resume.
+The PostgreSQL fixture does not set a JDBC socket timeout: a paused server can
+leave a producer blocked until it resumes, without throwing a transport error.
+That experiment measures blocked-call recovery; the PostgreSQL restart
+experiment exercises connection failure and reconnection. Trace events alone
+must not be used to infer that the paused PostgreSQL producer failed to recover.
 
 Every minute also record datastore CPU/RSS, connection counts, disk/AOF/WAL
 growth, and metadata cardinality. During faults capture every second. Retain

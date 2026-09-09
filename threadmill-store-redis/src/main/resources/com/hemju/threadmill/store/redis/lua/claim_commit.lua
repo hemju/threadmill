@@ -116,6 +116,7 @@ if concurrency_key ~= '' then
         redis.call('HSET', workflows_key, workflow_root_id, tostring(outstanding_count))
     end
     redis.call('ZADD', KEYS[16], 0, counters_key)
+    redis.call('HDEL', counters_key, 'idle_since')
     tm_pending_remove(pending_key, pending_member, queue_keys_key)
     if pending_root_key ~= no_key then
         redis.call('ZREM', pending_root_key, pending_member)

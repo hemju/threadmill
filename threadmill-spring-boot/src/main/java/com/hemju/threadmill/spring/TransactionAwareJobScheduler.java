@@ -1,6 +1,5 @@
 package com.hemju.threadmill.spring;
 
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -22,6 +21,7 @@ import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
 import com.hemju.threadmill.core.internal.FatalErrors;
+import com.hemju.threadmill.core.internal.Utf8;
 import com.hemju.threadmill.core.serialization.JobSerializer;
 import com.hemju.threadmill.core.store.BulkInsertBudget;
 import com.hemju.threadmill.core.store.JobStore;
@@ -212,10 +212,7 @@ public final class TransactionAwareJobScheduler extends JobScheduler {
   private void defer(List<Job> jobs, Runnable insert, String queueToWake) {
     long bytes = 0;
     for (var job : jobs) {
-      bytes += serializer
-          .serializeJob(job.snapshot(), store.capabilities())
-          .getBytes(StandardCharsets.UTF_8)
-          .length;
+      bytes += Utf8.length(serializer.serializeJob(job.snapshot(), store.capabilities()));
     }
     DeferredBudget budget = null;
     for (var synchronization : TransactionSynchronizationManager.getSynchronizations()) {

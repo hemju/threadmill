@@ -71,7 +71,7 @@ final class RecoveringProducerStore extends ForwardingJobStore {
     boolean alreadyInserted = job.version() > 0;
     return recover(
         "enqueueIfAbsent",
-        () -> delegate().enqueueIfAbsent(job, key, ttl, Instant.now()),
+        () -> delegate().enqueueIfAbsent(job, key, ttl, now),
         () -> confirmed(job)
             ? Optional.of(
                 alreadyInserted

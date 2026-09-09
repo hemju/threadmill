@@ -26,6 +26,7 @@ import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
+import com.hemju.threadmill.core.store.RetentionCursor;
 import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
@@ -256,6 +257,13 @@ public final class TracingJobStore extends ForwardingJobStore {
   }
 
   @Override
+  public long deleteIdleQueueMetadata(int max) {
+    return trace(
+        "threadmill.store.delete_idle_queue_metadata",
+        span -> delegate().deleteIdleQueueMetadata(max));
+  }
+
+  @Override
   public long deleteExpiredDedupKeys(Instant now, int max) {
     return trace(
         "threadmill.store.delete_expired_dedup_keys",
@@ -271,7 +279,8 @@ public final class TracingJobStore extends ForwardingJobStore {
   }
 
   @Override
-  public RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after) {
+  public RetentionPage deleteFinishedPage(
+      Instant cutoff, JobState state, int max, RetentionCursor after) {
     return trace("threadmill.store.delete_finished_page", span -> {
       span.setAttribute(ThreadmillTracing.FINAL_STATE, state.name());
       return delegate().deleteFinishedPage(cutoff, state, max, after);

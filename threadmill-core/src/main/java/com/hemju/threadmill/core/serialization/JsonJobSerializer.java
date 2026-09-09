@@ -145,12 +145,10 @@ public final class JsonJobSerializer implements JobSerializer {
                 : capFailureMessage(last.message(), budget)));
       }
     }
-    var metadata = budget == 0
-        ? Map.<String, String>of()
-        : trimMetadata(
-            s.metadata(),
-            Map.of("threadmill.truncated.lifecycle", "diagnostics compacted"),
-            budget);
+    var metadata = trimMetadata(
+        s.metadata(),
+        Map.of("threadmill.truncated.lifecycle", "diagnostics compacted"),
+        Math.max(1, budget));
     return new JobSnapshot(
         s.id(),
         s.spec(),
@@ -318,8 +316,9 @@ public final class JsonJobSerializer implements JobSerializer {
       return out;
     }
     var mutable = out == metadata ? new HashMap<>(metadata) : (HashMap<String, String>) out;
-    // Drop largest user entries first; engine ("threadmill.") entries and
-    // the elision markers are kept longest.
+    // Execution policy and elision markers must survive every budget. If
+    // immutable work plus engine metadata cannot fit, fail instead of changing
+    // the retry, timeout, routing or recurring semantics of the next attempt.
     var dropOrder = mutable.entrySet().stream()
         .sorted(Comparator.comparing(
                 (Map.Entry<String, String> e) -> e.getKey().startsWith("threadmill."))
@@ -330,7 +329,7 @@ public final class JsonJobSerializer implements JobSerializer {
     int omitted = 0;
     for (var e : dropOrder) {
       if (total <= maxBytes) break;
-      if (e.getKey().startsWith("threadmill.truncated.")) continue;
+      if (e.getKey().startsWith("threadmill.")) continue;
       mutable.remove(e.getKey());
       total -= metadataByteCost(e);
       omitted++;

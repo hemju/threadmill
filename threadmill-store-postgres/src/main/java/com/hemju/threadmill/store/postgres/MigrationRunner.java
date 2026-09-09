@@ -54,7 +54,8 @@ public final class MigrationRunner {
       "V7__execution_revision.sql",
       "V8__maintenance_scan.sql",
       "V9__queue_monitoring.sql",
-      "V10__idle_concurrency_groups.sql");
+      "V10__idle_concurrency_groups.sql",
+      "V11__retention_candidates.sql");
   private static final long MIGRATION_LOCK_KEY = 0x5468726561646D6CL;
   private static final Logger LOG = LoggerFactory.getLogger(MigrationRunner.class);
   private static final Duration LOCK_ACQUIRE_TIMEOUT = Duration.ofMinutes(5);

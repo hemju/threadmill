@@ -62,6 +62,7 @@ import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.StoreCapacityExceededException;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
+import com.hemju.threadmill.core.internal.RetentionPosition;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
@@ -75,6 +76,7 @@ import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.Mutexes;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
+import com.hemju.threadmill.core.store.RetentionCursor;
 import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
@@ -1496,8 +1498,9 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
         ? Range.<String>unbounded()
         : Range.from(
             Range.Boundary.excluding(after.toString()), Range.Boundary.<String>unbounded());
-    var ids =
-        sync().zrangebylex(RedisKeys.byStateTime(state) + ":ids", range, Limit.create(0, limit));
+    var ids = sync()
+        .zrangebylex(
+            RedisKeys.byStateTime(state) + RedisKeys.IDS_SUFFIX, range, Limit.create(0, limit));
     return loadJobs(ids).stream().filter(job -> job.currentState() == state).toList();
   }
 
@@ -1690,7 +1693,8 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
   // ---------------------------------------------------------------- retention
 
   @Override
-  public RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after) {
+  public RetentionPage deleteFinishedPage(
+      Instant cutoff, JobState state, int max, RetentionCursor after) {
     Objects.requireNonNull(cutoff, "cutoff");
     if (state != JobState.SUCCEEDED
         && state != JobState.FAILED
@@ -1700,25 +1704,34 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
     int limit = Math.clamp(max, 0, 100);
     if (limit == 0) return new RetentionPage(0, null);
     var r = sync();
-    var range = after == null
-        ? Range.<String>unbounded()
-        : Range.from(
-            Range.Boundary.excluding(after.toString()), Range.Boundary.<String>unbounded());
-    var ids = r.zrangebylex(RedisKeys.byStateTime(state) + ":ids", range, Limit.create(0, limit));
+    var position = after == null ? null : RetentionPosition.from(after);
+    List<String> candidates = evalScript(
+        LuaScripts.retentionCandidates(),
+        ScriptOutputType.MULTI,
+        new String[] {RedisKeys.byStateTime(state)},
+        Long.toString(cutoff.toEpochMilli()),
+        Integer.toString(limit),
+        position == null ? "" : Long.toString(position.at().toEpochMilli()),
+        position == null ? "" : position.id().toString());
     long removed = 0;
-    for (var id : ids) {
+    RetentionPosition last = null;
+    for (int index = 0; index < candidates.size(); index += 2) {
+      var id = candidates.get(index);
       var jobId = JobId.parse(id);
-      var fields = r.hgetall(RedisKeys.PREFIX + "job:" + id);
-      if (fields.isEmpty()) {
-        r.zrem(RedisKeys.byStateTime(state) + ":ids", id);
-        continue;
-      }
-      if (!state.name().equals(fields.get("state"))) continue;
-      if (Long.parseLong(fields.get("current_state_at")) > cutoff.toEpochMilli()) continue;
+      last = new RetentionPosition(
+          Instant.ofEpochMilli((long) Double.parseDouble(candidates.get(index + 1))), jobId);
+      var fields = r.hmget(
+          RedisKeys.PREFIX + "job:" + id,
+          state == JobState.FAILED
+              ? new String[] {"state", "current_state_at", "handler_signature", "version", "body"}
+              : new String[] {"state", "current_state_at", "handler_signature", "version"});
+      if (!fields.getFirst().hasValue()
+          || !state.name().equals(fields.getFirst().getValue())) continue;
+      if (Long.parseLong(fields.get(1).getValue()) > cutoff.toEpochMilli()) continue;
       if (state == JobState.FAILED) {
         try {
           if (serializer
-              .deserializeJob(fields.get("body"))
+              .deserializeJob(fields.get(4).getValue())
               .failureDecision()
               .map(decision -> decision.willRetry())
               .orElse(true)) continue;
@@ -1733,17 +1746,17 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
             RedisKeys.PREFIX + "job:" + id,
             RedisKeys.byStateTime(state),
             RedisKeys.COUNTS,
-            RedisKeys.byHandler(fields.get("handler_signature")),
+            RedisKeys.byHandler(fields.get(2).getValue()),
             RedisKeys.awaitingByParent(jobId)
           },
           id,
           state.name(),
           Long.toString(Instant.now().toEpochMilli()),
-          fields.get("version"),
+          fields.get(3).getValue(),
           Long.toString(cutoff.toEpochMilli()));
       if (deleted != null) removed += deleted;
     }
-    return new RetentionPage(removed, ids.size() == limit ? JobId.parse(ids.getLast()) : null);
+    return new RetentionPage(removed, candidates.size() == limit * 2 ? last.cursor() : null);
   }
 
   // ---------------------------------------------------------------- relationships & mutexes
@@ -2326,8 +2339,19 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
   private List<Job> loadJobs(List<String> ids) {
     if (ids == null || ids.isEmpty()) return List.of();
     List<Job> out = new ArrayList<>(ids.size());
-    for (String idStr : ids) {
-      readJob(RedisKeys.PREFIX + "job:" + idStr).ifPresent(out::add);
+    for (int offset = 0; offset < ids.size(); offset += 500) {
+      var reads = ids.subList(offset, Math.min(ids.size(), offset + 500)).stream()
+          .map(id ->
+              asyncCommands.hmget(RedisKeys.PREFIX + "job:" + id, "body", "owner_heartbeat_at"))
+          .toList();
+      awaitAll(reads);
+      for (var read : reads) {
+        var fields = resultOf(read);
+        if (fields.getFirst().hasValue())
+          out.add(readJobWithHeartbeat(
+              fields.getFirst().getValue(),
+              fields.get(1).hasValue() ? fields.get(1).getValue() : null));
+      }
     }
     return out;
   }

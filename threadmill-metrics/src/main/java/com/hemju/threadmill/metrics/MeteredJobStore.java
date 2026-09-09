@@ -18,6 +18,7 @@ import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.RetentionCursor;
 import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
@@ -130,6 +131,14 @@ final class MeteredJobStore extends ForwardingJobStore {
   }
 
   @Override
+  public long deleteIdleQueueMetadata(int max) {
+    long deleted =
+        write("delete_idle_queue_metadata", () -> delegate().deleteIdleQueueMetadata(max));
+    metrics.recordRetention("queue_metadata", deleted);
+    return deleted;
+  }
+
+  @Override
   public long deleteExpiredDedupKeys(Instant now, int max) {
     long deleted =
         write("delete_expired_dedup_keys", () -> delegate().deleteExpiredDedupKeys(now, max));
@@ -138,7 +147,8 @@ final class MeteredJobStore extends ForwardingJobStore {
   }
 
   @Override
-  public RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after) {
+  public RetentionPage deleteFinishedPage(
+      Instant cutoff, JobState state, int max, RetentionCursor after) {
     var page = write(
         "delete_finished_page", () -> delegate().deleteFinishedPage(cutoff, state, max, after));
     metrics.recordRetention(state.name(), page.deleted());

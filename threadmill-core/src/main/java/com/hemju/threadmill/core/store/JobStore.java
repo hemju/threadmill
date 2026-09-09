@@ -358,6 +358,16 @@ public interface JobStore {
    */
   long deleteIdleConcurrencyGroups(int max);
 
+  /**
+   * Inspect at most {@code min(max, 100)} queue metadata groups and reclaim
+   * obsolete bookkeeping without changing any job or aggregate count.
+   * Returns metadata rows removed. Stores without persistent empty-queue
+   * bookkeeping need no work. Implementations must advance past busy queues.
+   */
+  default long deleteIdleQueueMetadata(int max) {
+    return 0;
+  }
+
   /** Delete expired producer-side deduplication records that no longer protect active jobs. */
   long deleteExpiredDedupKeys(Instant now, int max);
 
@@ -373,22 +383,25 @@ public interface JobStore {
 
   /**
    * Inspect the first bounded retention page, returning the number deleted.
-   * Use {@link #deleteFinishedPage} to resume beyond protected or recent records.
+   * Use {@link #deleteFinishedPage} to resume beyond protected records.
    */
   default long deleteFinishedOlderThan(Instant cutoff, JobState state, int max) {
     return deleteFinishedPage(cutoff, state, max, null).deleted();
   }
 
   /**
-   * Inspect at most {@code min(max, 100)} records in a terminal state, ordered
-   * by id after the exclusive cursor. Delete only records at or before cutoff
+   * Inspect at most {@code min(max, 100)} cutoff-eligible records in a terminal
+   * state, resuming after the store's opaque cursor. Select candidates at or before cutoff
    * with no live dedup key or AWAITING child. FAILED records require an explicit
    * final failure decision; pending retries and legacy unknown decisions remain.
    * State/version and protections must be checked atomically with deletion.
    * The returned cursor advances even when no record can be deleted. A null
-   * cursor completes this pass; changed/skipped/new earlier ids wait for the next.
+   * cursor completes this pass; changed/skipped/new earlier records wait for the next.
+   * Keep the same state and cutoff throughout a pass. Recent records must not
+   * consume its candidate budget or require body reads. A deleted cursor record
+   * must not prevent the next page from progressing, including timestamp ties.
    */
-  RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after);
+  RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, RetentionCursor after);
 
   // ---------------------------------------------------------------- relationships, mutexes,
   // replacement

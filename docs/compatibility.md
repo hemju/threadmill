@@ -49,7 +49,10 @@ historical records is an offline migration, not a new-job insert.
 
 Maintenance pages use exclusive cursors. `scanJobs` and `scanCronTasks` return at
 most 500 records; `deleteFinishedPage` inspects at most 100 and returns actual
-deletions plus a resume cursor. Zero deletions does not mean a pass is complete.
+deletions plus an opaque `RetentionCursor`. Keep its cutoff/state fixed across
+pages; recent records do not consume the candidate budget. Zero deletions does
+not mean a pass is complete. The optional `deleteIdleQueueMetadata` operation
+defaults to no work; forwarding decorators must pass it through.
 Retention preserves live dedup keys, predecessors with waiting children, and
 failures with pending or unknown retry decisions. The older
 `deleteFinishedOlderThan` convenience method inspects the first page only.
@@ -82,10 +85,16 @@ optimistic-version checks.
 3. For PostgreSQL, apply the current `MigrationRunner` or its emitted SQL to the
    existing database. V1–V6 remain byte-for-byte unchanged. V7 adds the execution
    revision, V8 adds maintenance scanning, V9 adds queue counters/monitoring
-   indexes, and V10 indexes idle concurrency metadata. The runner validates every
+   indexes, V10 indexes idle concurrency metadata, and V11 adds the time/ID
+   retention index while dropping the redundant two-column state/time index.
+   The runner validates every
    recorded description/checksum and refuses unknown future migration versions.
-   V9 backfills counters under a table lock; allow a maintenance window sized for
-   the retained population and verify the resulting counts.
+   V7 validates its non-negative revision constraint with a full table scan
+   under `ACCESS EXCLUSIVE`; V9 backfills counters under a table lock. These
+   migrations run with all application instances stopped. Allow a maintenance
+   window sized for the retained population and verify the resulting counts.
+   Splitting constraint creation and validation inside the runner's same
+   transaction would not release V7's table lock sooner.
 4. For Redis, run `RedisIndexMigration.migrate(...)` with a caller-owned standalone,
    Sentinel or Cluster client. It acquires a migration lease, marks the namespace
    incomplete, converts legacy pending-member order and rebuilds auxiliary

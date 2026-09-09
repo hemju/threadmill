@@ -82,6 +82,7 @@ public final class ProcessingNode implements AutoCloseable {
         new RetryInterceptor(store, config.defaultMaxAttempts(), config.retryInitialBackoff());
     b.exceptionPolicies.forEach(retryInterceptor::policyFor);
     this.interceptors.add(retryInterceptor);
+    this.interceptors.failureDecisionFallback(retryInterceptor);
     this.interceptors.add(new WorkflowInterceptor(store));
     b.userInterceptors.forEach(interceptors::add);
     this.tags = Set.copyOf(b.tags);

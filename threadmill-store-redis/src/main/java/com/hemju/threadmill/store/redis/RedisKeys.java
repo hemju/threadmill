@@ -72,6 +72,10 @@ import com.hemju.threadmill.core.NodeId;
 public final class RedisKeys {
 
   public static final String PREFIX = "{threadmill}:";
+  static final String ORDERED_SUFFIX = ":ordered";
+  static final String EXCLUSIVE_SUFFIX = ":exclusive";
+  static final String READY_SUFFIX = ":ready:";
+  static final String IDS_SUFFIX = ":ids";
 
   public static final String COUNTS = PREFIX + "counts";
   /** Ordered registry of allocated concurrency counter hashes, for bounded reclamation. */
@@ -209,12 +213,12 @@ public final class RedisKeys {
 
   /** ENQUEUED members for one queue/key, in the global admission order. */
   public static String concurrencyReady(String key, String queue) {
-    return concurrencyPending(key) + ":ready:" + queueKeys(queue);
+    return concurrencyPending(key) + READY_SUFFIX + queueKeys(queue);
   }
 
   /** Lexicographic registry used for bounded queue-key enumeration. */
   public static String orderedQueueKeys(String queue) {
-    return queueKeys(queue) + ":ordered";
+    return queueKeys(queue) + ORDERED_SUFFIX;
   }
 
   public static String concurrencyPendingMember(ConcurrencyMode mode, JobId id) {

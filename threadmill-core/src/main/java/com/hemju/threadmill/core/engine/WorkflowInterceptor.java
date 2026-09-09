@@ -2,8 +2,10 @@ package com.hemju.threadmill.core.engine;
 
 import java.time.Instant;
 import java.util.ArrayDeque;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 import org.slf4j.Logger;
@@ -44,6 +46,10 @@ public final class WorkflowInterceptor implements JobInterceptor {
   private final JobStore store;
   private JobId reconcileAfter;
 
+  boolean reconciliationPassComplete() {
+    return reconcileAfter == null;
+  }
+
   public WorkflowInterceptor(JobStore store) {
     this.store = Objects.requireNonNull(store, "store");
   }
@@ -78,6 +84,7 @@ public final class WorkflowInterceptor implements JobInterceptor {
   public void reconcileOrphanedAwaitingChildren(int max) {
     int limit = Math.clamp(max, 1, JobSearch.MAX_LIMIT);
     var awaiting = store.scanJobs(JobState.AWAITING, reconcileAfter, limit);
+    var parents = new HashMap<JobId, Optional<Job>>();
     long deadline = System.nanoTime() + 200_000_000L;
     int inspected = 0;
     for (var child : awaiting) {
@@ -87,7 +94,7 @@ public final class WorkflowInterceptor implements JobInterceptor {
       if (child.currentState() != JobState.AWAITING || child.relationship().isEmpty()) continue;
       var relationship = child.relationship().orElseThrow();
       if (relationship.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
-      var parent = store.findById(relationship.parentId());
+      var parent = parents.computeIfAbsent(relationship.parentId(), store::findById);
       var parentState = parent.map(Job::currentState).orElse(null);
       boolean finalFailure = parentState == JobState.FAILED
           && parent

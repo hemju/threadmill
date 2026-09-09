@@ -2092,6 +2092,36 @@ public abstract class AbstractJobStoreContractTest {
   }
 
   @Test
+  void retentionSkipsRecentRecordsAndResumesDeletedCursorsAcrossEqualTimestamps() {
+    var old = Instant.now().minus(Duration.ofDays(10)).truncatedTo(ChronoUnit.MILLIS);
+    var cutoff = old.plusSeconds(1);
+    var jobs = new ArrayList<Job>();
+    for (int i = 0; i < 125; i++) {
+      // Reverse explicit UUID order relative to age: UUID creation time is not
+      // the retention key, and the cursor's record is deleted on each page.
+      var job = Job.builder()
+          .id(JobId.parse(String.format("00000000-0000-4000-8000-%012d", 1000 - i)))
+          .spec(Jobs.enqueued("retained").spec())
+          .initialState(JobState.SUCCEEDED)
+          .createdAt(i < 105 ? old : old.plusSeconds(2))
+          .build();
+      store.insert(job);
+      jobs.add(job);
+    }
+    var first = store.deleteFinishedPage(cutoff, JobState.SUCCEEDED, 100, null);
+    assertThat(first.deleted()).isEqualTo(100);
+    assertThat(first.nextAfter()).isNotNull();
+    var second = store.deleteFinishedPage(cutoff, JobState.SUCCEEDED, 100, first.nextAfter());
+    assertThat(second.deleted()).isEqualTo(5);
+    assertThat(second.nextAfter()).isNull();
+    var recent = store.deleteFinishedPage(cutoff, JobState.SUCCEEDED, 1, null);
+    assertThat(recent.deleted()).isZero();
+    assertThat(recent.nextAfter()).isNull();
+    for (int i = 105; i < jobs.size(); i++)
+      assertThat(store.findById(jobs.get(i).id())).isPresent();
+  }
+
+  @Test
   void retentionRefusesActiveStates() {
     var job = Jobs.enqueued("active");
     store.insert(job);

@@ -1,5 +1,6 @@
 package com.hemju.threadmill.core.engine;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -21,6 +22,13 @@ public final class JobInterceptors implements JobInterceptor {
       org.slf4j.LoggerFactory.getLogger(JobInterceptors.class);
 
   private final List<JobInterceptor> chain = new CopyOnWriteArrayList<>();
+  private JobInterceptor failureDecisionFallback;
+
+  // Decision priority is separate from completion notification order: the
+  // built-in retry hook still persists SCHEDULED before workflow/user hooks.
+  void failureDecisionFallback(JobInterceptor interceptor) {
+    this.failureDecisionFallback = Objects.requireNonNull(interceptor, "interceptor");
+  }
 
   public JobInterceptors add(JobInterceptor interceptor) {
     Objects.requireNonNull(interceptor, "interceptor");
@@ -45,7 +53,12 @@ public final class JobInterceptors implements JobInterceptor {
   @Override
   public FailureDecision onProcessingFailureDecision(
       Job job, JobExecutionContext ctx, Throwable cause, FailureCause kind) {
-    for (var interceptor : chain) {
+    var ordered = new ArrayList<>(chain);
+    if (failureDecisionFallback != null) {
+      ordered.remove(failureDecisionFallback);
+      ordered.add(failureDecisionFallback);
+    }
+    for (var interceptor : ordered) {
       try {
         var decision = interceptor.onProcessingFailureDecision(job, ctx, cause, kind);
         if (decision != null) return decision;

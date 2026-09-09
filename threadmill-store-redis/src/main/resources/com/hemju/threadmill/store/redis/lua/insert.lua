@@ -77,7 +77,7 @@ if redis.call('EXISTS', job_key) == 1 then
     return 'EXISTS'
 end
 
-redis.call('SETNX', '{threadmill}:storage_format', '2')
+redis.call('SETNX', '__THREADMILL_STORAGE_FORMAT_KEY__', '__THREADMILL_STORAGE_FORMAT__')
 redis.call('HSET', job_key,
     'body', body,
     'state', state,

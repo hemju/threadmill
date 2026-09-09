@@ -16,6 +16,7 @@ import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.RetentionCursor;
 import com.hemju.threadmill.core.store.RetentionPage;
 
 /** Harness-only operation timing with fixed-size recent sample windows and cumulative counters. */
@@ -63,10 +64,16 @@ final class MeasuredJobStore extends ForwardingJobStore {
   }
 
   @Override
-  public RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after) {
+  public RetentionPage deleteFinishedPage(
+      Instant cutoff, JobState state, int max, RetentionCursor after) {
     var page = measure("retentionPage", () -> super.deleteFinishedPage(cutoff, state, max, after));
     jobsDeleted.add(page.deleted());
     return page;
+  }
+
+  @Override
+  public long deleteIdleQueueMetadata(int max) {
+    return measure("queueMetadataCleanup", () -> super.deleteIdleQueueMetadata(max));
   }
 
   @Override

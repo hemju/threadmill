@@ -106,6 +106,8 @@ public final class NodeRegistry {
         }
       }
     }
+    // Retry best-effort loop cleanup and expose fatal cleanup failures to the
+    // stopping caller, even when the loop has already terminated.
     withdrawFromStore();
   }
 

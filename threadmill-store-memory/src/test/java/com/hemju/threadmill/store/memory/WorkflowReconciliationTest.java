@@ -3,15 +3,19 @@ package com.hemju.threadmill.store.memory;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Instant;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import com.hemju.threadmill.core.FailureDecision;
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.WorkflowInterceptor;
+import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.test.Jobs;
 
 /**
@@ -35,6 +39,24 @@ class WorkflowReconciliationTest {
     claimed.clearOwner();
     store.saveAtomic(claimed, v);
     return claimed;
+  }
+
+  @Test
+  void fanOutReconciliationReadsEachParentOnlyOncePerPage() {
+    var root = Jobs.enqueued("com.example.Root");
+    store.insert(root);
+    for (int i = 0; i < 100; i++) store.insert(Jobs.awaitingWorkflowStep("child", root));
+    var reads = new AtomicInteger();
+    var measured = new ForwardingJobStore(store) {
+      @Override
+      public Optional<Job> findById(JobId id) {
+        reads.incrementAndGet();
+        return super.findById(id);
+      }
+    };
+    new WorkflowInterceptor(measured).reconcileOrphanedAwaitingChildren(100);
+    assertThat(reads).hasValue(1);
+    assertThat(store.countsByState().get(JobState.AWAITING)).isEqualTo(100);
   }
 
   @Test

@@ -41,6 +41,8 @@ import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.RetentionCursor;
+import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
  * End-to-end engine tests: enqueue a job, the dispatcher claims and runs
@@ -118,6 +120,36 @@ class ProcessingNodeTest {
       assertThat(loaded.currentState()).isEqualTo(JobState.SUCCEEDED);
     });
     assertThat(EngineTestHandlers.CountingHandler.COUNT).containsKey(job.id().toString());
+  }
+
+  @Test
+  void userFailureDecisionOverridesTheBuiltInPolicyBeforeTheFailedWrite() {
+    var job = enqueueHello(EngineTestHandlers.FailingHandler.class, fastConfig.defaultQueue());
+    var notifications = new AtomicInteger();
+    node = ProcessingNode.builder(store)
+        .config(fastConfig)
+        .interceptor(new JobInterceptor() {
+          @Override
+          public FailureDecision onProcessingFailureDecision(
+              Job failed, JobExecutionContext context, Throwable cause, FailureCause kind) {
+            return FailureDecision.finalFailure();
+          }
+
+          @Override
+          public void onProcessingFailed(
+              Job failed, JobExecutionContext context, Throwable cause, FailureCause kind) {
+            assertThat(failed.failureDecision()).contains(FailureDecision.finalFailure());
+            assertThat(failed.currentState()).isEqualTo(JobState.FAILED);
+            notifications.incrementAndGet();
+          }
+        })
+        .build();
+    node.start();
+    await().atMost(Duration.ofSeconds(5)).until(() -> notifications.get() == 1);
+    var failed = store.findById(job.id()).orElseThrow();
+    assertThat(failed.currentState()).isEqualTo(JobState.FAILED);
+    assertThat(failed.attempts()).isEqualTo(1);
+    assertThat(failed.failureDecision()).contains(FailureDecision.finalFailure());
   }
 
   @Test
@@ -1305,6 +1337,65 @@ class ProcessingNodeTest {
         .untilAsserted(
             () -> assertThat(store.findById(fourth.id()).orElseThrow().currentState())
                 .isEqualTo(JobState.SUCCEEDED));
+  }
+
+  @Test
+  void completedRecoveryPassesPauseInsteadOfRescanningEveryMaintenanceTick() {
+    var scans = new AtomicInteger();
+    var measured = new ForwardingJobStore(store) {
+      @Override
+      public List<Job> scanJobs(JobState state, JobId after, int max) {
+        scans.incrementAndGet();
+        return super.scanJobs(state, after, max);
+      }
+    };
+    node = ProcessingNode.builder(measured)
+        .config(fastConfig.toBuilder()
+            .maintenancePollInterval(Duration.ofMillis(20))
+            .build())
+        .build();
+    node.start();
+    await().atMost(Duration.ofSeconds(3)).until(() -> scans.get() == 2);
+    await()
+        .during(Duration.ofMillis(300))
+        .atMost(Duration.ofSeconds(3))
+        .untilAsserted(() -> assertThat(scans).hasValue(2));
+  }
+
+  @Test
+  void completedJobRetentionStatesAreNotRepeatedWhileDedupCleanupIsStillBusy() {
+    var pages = new AtomicInteger();
+    var dedupCalls = new AtomicInteger();
+    var busy = new AtomicBoolean(true);
+    var measured = new ForwardingJobStore(store) {
+      @Override
+      public RetentionPage deleteFinishedPage(
+          Instant cutoff, JobState state, int max, RetentionCursor after) {
+        pages.incrementAndGet();
+        return super.deleteFinishedPage(cutoff, state, max, after);
+      }
+
+      @Override
+      public long deleteExpiredDedupKeys(Instant now, int max) {
+        // Simulate a dedup backlog independently of the real job retention.
+        dedupCalls.incrementAndGet();
+        return busy.get() ? max : super.deleteExpiredDedupKeys(now, max);
+      }
+    };
+    node = ProcessingNode.builder(measured)
+        .config(fastConfig.toBuilder()
+            .maintenancePollInterval(Duration.ofMillis(20))
+            .retentionInterval(Duration.ofHours(1))
+            .build())
+        .build();
+    node.start();
+    await().atMost(Duration.ofSeconds(3)).until(() -> dedupCalls.get() >= 100);
+    assertThat(pages).hasValue(4);
+    busy.set(false);
+    await()
+        .during(Duration.ofMillis(150))
+        .atMost(Duration.ofSeconds(3))
+        .untilAsserted(() -> assertThat(pages).hasValue(4));
   }
 
   @Test

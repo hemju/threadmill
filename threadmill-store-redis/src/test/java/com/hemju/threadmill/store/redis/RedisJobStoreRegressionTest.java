@@ -172,10 +172,37 @@ class RedisJobStoreRegressionTest {
   }
 
   @Test
+  void recentlyUsedConcurrencyKeysSurviveCleanupAndNewClaimsResetTheirIdleGrace() {
+    var store = store();
+    var r = adminConnection.sync();
+    var counters = RedisKeys.concurrencyCounters("reused");
+    r.hset(counters, "shared_in_flight", "0");
+    r.zadd(RedisKeys.CONCURRENCY_COUNTERS, 0, counters);
+    assertThat(store.deleteIdleConcurrencyGroups(100)).isZero();
+    assertThat(r.hget(counters, "idle_since")).isNotBlank();
+    r.hset(counters, "idle_since", "1");
+    var job = Job.builder()
+        .spec(JobSpec.of("example.Handler"))
+        .concurrencyKey("reused")
+        .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+        .build();
+    store.insert(job);
+    var claimed = store.claimReady(NodeId.newId(), "default", 1, Instant.now()).getFirst();
+    assertThat(r.hget(counters, "idle_since")).isNull();
+    claimed.transitionTo(JobState.SUCCEEDED, Instant.now());
+    store.saveAtomic(claimed, claimed.version());
+    assertThat(store.deleteIdleConcurrencyGroups(100)).isZero();
+    r.hset(counters, "idle_since", "1");
+    assertThat(store.deleteIdleConcurrencyGroups(100)).isEqualTo(1);
+  }
+
+  @Test
   void offlineMigrationFindsAndReclaimsCounterHashesAfterTheirJobsWereRetainedAway() {
     var r = adminConnection.sync();
     for (int i = 0; i < 250; i++) {
-      r.hset(RedisKeys.concurrencyCounters("old-" + i), "shared_in_flight", "0");
+      r.hset(
+          RedisKeys.concurrencyCounters("old-" + i),
+          Map.of("shared_in_flight", "0", "idle_since", "1"));
     }
     r.set(RedisStorageFormat.KEY, "migrating:2");
     RedisIndexMigration.migrate(adminClient);

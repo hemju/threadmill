@@ -74,6 +74,10 @@ public final class LuaScripts {
     return load("retention_delete.lua");
   }
 
+  static String retentionCandidates() {
+    return load("retention_candidates.lua");
+  }
+
   public static String queuePrune() {
     return load("queue_prune.lua");
   }
@@ -99,7 +103,13 @@ public final class LuaScripts {
         Thread.currentThread().getContextClassLoader().getResourceAsStream(ROOT + name)) {
       if (in == null) throw new IllegalStateException("Lua script not found: " + ROOT + name);
       return new String(in.readAllBytes(), StandardCharsets.UTF_8)
-          .replace(NO_KEY_TOKEN, RedisKeys.NO_KEY);
+          .replace(NO_KEY_TOKEN, RedisKeys.NO_KEY)
+          .replace("__THREADMILL_STORAGE_FORMAT_KEY__", RedisStorageFormat.KEY)
+          .replace("__THREADMILL_STORAGE_FORMAT__", RedisStorageFormat.CURRENT)
+          .replace("__THREADMILL_ORDERED_SUFFIX__", RedisKeys.ORDERED_SUFFIX)
+          .replace("__THREADMILL_EXCLUSIVE_SUFFIX__", RedisKeys.EXCLUSIVE_SUFFIX)
+          .replace("__THREADMILL_READY_SUFFIX__", RedisKeys.READY_SUFFIX)
+          .replace("__THREADMILL_IDS_SUFFIX__", RedisKeys.IDS_SUFFIX);
     } catch (IOException e) {
       throw new IllegalStateException("Failed to read Lua script: " + ROOT + name, e);
     }

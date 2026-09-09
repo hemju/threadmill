@@ -102,6 +102,8 @@ Use normal forward migrations for production.
 non-negative bigint with default zero. Progress/log/check-in writes compare and
 advance it without changing the state version. Claim resets it. Existing rows
 upgrade in place; stop old workers before starting workers that use this revision.
+Constraint validation scans the table under `ACCESS EXCLUSIVE`; size the offline
+migration window for the retained population.
 
 Migration `V8__maintenance_scan.sql` adds `(state, id)` for resumable maintenance
 pages. Recovery never uses offset pagination across a population it mutates.
@@ -129,4 +131,16 @@ share one transition timestamp, a case exercised by the monitoring benchmark.
 groups. Maintenance locks a bounded page and removes a group only after checking
 for active workflow holds and nonterminal jobs. Group acquisition retries if a
 conflict row disappears before its row lock is obtained, so cleanup cannot leave
-a new claim without the group lock.
+a new claim without the group lock. Reclamation waits one minute after the most
+recent counter change so frequently reused keys do not churn between jobs.
+
+`V11__retention_candidates.sql` adds `(state, current_state_at, id)` for
+cutoff-eligible retention pages and drops the redundant `(state, current_state_at)`
+index. The V9 dashboard index remains: its mixed descending-time/ascending-ID
+order differs from retention's ascending tuple order. Retention reads full
+bodies only for FAILED candidates whose persisted failure decision needs checking.
+
+Maintenance also pages queue-counter groups and removes only locked, zero-sum
+shard subsets belonging to empty queues. It never deletes newly inserted shards
+outside that locked snapshot; trigger writes and negative individual shards
+therefore keep the aggregate exact while obsolete queue names are reclaimed.

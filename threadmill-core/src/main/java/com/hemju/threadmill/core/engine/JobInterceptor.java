@@ -29,6 +29,9 @@ public interface JobInterceptor {
    * to the next interceptor. The first decision wins; absent a policy the
    * engine records final failure. This hook must not write to the store or
    * perform external effects. Completion notification still uses onProcessingFailed.
+   * A {@link ProcessingNode} consults user interceptors in registration order
+   * before its built-in retry policy; returning null retains that policy.
+   * This decision precedence does not change completion notification order.
    */
   default FailureDecision onProcessingFailureDecision(
       Job job, JobExecutionContext ctx, Throwable cause, FailureCause kind) {

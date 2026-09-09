@@ -61,6 +61,8 @@ class ThreadmillDashboardSecurityStarterAutoConfigTest {
 
   @Test
   void addingDashboardPreservesAuthenticationForExistingHostEndpoints() throws Exception {
+    assertThat(context.containsBean("threadmillHostSecurityFilterChain")).isTrue();
+    assertThat(context.containsBean("defaultSecurityFilterChain")).isFalse();
     var mvc =
         MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
 

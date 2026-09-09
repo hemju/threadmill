@@ -88,6 +88,27 @@ class ProducerRecoveryTest {
   }
 
   @Test
+  void dedupDecoratorPreservesTheCallersTimeAcrossAnOutage() throws Exception {
+    var real = new InMemoryJobStore();
+    var first = new AtomicBoolean(true);
+    var now = Instant.parse("2024-01-02T03:04:05Z");
+    var interrupted = new ForwardingJobStore(real) {
+      @Override
+      public EnqueueResult enqueueIfAbsent(Job job, String key, Duration ttl, Instant suppliedNow) {
+        assertThat(suppliedNow).isEqualTo(now);
+        if (first.getAndSet(false)) throw new RedisCommandTimeoutException("before write");
+        return super.enqueueIfAbsent(job, key, ttl, suppliedNow);
+      }
+    };
+    try (var trace = new SoakTraceWriter(temporary.resolve("trace.jsonl"))) {
+      var job = job();
+      assertThat(new RecoveringProducerStore(interrupted, trace, () -> false)
+              .enqueueIfAbsent(job, "key", Duration.ofMinutes(1), now))
+          .isEqualTo(new EnqueueResult.Created(job.id()));
+    }
+  }
+
+  @Test
   void deterministicProducerFailureIsNotRetriedAndOutageBudgetStopsRetries() throws Exception {
     var real = new InMemoryJobStore();
     var broken = new ForwardingJobStore(real) {

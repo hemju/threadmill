@@ -258,9 +258,7 @@ public final class Job {
   public synchronized void checkIn(Instant at) {
     Objects.requireNonNull(at, "at");
     if (lastCheckinAt == null || lastCheckinAt.isBefore(at)) this.lastCheckinAt = at;
-    if (ownerHeartbeatAt == null || ownerHeartbeatAt.isBefore(at)) {
-      if (ownerHeartbeatAt == null || ownerHeartbeatAt.isBefore(at)) this.ownerHeartbeatAt = at;
-    }
+    if (ownerHeartbeatAt == null || ownerHeartbeatAt.isBefore(at)) this.ownerHeartbeatAt = at;
   }
 
   /**

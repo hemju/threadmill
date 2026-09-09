@@ -14,7 +14,9 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
@@ -31,6 +33,7 @@ import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
+import com.hemju.threadmill.core.internal.RetentionPosition;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JobSerializer;
@@ -41,6 +44,7 @@ import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.core.store.NodeHeartbeat;
+import com.hemju.threadmill.core.store.RetentionCursor;
 import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
@@ -113,9 +117,13 @@ public final class InMemoryJobStore implements JobStore {
         .thenComparing(Map.Entry::getKey);
   }
 
-  private final ConcurrentHashMap<JobId, Entry> jobs = new ConcurrentHashMap<>();
+  private final ConcurrentSkipListMap<JobId, Entry> jobs = new ConcurrentSkipListMap<>();
+  private final Map<JobState, ConcurrentSkipListMap<JobId, Entry>> jobsByState =
+      new EnumMap<>(JobState.class);
+  private final Map<JobState, ConcurrentSkipListMap<RetentionPosition, Entry>> retainedByTime =
+      new EnumMap<>(JobState.class);
   private final ConcurrentHashMap<NodeId, Instant> nodeHeartbeats = new ConcurrentHashMap<>();
-  private final ConcurrentHashMap<String, CronTask> cronTasks = new ConcurrentHashMap<>();
+  private final ConcurrentSkipListMap<String, CronTask> cronTasks = new ConcurrentSkipListMap<>();
   private final ConcurrentHashMap<String, CronTaskScheduleState> cronTaskStates =
       new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Set<String>> cronTaskOwners = new ConcurrentHashMap<>();
@@ -142,6 +150,68 @@ public final class InMemoryJobStore implements JobStore {
   public InMemoryJobStore(JobSerializer serializer, JobStoreCapabilities capabilities) {
     this.serializer = Objects.requireNonNull(serializer, "serializer");
     this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
+    for (var state : JobState.values()) {
+      jobsByState.put(state, new ConcurrentSkipListMap<>());
+      retainedByTime.put(state, new ConcurrentSkipListMap<>());
+    }
+  }
+
+  // Every persisted replacement updates both maintenance indexes under the same
+  // claim mutex, including heartbeat-only saves and a rolled-back claim batch.
+  private Entry putEntry(JobId id, Entry value) {
+    synchronized (claimMutex) {
+      var previous = jobs.put(id, value);
+      indexEntry(id, previous, value);
+      return previous;
+    }
+  }
+
+  private Entry putEntryIfAbsent(JobId id, Entry value) {
+    synchronized (claimMutex) {
+      var previous = jobs.get(id);
+      if (previous == null) putEntry(id, value);
+      return previous;
+    }
+  }
+
+  private Entry computeEntry(JobId id, BiFunction<JobId, Entry, Entry> update) {
+    synchronized (claimMutex) {
+      var previous = jobs.get(id);
+      var value = update.apply(id, previous);
+      if (value == previous) return value;
+      if (value == null) jobs.remove(id);
+      else jobs.put(id, value);
+      indexEntry(id, previous, value);
+      return value;
+    }
+  }
+
+  private Entry computeEntryIfPresent(JobId id, BiFunction<JobId, Entry, Entry> update) {
+    return computeEntry(
+        id, (key, previous) -> previous == null ? null : update.apply(key, previous));
+  }
+
+  private boolean removeEntry(JobId id, Entry expected) {
+    synchronized (claimMutex) {
+      if (!jobs.remove(id, expected)) return false;
+      indexEntry(id, expected, null);
+      return true;
+    }
+  }
+
+  private void indexEntry(JobId id, Entry previous, Entry value) {
+    if (previous != null) {
+      jobsByState.get(previous.state).remove(id);
+      if (isTerminal(previous.state))
+        retainedByTime
+            .get(previous.state)
+            .remove(new RetentionPosition(previous.currentStateAt, id));
+    }
+    if (value != null) {
+      jobsByState.get(value.state).put(id, value);
+      if (isTerminal(value.state))
+        retainedByTime.get(value.state).put(new RetentionPosition(value.currentStateAt, id), value);
+    }
   }
 
   // ---------------------------------------------------------------- capabilities
@@ -194,7 +264,7 @@ public final class InMemoryJobStore implements JobStore {
       String wire = serializer.serializeJob(snapshot, capabilities);
       Entry entry = entryFromSnapshot(snapshot, wire, nextVersion);
 
-      Entry prior = jobs.putIfAbsent(job.id(), entry);
+      Entry prior = putEntryIfAbsent(job.id(), entry);
       if (prior != null) {
         throw new IllegalStateException("Job already exists: " + job.id());
       }
@@ -234,7 +304,7 @@ public final class InMemoryJobStore implements JobStore {
       }
       for (var p : prepared) {
         Entry entry = entryFromSnapshot(p.snapshot, p.wire, 1L);
-        jobs.put(p.job.id(), entry);
+        putEntry(p.job.id(), entry);
         insertedIds.add(p.job.id());
       }
     }
@@ -291,7 +361,7 @@ public final class InMemoryJobStore implements JobStore {
 
     var failure = new AtomicReference<RuntimeException>();
     synchronized (claimMutex) {
-      jobs.compute(job.id(), (k, existing) -> {
+      computeEntry(job.id(), (k, existing) -> {
         if (existing == null) {
           failure.set(new StaleJobException(job.id(), expectedVersion));
           return null;
@@ -320,7 +390,7 @@ public final class InMemoryJobStore implements JobStore {
   }
 
   private void softDeleteLocked(JobId id, AtomicReference<Boolean> changed) {
-    jobs.compute(id, (k, existing) -> {
+    computeEntry(id, (k, existing) -> {
       if (existing == null) {
         return null;
       }
@@ -382,7 +452,7 @@ public final class InMemoryJobStore implements JobStore {
             var rejected = withVersion(quarantined, nextVersion);
             var rejectedWire = serializer.serializeJob(rejected, capabilities);
             previous.put(ce.getKey(), existing);
-            jobs.put(ce.getKey(), entryFromSnapshot(rejected, rejectedWire, nextVersion));
+            putEntry(ce.getKey(), entryFromSnapshot(rejected, rejectedWire, nextVersion));
             continue;
           }
           Entry updated = entryFromSnapshot(snap, wire, nextVersion);
@@ -390,7 +460,7 @@ public final class InMemoryJobStore implements JobStore {
           // SKIP-LOCKED-plus-version-matched UPDATE: never overwrite an
           // entry that changed since the candidate snapshot was taken.
           previous.put(ce.getKey(), existing);
-          Entry committed = jobs.compute(ce.getKey(), (k, current) -> {
+          Entry committed = computeEntry(ce.getKey(), (k, current) -> {
             if (current == null
                 || current.version != existing.version
                 || current.state != JobState.ENQUEUED) {
@@ -408,7 +478,7 @@ public final class InMemoryJobStore implements JobStore {
       } catch (RuntimeException | Error failure) {
         // A custom serializer can fail even on quarantine. No failed batch
         // may leave earlier claims unreturned; the mutex makes rollback exact.
-        previous.forEach(jobs::put);
+        previous.forEach(this::putEntry);
         throw failure;
       }
     }
@@ -424,7 +494,7 @@ public final class InMemoryJobStore implements JobStore {
     // spurious StaleJobException.
     synchronized (claimMutex) {
       for (var id : jobs.keySet()) {
-        jobs.computeIfPresent(id, (jobId, existing) -> {
+        computeEntryIfPresent(id, (jobId, existing) -> {
           if (existing.state != JobState.PROCESSING) return existing;
           Job j = serializer.deserializeJob(existing.wire);
           if (j.ownerNodeId().filter(o -> o.equals(nodeId)).isEmpty()) return existing;
@@ -462,7 +532,7 @@ public final class InMemoryJobStore implements JobStore {
       }
       var updated = incoming.withExecutionUpdate(incoming.executionRevision() + 1, heartbeat);
       var wire = serializer.serializeJob(updated, capabilities);
-      jobs.put(job.id(), entryFromSnapshot(updated, wire, existing.version));
+      putEntry(job.id(), entryFromSnapshot(updated, wire, existing.version));
       job.adoptExecutionRevision(updated.executionRevision());
       return true;
     }
@@ -595,10 +665,9 @@ public final class InMemoryJobStore implements JobStore {
   @Override
   public List<Job> scanJobs(JobState state, JobId after, int max) {
     Objects.requireNonNull(state, "state");
-    return jobs.entrySet().stream()
-        .filter(e -> e.getValue().state == state)
-        .filter(e -> after == null || e.getKey().compareTo(after) > 0)
-        .sorted(Map.Entry.comparingByKey())
+    var indexed = jobsByState.get(state);
+    var remaining = after == null ? indexed : indexed.tailMap(after, false);
+    return remaining.entrySet().stream()
         .limit(Math.clamp(max, 0, 500))
         .map(e -> serializer.deserializeJob(e.getValue().wire))
         .toList();
@@ -606,11 +675,8 @@ public final class InMemoryJobStore implements JobStore {
 
   @Override
   public List<CronTask> scanCronTasks(String after, int max) {
-    return cronTasks.values().stream()
-        .filter(task -> after == null || task.name().compareTo(after) > 0)
-        .sorted(Comparator.comparing(CronTask::name))
-        .limit(Math.clamp(max, 0, 500))
-        .toList();
+    var remaining = after == null ? cronTasks : cronTasks.tailMap(after, false);
+    return remaining.values().stream().limit(Math.clamp(max, 0, 500)).toList();
   }
 
   @Override
@@ -717,7 +783,8 @@ public final class InMemoryJobStore implements JobStore {
   // ---------------------------------------------------------------- retention
 
   @Override
-  public RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, JobId after) {
+  public RetentionPage deleteFinishedPage(
+      Instant cutoff, JobState state, int max, RetentionCursor after) {
     Objects.requireNonNull(cutoff, "cutoff");
     if (state != JobState.SUCCEEDED
         && state != JobState.FAILED
@@ -726,12 +793,14 @@ public final class InMemoryJobStore implements JobStore {
       throw new IllegalArgumentException("Retention requires a finished state");
     int limit = Math.clamp(max, 0, 100);
     if (limit == 0) return new RetentionPage(0, null);
+    var position = after == null ? null : RetentionPosition.from(after);
     synchronized (claimMutex) {
-      var candidates = jobs.entrySet().stream()
-          .filter(entry -> entry.getValue().state == state
-              && (after == null || entry.getKey().compareTo(after) > 0))
-          .sorted(Map.Entry.comparingByKey())
+      var indexed = retainedByTime.get(state);
+      var remaining = position == null ? indexed : indexed.tailMap(position, false);
+      var candidates = remaining.entrySet().stream()
+          .takeWhile(entry -> !entry.getKey().at().isAfter(cutoff))
           .limit(limit)
+          .map(entry -> Map.entry(entry.getKey().id(), entry.getValue()))
           .toList();
       var now = Instant.now();
       var liveDedup = dedupKeys.values().stream()
@@ -755,11 +824,16 @@ public final class InMemoryJobStore implements JobStore {
           }
         }
         if (!findAwaitingByParent(candidate.getKey(), 1).isEmpty()) continue;
-        if (jobs.remove(candidate.getKey(), entry)) deleted++;
+        if (removeEntry(candidate.getKey(), entry)) deleted++;
       }
       return new RetentionPage(
-          deleted, candidates.size() == limit ? candidates.getLast().getKey() : null);
+          deleted,
+          candidates.size() == limit ? retentionPosition(candidates.getLast()).cursor() : null);
     }
+  }
+
+  private static RetentionPosition retentionPosition(Map.Entry<JobId, Entry> entry) {
+    return new RetentionPosition(entry.getValue().currentStateAt, entry.getKey());
   }
 
   // ---------------------------------------------------------------- relationships & mutexes
@@ -824,7 +898,7 @@ public final class InMemoryJobStore implements JobStore {
       JobReplacement replacement,
       AtomicReference<Boolean> result,
       AtomicReference<StaleJobException> stale) {
-    jobs.compute(id, (k, existing) -> {
+    computeEntry(id, (k, existing) -> {
       if (existing == null) {
         result.set(false);
         return null;

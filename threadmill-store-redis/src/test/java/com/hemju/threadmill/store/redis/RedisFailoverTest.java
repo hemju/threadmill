@@ -225,7 +225,10 @@ class RedisFailoverTest {
     final List<Job> jobs = new ArrayList<>();
     final List<ProcessingNode> nodes = new ArrayList<>();
     final CountDownLatch release = new CountDownLatch(1);
-    final CountDownLatch entered = new CountDownLatch(4);
+    // Both nodes have three default workers, plus one admitted exclusive root.
+    // Wait for all seven before WAIT: otherwise later claims can race primary
+    // termination outside the replication-qualified portion of this fixture.
+    final CountDownLatch entered = new CountDownLatch(7);
     final CountDownLatch rootStarted = new CountDownLatch(1);
     final AtomicInteger exclusive = new AtomicInteger();
     final ConcurrentLinkedQueue<String> violations = new ConcurrentLinkedQueue<>();
@@ -290,10 +293,48 @@ class RedisFailoverTest {
     }
 
     void assertDrained() {
-      await().atMost(Duration.ofSeconds(60)).ignoreExceptions().untilAsserted(() -> {
-        assertThat(store.countsByState().getOrDefault(JobState.SUCCEEDED, 0L))
-            .isEqualTo((long) jobs.size());
-      });
+      try {
+        await().atMost(Duration.ofSeconds(60)).ignoreExceptions().untilAsserted(() -> {
+          assertThat(store.countsByState().getOrDefault(JobState.SUCCEEDED, 0L))
+              .isEqualTo((long) jobs.size());
+        });
+      } catch (RuntimeException | AssertionError failure) {
+        try {
+          var directory = Path.of("build", "reports", "redis-failover");
+          Files.createDirectories(directory);
+          var remaining = new ArrayList<Map<String, Object>>();
+          for (var original : jobs) {
+            var persisted = store.findById(original.id());
+            if (persisted.isEmpty() || persisted.get().currentState() != JobState.SUCCEEDED)
+              remaining.add(Map.of(
+                  "id",
+                  original.id().toString(),
+                  "record",
+                  persisted
+                      .map(job -> new JsonJobSerializer()
+                          .serializeJob(job.snapshot(), store.capabilities()))
+                      .orElse("missing")));
+          }
+          new ObjectMapper()
+              .writerWithDefaultPrettyPrinter()
+              .writeValue(
+                  directory
+                      .resolve("failed-drain-" + System.currentTimeMillis() + ".json")
+                      .toFile(),
+                  Map.of(
+                      "counts",
+                      store.countsByState(),
+                      "remaining",
+                      remaining,
+                      "executions",
+                      executions,
+                      "violations",
+                      violations));
+        } catch (Exception diagnosticFailure) {
+          failure.addSuppressed(diagnosticFailure);
+        }
+        throw failure;
+      }
       for (var job : jobs)
         assertThat(store.findById(job.id()).orElseThrow().currentState())
             .isEqualTo(JobState.SUCCEEDED);

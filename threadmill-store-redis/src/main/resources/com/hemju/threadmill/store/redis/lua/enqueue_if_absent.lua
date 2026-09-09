@@ -64,7 +64,7 @@ end
 
 redis.call('HSET', dedup_key, 'job_id', job_id, 'expires_at', tostring(expires_at))
 redis.call('ZADD', expiry_key, expires_at, dedup_key)
-redis.call('SETNX', '{threadmill}:storage_format', '2')
+redis.call('SETNX', '__THREADMILL_STORAGE_FORMAT_KEY__', '__THREADMILL_STORAGE_FORMAT__')
 redis.call('HSET', job_key,
     'body', body,
     'state', state,

@@ -51,6 +51,10 @@ public final class RetryInterceptor implements JobInterceptor {
   private final JobStore store;
   private final RetryPolicy defaultPolicy;
   private JobId recoveryAfter;
+
+  boolean recoveryPassComplete() {
+    return recoveryAfter == null;
+  }
   // Iterated from concurrent worker virtual threads while policyFor may
   // still register entries; most-specific matching scans every entry, so
   // iteration order is irrelevant.

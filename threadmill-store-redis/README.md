@@ -43,6 +43,12 @@ versions. Managed services that restrict `INFO`/`CONFIG` may use
 verifying both the version and the no-eviction policy. Tests and examples use
 the minimum supported 7.4 release line.
 
+This is a qualification boundary, not a claim that each script needs a 7.4-only
+command. Redis 7.0/7.2 and Valkey have not passed Threadmill's supported
+version/topology matrix and are not supported. `externallyValidatedMode()` is
+for restricted administrative commands on an otherwise supported deployment;
+it does not extend the supported version or product matrix.
+
 `RedisJobStore` implements `AutoCloseable`: use try-with-resources for manually
 owned stores. Closing a store closes its connection; a caller-injected client
 remains owned by the caller.
@@ -77,7 +83,7 @@ indexes remain in the same slot too.
 
 | Key | Type | Purpose |
 |---|---|---|
-| `{threadmill}:job:{id}` | HASH | Per-job state. Fields: `body`, `state`, `queue`, `priority`, `handler_signature`, `scheduled_at`, `owner_node_id`, `owner_heartbeat_at`, `last_checkin_at`, `current_state_at`, `created_at`, `workflow_root_id`, `concurrency_key`, `concurrency_mode`, `version`. |
+| `{threadmill}:job:{id}` | HASH | Per-job state. Fields: `body`, `state`, `queue`, `priority`, `handler_signature`, `scheduled_at`, `owner_node_id`, `owner_heartbeat_at`, `last_checkin_at`, `current_state_at`, `created_at`, `workflow_root_id`, `concurrency_key`, `concurrency_mode`, `version`, `execution_revision`. |
 | `{threadmill}:queue:{queue}` | ZSET | ENQUEUED job ids per queue. Score `-priority` so `ZRANGE LIMIT 0 N` returns highest-priority first; Redis breaks equal-score ties lexicographically by the UUIDv7 job-id member. This exactly matches `(priority DESC, id)` across the full `int` priority and timestamp ranges. |
 | `{threadmill}:scheduled` | ZSET | SCHEDULED ids scored by `scheduled_at` (millis since epoch). |
 | `{threadmill}:awaiting` | ZSET | AWAITING ids scored by state-entry time. |
@@ -85,12 +91,17 @@ indexes remain in the same slot too.
 | `{threadmill}:processing:{node}` | ZSET | Per-node PROCESSING ids (same score). Lets `touchOwnerHeartbeat` rescore one ZSET, not scan globally. |
 | `{threadmill}:by_handler:{handler}` | SET | Members are job ids. Powers `findByHandlerSignature`. |
 | `{threadmill}:by_state_time:{STATE}` | ZSET | Ids scored by `current_state_at`. Used for retention. |
+| `{threadmill}:storage_format` | STRING | Completed index-format version (currently `2`), or an incomplete migration marker. |
+| `{threadmill}:storage_format_migration` | STRING with TTL | Offline migration lease. |
+| `{threadmill}:by_state_time:{STATE}:ids` | ZSET | Zero-score ID order for bounded retry/workflow recovery pages. |
 | `{threadmill}:counts` | HASH | State → cardinality. `HINCRBY` inside every state-changing script. **Never** `SCARD` / `ZCARD` for live counts. |
 | `{threadmill}:queues` | SET | Active queue names (membership maintained by `claim_commit`). |
 | `{threadmill}:queue_keys:{queue}` | HASH | Concurrency key → count of ENQUEUED keyed jobs of that key in the queue. An ordered ZSET mirror (`:ordered`) supplies bounded lexicographic registry pages. |
+| `{threadmill}:queue_keys:{queue}:ordered` | ZSET | Zero-score lexicographic queue-key registry. |
 | `{threadmill}:queue_unkeyed:{queue}` | ZSET | ENQUEUED unkeyed job ids, scored like the queue ZSET. The unkeyed claim lane never pages past keyed work. |
 | `{threadmill}:queue_enqueued_at:{queue}` | ZSET | Every ENQUEUED job id in the queue, scored by `current_state_at` millis. `oldestEnqueuedAt` (the `threadmill.queue.oldest.enqueued.age` gauge and the dashboard queue view) reads its head with one `ZRANGE 0 0 WITHSCORES`, so the age gauge never scans the priority-ordered queue ZSET. Maintained inside the same atomic scripts as queue membership. |
 | `{threadmill}:queue_pauses` | HASH | Paused queue → reason. |
+| `{threadmill}:cron_tasks:ordered` | ZSET | Zero-score recurring-name order for bounded materializer pages. |
 | `{threadmill}:cron_task_namespace:{namespace}` | SET | Cron task names owned by one reconciliation namespace. |
 | `{threadmill}:cron_task_namespaces` | SET | Known recurring reconciliation namespaces. |
 | `{threadmill}:nodes` | SET | Known NodeIds. |
@@ -99,8 +110,11 @@ indexes remain in the same slot too.
 | `{threadmill}:no_key` | Reserved sentinel | Placeholder for an absent optional Lua `KEYS` entry; never stores data. |
 | `{threadmill}:dedup:{queue}:{dedupKey}` | STRING | Dedup record. |
 | `{threadmill}:dedup_expiry` | ZSET | Dedup record expiries; maintenance cleanup reads this. |
-| `{threadmill}:concurrency:{key}:counters` | HASH | Per-key in-flight counts (`exclusive_in_flight`, `shared_in_flight`). |
+| `{threadmill}:concurrency_counters` | ZSET | Zero-score registry of counter keys for bounded idle cleanup. |
+| `{threadmill}:concurrency:{key}:counters` | HASH | Per-key in-flight counts (`exclusive_in_flight`, `shared_in_flight`) and optional `idle_since` grace marker. |
 | `{threadmill}:concurrency:{key}:pending` | ZSET | Pending concurrency members, scored by enqueue-time micros. |
+| `{threadmill}:concurrency:{key}:pending:exclusive` | ZSET | EXCLUSIVE-only pending mirror for the admission barrier. |
+| `{threadmill}:concurrency:{key}:pending:ready:{queueKeys}` | ZSET | Per-queue ENQUEUED pending mirror; `{queueKeys}` is the full encoded queue-key registry key. |
 | `{threadmill}:concurrency:{key}:pending_root:{root}` | ZSET | Per workflow-root mirror of `pending` (same members and scores), kept only for members whose workflow root differs from their own job id. Lets the claim path find active-hold members without scanning the pending population. |
 | `{threadmill}:concurrency:{key}:workflows` | HASH | Workflow root id → active outstanding hold count. Presence means the workflow currently owns the key. |
 | `{threadmill}:concurrency:{key}:workflow_counts` | HASH | Workflow root id → total non-terminal job count. Maintained incrementally so claim does not scan active jobs. |
@@ -148,6 +162,8 @@ server (single-threaded execution).
 | `lease_acquire.lua` | Compare-and-renew for the maintenance lease. |
 | `lease_release.lua` | Compare-and-delete for the maintenance lease. |
 | `dedup_delete.lua` | Compare-and-delete an expired dedup record without erasing a concurrent replacement. |
+| `retention_candidates.lua` | Read-only cutoff-eligible time/ID paging, with bounded seeking through timestamp ties even after cursor deletion. |
+| `cleanup_concurrency.lua` | Reclaim idle counters after a one-minute grace, preserving active and pending work. |
 | `retention_delete.lua` | State-checked hard deletion with atomic index and count cleanup. |
 | `queue_prune.lua` | Remove an empty queue from the registry without racing a concurrent insert. |
 
