@@ -32,6 +32,13 @@ the terminal save completes normally. If the node shuts down first, its retry
 and heartbeats stop; the maintenance leader then reclaims the job after
 `heartbeatTimeout` under the usual at-least-once semantics.
 
+When no execution or finalization context is active, the execution-heartbeat
+tick makes no datastore call. It clears any heartbeat-related claim suspension
+because no active attempt needs renewal; this is not a successful datastore
+health probe. If the store is still unavailable, the dispatcher's next claim
+detects the outage and its circuit breaker pauses dispatch. Node-registry
+heartbeats remain independent.
+
 ## Fatal JVM Errors and Process Supervision
 
 Threadmill contains ordinary handler exceptions and `AssertionError` as
