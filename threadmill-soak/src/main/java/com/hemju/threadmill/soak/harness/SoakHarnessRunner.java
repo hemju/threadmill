@@ -69,7 +69,6 @@ public final class SoakHarnessRunner {
           + "' does not support -Pproducers > 1 — its workload has run-level side effects");
     }
     JobStore store = new MeasuredJobStore(fixture.store());
-    Scheduler scheduler = new Scheduler(store, new JsonJobSerializer());
     Instant runStart = Instant.now();
 
     // Mutated by the main thread, read by scenario threads, and — when
@@ -86,6 +85,8 @@ public final class SoakHarnessRunner {
       }
     });
     SoakTraceWriter trace = new SoakTraceWriter(outputDir.traceJsonl(), verifier::onEvent);
+    var producerStore = new RecoveringProducerStore(store, trace, abortRequested::get);
+    Scheduler scheduler = new Scheduler(producerStore, new JsonJobSerializer());
     // Handlers emit their exec_started / exec_finished brackets through
     // the static sink — the execution-level invariants judge those.
     SoakExecutionTrace.install(trace);
@@ -145,7 +146,7 @@ public final class SoakHarnessRunner {
 
       SoakRunContext ctx = new SoakRunContext(
           config,
-          store,
+          producerStore,
           trace,
           Instant.now(),
           () -> {

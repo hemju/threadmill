@@ -28,7 +28,7 @@ class SpringRedisResetAutoConfigurationTest {
           DockerImageName.parse("redis:7.4-alpine"))
       .withExposedPorts(6379)
       .withCommand("redis-server", "--appendonly", "yes")
-      .waitingFor(Wait.forListeningPort());
+      .waitingFor(Wait.forSuccessfulCommand("redis-cli ping"));
 
   private static RedisURI uri;
   private static RedisClient adminClient;

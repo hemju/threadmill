@@ -55,6 +55,15 @@ parents; they are eligibility signals, not proof of a stuck maintenance worker.
 Monitor sampling freshness externally: a stopped sampler must not look healthy
 because its last successful values remain on disk.
 
+Harness producers recover transport failures for at most two minutes, retaining
+the original job IDs and checking durable records before retrying uncertain
+insert, bulk-insert, and deduplication acknowledgements. Worker calls still use
+the original store. `producer_outage` and `producer_recovered` trace events mark
+these intervals; invalid requests and partially visible ambiguous batches fail
+the run. This is harness behavior, not an automatic retry guarantee of the
+public `Scheduler`. Real Redis regressions pause the server longer than its
+command timeout and require both mixed and retention producers to resume.
+
 Every minute also record datastore CPU/RSS, connection counts, disk/AOF/WAL
 growth, and metadata cardinality. During faults capture every second. Retain
 raw measurements rather than only graphs or a final jobs/s number. For Redis,

@@ -97,6 +97,13 @@ The harness is distinct from:
 
 ### Live verification, `progress.json`, and fail-fast
 
+Producer insert, bulk-insert and deduplication calls recover transport outages
+for at most two minutes. Recovery retains the original IDs and checks durable
+records before retrying an uncertain acknowledgement. The trace records
+`producer_outage` and `producer_recovered`; worker recovery remains unchanged.
+Invalid requests and partially visible ambiguous batches fail the run. This
+retry policy belongs to the harness, not the public scheduler API.
+
 Invariants are verified **live**: every trace event feeds the scenario's
 streaming checks as it is written, with state bounded by in-flight work — the
 same definitions verify a five-second smoke and an eight-hour endurance run.
