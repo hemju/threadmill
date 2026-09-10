@@ -317,16 +317,18 @@ Java is formatted with **Palantir Java Format** in its `GOOGLE` style
 everyone on the team ends up with byte-identical output, and `./gradlew
 check` fails on violations.
 
-## Commercial support
+## Reference customer
 
 <a href="https://lingohub.com/">
   <img src="docs/assets/lingohub-logo.png" alt="LingoHub" width="320">
 </a>
 
+[LingoHub](https://lingohub.com/) uses Threadmill for background job processing.
+
+## Commercial support
+
 Starting with Threadmill **1.0**, commercial support will be available from
-[LingoHub](https://lingohub.com/).
-[Contact LingoHub](https://lingohub.com/contact) to discuss commercial support
-for your team.
+[hemju.com](https://hemju.com/).
 
 ## License
 
