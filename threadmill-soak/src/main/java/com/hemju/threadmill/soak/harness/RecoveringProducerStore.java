@@ -140,7 +140,11 @@ final class RecoveringProducerStore extends ForwardingJobStore {
       }
       if (cause instanceof SQLException sql
           && sql.getSQLState() != null
-          && (sql.getSQLState().startsWith("08") || sql.getSQLState().equals("57P01"))) {
+          && (sql.getSQLState().startsWith("08")
+              || sql.getSQLState().equals("57P01")
+              || sql.getSQLState().equals("57P02")
+              || sql.getSQLState().equals("57P03"))) {
+        // Existing sessions and new connections report different states during a restart.
         return true;
       }
     }

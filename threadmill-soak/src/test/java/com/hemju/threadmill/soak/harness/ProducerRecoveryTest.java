@@ -5,14 +5,20 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import io.lettuce.core.RedisCommandTimeoutException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import com.hemju.threadmill.core.EnqueueResult;
 import com.hemju.threadmill.core.Job;
@@ -46,6 +52,62 @@ class ProducerRecoveryTest {
     }
     assertThat(Files.readString(temporary.resolve("trace.jsonl")))
         .contains("producer_outage", "producer_recovered");
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"08006", "57P01", "57P02", "57P03"})
+  void postgresRestartDuringAcknowledgementReconciliationDoesNotDuplicateTheJob(String sqlState)
+      throws Exception {
+    var real = new InMemoryJobStore();
+    var writes = new AtomicInteger();
+    var reads = new AtomicInteger();
+    var interrupted = new ForwardingJobStore(real) {
+      @Override
+      public void insert(Job job) {
+        writes.incrementAndGet();
+        super.insert(job);
+        throw new IllegalStateException(new SQLException("lost acknowledgement", "08006"));
+      }
+
+      @Override
+      public Optional<Job> findById(JobId id) {
+        if (reads.getAndIncrement() == 0) {
+          throw new IllegalStateException(new SQLException("restart in progress", sqlState));
+        }
+        return super.findById(id);
+      }
+    };
+    try (var trace = new SoakTraceWriter(temporary.resolve("trace.jsonl"))) {
+      var job = job();
+      new RecoveringProducerStore(interrupted, trace, () -> false).insert(job);
+      assertThat(writes).hasValue(1);
+      assertThat(reads).hasValue(2);
+      assertThat(real.findById(job.id())).isPresent();
+      assertThat(real.countsByState().get(JobState.ENQUEUED)).isEqualTo(1);
+      assertThat(job.version()).isEqualTo(1);
+    }
+    assertThat(Files.readString(temporary.resolve("trace.jsonl")))
+        .contains("producer_outage", "producer_recovered");
+  }
+
+  @ParameterizedTest
+  @NullSource
+  @ValueSource(strings = {"57014", "57P04", "53300", "23505", "28P01", "42P01"})
+  void unrelatedPostgresErrorsAreNotClassifiedAsRestartOutages(String sqlState) throws Exception {
+    var failure = new IllegalStateException(new SQLException("deterministic failure", sqlState));
+    var broken = new ForwardingJobStore(new InMemoryJobStore()) {
+      @Override
+      public void insert(Job job) {
+        throw failure;
+      }
+    };
+    try (var trace = new SoakTraceWriter(temporary.resolve("trace.jsonl"))) {
+      assertThatThrownBy(() ->
+              new RecoveringProducerStore(broken, trace, () -> false, Duration.ZERO).insert(job()))
+          .isSameAs(failure);
+    }
+    assertThat(Files.readString(temporary.resolve("trace.jsonl")))
+        .doesNotContain("producer_outage", "producer_recovered");
   }
 
   @Test

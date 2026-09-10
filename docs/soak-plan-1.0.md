@@ -63,6 +63,11 @@ these intervals; invalid requests and partially visible ambiguous batches fail
 the run. This is harness behavior, not an automatic retry guarantee of the
 public `Scheduler`. Real Redis regressions pause the server longer than its
 command timeout and require both mixed and retention producers to resume.
+PostgreSQL recovery includes connection failures and restart states `57P01`,
+`57P02`, and `57P03`, including new connections refused during shutdown or
+startup. A real PostgreSQL regression holds the server in smart shutdown,
+verifies `57P03`, then restarts it and requires the original job to be inserted
+exactly once. Other SQL errors still fail the producer immediately.
 The PostgreSQL fixture does not set a JDBC socket timeout: a paused server can
 leave a producer blocked until it resumes, without throwing a transport error.
 That experiment measures blocked-call recovery; the PostgreSQL restart
