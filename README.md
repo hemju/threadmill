@@ -327,8 +327,9 @@ check` fails on violations.
 
 ## Commercial support
 
-Starting with Threadmill **1.0**, commercial support will be available from
-[hemju.com](https://hemju.com/).
+Starting with Threadmill **1.0**, commercial support will be available through
+[hemju.com](https://hemju.com/). Contact [sales@hemju.com](mailto:sales@hemju.com)
+to discuss commercial support for your team.
 
 ## License
 
