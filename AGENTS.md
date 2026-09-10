@@ -15,6 +15,8 @@ Threadmill is a modern, lightweight **background job-processing library for Java
 
 The delivery guarantee is **at-least-once**: a job may run more than once (for example after a node crash mid-execution). Handlers must be idempotent. State this loudly in any user-facing docs.
 
+Commercial support will be available from **LingoHub** starting with Threadmill **1.0**. The README links to LingoHub's website and contact page and uses the supplied logo from `docs/assets/lingohub-logo.png`.
+
 ---
 
 ## 2. Platform and technology
