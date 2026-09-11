@@ -44,11 +44,16 @@ Threadmill is published to Maven Central under the `com.hemju.threadmill`
 group. Pick the core plus the store you run against (and the Spring Boot
 starter if you use Spring):
 
+These examples target **1.0.0**, which is being prepared for release on this
+branch. Until publication completes, the latest published release remains
+**0.3.0**. Upgrade existing installations using the
+[0.3.0-to-1.0 migration guide](docs/compatibility.md#upgrade-from-v030).
+
 ```kotlin
 // build.gradle.kts
-implementation("com.hemju.threadmill:threadmill-core:0.3.0")
-implementation("com.hemju.threadmill:threadmill-store-postgres:0.3.0") // or -store-redis / -store-memory
-implementation("com.hemju.threadmill:threadmill-spring-boot:0.3.0")    // optional Spring Boot integration
+implementation("com.hemju.threadmill:threadmill-core:1.0.0")
+implementation("com.hemju.threadmill:threadmill-store-postgres:1.0.0") // or -store-redis / -store-memory
+implementation("com.hemju.threadmill:threadmill-spring-boot:1.0.0")    // optional Spring Boot integration
 ```
 
 ```xml
@@ -56,7 +61,7 @@ implementation("com.hemju.threadmill:threadmill-spring-boot:0.3.0")    // option
 <dependency>
   <groupId>com.hemju.threadmill</groupId>
   <artifactId>threadmill-core</artifactId>
-  <version>0.3.0</version>
+  <version>1.0.0</version>
 </dependency>
 ```
 
@@ -124,7 +129,7 @@ See [docs/quickstart.md](docs/quickstart.md) for a complete Spring walkthrough, 
 
 ## Storage backends
 
-**PostgreSQL** is the primary production backend. Indexed scalar columns
+**PostgreSQL 18+** is the primary production backend. Indexed scalar columns
 denormalize the indexed job state; the body column holds the
 JSON-serialized job. Per-state counts come from a counter table maintained
 by a trigger (so the observability path never contends with the claim
@@ -132,7 +137,7 @@ path). Migrations are applied automatically on startup; an
 `emitPendingSql()` method produces pending SQL for teams that prefer
 Flyway/Liquibase, and `emitCleanInstallSql()` emits the full clean-install DDL.
 
-**Redis** is a fully supported first-class backend. Every multi-key state
+**Redis 7.4+** is a first-class backend and requires `noeviction`. Every multi-key state
 transition is a single atomic Lua script. Standalone, Sentinel, and Cluster
 topologies are configured through one factory path. Redis Cluster uses a
 single `{threadmill}` hash slot for correctness; it is topology/failover
@@ -220,7 +225,9 @@ stable API.
 
 ## Status
 
-Shipped in v1:
+The **1.0.0 release candidate** includes the features below. Publication is
+pending the [release checks](docs/release-checklist.md), including completed
+PostgreSQL and Redis soak qualification.
 
 - Job model with append-only state history, optimistic-lock versioning,
   relationship and result fields, and bounded size.

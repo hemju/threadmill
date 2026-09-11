@@ -10,12 +10,13 @@ run the same logical job more than once.
 
 ## Dependencies
 
-Use Java 25 and add the Spring module plus one store:
+Use Java 25 and add the Spring module plus one store. These examples target
+the unreleased 1.0.0 candidate; see the [release status](../README.md#status).
 
 ```kotlin
-implementation("com.hemju.threadmill:threadmill-spring-boot:0.3.0")
-implementation("com.hemju.threadmill:threadmill-store-postgres:0.3.0")
-// or: implementation("com.hemju.threadmill:threadmill-store-redis:0.3.0")
+implementation("com.hemju.threadmill:threadmill-spring-boot:1.0.0")
+implementation("com.hemju.threadmill:threadmill-store-postgres:1.0.0")
+// or: implementation("com.hemju.threadmill:threadmill-store-redis:1.0.0")
 ```
 
 The default Spring enqueue mode is `after_commit`: returned ids are reserved
@@ -83,15 +84,16 @@ the surrounding transaction did not commit.
 public void scheduleWelcome(UserCreated created) {
     userRepo.save(created.toUser());        // pending write
     jobs.enqueue(SendEmailHandler.class, new SendEmail(created.email(), "Welcome"));
-    // Both happen — or neither: the job insert fires on afterCommit.
+    // The job insert is attempted after commit; observe AfterCommitEnqueueFailure.
 }
 ```
 
 The returned `JobId` is reserved synchronously (UUIDv7 is generated client
-side), but the store row appears only after the transaction commits. If a
-caller depends on `store.findById(id)` succeeding immediately after
-`enqueue()` returns — e.g., a non-transactional code path that re-reads
-its own write — disable the wrapper:
+side), but the deferred store insert is attempted only after the transaction
+commits. Within that transaction, `store.findById(id)` cannot yet find the job.
+Outside a transaction the default wrapper inserts immediately. The
+`immediate` mode also inserts immediately inside a transaction, but that job
+can run before the business transaction commits and survives its rollback:
 
 ```yaml
 threadmill:

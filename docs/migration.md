@@ -51,6 +51,6 @@ before upgrading and explicitly retry or delete them as appropriate. Drain and
 stop old workers before starting the new version: old workers do not preserve
 this decision. Threadmill remains at-least-once; handlers must be idempotent.
 
-For the v0.3.0-to-candidate storage upgrade, module/SPI changes, Redis format 2,
+For the v0.3.0-to-1.0.0 storage upgrade, module/SPI changes, Redis format 2,
 legacy failure handling, and the stop/restore policy, follow the
 [version compatibility contract](compatibility.md).

@@ -63,6 +63,7 @@ import com.hemju.threadmill.core.StaleJobException;
 import com.hemju.threadmill.core.StoreCapacityExceededException;
 import com.hemju.threadmill.core.engine.RemoteWakeChannel;
 import com.hemju.threadmill.core.internal.ExecutionHeartbeats;
+import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.internal.RetentionPosition;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
@@ -434,7 +435,13 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
     List<ClaimLock> locks = List.of();
     while (true) {
       locks = acquireClaimLocks(r, concurrencyClaimLockKeys(List.of(snapshot)));
-      JobSnapshot lockedSnapshot = snapshotForInsert(r, job, version);
+      JobSnapshot lockedSnapshot;
+      try {
+        lockedSnapshot = snapshotForInsert(r, job, version);
+      } catch (RuntimeException | Error failure) {
+        releaseClaimLocksAfterFailure(r, locks, failure);
+        throw failure;
+      }
       if (concurrencyClaimLockKeys(List.of(lockedSnapshot)).equals(claimLockKeys(locks))) {
         snapshot = lockedSnapshot;
         break;
@@ -561,11 +568,7 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
           lockedStateAts.add(lastTransitionTime(snap, snap.currentState()));
         }
       } catch (RuntimeException | Error failure) {
-        try {
-          releaseClaimLocks(r, locks);
-        } catch (RuntimeException cleanup) {
-          failure.addSuppressed(cleanup);
-        }
+        releaseClaimLocksAfterFailure(r, locks, failure);
         throw failure;
       }
       if (concurrencyClaimLockKeys(lockedSnapshots).equals(claimLockKeys(locks))) {
@@ -674,7 +677,13 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
     List<ClaimLock> locks = List.of();
     while (true) {
       locks = acquireClaimLocks(r, concurrencyClaimLockKeys(List.of(snapshot)));
-      JobSnapshot lockedSnapshot = snapshotForInsert(r, job, version);
+      JobSnapshot lockedSnapshot;
+      try {
+        lockedSnapshot = snapshotForInsert(r, job, version);
+      } catch (RuntimeException | Error failure) {
+        releaseClaimLocksAfterFailure(r, locks, failure);
+        throw failure;
+      }
       if (concurrencyClaimLockKeys(List.of(lockedSnapshot)).equals(claimLockKeys(locks))) {
         snapshot = lockedSnapshot;
         break;
@@ -2480,10 +2489,16 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
     return key == null ? RedisKeys.NO_KEY : key;
   }
 
-  private static boolean tryClaimLock(
-      RedisClusterCommands<String, String> r, String key, String token) {
-    String reply = r.set(key, token, SetArgs.Builder.nx().px(30_000));
-    return "OK".equals(reply);
+  private boolean tryClaimLock(RedisClusterCommands<String, String> r, String key, String token) {
+    try {
+      String reply = r.set(key, token, SetArgs.Builder.nx().px(30_000));
+      return "OK".equals(reply);
+    } catch (RuntimeException | Error failure) {
+      // SET can commit before its reply times out or the caller is interrupted.
+      // A token-checked release also covers that uncertain acquisition.
+      releaseClaimLocksAfterFailure(r, List.of(new ClaimLock(key, token)), failure);
+      throw failure;
+    }
   }
 
   private static List<String> concurrencyClaimLockKeys(List<JobSnapshot> snapshots) {
@@ -2576,14 +2591,19 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
     while (true) {
       var acquired = new ArrayList<ClaimLock>(keys.size());
       boolean complete = true;
-      for (String key : keys) {
-        String token = UUID.randomUUID().toString();
-        if (tryClaimLock(r, key, token)) {
-          acquired.add(new ClaimLock(key, token));
-        } else {
-          complete = false;
-          break;
+      try {
+        for (String key : keys) {
+          String token = UUID.randomUUID().toString();
+          if (tryClaimLock(r, key, token)) {
+            acquired.add(new ClaimLock(key, token));
+          } else {
+            complete = false;
+            break;
+          }
         }
+      } catch (RuntimeException | Error failure) {
+        releaseClaimLocksAfterFailure(r, acquired, failure);
+        throw failure;
       }
       if (complete) {
         return List.copyOf(acquired);
@@ -2596,19 +2616,46 @@ public final class RedisJobStore implements JobStore, AutoCloseable {
     }
   }
 
-  private void releaseClaimLocks(RedisClusterCommands<String, String> r, List<ClaimLock> locks) {
-    for (int i = locks.size() - 1; i >= 0; i--) {
-      ClaimLock lock = locks.get(i);
-      releaseClaimLock(r, lock.key(), lock.token());
+  private void releaseClaimLocksAfterFailure(
+      RedisClusterCommands<String, String> r, List<ClaimLock> locks, Throwable failure) {
+    FatalErrors.rethrowIfFatal(failure);
+    try {
+      releaseClaimLocks(r, locks);
+    } catch (RuntimeException | Error cleanup) {
+      FatalErrors.rethrowIfFatal(cleanup);
+      if (cleanup != failure) failure.addSuppressed(cleanup);
     }
   }
 
+  private void releaseClaimLocks(RedisClusterCommands<String, String> r, List<ClaimLock> locks) {
+    Throwable failure = null;
+    for (int i = locks.size() - 1; i >= 0; i--) {
+      ClaimLock lock = locks.get(i);
+      try {
+        releaseClaimLock(r, lock.key(), lock.token());
+      } catch (RuntimeException | Error cleanup) {
+        FatalErrors.rethrowIfFatal(cleanup);
+        if (failure == null) failure = cleanup;
+        else if (failure != cleanup) failure.addSuppressed(cleanup);
+      }
+    }
+    if (failure instanceof RuntimeException runtime) throw runtime;
+    if (failure instanceof Error error) throw error;
+  }
+
   private void releaseClaimLock(RedisClusterCommands<String, String> r, String key, String token) {
-    evalScript(
-        "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
-        ScriptOutputType.INTEGER,
-        new String[] {key},
-        token);
+    // Lettuce's synchronous wait fails immediately on an interrupted thread.
+    // Let the bounded cleanup complete, then preserve the caller's cancellation.
+    boolean interrupted = Thread.interrupted();
+    try {
+      evalScript(
+          "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end",
+          ScriptOutputType.INTEGER,
+          new String[] {key},
+          token);
+    } finally {
+      if (interrupted) Thread.currentThread().interrupt();
+    }
   }
 
   private List<Map<String, String>> hashesForStates(

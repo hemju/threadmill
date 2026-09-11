@@ -190,6 +190,15 @@ Never a destructive `BLPOP` / `ZPOPMIN`. The flow is:
 A crash before step 3 leaves the job in ENQUEUED. A crash after step 3
 leaves a complete PROCESSING record for the orphan-recovery path.
 
+Short per-key preparation locks have a 30-second expiry as a crash fallback.
+A timed-out or interrupted lock acquisition may have committed in Redis, so
+cleanup compares the acquisition token before deleting it. Partial bulk
+acquisitions and failed workflow re-reads release every acquired lock; one
+cleanup error does not skip the other locks or replace the acquisition failure.
+Cleanup temporarily clears and then restores the caller's interrupt flag so
+Lettuce can complete its bounded release. A continuing outage can still prevent
+cleanup; expiry remains the fallback. This does not change at-least-once delivery.
+
 ## Capabilities
 
 `supportsRichSearch = false`. Redis cannot do deep ad-hoc metadata search;

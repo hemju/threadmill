@@ -1,11 +1,12 @@
-# Compatibility contract for the 1.0 candidate
+# Compatibility contract for Threadmill 1.0
 
 Threadmill provides **at-least-once delivery**. A recovered or retried job can
 execute again; handlers and external side effects must be idempotent. The changes
 in issue [#135](https://github.com/hemju/threadmill/issues/135) harden that contract.
-They do not make execution exactly once. This document defines the proposed 1.0
+They do not make execution exactly once. This document defines the 1.0
 compatibility boundary; a release still requires the recorded validation and
-endurance gates in the [release checklist](release-checklist.md).
+endurance gates in the [release checklist](release-checklist.md). The branch
+targets 1.0.0; it is not yet a published release.
 
 ## Supported platform and storage
 

@@ -2,7 +2,7 @@
 
 ## Start here
 
-- [Getting started](getting-started.md) — five-minute Spring Boot quickstart.
+- [Getting started](getting-started.md) — core API wiring and a runnable in-memory example.
 - [Spring quickstart](quickstart.md) — Spring Boot wiring, `@Job`,
   transaction-aware enqueue modes.
 
