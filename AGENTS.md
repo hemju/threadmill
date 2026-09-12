@@ -686,3 +686,16 @@ with `supportsRichSearch=false` and dashboard validation. It preserves global
 ZSET page order (newest transition millisecond, then descending canonical ID)
 instead of re-sorting only the selected page. Contract rejection tests and the
 Redis equal-timestamp/page-size regression pin the behavior.
+
+### Soak harness recovery and execution brackets
+
+The harness producer retries Redis `LOADING` during restart within its existing
+two-minute outage budget, reconciling original job IDs before another write.
+Other Redis command errors remain fatal to the run. `ProducerRecoveryTest`
+covers write/reconciliation recovery and budget/error classification.
+`SoakInterceptor` tracks outstanding started handler brackets independently of
+cumulative attempts, so a refunded unstarted retry after an earlier failed
+attempt cannot emit a second release. The named
+`refundedRetryAfterAStartedFailureDoesNotReleaseThePreviousBracketAgain`
+regression pins this sequence. Handler brackets are not datastore workflow holds;
+final trace pairing and independent durable hold/counter audits remain required.

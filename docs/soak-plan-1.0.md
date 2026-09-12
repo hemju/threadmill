@@ -63,6 +63,8 @@ these intervals; invalid requests and partially visible ambiguous batches fail
 the run. This is harness behavior, not an automatic retry guarantee of the
 public `Scheduler`. Real Redis regressions pause the server longer than its
 command timeout and require both mixed and retention producers to resume.
+Redis `LOADING` responses during restart also use the same bounded producer
+recovery and acknowledgement reconciliation; unrelated command errors do not.
 PostgreSQL recovery includes connection failures and restart states `57P01`,
 `57P02`, and `57P03`, including new connections refused during shutdown or
 startup. A real PostgreSQL regression holds the server in smart shutdown,
@@ -247,3 +249,8 @@ digests, candidate patch, comparison tables, and final datastore snapshot under
 each run ID. Review every failed invariant and outlier before signing off.
 An interrupted or aborted run is incomplete evidence. Any correctness fix
 requires fresh relevant qualification and a fresh `productionCheck` before 1.0.
+
+Handler lock traces track outstanding started brackets separately from cumulative
+attempt counts. A claim refunded before its handler starts emits no release,
+even when an earlier attempt ran. Final lock pairing and the independent
+datastore hold/counter audit remain required.

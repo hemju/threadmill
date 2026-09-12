@@ -98,7 +98,7 @@ The harness is distinct from:
 ### Live verification, `progress.json`, and fail-fast
 
 Producer insert, bulk-insert and deduplication calls recover transport outages
-for at most two minutes. Recovery retains the original IDs and checks durable
+and temporary Redis `LOADING` responses for at most two minutes. Recovery retains the original IDs and checks durable
 records before retrying an uncertain acknowledgement. The trace records
 `producer_outage` and `producer_recovered`; worker recovery remains unchanged.
 Invalid requests and partially visible ambiguous batches fail the run. This

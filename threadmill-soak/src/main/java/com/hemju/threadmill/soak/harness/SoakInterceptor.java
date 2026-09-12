@@ -30,13 +30,15 @@ import com.hemju.threadmill.core.handler.JobExecutionContext;
  *   <li>Anything else → {@code failed}</li>
  * </ul>
  *
- * <p>Lock released is emitted on every terminal hook (success or failure of
- * any cause) so the lock-pairing invariant holds.
+ * <p>Lock events bracket started handler attempts, not datastore workflow holds.
+ * A completion hook closes an outstanding bracket only; a refunded claim that
+ * never started must not release a previous attempt again.
  */
 public final class SoakInterceptor implements JobInterceptor {
 
   private final SoakTraceWriter trace;
   private final LatencyTracker latencyTracker;
+  private final ConcurrentHashMap<String, Integer> openLockBrackets = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Integer> attemptsByJob = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, LongAdder> succeededByQueue = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, LongAdder> succeededByHandler = new ConcurrentHashMap<>();
@@ -72,7 +74,10 @@ public final class SoakInterceptor implements JobInterceptor {
       lockFields.put("jobId", job.id().toString());
       lockFields.put("lockKey", key);
       lockFields.put("lockMode", job.concurrencyMode().map(Enum::name).orElse(""));
-      trace.emit("lock_acquired", lockFields);
+      openLockBrackets.compute(job.id().toString(), (id, open) -> {
+        trace.emit("lock_acquired", lockFields);
+        return open == null ? 1 : open + 1;
+      });
     });
   }
 
@@ -93,7 +98,7 @@ public final class SoakInterceptor implements JobInterceptor {
     fields.put("attempts", attempts);
     fields.put("final", true);
     trace.emit("succeeded", fields);
-    emitLockReleased(job, attempts);
+    emitLockReleased(job);
     latencyTracker.recordCompleted(job.id(), attempts, "SUCCEEDED");
   }
 
@@ -126,7 +131,7 @@ public final class SoakInterceptor implements JobInterceptor {
       default -> failedCount.incrementAndGet();
     }
     trace.emit(event, fields);
-    emitLockReleased(job, attempts);
+    emitLockReleased(job);
     if (!terminal) {
       // A non-final failure means RetryInterceptor will schedule another attempt.
       retriedCount.incrementAndGet();
@@ -141,20 +146,19 @@ public final class SoakInterceptor implements JobInterceptor {
     }
   }
 
-  private void emitLockReleased(Job job, int attempts) {
-    // A claim whose handler never started (node churned away between the
-    // store-level claim and onProcessingStarting, then orphan-reclaimed;
-    // or a quarantine at claim time) traced no lock_acquired — emitting a
-    // release would record a bracket that never opened. attempts is only
-    // incremented by onProcessingStarting, which precedes every
-    // lock_acquired, so attempts == 0 means exactly that shape.
-    if (attempts == 0) return;
-    job.concurrencyKey().ifPresent(key -> {
-      var lockFields = new LinkedHashMap<String, Object>();
-      lockFields.put("jobId", job.id().toString());
-      lockFields.put("lockKey", key);
-      lockFields.put("lockMode", job.concurrencyMode().map(Enum::name).orElse(""));
-      trace.emit("lock_released", lockFields);
+  private void emitLockReleased(Job job) {
+    // Cumulative attempts survive retry scheduling. They cannot tell whether a
+    // later refunded claim started. Keep only outstanding handler brackets,
+    // removing balanced entries so retention/churn does not grow this map.
+    openLockBrackets.computeIfPresent(job.id().toString(), (id, open) -> {
+      job.concurrencyKey().ifPresent(key -> {
+        var lockFields = new LinkedHashMap<String, Object>();
+        lockFields.put("jobId", id);
+        lockFields.put("lockKey", key);
+        lockFields.put("lockMode", job.concurrencyMode().map(Enum::name).orElse(""));
+        trace.emit("lock_released", lockFields);
+      });
+      return open == 1 ? null : open - 1;
     });
   }
 

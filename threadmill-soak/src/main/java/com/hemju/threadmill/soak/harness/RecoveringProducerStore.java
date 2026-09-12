@@ -11,6 +11,7 @@ import java.util.function.Supplier;
 
 import io.lettuce.core.RedisCommandTimeoutException;
 import io.lettuce.core.RedisConnectionException;
+import io.lettuce.core.RedisLoadingException;
 
 import com.hemju.threadmill.core.EnqueueResult;
 import com.hemju.threadmill.core.Job;
@@ -135,7 +136,8 @@ final class RecoveringProducerStore extends ForwardingJobStore {
   private static boolean isOutage(Throwable failure) {
     for (var cause = failure; cause != null; cause = cause.getCause()) {
       if (cause instanceof RedisCommandTimeoutException
-          || cause instanceof RedisConnectionException) {
+          || cause instanceof RedisConnectionException
+          || cause instanceof RedisLoadingException) {
         return true;
       }
       if (cause instanceof SQLException sql

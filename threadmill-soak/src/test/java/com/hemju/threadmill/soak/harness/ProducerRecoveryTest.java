@@ -13,7 +13,9 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import io.lettuce.core.RedisCommandExecutionException;
 import io.lettuce.core.RedisCommandTimeoutException;
+import io.lettuce.core.RedisLoadingException;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -195,6 +197,65 @@ class ProducerRecoveryTest {
                   .insert(job()))
           .isInstanceOf(RedisCommandTimeoutException.class);
     }
+  }
+
+  @Test
+  void redisLoadingDuringWriteAndReconciliationRetriesTheSameJob() throws Exception {
+    var real = new InMemoryJobStore();
+    var writes = new AtomicInteger();
+    var reads = new AtomicInteger();
+    var restarting = new ForwardingJobStore(real) {
+      @Override
+      public void insert(Job job) {
+        if (writes.getAndIncrement() == 0) throw new RedisLoadingException("LOADING dataset");
+        super.insert(job);
+      }
+
+      @Override
+      public Optional<Job> findById(JobId id) {
+        if (reads.getAndIncrement() == 0) throw new RedisLoadingException("LOADING dataset");
+        return super.findById(id);
+      }
+    };
+    try (var trace = new SoakTraceWriter(temporary.resolve("trace.jsonl"))) {
+      var job = job();
+      new RecoveringProducerStore(restarting, trace, () -> false).insert(job);
+      assertThat(writes).hasValue(2);
+      assertThat(reads).hasValue(2);
+      assertThat(real.findById(job.id())).isPresent();
+      assertThat(real.countsByState().get(JobState.ENQUEUED)).isEqualTo(1);
+    }
+    assertThat(Files.readString(temporary.resolve("trace.jsonl")))
+        .contains("producer_outage", "producer_recovered");
+  }
+
+  @Test
+  void redisLoadingHonorsRecoveryBudgetButOtherCommandErrorsAreNotRetried() throws Exception {
+    var calls = new AtomicInteger();
+    var loading = new RedisLoadingException("LOADING dataset");
+    var denied = new RedisCommandExecutionException("NOPERM command denied");
+    try (var trace = new SoakTraceWriter(temporary.resolve("trace.jsonl"))) {
+      for (var failure : List.of(loading, denied)) {
+        var broken = new ForwardingJobStore(new InMemoryJobStore()) {
+          @Override
+          public void insert(Job job) {
+            calls.incrementAndGet();
+            throw failure;
+          }
+        };
+        assertThatThrownBy(() -> new RecoveringProducerStore(
+                    broken,
+                    trace,
+                    () -> false,
+                    failure == loading ? Duration.ZERO : Duration.ofMinutes(2))
+                .insert(job()))
+            .isSameAs(failure);
+      }
+      assertThat(calls).hasValue(2);
+    }
+    assertThat(Files.readAllLines(temporary.resolve("trace.jsonl")))
+        .filteredOn(line -> line.contains("producer_outage"))
+        .hasSize(1);
   }
 
   private static Job job() {
