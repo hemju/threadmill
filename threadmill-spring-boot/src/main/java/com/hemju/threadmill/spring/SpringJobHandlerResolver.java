@@ -33,6 +33,12 @@ public final class SpringJobHandlerResolver implements JobHandlerResolver {
   }
 
   @Override
+  public ClassLoader classLoader() {
+    return Objects.requireNonNullElse(
+        context.getClassLoader(), SpringJobHandlerResolver.class.getClassLoader());
+  }
+
+  @Override
   public JobHandler<?> resolve(String handlerTypeName) throws HandlerResolutionException {
     Objects.requireNonNull(handlerTypeName, "handlerTypeName");
     try {
@@ -41,7 +47,7 @@ public final class SpringJobHandlerResolver implements JobHandlerResolver {
       // (Spring Boot devtools restart loader, war deployments) handler
       // classes are invisible to the base loader and a plain
       // Class.forName quarantines every job.
-      Class<?> type = ClassUtils.forName(handlerTypeName, context.getClassLoader());
+      Class<?> type = ClassUtils.forName(handlerTypeName, classLoader());
       if (!JobHandler.class.isAssignableFrom(type)) {
         throw new HandlerResolutionException(
             "Type " + handlerTypeName + " does not implement JobHandler");

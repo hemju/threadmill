@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "./App";
 
@@ -79,7 +79,7 @@ const responses: Record<string, unknown> = {
       ownerHeartbeatAt: null,
       detailsRedacted: true
     },
-    stateHistory: [{ state: "ENQUEUED", at: "2026-01-01T00:00:00Z", reason: null, detail: null }],
+    stateHistory: [{ state: "ENQUEUED", at: "2026-01-01T00:00:00Z", reason: null, message: null }],
     arguments: [],
     metadata: {},
     log: [],
@@ -382,4 +382,84 @@ it("paginates with the last submitted handler filter", async () => {
     expect(calls.some((url) => url.includes("handlerType=com.example.Pending"))).toBe(true)
   );
   expect(calls.filter((url) => url.includes("/jobs?")).at(-1)).toContain("offset=0");
+});
+
+function delayedResponse() {
+  let resolve!: (body: unknown) => void;
+  const promise = new Promise<{ ok: boolean; json: () => Promise<unknown> }>((complete) => {
+    resolve = (body) => complete({ ok: true, json: () => Promise.resolve(body) });
+  });
+  return { promise, resolve };
+}
+
+it("ignores an older refresh after a newer state selection even if abort is ignored", async () => {
+  let holdRefresh = false;
+  let held = false;
+  const old = delayedResponse();
+  vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+    const url = input.toString();
+    if (holdRefresh && url.includes("/jobs?state=ENQUEUED")) {
+      held = true;
+      return old.promise;
+    }
+    const value = url.includes("/jobs?state=FAILED")
+      ? fullJobPage("com.example.LatestFailedHandler", 0)
+      : fixtureFor(url);
+    return Promise.resolve({ ok: true, json: () => Promise.resolve(value) });
+  });
+  render(<App />);
+  await screen.findByText("com.example.ImportHandler");
+  holdRefresh = true;
+  fireEvent.click(screen.getByLabelText("Refresh"));
+  await waitFor(() => expect(held).toBe(true));
+  fireEvent.click(screen.getByRole("button", { name: /^FAILED/ }));
+  await screen.findByText("com.example.LatestFailedHandler");
+  await act(async () => old.resolve(responses["/threadmill/api/jobs"]));
+  expect(screen.getByText("com.example.LatestFailedHandler")).toBeInTheDocument();
+  expect(screen.queryByText("com.example.ImportHandler")).not.toBeInTheDocument();
+});
+
+it("keeps the most recently selected detail and renders the server's message as text", async () => {
+  const firstId = "018f0000-0000-7000-8000-000000000001";
+  const secondId = "018f0000-0000-7000-8000-000000000002";
+  const first = delayedResponse();
+  const summary = (responses["/threadmill/api/jobs"] as { jobs: Array<Record<string, unknown>> }).jobs[0];
+  const detail = fixtureFor(`/threadmill/api/jobs/${firstId}`) as Record<string, unknown>;
+  vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+    const url = input.toString();
+    if (url.endsWith(`/jobs/${firstId}`)) return first.promise;
+    const value = url.includes("/jobs?")
+      ? { jobs: [summary, { ...summary, id: secondId }], limit: 50, offset: 0 }
+      : url.endsWith(`/jobs/${secondId}`)
+        ? { ...detail, summary: { ...summary, id: secondId }, stateHistory: [{
+          state: "FAILED", at: "2026-01-01T00:00:00Z", reason: "handler.failure", message: "<b>redacted diagnostic</b>"
+        }] }
+        : fixtureFor(url);
+    return Promise.resolve({ ok: true, json: () => Promise.resolve(value) });
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: `Open job details for ${firstId}` }));
+  fireEvent.click(screen.getByRole("button", { name: `Open job details for ${secondId}` }));
+  expect(await screen.findByText("<b>redacted diagnostic</b>")).toBeInTheDocument();
+  expect(screen.getByText("handler.failure")).toBeInTheDocument();
+  expect(screen.getByText("<b>redacted diagnostic</b>").querySelector("b")).toBeNull();
+  await act(async () => first.resolve(detail));
+  expect(screen.getByText("<b>redacted diagnostic</b>")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: `Open job details for ${secondId}` })).toHaveAttribute("aria-selected", "true");
+});
+
+it("does not reopen a cleared selection when a late detail arrives", async () => {
+  const id = "018f0000-0000-7000-8000-000000000001";
+  const delayed = delayedResponse();
+  vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+    const url = input.toString();
+    if (url.endsWith(`/jobs/${id}`)) return delayed.promise;
+    return Promise.resolve({ ok: true, json: () => Promise.resolve(fixtureFor(url)) });
+  });
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button", { name: `Open job details for ${id}` }));
+  fireEvent.click(screen.getByRole("button", { name: /^FAILED/ }));
+  await act(async () => delayed.resolve(fixtureFor(`/threadmill/api/jobs/${id}`)));
+  expect(screen.getByText("Select a job.")).toBeInTheDocument();
+  expect(screen.queryByText("Sensitive details redacted.")).not.toBeInTheDocument();
 });

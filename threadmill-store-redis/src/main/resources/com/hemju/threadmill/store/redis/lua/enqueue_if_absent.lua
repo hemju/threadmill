@@ -64,6 +64,7 @@ end
 
 redis.call('HSET', dedup_key, 'job_id', job_id, 'expires_at', tostring(expires_at))
 redis.call('ZADD', expiry_key, expires_at, dedup_key)
+redis.call('SETNX', '__THREADMILL_STORAGE_FORMAT_KEY__', '__THREADMILL_STORAGE_FORMAT__')
 redis.call('HSET', job_key,
     'body', body,
     'state', state,
@@ -90,7 +91,7 @@ if active_key ~= no_key and active_score ~= nil then
 end
 if concurrency_key ~= '' and pending_key ~= no_key and pending_member ~= '' and
    (state == 'ENQUEUED' or state == 'SCHEDULED' or state == 'AWAITING') then
-    redis.call('ZADD', pending_key, pending_score, pending_member)
+    tm_pending_add(pending_key, pending_score, pending_member, state, queue_keys_key)
     if pending_root_key ~= no_key then
         redis.call('ZADD', pending_root_key, pending_score, pending_member)
     end
@@ -111,12 +112,12 @@ if state == 'ENQUEUED' then
     redis.call('SADD', queues_key, queue)
     redis.call('ZADD', enqueued_at_key, state_time, job_id)
     if concurrency_key ~= '' then
-        redis.call('HINCRBY', queue_keys_key, concurrency_key, 1)
+        tm_queue_add(queue_keys_key, concurrency_key)
     else
         redis.call('ZADD', unkeyed_key, active_score, job_id)
     end
 end
-redis.call('ZADD', state_time_key, state_time, job_id)
+tm_state_add(state_time_key, state_time, job_id)
 redis.call('SADD', handler_key, job_id)
 redis.call('HINCRBY', counts_key, state, 1)
 return 'OK'

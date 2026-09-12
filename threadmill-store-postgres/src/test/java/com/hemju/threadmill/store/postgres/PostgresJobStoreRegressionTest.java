@@ -2,9 +2,12 @@ package com.hemju.threadmill.store.postgres;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.awaitility.Awaitility.await;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -15,8 +18,11 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -38,17 +44,21 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
+import com.hemju.threadmill.core.EnqueueResult;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobRelationship;
+import com.hemju.threadmill.core.JobReplacement;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
+import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.test.Jobs;
+import com.hemju.threadmill.test.LegacyJobFixtures;
 
 /**
  * PostgreSQL-specific regression tests.
@@ -98,11 +108,78 @@ class PostgresJobStoreRegressionTest {
           + "threadmill_dedup_keys, threadmill_queue_pauses, threadmill_concurrency_groups, "
           + "threadmill_concurrency_workflow_holds RESTART IDENTITY CASCADE");
       st.execute("UPDATE threadmill_job_counts SET count = 0");
+      st.execute("TRUNCATE threadmill_queue_counts");
     }
   }
 
   private JobStore store() {
     return new PostgresJobStore(dataSource);
+  }
+
+  @Test
+  void transactionErrorRollsBackWritesBeforeRestoringAutoCommit() throws SQLException {
+    for (boolean autoCommit : List.of(true, false)) {
+      try (var connection = dataSource.getConnection()) {
+        connection.setAutoCommit(autoCommit);
+        var failure = new AssertionError("after durable SQL write");
+        assertThatThrownBy(() -> PostgresTransactions.execute(connection, transaction -> {
+              try (var statement = transaction.createStatement()) {
+                statement.executeUpdate(
+                    "INSERT INTO threadmill_metadata VALUES ('error-test', 'value')");
+              }
+              throw failure;
+            }))
+            .isSameAs(failure);
+        assertThat(connection.getAutoCommit()).isEqualTo(autoCommit);
+      }
+      assertNoFailedTransactionWrite();
+    }
+  }
+
+  @Test
+  void transactionCleanupFailuresDoNotMaskTheOriginalError() throws SQLException {
+    for (var phase : List.of("rollback", "reset")) {
+      try (var connection = dataSource.getConnection()) {
+        var cleanupFailure = new SQLException("injected " + phase + " failure");
+        var wrapped = (Connection) Proxy.newProxyInstance(
+            Connection.class.getClassLoader(),
+            new Class<?>[] {Connection.class},
+            (proxy, method, args) -> {
+              try {
+                var result = method.invoke(connection, args);
+                if ((phase.equals("rollback") && method.getName().equals("rollback"))
+                    || (phase.equals("reset")
+                        && method.getName().equals("setAutoCommit")
+                        && Boolean.TRUE.equals(args[0]))) {
+                  throw cleanupFailure;
+                }
+                return result;
+              } catch (InvocationTargetException error) {
+                throw error.getCause();
+              }
+            });
+        var failure = new AssertionError("original transaction failure");
+        assertThatThrownBy(() -> PostgresTransactions.execute(wrapped, transaction -> {
+              try (var statement = transaction.createStatement()) {
+                statement.executeUpdate(
+                    "INSERT INTO threadmill_metadata VALUES ('error-test', 'value')");
+              }
+              throw failure;
+            }))
+            .isSameAs(failure);
+        assertThat(failure.getSuppressed()).contains(cleanupFailure);
+      }
+      assertNoFailedTransactionWrite();
+    }
+  }
+
+  private void assertNoFailedTransactionWrite() throws SQLException {
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement();
+        var result = statement.executeQuery(
+            "SELECT value FROM threadmill_metadata WHERE key = 'error-test'")) {
+      assertThat(result.next()).isFalse();
+    }
   }
 
   @Test
@@ -520,6 +597,243 @@ class PostgresJobStoreRegressionTest {
   }
 
   @Test
+  void recentlyUsedConcurrencyKeysSurviveCleanupUntilTheirIdleGraceExpires() throws SQLException {
+    var store = store();
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "INSERT INTO threadmill_concurrency_groups VALUES ('recent',0,0,clock_timestamp())");
+      assertThat(store.deleteIdleConcurrencyGroups(100)).isZero();
+      statement.executeUpdate(
+          "UPDATE threadmill_concurrency_groups SET last_modified=clock_timestamp()-interval '2 minutes'");
+      assertThat(store.deleteIdleConcurrencyGroups(100)).isEqualTo(1);
+    }
+  }
+
+  @Test
+  void emptyQueueCleanupRemovesBalancedShardsWithoutErasingLockedCounterChanges()
+      throws SQLException {
+    var store = store();
+    var active =
+        Job.builder().queue("active").spec(JobSpec.of("example.Handler")).build();
+    store.insert(active);
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "INSERT INTO threadmill_queue_counts SELECT 'old-'||lpad(n::text,4,'0'),s,CASE WHEN s=0 THEN 5 ELSE -5 END FROM generate_series(1,250) n CROSS JOIN generate_series(0,1) s");
+      connection.setAutoCommit(false);
+      statement
+          .executeQuery(
+              "SELECT * FROM threadmill_queue_counts WHERE queue='old-0001' AND shard=0 FOR UPDATE")
+          .close();
+      for (int i = 0; i < 4; i++) store.deleteIdleQueueMetadata(1000);
+      // A negative shard alone is not zero-sum and cannot be deleted while
+      // its positive counterpart is locked by a concurrent writer.
+      try (var rows = statement.executeQuery(
+          "SELECT count(*),sum(count) FROM threadmill_queue_counts WHERE queue='old-0001'")) {
+        rows.next();
+        assertThat(rows.getLong(1)).isEqualTo(2);
+        assertThat(rows.getLong(2)).isZero();
+      }
+      connection.rollback();
+      for (int i = 0; i < 4; i++) store.deleteIdleQueueMetadata(1000);
+      assertThat(store.queueDepths()).containsExactly(Map.entry("active", 1L));
+      try (var rows = statement.executeQuery(
+          "SELECT count(*) FROM threadmill_queue_counts WHERE queue<>'active'")) {
+        rows.next();
+        assertThat(rows.getLong(1)).isZero();
+      }
+    }
+  }
+
+  @Test
+  void idleQueueCleanupDoesNotLockActiveQueueCountersWhileDeletingAnotherQueue() throws Exception {
+    var store = store();
+    store.insert(
+        Job.builder().queue("a-active").spec(JobSpec.of("example.Handler")).build());
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement()) {
+      statement.executeUpdate("INSERT INTO threadmill_queue_counts VALUES ('z-idle',0,0)");
+      statement.execute("""
+          CREATE FUNCTION cleanup_test_gate() RETURNS trigger AS $$
+          BEGIN PERFORM pg_advisory_xact_lock(136029); RETURN OLD; END;
+          $$ LANGUAGE plpgsql
+          """);
+      statement.execute("CREATE TRIGGER cleanup_test_gate BEFORE DELETE ON threadmill_queue_counts "
+          + "FOR EACH ROW EXECUTE FUNCTION cleanup_test_gate()");
+      statement.execute("SELECT pg_advisory_lock(136029)");
+      try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+        var cleanup = executor.submit(() -> store.deleteIdleQueueMetadata(100));
+        try {
+          await().atMost(Duration.ofSeconds(5)).until(() -> {
+            try (var rows = statement.executeQuery(
+                "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype='advisory' AND objid=136029 AND NOT granted)")) {
+              rows.next();
+              return rows.getBoolean(1);
+            }
+          });
+          statement.execute("SET lock_timeout='1s'");
+          assertThat(statement.executeUpdate(
+                  "UPDATE threadmill_queue_counts SET count=count WHERE queue='a-active'"))
+              .isPositive();
+        } finally {
+          statement.execute("SELECT pg_advisory_unlock(136029)");
+        }
+        assertThat(cleanup.get(5, TimeUnit.SECONDS)).isEqualTo(1);
+      } finally {
+        statement.execute("DROP TRIGGER cleanup_test_gate ON threadmill_queue_counts");
+        statement.execute("DROP FUNCTION cleanup_test_gate()");
+      }
+    }
+  }
+
+  @Test
+  void queueCleanupRacingProducerAndClaimTriggersPreservesExactCounts() throws Exception {
+    var store = store();
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      var futures = new ArrayList<Future<?>>();
+      for (int worker = 0; worker < 4; worker++) {
+        int lane = worker;
+        futures.add(executor.submit(() -> {
+          for (int i = 0; i < 30; i++) {
+            var job = Job.builder()
+                .queue("churn-" + lane + "-" + i)
+                .spec(JobSpec.of("example.Handler"))
+                .build();
+            store.insert(job);
+            store.softDelete(job.id());
+          }
+        }));
+      }
+      for (int sample = 0; sample < 30; sample++) {
+        store.deleteIdleQueueMetadata(100);
+        assertThat(store.queueDepths().values()).allMatch(depth -> depth >= 0);
+      }
+      for (var future : futures) future.get(30, TimeUnit.SECONDS);
+    }
+    for (int i = 0; i < 4; i++) store.deleteIdleQueueMetadata(100);
+    assertThat(store.queueDepths()).isEmpty();
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement();
+        var rows = statement.executeQuery("SELECT count(*) FROM threadmill_queue_counts")) {
+      rows.next();
+      assertThat(rows.getLong(1)).isZero();
+    }
+  }
+
+  @Test
+  void retentionCandidatePlanUsesCutoffAndTimeIdIndexWithoutSorting() throws SQLException {
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement()) {
+      statement.execute("SET enable_seqscan=off");
+      try (var rows = statement.executeQuery(
+          "EXPLAIN (FORMAT TEXT) SELECT id,current_state_at FROM threadmill_jobs WHERE state='SUCCEEDED' AND current_state_at<='2026-01-01' AND (current_state_at,id)>('2025-01-01','00000000-0000-4000-8000-000000000001') ORDER BY current_state_at,id LIMIT 100 FOR UPDATE SKIP LOCKED")) {
+        var plan = new StringBuilder();
+        while (rows.next()) plan.append(rows.getString(1));
+        assertThat(plan.toString())
+            .contains("threadmill_jobs_retention_idx", "Index Cond")
+            .doesNotContain("Sort", "Seq Scan");
+      }
+    }
+  }
+
+  @Test
+  void idleConcurrencyReclamationIsBoundedAndResumesAfterDeletedPages() throws SQLException {
+    var store = store();
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "INSERT INTO threadmill_concurrency_groups SELECT 'old-'||lpad(n::text,4,'0'),0,0,now()-interval '2 minutes' FROM generate_series(1,250) n");
+    }
+    assertThat(store.deleteIdleConcurrencyGroups(1000)).isEqualTo(100);
+    assertThat(store.deleteIdleConcurrencyGroups(1000)).isEqualTo(100);
+    assertThat(store.deleteIdleConcurrencyGroups(1000)).isEqualTo(50);
+    assertThat(store.deleteIdleConcurrencyGroups(1000)).isZero();
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement();
+        var rows = statement.executeQuery("SELECT count(*) FROM threadmill_concurrency_groups")) {
+      rows.next();
+      assertThat(rows.getLong(1)).isZero();
+    }
+  }
+
+  @Test
+  void queueCountersStayExactAcrossConcurrentClaimsMovesAndRollback() throws Exception {
+    var store = store();
+    var jobs = new ArrayList<Job>();
+    for (int i = 0; i < 400; i++)
+      jobs.add(Job.builder().spec(JobSpec.of("example.Handler")).build());
+    store.insertAll(jobs);
+    assertThat(store.replaceJob(
+            jobs.getFirst().id(),
+            jobs.getFirst().version(),
+            JobReplacement.builder().queue("moved").build()))
+        .isTrue();
+    try (var connection = dataSource.getConnection()) {
+      connection.setAutoCommit(false);
+      try (var update = connection.createStatement()) {
+        update.executeUpdate("UPDATE threadmill_jobs SET queue='rollback' WHERE queue='default'");
+      }
+      connection.rollback();
+    }
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      var futures = new ArrayList<Future<?>>();
+      for (int worker = 0; worker < 4; worker++) {
+        futures.add(executor.submit(() -> {
+          for (int pass = 0; pass < 5; pass++)
+            store.claimReady(NodeId.newId(), "default", 10, Instant.now());
+        }));
+      }
+      for (int sample = 0; sample < 20; sample++) {
+        assertThat(store.queueDepths().values()).allMatch(depth -> depth >= 0);
+        store.oldestEnqueuedAt("default");
+      }
+      for (var future : futures) future.get(30, TimeUnit.SECONDS);
+    }
+    var exact = new HashMap<String, Long>();
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement();
+        var rows = statement.executeQuery(
+            "SELECT queue,count(*) FROM threadmill_jobs WHERE state='ENQUEUED' GROUP BY queue")) {
+      while (rows.next()) exact.put(rows.getString(1), rows.getLong(2));
+    }
+    assertThat(store.queueDepths())
+        .isEqualTo(exact)
+        .containsEntry("moved", 1L)
+        .doesNotContainKey("rollback");
+  }
+
+  @Test
+  void queueMonitoringUsesCounterRowsAndAnOrderedAgeIndex() throws SQLException {
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement()) {
+      try (var rows = statement.executeQuery(
+          "EXPLAIN (FORMAT TEXT) SELECT queue,SUM(count) FROM threadmill_queue_counts GROUP BY queue HAVING SUM(count)>0")) {
+        var plan = new StringBuilder();
+        while (rows.next()) plan.append(rows.getString(1));
+        assertThat(plan.toString()).doesNotContain("threadmill_jobs");
+      }
+      statement.execute("SET enable_seqscan=off");
+      try (var rows = statement.executeQuery(
+          "EXPLAIN (FORMAT TEXT) SELECT current_state_at FROM threadmill_jobs WHERE state='ENQUEUED' AND queue='default' ORDER BY current_state_at LIMIT 1")) {
+        var plan = new StringBuilder();
+        while (rows.next()) plan.append(rows.getString(1));
+        assertThat(plan.toString())
+            .contains("threadmill_jobs_queue_age_idx")
+            .doesNotContain("Sort");
+      }
+      try (var rows = statement.executeQuery(
+          "EXPLAIN (FORMAT TEXT) SELECT body FROM threadmill_jobs WHERE state='ENQUEUED' ORDER BY current_state_at DESC,id LIMIT 20")) {
+        var plan = new StringBuilder();
+        while (rows.next()) plan.append(rows.getString(1));
+        assertThat(plan.toString())
+            .contains("threadmill_jobs_state_page_idx")
+            .doesNotContain("Sort");
+      }
+    }
+  }
+
+  @Test
   void perStateCountsReadFromCounterTableNotFromJobsTable() throws SQLException {
     JobStore store = store();
     for (int i = 0; i < 100; i++) {
@@ -556,6 +870,154 @@ class PostgresJobStoreRegressionTest {
     var unrelated = new SQLException("other", "23505");
     assertThat(DeadlockRetry.isRetryable(deadlock)).isTrue();
     assertThat(DeadlockRetry.isRetryable(unrelated)).isFalse();
+  }
+
+  @Test
+  void nonemptyVersion030SchemaUpgradesWithoutChangingWireOrOperationalState() throws Exception {
+    var schema = "upgrade_v030";
+    try (var connection = dataSource.getConnection();
+        var statement = connection.createStatement()) {
+      statement.execute("CREATE SCHEMA " + schema);
+    }
+    var legacyDataSource = new PGSimpleDataSource();
+    legacyDataSource.setUrl(POSTGRES.getJdbcUrl());
+    legacyDataSource.setUser(POSTGRES.getUsername());
+    legacyDataSource.setPassword(POSTGRES.getPassword());
+    legacyDataSource.setCurrentSchema(schema);
+    try {
+      try (var connection = legacyDataSource.getConnection();
+          var statement = connection.createStatement()) {
+        statement.execute(
+            "CREATE TABLE threadmill_schema_history (version INTEGER PRIMARY KEY, description TEXT NOT NULL, checksum TEXT, installed_at TIMESTAMPTZ DEFAULT now())");
+        var migrations = List.of(
+            "V1__baseline.sql",
+            "V2__cron_task_overrides.sql",
+            "V3__integrity_constraints.sql",
+            "V4__cron_state_timing_fingerprint.sql",
+            "V5__cron_state_nudge.sql",
+            "V6__cron_task_exclusive.sql");
+        for (var file : migrations) {
+          String sql;
+          try (var input = getClass().getResourceAsStream("/compatibility/v0.3.0/" + file)) {
+            assertThat(input).isNotNull();
+            sql = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+          }
+          statement.execute(sql);
+          try (var history = connection.prepareStatement(
+              "INSERT INTO threadmill_schema_history(version,description,checksum) VALUES (?,?,?)")) {
+            history.setInt(1, Integer.parseInt(file.substring(1, file.indexOf("__"))));
+            history.setString(
+                2, file.substring(file.indexOf("__") + 2, file.length() - 4).replace('_', ' '));
+            history.setString(
+                3,
+                HexFormat.of()
+                    .formatHex(MessageDigest.getInstance("SHA-256")
+                        .digest(sql.getBytes(StandardCharsets.UTF_8))));
+            history.executeUpdate();
+          }
+        }
+        var serializer = new JsonJobSerializer();
+        for (var name : LegacyJobFixtures.NAMES) {
+          var wire = LegacyJobFixtures.wire(name);
+          var job = serializer.deserializeJob(wire);
+          var snapshot = job.snapshot();
+          try (var insert = connection.prepareStatement(
+              "INSERT INTO threadmill_jobs(id,state,queue,priority,handler_signature,scheduled_at,owner_node_id,owner_heartbeat_at,last_checkin_at,current_state_at,version,body,created_at,workflow_root_id,parent_job_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")) {
+            insert.setObject(1, job.id().asUuid());
+            insert.setString(2, job.currentState().name());
+            insert.setString(3, job.queue());
+            insert.setInt(4, job.priority());
+            insert.setString(5, job.spec().handlerType());
+            insert.setTimestamp(
+                6,
+                snapshot.scheduledFor() == null ? null : Timestamp.from(snapshot.scheduledFor()));
+            insert.setObject(
+                7,
+                snapshot.ownerNodeId() == null ? null : snapshot.ownerNodeId().asUuid());
+            insert.setTimestamp(
+                8,
+                snapshot.ownerHeartbeatAt() == null
+                    ? null
+                    : Timestamp.from(snapshot.ownerHeartbeatAt()));
+            insert.setTimestamp(
+                9,
+                snapshot.lastCheckinAt() == null ? null : Timestamp.from(snapshot.lastCheckinAt()));
+            insert.setTimestamp(10, Timestamp.from(job.stateHistory().getLast().at()));
+            insert.setLong(11, job.version());
+            insert.setString(12, wire);
+            insert.setTimestamp(13, Timestamp.from(job.createdAt()));
+            insert.setObject(14, job.workflowRootId().asUuid());
+            insert.setObject(
+                15,
+                job.relationship()
+                    .map(relationship -> relationship.parentId().asUuid())
+                    .orElse(null));
+            insert.executeUpdate();
+          }
+        }
+        statement.execute(
+            "INSERT INTO threadmill_cron_tasks(name,trigger_kind,trigger_value,handler_signature,payload_type_tag,payload_serialized,exclusive) VALUES ('upgrade-cron','INTERVAL','PT1H','example.UpgradeHandler','example.UpgradePayload','{}',true)");
+        statement.execute(
+            "INSERT INTO threadmill_cron_task_state(task_name,next_run_at,in_flight_job_id,timing_fingerprint,nudge_requested_at,nudge_revision) VALUES ('upgrade-cron',now(),'01900000-0000-7000-8000-000000000003','legacy-fingerprint',now(),17)");
+        statement.execute(
+            "INSERT INTO threadmill_cron_task_ownership VALUES ('upgrade-app','upgrade-cron')");
+        statement.execute(
+            "INSERT INTO threadmill_dedup_keys VALUES ('upgrade','legacy-dedup','01900000-0000-7000-8000-000000000001',now() + interval '1 hour')");
+        statement.execute(
+            "INSERT INTO threadmill_queue_pauses(queue,paused_at,paused_by) VALUES ('empty-paused',now(),'upgrade')");
+      }
+      var runner = new MigrationRunner(legacyDataSource);
+      runner.migrate();
+      runner.migrate();
+      runner.validate();
+      var upgraded = new PostgresJobStore(legacyDataSource);
+      var serializer = new JsonJobSerializer();
+      try (var connection = legacyDataSource.getConnection();
+          var query = connection.prepareStatement(
+              "SELECT body,execution_revision FROM threadmill_jobs WHERE id = ?")) {
+        for (var name : LegacyJobFixtures.NAMES) {
+          var original = serializer.deserializeJob(LegacyJobFixtures.wire(name));
+          query.setObject(1, original.id().asUuid());
+          try (var row = query.executeQuery()) {
+            assertThat(row.next()).isTrue();
+            assertThat(row.getString(1)).isEqualTo(LegacyJobFixtures.wire(name));
+            assertThat(row.getLong(2)).isZero();
+          }
+          assertThat(upgraded.findById(original.id())).hasValueSatisfying(job -> {
+            assertThat(job.version()).isEqualTo(7);
+            assertThat(job.currentState()).isEqualTo(original.currentState());
+          });
+        }
+      }
+      assertThat(upgraded.listCronTaskNamesOwnedBy("upgrade-app")).containsExactly("upgrade-cron");
+      assertThat(upgraded.enqueueIfAbsent(
+              Jobs.onQueue("example.Dedup", "upgrade"),
+              "legacy-dedup",
+              Duration.ofHours(1),
+              Instant.now()))
+          .isEqualTo(
+              new EnqueueResult.Coalesced(JobId.parse("01900000-0000-7000-8000-000000000001")));
+      assertThat(upgraded.queueDepths()).containsEntry("upgrade", 1L);
+      assertThat(upgraded.listPausedQueues()).contains("empty-paused");
+      var cron = upgraded.findCronTaskState("upgrade-cron").orElseThrow();
+      assertThat(cron.nudgeRevision()).isEqualTo(17L);
+      assertThat(cron.inFlightJobId())
+          .isEqualTo(UUID.fromString("01900000-0000-7000-8000-000000000003"));
+      assertThat(upgraded.findCronTask("upgrade-cron").orElseThrow().exclusive())
+          .isTrue();
+      assertThat(upgraded.deleteFinishedOlderThan(Instant.now(), JobState.FAILED, 100))
+          .isZero();
+      assertThat(upgraded.findAwaitingByParent(
+              JobId.parse("01900000-0000-7000-8000-000000000005"), 10))
+          .hasSize(1);
+      assertThat(upgraded.claimReady(NodeId.newId(), "upgrade", 1, Instant.now()))
+          .hasSize(1);
+    } finally {
+      try (var connection = dataSource.getConnection();
+          var statement = connection.createStatement()) {
+        statement.execute("DROP SCHEMA " + schema + " CASCADE");
+      }
+    }
   }
 
   @Test
@@ -613,14 +1075,15 @@ class PostgresJobStoreRegressionTest {
         .contains("V3__integrity_constraints.sql")
         .contains("V4__cron_state_timing_fingerprint.sql")
         .contains("V5__cron_state_nudge.sql")
-        .contains("V6__cron_task_exclusive.sql");
+        .contains("V6__cron_task_exclusive.sql")
+        .contains("V7__execution_revision.sql");
     try (Connection conn = dataSource.getConnection();
         Statement st = conn.createStatement()) {
       st.execute(sql);
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
         assertThat(rs.next()).isTrue();
         // One history row per shipped migration.
-        assertThat(rs.getInt(1)).isEqualTo(6);
+        assertThat(rs.getInt(1)).isEqualTo(11);
       }
     }
     new MigrationRunner(dataSource).validate();
@@ -642,6 +1105,9 @@ class PostgresJobStoreRegressionTest {
       st.execute("DROP TABLE IF EXISTS threadmill_leases CASCADE");
       st.execute("DROP TABLE IF EXISTS threadmill_metadata CASCADE");
       st.execute("DROP TABLE IF EXISTS threadmill_job_counts CASCADE");
+      st.execute("DROP TABLE IF EXISTS threadmill_queue_counts CASCADE");
+      st.execute("DROP FUNCTION IF EXISTS threadmill_maintain_queue_counts() CASCADE");
+      st.execute("DROP FUNCTION IF EXISTS threadmill_adjust_queue_count(TEXT, BIGINT) CASCADE");
       st.execute("DROP TABLE IF EXISTS threadmill_queue_pauses CASCADE");
       st.execute("DROP TABLE IF EXISTS threadmill_schema_history CASCADE");
     }
@@ -653,7 +1119,8 @@ class PostgresJobStoreRegressionTest {
         .contains("V3__integrity_constraints.sql")
         .contains("V4__cron_state_timing_fingerprint.sql")
         .contains("V5__cron_state_nudge.sql")
-        .contains("V6__cron_task_exclusive.sql");
+        .contains("V6__cron_task_exclusive.sql")
+        .contains("V7__execution_revision.sql");
 
     try (Connection conn = dataSource.getConnection();
         Statement st = conn.createStatement()) {
@@ -661,7 +1128,7 @@ class PostgresJobStoreRegressionTest {
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
         assertThat(rs.next()).isTrue();
         // One history row per shipped migration.
-        assertThat(rs.getInt(1)).isEqualTo(6);
+        assertThat(rs.getInt(1)).isEqualTo(11);
       }
       try (ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_job_counts")) {
         assertThat(rs.next()).isTrue();
@@ -880,7 +1347,7 @@ class PostgresJobStoreRegressionTest {
         ResultSet rs = st.executeQuery("SELECT count(*) FROM threadmill_schema_history")) {
       assertThat(rs.next()).isTrue();
       // One history row per shipped migration.
-      assertThat(rs.getInt(1)).isEqualTo(6);
+      assertThat(rs.getInt(1)).isEqualTo(11);
     }
   }
 
@@ -1219,6 +1686,9 @@ class PostgresJobStoreRegressionTest {
       st.execute("DROP TABLE IF EXISTS threadmill_leases CASCADE");
       st.execute("DROP TABLE IF EXISTS threadmill_metadata CASCADE");
       st.execute("DROP TABLE IF EXISTS threadmill_job_counts CASCADE");
+      st.execute("DROP TABLE IF EXISTS threadmill_queue_counts CASCADE");
+      st.execute("DROP FUNCTION IF EXISTS threadmill_maintain_queue_counts() CASCADE");
+      st.execute("DROP FUNCTION IF EXISTS threadmill_adjust_queue_count(TEXT, BIGINT) CASCADE");
       st.execute("DROP TABLE IF EXISTS threadmill_queue_pauses CASCADE");
       st.execute("DROP TABLE IF EXISTS threadmill_schema_history CASCADE");
     }

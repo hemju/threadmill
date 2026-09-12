@@ -129,7 +129,7 @@ function installApiMock(options: MockOptions = {}) {
       return response({
         summary: currentJob,
         stateHistory: [
-          { state: currentJob.state, at: currentJob.currentStateAt, reason: null, detail: null }
+          { state: currentJob.state, at: currentJob.currentStateAt, reason: null, message: null }
         ],
         arguments: [],
         metadata: {},
@@ -364,4 +364,30 @@ it("surfaces a non-2xx job-detail response", async () => {
   );
 
   expect(await screen.findByText("404 Not Found")).toBeInTheDocument();
+});
+
+it("disables operator actions and sends only one mutation while a request is pending", async () => {
+  installApiMock();
+  const read = globalThis.fetch;
+  let complete!: () => void;
+  let writes = 0;
+  vi.stubGlobal("fetch", (input: RequestInfo | URL, init: RequestInit = {}) => {
+    if (init.method && init.method !== "GET") {
+      writes++;
+      return new Promise((resolve) => {
+        complete = () => resolve({ ok: true, json: () => Promise.resolve({ status: "ok", target: "priority queue" }) });
+      });
+    }
+    return read(input, init);
+  });
+  render(<App />);
+  const pause = await screen.findByRole("button", { name: "Pause" });
+  fireEvent.click(pause);
+  fireEvent.click(pause);
+  expect(pause).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Delete" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Trigger recurring" })).toBeDisabled();
+  expect(writes).toBe(1);
+  complete();
+  await waitFor(() => expect(pause).toBeEnabled());
 });

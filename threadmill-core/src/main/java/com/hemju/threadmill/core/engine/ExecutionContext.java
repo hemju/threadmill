@@ -212,7 +212,9 @@ public final class ExecutionContext implements JobExecutionContext {
   public void checkIn() {
     var now = Instant.now();
     job.checkIn(now);
-    lastCheckIn.set(now);
+    lastCheckIn.accumulateAndGet(
+        now,
+        (previous, current) -> previous == null || previous.isBefore(current) ? current : previous);
     flushIfDue(now);
   }
 
@@ -247,17 +249,16 @@ public final class ExecutionContext implements JobExecutionContext {
     return droppedLogCount.get();
   }
 
-  public void flushBestEffort() {
+  public synchronized void flushBestEffort() {
     try {
-      store.saveExecutionUpdate(job, nodeId);
-      lastPersistedAt = Instant.now();
+      if (store.saveExecutionUpdate(job, nodeId)) lastPersistedAt = Instant.now();
     } catch (Throwable t) {
       FatalErrors.rethrowIfFatal(t);
       LOG.debug("Threadmill check-in flush failed for job {}", jobId, t);
     }
   }
 
-  private void flushIfDue(Instant now) {
+  private synchronized void flushIfDue(Instant now) {
     if (!lastPersistedAt.plus(config.checkInMinInterval()).isAfter(now)) {
       flushBestEffort();
     }

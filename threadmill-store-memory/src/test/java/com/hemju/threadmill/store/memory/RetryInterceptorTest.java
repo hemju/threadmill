@@ -60,6 +60,9 @@ class RetryInterceptorTest {
     // FAILED with attempts=1 of 3 and no reschedule — the crash window
     // between the terminal FAILED save and the reschedule save.
     Job stranded = failedAfterFirstAttempt(null, null);
+    stranded.setFailureDecision(interceptor.onProcessingFailureDecision(
+        stranded, null, new RuntimeException("boom"), JobInterceptor.FailureCause.EXCEPTION));
+    store.saveAtomic(stranded, stranded.version());
 
     int recovered = interceptor.recoverStrandedFailures(10, Duration.ZERO);
 
@@ -73,6 +76,9 @@ class RetryInterceptorTest {
     var interceptor = new RetryInterceptor(store, 3, Duration.ofMillis(100));
     // Per-job override caps the budget at 1 — this FAILED job is final.
     Job finalFailure = failedAfterFirstAttempt("threadmill.retry.maxAttempts", "1");
+    finalFailure.setFailureDecision(interceptor.onProcessingFailureDecision(
+        finalFailure, null, new RuntimeException("boom"), JobInterceptor.FailureCause.EXCEPTION));
+    store.saveAtomic(finalFailure, finalFailure.version());
 
     int recovered = interceptor.recoverStrandedFailures(10, Duration.ZERO);
 
@@ -85,6 +91,9 @@ class RetryInterceptorTest {
   void recoveryScanLeavesYoungFailedJobsToTheLiveHook() {
     var interceptor = new RetryInterceptor(store, 3, Duration.ofMillis(100));
     Job young = failedAfterFirstAttempt(null, null);
+    young.setFailureDecision(interceptor.onProcessingFailureDecision(
+        young, null, new RuntimeException("boom"), JobInterceptor.FailureCause.EXCEPTION));
+    store.saveAtomic(young, young.version());
 
     int recovered = interceptor.recoverStrandedFailures(10, Duration.ofMinutes(5));
 

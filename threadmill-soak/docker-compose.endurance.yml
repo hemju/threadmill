@@ -30,7 +30,7 @@ services:
       - threadmill-endurance-postgres:/var/lib/postgresql
 
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     # AOF on matches the documented production durability posture;
     # noeviction is required by RedisJobStore's startup gate.
     command:

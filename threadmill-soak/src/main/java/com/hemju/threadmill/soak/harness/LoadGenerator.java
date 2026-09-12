@@ -9,6 +9,7 @@ import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
+import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.handler.JobHandler;
 import com.hemju.threadmill.core.handler.JobPayload;
@@ -88,8 +89,28 @@ public final class LoadGenerator {
    * rate at the start does not "burn" budget — the next call catches up.
    */
   public void pace(Instant deadline) throws InterruptedException {
-    long sleepMs = Duration.between(Instant.now(), deadline).toMillis();
-    if (sleepMs > 0) Thread.sleep(Math.min(sleepMs, 50));
+    while (true) {
+      var remaining = Duration.between(Instant.now(), deadline);
+      if (remaining.isNegative() || remaining.isZero()) return;
+      Thread.sleep(
+          remaining.compareTo(Duration.ofMillis(50)) > 0 ? Duration.ofMillis(50) : remaining);
+    }
+  }
+
+  /** Record a confirmed insert performed by a scenario through the storage SPI. */
+  public void recordAccepted(Job job) {
+    latencyTracker.recordEnqueued(job.id());
+    enqueuedCount.incrementAndGet();
+    var fields = new LinkedHashMap<String, Object>();
+    fields.put("jobId", job.id().toString());
+    fields.put("queue", job.queue());
+    String handler = job.spec().handlerType();
+    fields.put(
+        "handler",
+        handler.substring(Math.max(handler.lastIndexOf('.'), handler.lastIndexOf('$')) + 1));
+    fields.put("lockKey", job.concurrencyKey().orElse(null));
+    fields.put("lockMode", job.concurrencyMode().map(Enum::name).orElse(null));
+    trace.emit("enqueued", fields);
   }
 
   public <P extends JobPayload> JobId enqueue(

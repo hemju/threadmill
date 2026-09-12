@@ -2,9 +2,10 @@ package com.hemju.threadmill.core.engine;
 
 import java.time.Instant;
 import java.util.ArrayDeque;
-import java.util.HashSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 import org.slf4j.Logger;
@@ -43,6 +44,11 @@ public final class WorkflowInterceptor implements JobInterceptor {
   private static final Logger LOG = LoggerFactory.getLogger(WorkflowInterceptor.class);
 
   private final JobStore store;
+  private JobId reconcileAfter;
+
+  boolean reconciliationPassComplete() {
+    return reconcileAfter == null;
+  }
 
   public WorkflowInterceptor(JobStore store) {
     this.store = Objects.requireNonNull(store, "store");
@@ -59,6 +65,8 @@ public final class WorkflowInterceptor implements JobInterceptor {
     if (job.currentState() != JobState.FAILED && job.currentState() != JobState.QUARANTINED) {
       return;
     }
+    if (job.currentState() == JobState.FAILED
+        && job.failureDecision().map(decision -> decision.willRetry()).orElse(false)) return;
     abandonAwaitingSuccessorsOf(job.id());
   }
 
@@ -74,49 +82,47 @@ public final class WorkflowInterceptor implements JobInterceptor {
    * maintenance leader periodically.
    */
   public void reconcileOrphanedAwaitingChildren(int max) {
-    if (store.capabilities().supportsExactCounts()
-        && store.countsByState().getOrDefault(JobState.AWAITING, 0L) == 0L) {
-      return;
-    }
-    // Page through the WHOLE AWAITING population, not just the first
-    // window: stores return the search newest-first, and a stranded
-    // child's current_state_at never changes — a single fixed window
-    // would permanently shadow exactly the jobs this sweep exists to
-    // rescue once the live AWAITING population outgrows it. Pages keep
-    // memory flat; offset drift from concurrent promotions can skip or
-    // repeat entries within one sweep, which is fine — every decision is
-    // idempotent and the sweep reruns each retention tick.
-    var handledParents = new HashSet<JobId>();
-    int pageSize = Math.max(1, max);
-    for (int offset = 0; ; offset += pageSize) {
-      List<Job> awaiting =
-          store.searchJobs(new JobSearch(JobState.AWAITING, null, null, pageSize, offset));
-      for (Job child : awaiting) {
-        if (child.relationship().isEmpty()) continue;
-        JobRelationship rel = child.relationship().get();
-        if (rel.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
-        JobId parentId = rel.parentId();
-        if (!handledParents.add(parentId)) continue;
-        JobState parentState = store.findById(parentId).map(Job::currentState).orElse(null);
-        if (parentState == JobState.SUCCEEDED) {
-          promoteAwaitingSuccessorsOf(parentId);
-        } else if (parentState == null
-            || parentState == JobState.FAILED
-            || parentState == JobState.QUARANTINED
-            || parentState == JobState.DELETED) {
-          // Failed (no pending retry), quarantined, deleted, or hard-deleted
-          // by retention: the predecessor can never promote this child, so
-          // abandon the subtree. ENQUEUED/SCHEDULED/PROCESSING/AWAITING all
-          // mean the predecessor is still in flight — leave the child be.
-          // (FAILED is not state.isTerminal() because a retry can resurrect
-          // it, but a predecessor sitting in FAILED at this cadence is done.)
-          abandonAwaitingSuccessorsOf(parentId);
-        }
-      }
-      if (awaiting.size() < pageSize) {
-        return;
+    int limit = Math.clamp(max, 1, JobSearch.MAX_LIMIT);
+    var awaiting = store.scanJobs(JobState.AWAITING, reconcileAfter, limit);
+    var parents = new HashMap<JobId, Optional<Job>>();
+    long deadline = System.nanoTime() + 200_000_000L;
+    int inspected = 0;
+    for (var child : awaiting) {
+      if (inspected > 0 && System.nanoTime() >= deadline) break;
+      reconcileAfter = child.id();
+      inspected++;
+      if (child.currentState() != JobState.AWAITING || child.relationship().isEmpty()) continue;
+      var relationship = child.relationship().orElseThrow();
+      if (relationship.kind() != JobRelationship.Kind.WORKFLOW_STEP) continue;
+      var parent = parents.computeIfAbsent(relationship.parentId(), store::findById);
+      var parentState = parent.map(Job::currentState).orElse(null);
+      boolean finalFailure = parentState == JobState.FAILED
+          && parent
+              .flatMap(Job::failureDecision)
+              .map(decision -> !decision.willRetry())
+              .orElse(false);
+      JobState next = parentState == JobState.SUCCEEDED
+          ? JobState.ENQUEUED
+          : parentState == null
+                  || finalFailure
+                  || parentState == JobState.QUARANTINED
+                  || parentState == JobState.DELETED
+              ? JobState.DELETED
+              : null;
+      if (next == null) continue;
+      try {
+        long version = child.version();
+        child.transitionTo(
+            next,
+            Instant.now(),
+            next == JobState.ENQUEUED ? "engine.workflow-promote" : "engine.workflow-abandon",
+            null);
+        store.saveAtomic(child, version);
+      } catch (StaleJobException ignored) {
+        // A concurrent hook already handled it.
       }
     }
+    if (inspected == awaiting.size() && awaiting.size() < limit) reconcileAfter = null;
   }
 
   /** Children are drained in batches of this size until exhausted. */

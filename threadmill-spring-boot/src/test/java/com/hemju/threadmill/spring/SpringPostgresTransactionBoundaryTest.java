@@ -95,6 +95,7 @@ class SpringPostgresTransactionBoundaryTest {
         var st = conn.createStatement()) {
       st.executeUpdate("TRUNCATE threadmill_dedup_keys, threadmill_jobs RESTART IDENTITY CASCADE");
       st.executeUpdate("UPDATE threadmill_job_counts SET count = 0");
+      st.executeUpdate("TRUNCATE threadmill_queue_counts");
     }
     store = new PostgresJobStore(
         dataSource,

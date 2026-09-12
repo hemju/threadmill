@@ -3,6 +3,7 @@ package com.hemju.threadmill.metrics;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.Supplier;
 
@@ -18,6 +19,8 @@ import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.RetentionCursor;
+import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
  * Store decorator used by {@link ThreadmillMetrics#meteredStore()}.
@@ -87,6 +90,13 @@ final class MeteredJobStore extends ForwardingJobStore {
   }
 
   @Override
+  public void touchExecutionHeartbeats(NodeId nodeId, Map<JobId, Long> activeClaims, Instant now) {
+    writeVoid(
+        "touch_execution_heartbeats",
+        () -> delegate().touchExecutionHeartbeats(nodeId, activeClaims, now));
+  }
+
+  @Override
   public void touchOwnerHeartbeat(NodeId nodeId, Instant now) {
     writeVoid("touch_owner_heartbeat", () -> delegate().touchOwnerHeartbeat(nodeId, now));
   }
@@ -121,14 +131,44 @@ final class MeteredJobStore extends ForwardingJobStore {
   }
 
   @Override
+  public long deleteIdleConcurrencyGroups(int max) {
+    long deleted =
+        write("delete_idle_concurrency_groups", () -> delegate().deleteIdleConcurrencyGroups(max));
+    metrics.recordRetention("concurrency", deleted);
+    return deleted;
+  }
+
+  @Override
+  public long deleteIdleQueueMetadata(int max) {
+    long deleted =
+        write("delete_idle_queue_metadata", () -> delegate().deleteIdleQueueMetadata(max));
+    metrics.recordRetention("queue_metadata", deleted);
+    return deleted;
+  }
+
+  @Override
   public long deleteExpiredDedupKeys(Instant now, int max) {
-    return write("delete_expired_dedup_keys", () -> delegate().deleteExpiredDedupKeys(now, max));
+    long deleted =
+        write("delete_expired_dedup_keys", () -> delegate().deleteExpiredDedupKeys(now, max));
+    metrics.recordRetention("dedup", deleted);
+    return deleted;
+  }
+
+  @Override
+  public RetentionPage deleteFinishedPage(
+      Instant cutoff, JobState state, int max, RetentionCursor after) {
+    var page = write(
+        "delete_finished_page", () -> delegate().deleteFinishedPage(cutoff, state, max, after));
+    metrics.recordRetention(state.name(), page.deleted());
+    return page;
   }
 
   @Override
   public long deleteFinishedOlderThan(Instant cutoff, JobState state, int max) {
-    return write(
+    long deleted = write(
         "delete_finished_older_than", () -> delegate().deleteFinishedOlderThan(cutoff, state, max));
+    metrics.recordRetention(state.name(), deleted);
+    return deleted;
   }
 
   @Override

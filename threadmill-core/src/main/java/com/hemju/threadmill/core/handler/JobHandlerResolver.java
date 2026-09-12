@@ -25,6 +25,16 @@ public interface JobHandlerResolver {
    */
   JobHandler<?> resolve(String handlerTypeName) throws HandlerResolutionException;
 
+  /**
+   * Application loader used for persisted handler and payload type names.
+   * Container integrations override this with their deployment loader. The
+   * engine loads payload classes without initialization and verifies JobPayload
+   * assignability before deserializing them.
+   */
+  default ClassLoader classLoader() {
+    return getClass().getClassLoader();
+  }
+
   /** Thrown when a handler cannot be resolved. */
   class HandlerResolutionException extends Exception {
     public HandlerResolutionException(String message) {

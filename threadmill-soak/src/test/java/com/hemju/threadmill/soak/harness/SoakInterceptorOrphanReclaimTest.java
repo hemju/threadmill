@@ -61,6 +61,30 @@ final class SoakInterceptorOrphanReclaimTest {
     assertThat(trace).contains("\"event\":\"lock_released\"");
   }
 
+  @Test
+  void refundedRetryAfterAStartedFailureDoesNotReleaseThePreviousBracketAgain(@TempDir Path tempDir)
+      throws Exception {
+    var traceFile = tempDir.resolve("trace.jsonl");
+    var job = keyedJob();
+    try (var trace = new SoakTraceWriter(traceFile);
+        var latency = new LatencyTracker(tempDir.resolve("latencies.jsonl"))) {
+      var interceptor = new SoakInterceptor(trace, latency);
+      interceptor.onProcessingStarting(job, null);
+      interceptor.onProcessingFailed(
+          job, null, new IllegalStateException("planned failure"), FailureCause.EXCEPTION);
+      // The next claim is refunded before its handler starts. Historical attempts remain nonzero.
+      interceptor.onProcessingFailed(
+          job, null, new IllegalStateException("engine.dispatch-failure"), FailureCause.SHUTDOWN);
+      interceptor.onProcessingStarting(job, null);
+      interceptor.onProcessingSucceeded(job, null);
+    }
+    var lines = Files.readAllLines(traceFile);
+    assertThat(lines.stream().filter(line -> line.contains("\"event\":\"lock_acquired\"")))
+        .hasSize(2);
+    assertThat(lines.stream().filter(line -> line.contains("\"event\":\"lock_released\"")))
+        .hasSize(2);
+  }
+
   private static Job keyedJob() {
     // SCHEDULED = the post-retry state, so the failure hook sees a
     // non-final failure (the orphan-reclaim-then-retry shape).

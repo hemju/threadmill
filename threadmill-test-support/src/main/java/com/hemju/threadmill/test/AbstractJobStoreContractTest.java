@@ -10,6 +10,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -22,15 +23,18 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
 import com.hemju.threadmill.core.EnqueueResult;
+import com.hemju.threadmill.core.FailureDecision;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobLog;
+import com.hemju.threadmill.core.JobRelationship;
 import com.hemju.threadmill.core.JobReplacement;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
@@ -79,12 +83,382 @@ public abstract class AbstractJobStoreContractTest {
    */
   protected void tearDownStore() {}
 
+  @AfterEach
+  void releaseStore() throws Exception {
+    try {
+      tearDownStore();
+    } finally {
+      if (store instanceof AutoCloseable closeable) closeable.close();
+    }
+  }
+
   @BeforeEach
   void freshStore() {
     store = createStore();
   }
 
+  @Test
+  void executionHeartbeatsRefreshOnlyConfirmedMatchingAttemptsAndRejectOversizedBatches() {
+    var at = Instant.now().minusSeconds(30).truncatedTo(ChronoUnit.MILLIS);
+    store.insertAll(List.of(Jobs.enqueued("one"), Jobs.enqueued("two")));
+    var owner = NodeId.newId();
+    var claimed = store.claimReady(owner, "default", 2, at);
+    var active = claimed.getFirst();
+    var unreturned = claimed.getLast();
+    long oldVersion = active.version();
+    var advanced = at.plusSeconds(5);
+    store.touchExecutionHeartbeats(owner, Map.of(active.id(), oldVersion), advanced);
+    assertThat(store.findById(active.id()).orElseThrow().ownerHeartbeatAt()).contains(advanced);
+    assertThat(store.findById(unreturned.id()).orElseThrow().ownerHeartbeatAt()).contains(at);
+    store.touchExecutionHeartbeats(owner, Map.of(active.id(), oldVersion), at);
+    assertThat(store.findById(active.id()).orElseThrow().ownerHeartbeatAt()).contains(advanced);
+    assertThat(store.findById(active.id()).orElseThrow().version()).isEqualTo(oldVersion);
+    assertThat(store.findById(active.id()).orElseThrow().executionRevision()).isZero();
+
+    for (var state : List.of(JobState.FAILED, JobState.SCHEDULED, JobState.ENQUEUED)) {
+      active.transitionTo(state, advanced);
+      store.saveAtomic(active, active.version());
+    }
+    var newer = store.claimReady(owner, "default", 1, advanced).getFirst();
+    var later = advanced.plusSeconds(5);
+    store.touchExecutionHeartbeats(owner, Map.of(active.id(), oldVersion), later);
+    store.touchExecutionHeartbeats(NodeId.newId(), Map.of(newer.id(), newer.version()), later);
+    assertThat(store.findById(newer.id()).orElseThrow().ownerHeartbeatAt()).contains(advanced);
+    store.touchExecutionHeartbeats(owner, Map.of(newer.id(), newer.version()), later);
+    assertThat(store.findById(newer.id()).orElseThrow().ownerHeartbeatAt()).contains(later);
+
+    var excessive = new HashMap<JobId, Long>();
+    excessive.put(newer.id(), newer.version());
+    for (int i = 0; i < 500; i++) excessive.put(JobId.newId(), 1L);
+    assertThatThrownBy(() -> store.touchExecutionHeartbeats(owner, excessive, later.plusSeconds(5)))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(store.findById(newer.id()).orElseThrow().ownerHeartbeatAt()).contains(later);
+    store.touchExecutionHeartbeats(owner, Map.of(JobId.newId(), 1L), later);
+    store.touchExecutionHeartbeats(owner, Map.of(), later);
+  }
+
+  @Test
+  void idleConcurrencyCleanupPreservesActiveAndPendingAdmission() {
+    var at = Instant.now().minusSeconds(10);
+    var first = concurrentJob("example.Handler", "cleanup", ConcurrencyMode.EXCLUSIVE, 0, at);
+    var next =
+        concurrentJob("example.Handler", "cleanup", ConcurrencyMode.SHARED, 0, at.plusSeconds(1));
+    store.insertAll(List.of(first, next));
+    var active = store.claimReady(NodeId.newId(), "default", 1, Instant.now()).getFirst();
+    assertThat(store.deleteIdleConcurrencyGroups(100)).isZero();
+    assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now())).isEmpty();
+    finish(active, JobState.SUCCEEDED);
+    assertThat(store.deleteIdleConcurrencyGroups(100)).isZero();
+    var following =
+        store.claimReady(NodeId.newId(), "default", 1, Instant.now()).getFirst();
+    assertThat(following.id()).isEqualTo(next.id());
+    finish(following, JobState.SUCCEEDED);
+    assertThat(store.deleteIdleConcurrencyGroups(100)).isBetween(0L, 1L);
+    var reused =
+        concurrentJob("example.Handler", "cleanup", ConcurrencyMode.EXCLUSIVE, 0, Instant.now());
+    store.insert(reused);
+    assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(reused.id());
+  }
+
+  @Test
+  void concurrencyCleanupRacingNewJobsAndClaimsPreservesExclusion() throws Exception {
+    var done = new AtomicBoolean(false);
+    try (var executor = Executors.newVirtualThreadPerTaskExecutor()) {
+      var reaper = executor.submit(() -> {
+        while (!done.get()) {
+          store.deleteIdleConcurrencyGroups(100);
+          Thread.yield();
+        }
+      });
+      try {
+        for (int round = 0; round < 20; round++) {
+          var at = Instant.now().minusSeconds(1);
+          var first = concurrentJob("example.Handler", "reused", ConcurrencyMode.EXCLUSIVE, 1, at);
+          var second = concurrentJob("example.Handler", "reused", ConcurrencyMode.EXCLUSIVE, 0, at);
+          store.insertAll(List.of(first, second));
+          var a =
+              executor.submit(() -> store.claimReady(NodeId.newId(), "default", 1, Instant.now()));
+          var b =
+              executor.submit(() -> store.claimReady(NodeId.newId(), "default", 1, Instant.now()));
+          var claimed = new ArrayList<>(a.get(20, TimeUnit.SECONDS));
+          claimed.addAll(b.get(20, TimeUnit.SECONDS));
+          assertThat(claimed).hasSize(1);
+          finish(claimed.getFirst(), JobState.SUCCEEDED);
+          var next = store.claimReady(NodeId.newId(), "default", 1, Instant.now());
+          assertThat(next).hasSize(1);
+          finish(next.getFirst(), JobState.SUCCEEDED);
+        }
+      } finally {
+        done.set(true);
+      }
+      reaper.get(20, TimeUnit.SECONDS);
+    }
+  }
+
+  @Test
+  void maintenanceAgeUsesScheduledDueTimeAndTracksStateChanges() {
+    var due = Instant.now().minusSeconds(7200).truncatedTo(ChronoUnit.MILLIS);
+    var job = Jobs.scheduled("example.Handler", due);
+    store.insert(job);
+    assertThat(store.oldestMaintenanceAt(JobState.SCHEDULED)).contains(due);
+    assertThat(store.oldestMaintenanceAt(JobState.DELETED)).isEmpty();
+    store.softDelete(job.id());
+    assertThat(store.oldestMaintenanceAt(JobState.SCHEDULED)).isEmpty();
+    assertThat(store.oldestMaintenanceAt(JobState.DELETED)).isPresent();
+  }
+
+  @Test
+  void maintenanceCursorSurvivesEarlierStateChangesAndCapsThePage() {
+    var jobs = new ArrayList<Job>();
+    var at = Instant.now().minusSeconds(1000);
+    for (int i = 0; i < 510; i++) {
+      jobs.add(Job.builder()
+          .spec(JobSpec.of("example.Handler"))
+          .createdAt(at.plusMillis(i))
+          .build());
+    }
+    store.insertAll(jobs);
+    var first = store.scanJobs(JobState.ENQUEUED, null, 5000);
+    assertThat(first).hasSize(500);
+    assertThat(first).extracting(Job::id).isSorted();
+    first.forEach(job -> store.softDelete(job.id()));
+    var next = store.scanJobs(JobState.ENQUEUED, first.getLast().id(), 500);
+    assertThat(next)
+        .extracting(Job::id)
+        .containsExactlyElementsOf(jobs.subList(500, 510).stream().map(Job::id).toList());
+    assertThat(store.scanJobs(JobState.ENQUEUED, next.getLast().id(), 500)).isEmpty();
+    assertThat(store.scanJobs(JobState.ENQUEUED, null, 0)).isEmpty();
+  }
+
+  @Test
+  void recurringCursorSurvivesDefinitionDeletion() {
+    for (int i = 0; i < 9; i++) {
+      store.upsertCronTask(new CronTask(
+          "cursor-" + i,
+          new CronTask.Trigger.Interval(Duration.ofHours(1)),
+          "example.Handler",
+          new JobArgument("example.Payload", "{}"),
+          "default",
+          0,
+          CronTask.MissedRunPolicy.DROP,
+          ZoneId.of("UTC"),
+          true));
+    }
+    var first = store.scanCronTasks(null, 4);
+    assertThat(first).hasSize(4);
+    first.forEach(task -> store.deleteCronTask(task.name()));
+    var second = store.scanCronTasks(first.getLast().name(), 500);
+    assertThat(second)
+        .extracting(CronTask::name)
+        .containsExactly("cursor-4", "cursor-5", "cursor-6", "cursor-7", "cursor-8");
+  }
+
   // ================================================================ store identity
+
+  @Test
+  void bulkInsertBudgetsRejectTheWholeBatchBeforeWriting() {
+    var batch = new ArrayList<Job>();
+    for (int i = 0; i <= store.capabilities().maxBulkInsertJobs(); i++) {
+      batch.add(Job.builder().spec(JobSpec.of("example.Handler")).build());
+    }
+    assertThatThrownBy(() -> store.insertAll(batch))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("jobs");
+    assertThat(batch).allSatisfy(job -> assertThat(job.version()).isZero());
+    assertThat(store.countsByState().getOrDefault(JobState.ENQUEUED, 0L)).isZero();
+    batch.clear();
+    var payload =
+        "x".repeat((int) Math.min(200_000, store.capabilities().maxInitialJobBytes() - 2048));
+    int jobs = (int) (store.capabilities().maxBulkInsertBytes() / payload.length()) + 1;
+    for (int i = 0; i < jobs; i++)
+      batch.add(Job.builder()
+          .spec(JobSpec.of("example.Handler", new JobArgument("example.Payload", payload)))
+          .build());
+    assertThatThrownBy(() -> store.insertAll(batch))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("serialized bytes");
+    assertThat(batch).allSatisfy(job -> assertThat(job.version()).isZero());
+    assertThat(store.countsByState().getOrDefault(JobState.ENQUEUED, 0L)).isZero();
+  }
+
+  @Test
+  void sharedJobsInOtherQueuesDoNotHideTheTargetQueuesCandidate() {
+    for (int i = 0; i < 40; i++) {
+      store.insert(Job.builder()
+          .spec(JobSpec.of("example.Handler"))
+          .queue("other")
+          .concurrencyKey("queue-window")
+          .concurrencyMode(ConcurrencyMode.SHARED)
+          .build());
+    }
+    var target = Job.builder()
+        .spec(JobSpec.of("example.Handler"))
+        .queue("target")
+        .concurrencyKey("queue-window")
+        .concurrencyMode(ConcurrencyMode.SHARED)
+        .build();
+    store.insert(target);
+    assertThat(store.claimReady(NodeId.newId(), "target", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(target.id());
+  }
+
+  @Test
+  void equalTimestampModesUseJobIdOrderBeforeApplyingTheCandidateLimit() {
+    var at = Instant.now();
+    var first = Job.builder()
+        .id(JobId.of(new UUID(0, 1)))
+        .createdAt(at)
+        .spec(JobSpec.of("example.Handler"))
+        .concurrencyKey("same-time")
+        .concurrencyMode(ConcurrencyMode.SHARED)
+        .build();
+    store.insert(first);
+    for (int i = 2; i < 42; i++) {
+      store.insert(Job.builder()
+          .id(JobId.of(new UUID(0, i)))
+          .createdAt(at)
+          .spec(JobSpec.of("example.Handler"))
+          .concurrencyKey("same-time")
+          .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+          .build());
+    }
+    assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(first.id());
+  }
+
+  @Test
+  void activeWorkflowDescendantRemainsReachableBehindManyBlockedQueueCandidates() {
+    var root = Job.builder()
+        .spec(JobSpec.of("example.Handler"))
+        .queue("root")
+        .concurrencyKey("active-hold-window")
+        .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+        .build();
+    store.insert(root);
+    var child = Job.builder()
+        .spec(JobSpec.of("example.Handler"))
+        .queue("target")
+        .initialState(JobState.AWAITING)
+        .relationship(new JobRelationship(root.id(), JobRelationship.Kind.WORKFLOW_STEP))
+        .build();
+    store.insert(child);
+    assertThat(store.claimReady(NodeId.newId(), "root", 1, Instant.now())).hasSize(1);
+    for (int i = 0; i < 300; i++) {
+      store.insert(Job.builder()
+          .spec(JobSpec.of("example.Handler"))
+          .queue("target")
+          .concurrencyKey("active-hold-window")
+          .concurrencyMode(ConcurrencyMode.SHARED)
+          .build());
+    }
+    child = store.findById(child.id()).orElseThrow();
+    child.transitionTo(JobState.ENQUEUED, Instant.now(), "test.promote", null);
+    store.saveAtomic(child, child.version());
+    var claimed = List.<Job>of();
+    for (int poll = 0; poll < 100 && claimed.isEmpty(); poll++) {
+      claimed = store.claimReady(NodeId.newId(), "target", 1, Instant.now());
+    }
+    assertThat(claimed).extracting(Job::id).containsExactly(child.id());
+  }
+
+  @Test
+  void delayedExecutionUpdateCannotRegressAcknowledgedProgressOrLiveness() {
+    var job = Job.builder().spec(JobSpec.of("example.Handler")).build();
+    store.insert(job);
+    var node = NodeId.newId();
+    var start = Instant.now().truncatedTo(ChronoUnit.MILLIS).minusSeconds(60);
+    var first = store.claimReady(node, "default", 1, start).getFirst();
+    var older = store.findById(job.id()).orElseThrow();
+    older.checkIn(start.plusSeconds(1));
+    older.progress().update(0.1, "old");
+    first.checkIn(start.plusSeconds(10));
+    first.progress().update(0.8, "acknowledged");
+    assertThat(store.saveExecutionUpdate(first, node)).isTrue();
+    assertThat(first.executionRevision()).isEqualTo(1);
+    assertThat(store.saveExecutionUpdate(older, node)).isFalse();
+    assertThat(older.executionRevision()).isZero();
+    store.touchOwnerHeartbeat(node, start.plusSeconds(50));
+    store.touchOwnerHeartbeat(node, start.plusSeconds(20));
+    assertThat(store.findById(job.id()).orElseThrow().ownerHeartbeatAt())
+        .contains(start.plusSeconds(50));
+    assertThat(store
+            .searchJobs(new JobSearch(JobState.PROCESSING, null, null, 10, 0))
+            .getFirst()
+            .ownerHeartbeatAt())
+        .contains(start.plusSeconds(50));
+    first.progress().update(0.9, "latest");
+    assertThat(store.saveExecutionUpdate(first, node)).isTrue();
+    var persisted = store.findById(job.id()).orElseThrow();
+    assertThat(persisted.executionRevision()).isEqualTo(2);
+    assertThat(persisted.progress().snapshot())
+        .hasValueSatisfying(progress -> assertThat(progress.message()).isEqualTo("latest"));
+    assertThat(persisted.ownerHeartbeatAt()).contains(start.plusSeconds(50));
+    assertThat(persisted.lastCheckinAt()).contains(start.plusSeconds(10));
+    assertThat(store.findOrphaned(start.plusSeconds(40), 10)).isEmpty();
+  }
+
+  @Test
+  void executionRevisionRejectsOlderDiagnosticsEvenWithIdenticalCheckInTimes() {
+    var job = Job.builder().spec(JobSpec.of("example.Handler")).build();
+    store.insert(job);
+    var node = NodeId.newId();
+    var current = store.claimReady(node, "default", 1, Instant.now()).getFirst();
+    var old = store.findById(job.id()).orElseThrow();
+    current.progress().update(0.7, "new");
+    old.progress().update(0.2, "old");
+    assertThat(store.saveExecutionUpdate(current, node)).isTrue();
+    assertThat(store.saveExecutionUpdate(old, node)).isFalse();
+    assertThat(store.findById(job.id()).orElseThrow().progress().snapshot())
+        .hasValueSatisfying(p -> assertThat(p.fraction()).isEqualTo(0.7));
+  }
+
+  @Test
+  void initialSizeBudgetReservesRoomForClaimsAndAllTerminalOutcomes() {
+    var serializer = new JsonJobSerializer();
+    var caps = store.capabilities();
+    var tooLarge = Job.builder()
+        .spec(JobSpec.of(
+            "example.Handler",
+            new JobArgument(
+                "example.Payload", "x".repeat((int) caps.maxSerializedJobBytes() - 512))))
+        .build();
+    assertThatThrownBy(() -> store.insert(tooLarge)).isInstanceOf(OversizedJobException.class);
+    assertThat(tooLarge.version()).isZero();
+    assertThat(store.findById(tooLarge.id())).isEmpty();
+
+    var payload = "😀\"".repeat((int) (caps.maxInitialJobBytes() - 2048) / 6);
+    var inserted = new ArrayList<Job>();
+    for (int i = 0; i < 3; i++) {
+      var job = Job.builder()
+          .spec(JobSpec.of("example.Handler", new JobArgument("example.Payload", payload)))
+          .build();
+      store.insert(job);
+      inserted.add(job);
+    }
+    var claimed = store.claimReady(NodeId.newId(), "default", 3, Instant.now());
+    assertThat(claimed).hasSize(3);
+    var outcomes = List.of(JobState.SUCCEEDED, JobState.FAILED, JobState.QUARANTINED);
+    for (int i = 0; i < claimed.size(); i++) {
+      var job = claimed.get(i);
+      job.progress().update(0.8, "😀\"".repeat(100_000));
+      job.log().info("\"".repeat(300_000));
+      job.metadata().put("large-diagnostic", "\"".repeat(300_000));
+      job.setFailureDecision(FailureDecision.finalFailure());
+      job.transitionTo(outcomes.get(i), Instant.now(), "test.terminal", "😀\"".repeat(100_000));
+      store.saveAtomic(job, job.version());
+      var persisted = store.findById(job.id()).orElseThrow();
+      assertThat(persisted.currentState()).isEqualTo(outcomes.get(i));
+      assertThat(persisted.spec()).isEqualTo(job.spec());
+      assertThat(persisted.failureDecision()).contains(FailureDecision.finalFailure());
+      assertThat(serializer.serializeJob(persisted.snapshot(), caps.maxSerializedJobBytes()))
+          .isNotEmpty();
+    }
+    assertThat(store.countsByState().getOrDefault(JobState.PROCESSING, 0L)).isZero();
+  }
 
   @Test
   @DisplayName("describe() returns a non-blank operator-facing identifier")
@@ -110,6 +484,37 @@ public abstract class AbstractJobStoreContractTest {
     assertThat(j.currentState()).isEqualTo(JobState.ENQUEUED);
     assertThat(j.version()).isEqualTo(1L);
     assertThat(j.metadata().get("trace")).contains("abc");
+  }
+
+  @Test
+  void failureDecisionSurvivesStoreRoundTripsAndClearsForTheNextAttempt() {
+    var now = Instant.now();
+    for (var decision : List.of(
+        FailureDecision.finalFailure(),
+        new FailureDecision(now, false),
+        new FailureDecision(now, true))) {
+      var job = Job.builder()
+          .spec(JobSpec.of("example.Handler"))
+          .initialState(JobState.FAILED)
+          .failureDecision(decision)
+          .attempts(1)
+          .build();
+      store.insert(job);
+      var loaded = store.findById(job.id()).orElseThrow();
+      assertThat(loaded.failureDecision()).contains(decision);
+      loaded.transitionTo(JobState.SCHEDULED, now);
+      loaded.scheduleAt(now);
+      store.saveAtomic(loaded, loaded.version());
+      loaded = store.findById(job.id()).orElseThrow();
+      assertThat(loaded.failureDecision()).contains(decision);
+      loaded.transitionTo(JobState.ENQUEUED, now);
+      loaded.clearScheduledFor();
+      store.saveAtomic(loaded, loaded.version());
+      var claimed = store.claimReady(NodeId.newId(), "default", 1, now).getFirst();
+      assertThat(claimed.failureDecision()).isEmpty();
+      assertThat(store.findById(job.id()).orElseThrow().failureDecision()).isEmpty();
+      finish(claimed, JobState.SUCCEEDED);
+    }
   }
 
   @Test
@@ -638,6 +1043,36 @@ public abstract class AbstractJobStoreContractTest {
 
     finish(first.get(0), JobState.SUCCEEDED);
     assertThat(store.claimReady(NodeId.newId(), "default", 2, Instant.now())).hasSize(1);
+  }
+
+  @Test
+  void terminatingAnUnclaimedJobDoesNotReleaseAnotherRootsConcurrencyHold() {
+    for (var mode : ConcurrencyMode.values()) {
+      for (var terminal : List.of(JobState.DELETED, JobState.QUARANTINED)) {
+        var key = "pending-terminal:" + mode + ":" + terminal;
+        var at = Instant.now().minusSeconds(10);
+        var first = concurrentJob("com.example.Import", key, mode, 3, at);
+        var pending = concurrentJob("com.example.Import", key, mode, 2, at.plusSeconds(1));
+        var follower = concurrentJob(
+            "com.example.Import", key, ConcurrencyMode.EXCLUSIVE, 1, at.plusSeconds(2));
+        store.insertAll(List.of(first, pending, follower));
+        var active =
+            store.claimReady(NodeId.newId(), "default", 1, Instant.now()).getFirst();
+        assertThat(active.id()).isEqualTo(first.id());
+
+        var cancelled = store.findById(pending.id()).orElseThrow();
+        cancelled.transitionTo(terminal, Instant.now(), "test.pending-terminal", null);
+        store.saveAtomic(cancelled, cancelled.version());
+
+        assertThat(store.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+            .as("%s must not release a different %s root", terminal, mode)
+            .isEmpty();
+        finish(active, JobState.SUCCEEDED);
+        var next = store.claimReady(NodeId.newId(), "default", 1, Instant.now());
+        assertThat(next).extracting(Job::id).containsExactly(follower.id());
+        finish(next.getFirst(), JobState.SUCCEEDED);
+      }
+    }
   }
 
   @Test
@@ -1533,6 +1968,14 @@ public abstract class AbstractJobStoreContractTest {
     store.insert(otherHandler);
 
     if (!store.capabilities().supportsRichSearch()) {
+      for (var unsupported : List.of(
+          JobSearch.all(),
+          new JobSearch(JobState.ENQUEUED, "beta", null, 1, 0),
+          new JobSearch(JobState.ENQUEUED, null, "com.example.A", 1, 0))) {
+        assertThatThrownBy(() -> store.searchJobs(unsupported))
+            .isInstanceOf(IllegalArgumentException.class)
+            .hasMessageContaining("state-only");
+      }
       var firstPage = store.searchJobs(new JobSearch(JobState.ENQUEUED, null, null, 1, 0));
       assertThat(firstPage).extracting(Job::id).containsExactly(otherHandler.id());
 
@@ -1586,6 +2029,21 @@ public abstract class AbstractJobStoreContractTest {
     assertThat(result).allMatch(j -> j.spec().handlerType().equals("com.example.A"));
   }
 
+  @Test
+  void insertCannotCommitBeforeRejectingAPersistedVersionReset() {
+    var imported = Jobs.enqueued("historical");
+    imported.adoptVersion(7);
+    assertThatThrownBy(() -> store.insert(imported)).isInstanceOf(IllegalStateException.class);
+    assertThat(store.findById(imported.id())).isEmpty();
+    var fresh = Jobs.enqueued("fresh");
+    assertThatThrownBy(() -> store.insertAll(List.of(fresh, imported)))
+        .isInstanceOf(IllegalStateException.class);
+    assertThat(store.findById(fresh.id())).isEmpty();
+    assertThat(store.findById(imported.id())).isEmpty();
+    assertThat(fresh.version()).isZero();
+    assertThat(imported.version()).isEqualTo(7);
+  }
+
   // ================================================================ retention
 
   @Test
@@ -1610,6 +2068,107 @@ public abstract class AbstractJobStoreContractTest {
     assertThat(deleted).isEqualTo(1L);
     assertThat(store.findById(old.id())).isEmpty();
     assertThat(store.findById(recent.id())).isPresent();
+  }
+
+  @Test
+  void retentionPreservesRetryDecisionsAndWorkflowOutcomesUntilRecoveryFinishes() {
+    var oldAt = Instant.now().minus(Duration.ofDays(10));
+    var retrying = Jobs.enqueued("retrying");
+    var unknown = Jobs.enqueued("legacy");
+    var finalFailure = Jobs.enqueued("final");
+    var successfulParent = Jobs.enqueued("parent");
+    for (var job : List.of(retrying, unknown, finalFailure, successfulParent)) store.insert(job);
+    var child = Jobs.awaitingWorkflowStep("child", successfulParent);
+    store.insert(child);
+    for (var job : List.of(retrying, unknown, finalFailure)) {
+      job.transitionTo(JobState.PROCESSING, oldAt);
+      job.transitionTo(JobState.FAILED, oldAt);
+      if (job == retrying)
+        job.setFailureDecision(new FailureDecision(Instant.now().plusSeconds(60), false));
+      if (job == finalFailure) job.setFailureDecision(FailureDecision.finalFailure());
+      store.saveAtomic(job, job.version());
+    }
+    successfulParent.transitionTo(JobState.PROCESSING, oldAt);
+    successfulParent.transitionTo(JobState.SUCCEEDED, oldAt);
+    store.saveAtomic(successfulParent, successfulParent.version());
+    assertThat(store.deleteFinishedOlderThan(Instant.now(), JobState.FAILED, 100))
+        .isEqualTo(1);
+    assertThat(store.findById(retrying.id())).isPresent();
+    assertThat(store.findById(unknown.id())).isPresent();
+    assertThat(store.findById(finalFailure.id())).isEmpty();
+    assertThat(store.deleteFinishedOlderThan(Instant.now(), JobState.SUCCEEDED, 100))
+        .isZero();
+    assertThat(store.findById(successfulParent.id())).isPresent();
+    child.transitionTo(JobState.ENQUEUED, Instant.now());
+    store.saveAtomic(child, child.version());
+    assertThat(store.deleteFinishedOlderThan(Instant.now(), JobState.SUCCEEDED, 100))
+        .isEqualTo(1);
+    assertThat(store.findById(child.id())).isPresent();
+  }
+
+  @Test
+  void retentionCursorPassesProtectedPagesWithoutLosingEligibleLaterJobs() {
+    var base = Instant.now().minus(Duration.ofDays(10));
+    var jobs = new ArrayList<Job>();
+    for (int i = 0; i < 125; i++) {
+      var job = Job.builder()
+          .createdAt(base.plusMillis(i))
+          .spec(Jobs.enqueued("retained").spec())
+          .build();
+      store.insert(job);
+      job.transitionTo(JobState.PROCESSING, base);
+      job.transitionTo(JobState.FAILED, base);
+      job.setFailureDecision(
+          i < 110 ? new FailureDecision(Instant.now(), false) : FailureDecision.finalFailure());
+      store.saveAtomic(job, job.version());
+      jobs.add(job);
+    }
+    var first = store.deleteFinishedPage(Instant.now(), JobState.FAILED, 100, null);
+    assertThat(first.deleted()).isZero();
+    assertThat(first.nextAfter()).isNotNull();
+    var second = store.deleteFinishedPage(Instant.now(), JobState.FAILED, 100, first.nextAfter());
+    assertThat(second.deleted()).isEqualTo(15);
+    assertThat(second.nextAfter()).isNull();
+    for (int i = 0; i < 110; i++) assertThat(store.findById(jobs.get(i).id())).isPresent();
+  }
+
+  @Test
+  void retentionSkipsRecentRecordsAndResumesDeletedCursorsAcrossEqualTimestamps() {
+    var old = Instant.now().minus(Duration.ofDays(10)).truncatedTo(ChronoUnit.MILLIS);
+    var cutoff = old.plusSeconds(1);
+    var jobs = new ArrayList<Job>();
+    for (int i = 0; i < 125; i++) {
+      // Reverse explicit UUID order relative to age: UUID creation time is not
+      // the retention key, and the cursor's record is deleted on each page.
+      var job = Job.builder()
+          .id(JobId.parse(String.format("00000000-0000-4000-8000-%012d", 1000 - i)))
+          .spec(Jobs.enqueued("retained").spec())
+          .initialState(JobState.SUCCEEDED)
+          .createdAt(i < 105 ? old : old.plusSeconds(2))
+          .build();
+      store.insert(job);
+      jobs.add(job);
+    }
+    var first = store.deleteFinishedPage(cutoff, JobState.SUCCEEDED, 100, null);
+    assertThat(first.deleted()).isEqualTo(100);
+    assertThat(first.nextAfter()).isNotNull();
+    var second = store.deleteFinishedPage(cutoff, JobState.SUCCEEDED, 100, first.nextAfter());
+    assertThat(second.deleted()).isEqualTo(5);
+    assertThat(second.nextAfter()).isNull();
+    var recent = store.deleteFinishedPage(cutoff, JobState.SUCCEEDED, 1, null);
+    assertThat(recent.deleted()).isZero();
+    assertThat(recent.nextAfter()).isNull();
+    for (int i = 105; i < jobs.size(); i++)
+      assertThat(store.findById(jobs.get(i).id())).isPresent();
+  }
+
+  @Test
+  void retentionRefusesActiveStates() {
+    var job = Jobs.enqueued("active");
+    store.insert(job);
+    assertThatThrownBy(() -> store.deleteFinishedOlderThan(Instant.now(), JobState.ENQUEUED, 100))
+        .isInstanceOf(IllegalArgumentException.class);
+    assertThat(store.findById(job.id())).isPresent();
   }
 
   // ================================================================ vanished
@@ -1665,7 +2224,9 @@ public abstract class AbstractJobStoreContractTest {
   @Test
   @DisplayName("mutex is exclusive, reentrant for the same holder, and expires at the lease end")
   void mutexLeaseSemantics() throws InterruptedException {
-    assertThat(store.tryAcquireMutex("m", "node-a", Duration.ofMillis(80))).isTrue();
+    // Keep the exclusion assertion independent of host scheduling pauses;
+    // the separate short lease below proves expiry.
+    assertThat(store.tryAcquireMutex("m", "node-a", Duration.ofSeconds(5))).isTrue();
     assertThat(store.tryAcquireMutex("m", "node-b", Duration.ofSeconds(5))).isFalse();
     // Reentrant: same holder re-acquires and the new lease overwrites the prior one.
     assertThat(store.tryAcquireMutex("m", "node-a", Duration.ofSeconds(5))).isTrue();

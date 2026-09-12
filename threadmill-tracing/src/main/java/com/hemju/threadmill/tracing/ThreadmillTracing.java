@@ -1,7 +1,9 @@
 package com.hemju.threadmill.tracing;
 
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
 
 import io.opentelemetry.api.GlobalOpenTelemetry;
 import io.opentelemetry.api.OpenTelemetry;
@@ -28,6 +30,8 @@ public final class ThreadmillTracing {
   static final AttributeKey<String> HANDLER = AttributeKey.stringKey("threadmill.handler");
   static final AttributeKey<Long> ATTEMPT = AttributeKey.longKey("threadmill.attempt");
   static final AttributeKey<String> NODE_ID = AttributeKey.stringKey("threadmill.node.id");
+  static final AttributeKey<Boolean> COMPLETION_CONFIRMED =
+      AttributeKey.booleanKey("threadmill.execution.completion_confirmed");
   static final AttributeKey<String> FINAL_STATE = AttributeKey.stringKey("threadmill.final_state");
   static final AttributeKey<String> FAILURE_CAUSE =
       AttributeKey.stringKey("threadmill.failure_cause");
@@ -64,7 +68,8 @@ public final class ThreadmillTracing {
 
   private static final class TracingInterceptor implements JobInterceptor {
     private final Tracer tracer;
-    private final ConcurrentHashMap<String, ActiveSpan> spans = new ConcurrentHashMap<>();
+    private final Map<JobExecutionContext, ActiveSpan> spans =
+        Collections.synchronizedMap(new IdentityHashMap<>());
 
     private TracingInterceptor(Tracer tracer) {
       this.tracer = tracer;
@@ -72,52 +77,45 @@ public final class ThreadmillTracing {
 
     @Override
     public void onProcessingStarting(Job job, JobExecutionContext ctx) {
-      var span = baseSpan(job, ctx).startSpan();
-      // JobRunner invokes start, handler execution, and finish/failure hooks on the
-      // same execution thread; this Scope intentionally spans the handler call.
-      var scope = span.makeCurrent();
-      spans.put(job.id().toString(), new ActiveSpan(span, scope));
+      spans.computeIfAbsent(ctx, ignored -> {
+        var span = baseSpan(job, ctx).setAttribute(COMPLETION_CONFIRMED, false).startSpan();
+        return new ActiveSpan(span, span.makeCurrent());
+      });
     }
 
     @Override
     public void onProcessingSucceeded(Job job, JobExecutionContext ctx) {
-      finish(job);
+      var active = spans.get(ctx);
+      if (active != null) {
+        active.span().setAttribute(COMPLETION_CONFIRMED, true);
+        active.span().setAttribute(FINAL_STATE, job.currentState().name());
+      }
     }
 
     @Override
     public void onProcessingFailed(
         Job job, JobExecutionContext ctx, Throwable cause, FailureCause causeKind) {
-      ActiveSpan active = spans.remove(job.id().toString());
-      if (active == null) {
-        var span = baseSpan(job, ctx).startSpan();
-        active = new ActiveSpan(span, span.makeCurrent());
-      }
+      var active = spans.get(ctx);
+      // Recovery is a separate execution, possibly on another node/thread.
+      // Its span must never take or close the original handler's thread-bound scope.
+      var span = active == null ? baseSpan(job, ctx).startSpan() : active.span();
       try {
-        active.span().setAttribute(FAILURE_CAUSE, causeKind.name());
-        if (cause != null) {
-          active.span().recordException(cause);
-          active
-              .span()
-              .setStatus(
-                  StatusCode.ERROR,
-                  cause.getMessage() == null ? causeKind.name() : cause.getMessage());
-        } else {
-          active.span().setStatus(StatusCode.ERROR, causeKind.name());
-        }
-        active.span().setAttribute(FINAL_STATE, job.currentState().name());
+        span.setAttribute(COMPLETION_CONFIRMED, true);
+        span.setAttribute(FAILURE_CAUSE, causeKind.name());
+        if (cause != null) span.recordException(cause);
+        span.setStatus(
+            StatusCode.ERROR,
+            cause == null || cause.getMessage() == null ? causeKind.name() : cause.getMessage());
+        span.setAttribute(FINAL_STATE, job.currentState().name());
       } finally {
-        active.close();
+        if (active == null) span.end();
       }
     }
 
-    private void finish(Job job) {
-      ActiveSpan active = spans.remove(job.id().toString());
-      if (active == null) return;
-      try {
-        active.span().setAttribute(FINAL_STATE, job.currentState().name());
-      } finally {
-        active.close();
-      }
+    @Override
+    public void onProcessingFinished(Job job, JobExecutionContext ctx) {
+      var active = spans.remove(ctx);
+      if (active != null) active.close();
     }
 
     private SpanBuilder baseSpan(Job job, JobExecutionContext ctx) {

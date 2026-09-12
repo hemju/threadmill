@@ -126,6 +126,7 @@ public interface JobStore {
    * {@link Job#adoptVersion(long)}.
    *
    * @throws IllegalStateException     if a job with the same id already exists
+   *                                  or inserting would reset a persisted version greater than 1
    * @throws OversizedJobException     if the serialized form exceeds the limit
    */
   void insert(Job job);
@@ -154,6 +155,8 @@ public interface JobStore {
    * pgJDBC URL to realise the batched-insert win.
    *
    * @return the inserted job ids, in input order
+   * @throws IllegalArgumentException if the batch exceeds the capabilities
+   *     job-count or combined serialized-byte budget; nothing is inserted
    * @throws IllegalStateException if any job's id already exists; the
    *     batch is rejected as a whole
    * @throws OversizedJobException if any job's serialized form exceeds
@@ -232,13 +235,28 @@ public interface JobStore {
 
   /**
    * Update the heartbeat for all jobs this node currently owns to {@code now}.
+   * This owner-wide operation is for explicit external callers. The engine uses
+   * {@link #touchExecutionHeartbeats} so unacknowledged claims can expire.
    */
   void touchOwnerHeartbeat(NodeId nodeId, Instant now);
 
   /**
+   * Refresh at most 500 confirmed active claims, keyed by job ID and persisted
+   * state version. Update only matching PROCESSING jobs owned by {@code nodeId};
+   * missing, stale, unlisted and differently owned attempts remain unchanged.
+   * Never regress a heartbeat or alter state/execution versions. Reject invalid
+   * or oversized batches before any write. An empty batch is a no-op.
+   */
+  void touchExecutionHeartbeats(NodeId nodeId, Map<JobId, Long> activeClaims, Instant now);
+
+  /**
    * Persist execution-time updates such as check-ins, progress, and logs
    * without advancing the optimistic-lock version. The update applies only
-   * while the job is still {@code PROCESSING} and owned by {@code nodeId}.
+   * while the job is still {@code PROCESSING}, owned by {@code nodeId}, and
+   * both its state version and execution revision match persisted state.
+   * Success advances {@link Job#executionRevision()} after commit; a rejected
+   * write leaves it unchanged. Owner heartbeats and check-ins never regress.
+   * Return {@code false} for stale or superseded updates.
    */
   boolean saveExecutionUpdate(Job job, NodeId nodeId);
 
@@ -303,6 +321,28 @@ public interface JobStore {
    */
   List<Job> searchJobs(JobSearch search);
 
+  /**
+   * Bounded maintenance page in ascending canonical job-id order. Null
+   * {@code after} starts a sweep; otherwise the id is exclusive. Removing
+   * earlier rows cannot skip later rows. Concurrent changes may be observed
+   * on the following sweep. Implementations cap {@code max} at 500.
+   */
+  List<Job> scanJobs(JobState state, JobId after, int max);
+
+  /**
+   * Bounded recurring-definition page in the backend's stable ascending name order.
+   * Null starts a sweep; otherwise the name is exclusive. Maximum page size is 500.
+   */
+  List<CronTask> scanCronTasks(String after, int max);
+
+  /**
+   * Oldest maintenance timestamp in a state: scheduled due time for SCHEDULED,
+   * state-entry time otherwise. Empty when no timestamp exists. This is an
+   * indexed diagnostic, not an assertion that a failed job needs recovery or
+   * that a terminal job is eligible for retention (dedup may protect it).
+   */
+  Optional<Instant> oldestMaintenanceAt(JobState state);
+
   /** Oldest currently ENQUEUED job time for the queue, if the queue has jobs. */
   Optional<Instant> oldestEnqueuedAt(String queue);
 
@@ -321,6 +361,24 @@ public interface JobStore {
    */
   long deleteNodeHeartbeatsOlderThan(Instant cutoff);
 
+  /**
+   * Inspect at most 100 concurrency groups (or the smaller requested maximum)
+   * and remove bookkeeping only when no active hold or nonterminal work needs it.
+   * Implementations retain a bounded cursor so busy keys cannot hide idle keys.
+   * Returns groups removed; stores without persistent group bookkeeping return zero.
+   */
+  long deleteIdleConcurrencyGroups(int max);
+
+  /**
+   * Inspect at most {@code min(max, 100)} queue metadata groups and reclaim
+   * obsolete bookkeeping without changing any job or aggregate count.
+   * Returns metadata rows removed. Stores without persistent empty-queue
+   * bookkeeping need no work. Implementations must advance past busy queues.
+   */
+  default long deleteIdleQueueMetadata(int max) {
+    return 0;
+  }
+
   /** Delete expired producer-side deduplication records that no longer protect active jobs. */
   long deleteExpiredDedupKeys(Instant now, int max);
 
@@ -335,10 +393,26 @@ public interface JobStore {
   // ---------------------------------------------------------------- retention
 
   /**
-   * Hard-delete up to {@code max} jobs in {@code state} that entered that
-   * state at or before {@code cutoff}. Returns the number actually deleted.
+   * Inspect the first bounded retention page, returning the number deleted.
+   * Use {@link #deleteFinishedPage} to resume beyond protected records.
    */
-  long deleteFinishedOlderThan(Instant cutoff, JobState state, int max);
+  default long deleteFinishedOlderThan(Instant cutoff, JobState state, int max) {
+    return deleteFinishedPage(cutoff, state, max, null).deleted();
+  }
+
+  /**
+   * Inspect at most {@code min(max, 100)} cutoff-eligible records in a terminal
+   * state, resuming after the store's opaque cursor. Select candidates at or before cutoff
+   * with no live dedup key or AWAITING child. FAILED records require an explicit
+   * final failure decision; pending retries and legacy unknown decisions remain.
+   * State/version and protections must be checked atomically with deletion.
+   * The returned cursor advances even when no record can be deleted. A null
+   * cursor completes this pass; changed/skipped/new earlier records wait for the next.
+   * Keep the same state and cutoff throughout a pass. Recent records must not
+   * consume its candidate budget or require body reads. A deleted cursor record
+   * must not prevent the next page from progressing, including timestamp ties.
+   */
+  RetentionPage deleteFinishedPage(Instant cutoff, JobState state, int max, RetentionCursor after);
 
   // ---------------------------------------------------------------- relationships, mutexes,
   // replacement

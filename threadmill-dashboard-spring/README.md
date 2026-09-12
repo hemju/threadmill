@@ -28,12 +28,13 @@ token back in the configured header. Set
 If no `SecurityFilterChain` exists, startup fails unless unsafe read-only local
 mode is enabled.
 
-Registering Threadmill's scoped chain makes Spring Boot's default catch-all
-chain back off. The Threadmill chain protects only the configured dashboard API
-path and `/threadmill/**`; it does not secure any other host endpoints. Provide
-a host catch-all `SecurityFilterChain` for the rest of the application, or set
-`threadmill.dashboard.security.auto-configure=false` if the host should own the
-complete security configuration (including Boot's default chain).
+When the host declares no `SecurityFilterChain`, Threadmill also installs a
+fallback catch-all chain requiring authentication, with form login, HTTP Basic,
+and default CSRF protection. This preserves protection for host endpoints when
+the scoped dashboard chain makes Boot's default chain back off. If the host
+provides any custom chain, this fallback backs off and the host owns its route
+coverage. Setting `threadmill.dashboard.security.auto-configure=false` disables
+both Threadmill chains, leaving the configuration to the host and Spring Boot.
 
 Sensitive fields are redacted by default: payload arguments, metadata, logs,
 results, and failure messages. Full detail requires both
@@ -45,7 +46,7 @@ results, and failure messages. Full detail requires both
 | Property | Default | Purpose |
 |---|---:|---|
 | `threadmill.dashboard.api.base-path` | `/threadmill/api` | Base path for every API endpoint. |
-| `threadmill.dashboard.security.auto-configure` | `true` | Register Threadmill's scoped dashboard security chain. |
+| `threadmill.dashboard.security.auto-configure` | `true` | Register scoped dashboard security and a host authentication fallback when no custom chains exist. |
 | `threadmill.dashboard.expose-sensitive-details` | `false` | Allow full payload / metadata / log / result exposure when the user also has `VIEW_SENSITIVE_DETAILS`. |
 | `threadmill.dashboard.allow-unsafe-read-only-without-authentication` | `false` | Local-only escape hatch for read-only unauthenticated access. |
 

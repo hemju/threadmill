@@ -22,12 +22,14 @@ single place to confirm "which engine, which store, which lanes" at boot time.
 
 ## Quick start
 
+These dependencies target the unreleased 1.0.0 candidate; see the
+[release status](../README.md#status). Add the store your application uses.
+
 ```kotlin
 dependencies {
-    implementation("com.hemju.threadmill:threadmill-spring-boot:VERSION")
-    // Optional, pick one or none — auto-detected:
-    implementation("com.hemju.threadmill:threadmill-store-postgres:VERSION")
-    // implementation("com.hemju.threadmill:threadmill-store-redis:VERSION") // pulled in transitively
+    implementation("com.hemju.threadmill:threadmill-spring-boot:1.0.0")
+    implementation("com.hemju.threadmill:threadmill-store-postgres:1.0.0")
+    // or: implementation("com.hemju.threadmill:threadmill-store-redis:1.0.0")
 }
 ```
 
@@ -96,7 +98,7 @@ enqueue.
 public void scheduleWelcome(UserCreated created) {
     userRepo.save(created.toUser());         // pending write
     jobs.enqueue(SendEmailHandler.class, new SendEmail(...)); // also pending
-    // Both happen — or neither: the job insert fires on afterCommit.
+    // Business commit happens first; the deferred job insert can still fail.
 }
 ```
 
@@ -105,6 +107,15 @@ public void scheduleWelcome(UserCreated created) {
 actual `store.insert(...)` via `TransactionSynchronizationManager`. If no
 synchronisation is active, the insert is immediate — identical to the
 non-Spring path.
+
+A returned id is a reservation. If a deferred insert fails after the business
+commit, Spring publishes `AfterCommitEnqueueFailure`; the scheduler also exposes
+`deferredEnqueueFailureCount()`. The write may have committed before its
+acknowledgement was lost. Observe and reconcile the reserved ids; use
+`join_transaction` with the same PostgreSQL DataSource for atomic business/job
+writes, or a durable outbox across datastores. Deferred submissions are validated
+before returning and bounded to 1,000 jobs / 8 MiB per scheduler and transaction.
+See [transaction semantics](../docs/transactions.md#after_commit-default).
 
 Use immediate writes with:
 

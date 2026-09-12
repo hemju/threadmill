@@ -34,7 +34,7 @@ import com.hemju.threadmill.store.redis.RedisJobStore;
  * <ul>
  *   <li>{@code --backend memory} — fast, no Docker dependency.</li>
  *   <li>{@code --backend postgres} — boots a {@code postgres:18-alpine} Testcontainer.</li>
- *   <li>{@code --backend redis} — boots a {@code redis:7-alpine} Testcontainer.</li>
+ *   <li>{@code --backend redis} — boots a {@code redis:7.4-alpine} Testcontainer.</li>
  *   <li>{@code --backend all} (default) — runs all three sequentially.</li>
  * </ul>
  *
@@ -136,7 +136,7 @@ public final class SimulationMain {
   private static RunOutcome runRedis(SimulationConfig config)
       throws IOException, InterruptedException {
     Path trace = traceFile("redis");
-    var container = new GenericContainer<>(DockerImageName.parse("redis:7-alpine"))
+    var container = new GenericContainer<>(DockerImageName.parse("redis:7.4-alpine"))
         .withExposedPorts(6379)
         .withCommand("redis-server", "--appendonly", "yes")
         .waitingFor(Wait.forListeningPort());

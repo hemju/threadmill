@@ -19,7 +19,7 @@ services:
       timeout: 5s
       retries: 10
   redis:
-    image: redis:7-alpine
+    image: redis:7.4-alpine
     container_name: threadmill-local-redis
     command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
     ports:

@@ -2,7 +2,7 @@
 
 ## Start here
 
-- [Getting started](getting-started.md) — five-minute Spring Boot quickstart.
+- [Getting started](getting-started.md) — core API wiring and a runnable in-memory example.
 - [Spring quickstart](quickstart.md) — Spring Boot wiring, `@Job`,
   transaction-aware enqueue modes.
 
@@ -39,6 +39,7 @@
 - [Redis topologies](redis-topologies.md) — standalone, Sentinel, Cluster.
 - [Operations](operations.md) — production runbook, pause / resume, monitoring.
 - [Troubleshooting](troubleshooting.md) — symptom → cause → fix.
+- [Version compatibility and storage upgrades](compatibility.md).
 - [Migration](migration.md) — replacing an existing job or scheduler system.
 - [Dependency security](dependency-security.md) — enforced scan inputs,
   vulnerability policy, exceptions, and reachability analysis.
@@ -88,3 +89,5 @@ operational notes:
 - [`threadmill-test-support`](../threadmill-test-support/README.md) — how to
   add a new backend.
 - [`threadmill-example`](../threadmill-example/README.md) — runnable demos.
+
+- [1.0 soak qualification plan](soak-plan-1.0.md) — separate PostgreSQL and Redis endurance, retention, performance, and fault experiments.

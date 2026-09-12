@@ -1,7 +1,10 @@
 # Configuration Reference
 
-All durations must be positive. Queue, cron task, mutex, metadata, and tag names
+All configured engine durations must be positive. Queue, cron task, mutex, and tag names
 must be nonblank, at most 128 characters, and contain no control characters.
+Metadata keys and values are non-null strings; they are governed by the serialized
+job and metadata byte budgets rather than the name limit. Concurrency keys have
+their own 256-byte UTF-8 limit.
 
 | Setting | Default | Notes |
 |---|---:|---|
@@ -117,3 +120,25 @@ correctness fallback.
 |---|---:|---|
 | `threadmill.spring.enqueue-mode` | `after_commit` | `after_commit`, `join_transaction`, or `immediate`. `join_transaction` is Spring + Postgres only. |
 | `threadmill.spring.recurring-namespace` | `spring.application.name` | Namespace whose annotation-driven recurring tasks are reconciled at startup. If neither value is set, Threadmill only upserts discovered tasks and does not delete stale ones. |
+
+### Initial and lifecycle size budgets
+
+The JSON serializer reserves up to 16 KiB (one quarter of smaller configured
+limits) for lifecycle data. With the default 256 KiB maximum, a newly submitted
+job must fit 240 KiB after normal log and failure-detail trimming. Rejection
+leaves its version unchanged and writes nothing.
+
+Progress messages are bounded like failure messages. If an attempted job still
+exceeds the overall encoded byte limit, the serializer progressively compacts
+optional diagnostics: logs, metadata, result, progress text, and intermediate
+history. It preserves the work description, identity, current state, ownership,
+and durable failure decision. This also accounts for JSON escaping overhead.
+Keep business data in the payload or application store; diagnostics are lossy.
+
+### Atomic bulk insert limits
+
+All stores accept at most 1,000 jobs and 8 MiB of combined encoded job bodies in
+one `insertAll` call. The capability descriptor exposes both limits. Oversized
+batches throw `IllegalArgumentException` before writing any jobs or adopting
+versions. Divide larger submissions into deliberate atomic batches; Threadmill
+does not silently split a request whose all-or-nothing semantics you rely on.
