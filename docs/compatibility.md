@@ -28,7 +28,7 @@ Application APIs are the command/handler model, scheduler, documented engine
 configuration, execution context, interception, and optional adapters. Public
 configuration records and snapshot records are source/binary API: adding a record
 component is a breaking change even when JSON can default it. Recompile existing
-0.x applications and custom stores against this candidate. Do not mix Threadmill
+0.x applications and custom stores against Threadmill 1.0.0. Do not mix Threadmill
 module versions in one process.
 
 Before 1.0, custom stores must implement the complete `JobStore` contract,
@@ -81,7 +81,7 @@ optimistic-version checks.
 1. Back up the datastore and record the application/Threadmill versions and
    configuration. Review legacy FAILED jobs: their exception-specific retry
    decisions were not persisted. Explicitly retry or delete those jobs according
-   to application policy; the candidate preserves unknown outcomes and waiting
+   to application policy; Threadmill 1.0.0 preserves unknown outcomes and waiting
    children rather than guessing.
 2. Stop every old worker **and producer**, including Spring instances that can
    enqueue. Gracefully finish work where possible; interrupted processing jobs
@@ -108,7 +108,7 @@ optimistic-version checks.
    is resumable; rerun it after resolving the failure. New stores reject a
    nonempty legacy/incomplete namespace. Producers have no registry, so the
    migrator cannot independently prove they are stopped.
-5. Start only candidate workers/producers. Verify queue/state counts, paused
+5. Start only 1.0.0 workers/producers. Verify queue/state counts, paused
    queues, recurring ownership/nudges, orphan recovery, retry disposition and
    workflow continuation before restoring full traffic.
 
@@ -117,7 +117,7 @@ rewrite away retry decisions/revisions and use obsolete Redis indexes. PostgreSQ
 migration validation and Redis format checks protect new startup paths; they do
 not remotely fence already-running old binaries. Coordinate the deployment.
 
-**Downgrade requires a restore.** Stop the candidate and restore the pre-upgrade
+**Downgrade requires a restore.** Stop Threadmill 1.0.0 and restore the pre-upgrade
 backup with the matching old application and Threadmill binaries. Running the old
 binary against a migrated store, removing history rows, or changing a Redis
 format marker is not a supported rollback. Work accepted after the backup must

@@ -44,9 +44,7 @@ Threadmill is published to Maven Central under the `com.hemju.threadmill`
 group. Pick the core plus the store you run against (and the Spring Boot
 starter if you use Spring):
 
-These examples target **1.0.0**, which is being prepared for release on this
-branch. Until publication completes, the latest published release remains
-**0.3.0**. Upgrade existing installations using the
+These examples use **1.0.0**. Upgrade existing installations using the
 [0.3.0-to-1.0 migration guide](docs/compatibility.md#upgrade-from-v030).
 
 ```kotlin
@@ -225,9 +223,9 @@ stable API.
 
 ## Status
 
-The **1.0.0 release candidate** includes the features below. Publication is
-pending the [release checks](docs/release-checklist.md), including completed
-PostgreSQL and Redis soak qualification.
+**Threadmill 1.0.0** includes the features below. See the
+[release checklist](docs/release-checklist.md) for the validation and publication
+process.
 
 - Job model with append-only state history, optimistic-lock versioning,
   relationship and result fields, and bounded size.
@@ -334,7 +332,7 @@ check` fails on violations.
 
 ## Commercial support
 
-Starting with Threadmill **1.0**, commercial support will be available through
+Commercial support for Threadmill **1.0** is available through
 [hemju.com](https://hemju.com/). Contact [sales@hemju.com](mailto:sales@hemju.com)
 to discuss commercial support for your team.
 

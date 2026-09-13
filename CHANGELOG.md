@@ -1,9 +1,9 @@
 # Changelog
 
-## 1.0.0 (unreleased)
+## 1.0.0 — 2026-09-13
 
-This branch prepares Threadmill 1.0.0. Publication requires the complete release
-and soak qualification gates; this entry does not claim those runs have passed.
+Threadmill 1.0.0 adds production hardening, operational tooling and migration
+support across the PostgreSQL, Redis and in-memory backends.
 See the [compatibility and upgrade guide](docs/compatibility.md) before upgrading
 from 0.3.0. Delivery remains **at least once**; handlers must be idempotent.
 
