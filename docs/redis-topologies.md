@@ -1,7 +1,10 @@
 # Redis Topologies
 
 Threadmill supports Redis standalone, Sentinel, and Cluster clients through one
-configuration model.
+configuration model. Every data node must run Redis 7.4 or later, including
+replicas that may become primary. Startup validates the connected server's
+version and no-eviction policy; externally validated managed deployments must
+verify both independently on every node before opting out of these checks.
 
 ## Standalone
 
@@ -128,6 +131,57 @@ For production durability, enable Redis AOF, for example `appendonly yes`.
 Threadmill's durability on Redis is bounded by the Redis persistence policy you
 choose.
 
+Redis replication is asynchronous: a primary can acknowledge a write that a
+promoted replica never received. AOF `everysec` also permits loss of recent
+local writes on a host failure. Threadmill does not issue a replication barrier
+for each job write. At-least-once execution applies to jobs that survive the
+configured datastore durability boundary; it does not promise zero loss of
+acknowledged enqueues after every Redis failure. `WAIT` improves replication
+coverage but does not make Redis strongly consistent. See the
+[Redis replication contract](https://redis.io/docs/latest/operate/oss_and_stack/management/replication/).
+
+## Automated topology qualification
+
+`RedisFailoverTest` runs on Redis 7.4 and 8.6 with two existing processing nodes,
+queued and in-flight jobs, and an exclusive workflow competing for one key.
+It hard-kills a primary in a three-Sentinel topology, hard-kills the owning
+primary in a three-primary/three-replica Cluster, and moves the namespace's
+slot while workers execute. Each scenario verifies that all 203 seeded jobs
+finish and that no exclusive executions overlap. The primary-kill cases use
+a fixture-only replication barrier after seeding and blocked claims, so they
+test recovery of replicated work, not zero acknowledged-write loss.
+
+Sentinel recovery also runs after deliberately suspending its processes long
+enough to enter [TILT protection](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/#tilt-mode).
+TILT suspends election activity until the clock/timer has been stable for 30
+seconds. The test allows 90 seconds for that guard and election retries, then
+requires the same promotion, hold preservation and complete drain. It does not
+disable TILT or certify a 30-second failover objective. Preserve Sentinel event
+logs when assessing recovery time on a busy or suspended host.
+
+The fixture uses a five-second `down-after-milliseconds` setting. Sentinel's
+[replica eligibility check](https://redis.io/docs/latest/operate/oss_and_stack/management/sentinel/#replica-selection-and-priority)
+allows disconnected time up to ten times that setting plus the observed master
+down duration. An aggressive one-second setting can exclude the only replicated
+candidate when TILT delays the initial down observation for 30 seconds. Test
+deployment timing settings with clock/process pauses as well as ordinary kills;
+raising a client timeout alone cannot make an ineligible replica promotable.
+
+The complete shared storage contract also runs through standalone, Cluster,
+and Sentinel on Redis 7.4. Separate security tests cover authenticated TLS,
+mutual TLS, wrong credentials, and an untrusted server certificate. Reports
+and process logs are written under `threadmill-store-redis/build/redis-topology/`.
+
+These are bounded tests with independent Redis processes co-located in one
+container. They do not certify separate hosts, network partitions, production
+certificates, or multi-zone failure domains. Repeat qualification against the
+deployment topology and follow the [1.0 soak plan](soak-plan-1.0.md).
+
+Lua digests are computed locally. A script-cache miss loads and executes the
+script on the key's current owner; it never requires a `SCRIPT LOAD` broadcast
+to an unavailable former primary. Periodic/adaptive topology refresh and the
+engine's retained terminal-save retries provide recovery after promotion.
+
 ## Memory Policy
 
 Threadmill requires Redis `maxmemory-policy noeviction`. Redis configured as a
@@ -174,3 +228,49 @@ count (`threadmill.jobs.orphan.reclaimed`), claim failures
 (`threadmill.claim.failures`), rejected writes
 (`threadmill.store.writes.rejected`), and queue depth
 (`threadmill.queue.depth`).
+
+## Upgrading existing Redis data
+
+Index format 2 changes pending members from `MODE:id` to `id:MODE` and adds
+queue-specific ready, exclusive-barrier, and ordered queue-key indexes. New
+stores refuse nonempty legacy storage and incomplete migrations.
+
+1. Stop **every worker and producer**, including scheduled application writes.
+2. Take a Redis backup and retain the old application artifacts for recovery.
+3. Call `RedisIndexMigration.migrate(client)` with a configured `RedisClient`
+   (standalone/Sentinel) or `RedisClusterClient`. For example:
+
+   ```java
+   var client = RedisClient.create(System.getenv("THREADMILL_REDIS_URL"));
+   try {
+     long visited = RedisIndexMigration.migrate(client);
+     System.out.println("Visited job records: " + visited);
+   } finally {
+     client.shutdown();
+   }
+   ```
+
+4. Start the new workers and producers, then verify queue depth, claim progress,
+   and workflow state. Review legacy FAILED records as described in
+   [migration](migration.md#upgrading-persisted-failures).
+
+The migrator refuses live registered workers and unknown future formats.
+Producer shutdown is an operator responsibility because producers do not
+register. It visits state indexes in bounded pages, preserves job bodies and
+pending microsecond timestamps, and updates a format marker only after the
+complete pass. An interrupted run may be repeated; keep all application writers
+stopped throughout retries. The migration owns its connection, while the client
+remains caller-owned. For managed Redis, migration credentials need access to
+all Threadmill keys and the normal scripting commands.
+
+Mixed old/new workers and in-place downgrade are unsupported. To roll back,
+stop all new processes and restore the pre-upgrade backup; reconcile external
+side effects before restarting old workers. Processing remains at-least-once,
+so handlers must be idempotent.
+
+The format-2 offline upgrade also rebuilds the ordered concurrency-counter
+registry, including legacy hashes whose jobs were already retained away. It
+routes its offline key scan to the owner of the `{threadmill}` slot. Runtime
+cleanup uses bounded ordered pages and atomically verifies zero counters, no
+pending jobs, no active holds, and no outstanding workflow members before
+removing a hash. An upgrade must still stop all workers and producers.

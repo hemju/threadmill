@@ -3,14 +3,19 @@ package com.hemju.threadmill.store.memory;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Instant;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import com.hemju.threadmill.core.FailureDecision;
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.WorkflowInterceptor;
+import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.test.Jobs;
 
 /**
@@ -30,9 +35,28 @@ class WorkflowReconciliationTest {
     // Terminal save lands, but the WorkflowInterceptor hook is deliberately
     // NOT fired — this is the crash window.
     claimed.transitionTo(terminal, Instant.now(), "engine.terminal", null);
+    if (terminal == JobState.FAILED) claimed.setFailureDecision(FailureDecision.finalFailure());
     claimed.clearOwner();
     store.saveAtomic(claimed, v);
     return claimed;
+  }
+
+  @Test
+  void fanOutReconciliationReadsEachParentOnlyOncePerPage() {
+    var root = Jobs.enqueued("com.example.Root");
+    store.insert(root);
+    for (int i = 0; i < 100; i++) store.insert(Jobs.awaitingWorkflowStep("child", root));
+    var reads = new AtomicInteger();
+    var measured = new ForwardingJobStore(store) {
+      @Override
+      public Optional<Job> findById(JobId id) {
+        reads.incrementAndGet();
+        return super.findById(id);
+      }
+    };
+    new WorkflowInterceptor(measured).reconcileOrphanedAwaitingChildren(100);
+    assertThat(reads).hasValue(1);
+    assertThat(store.countsByState().get(JobState.AWAITING)).isEqualTo(100);
   }
 
   @Test
@@ -81,24 +105,24 @@ class WorkflowReconciliationTest {
   @Test
   @DisplayName("a stranded child beyond the first search window is still rescued")
   void rescuesAStrandedChildBeyondTheFirstSearchWindow() {
-    // The stranded child is the OLDEST awaiting job; searches return
-    // newest-first, so with a fixed single window it would be permanently
-    // shadowed the moment the live AWAITING population exceeds the
-    // window. The sweep must page through the whole population.
-    Job root = Jobs.enqueued("com.example.Root");
-    Job stranded = Jobs.awaitingWorkflowStep("com.example.Stranded", root);
-    store.insert(stranded);
-    driveToTerminal(root, JobState.SUCCEEDED);
-
-    // Flood with newer, legitimately-waiting children of a live parent.
-    Job activeParent = Jobs.enqueued("com.example.ActiveParent");
+    var activeParent = Jobs.enqueued("com.example.ActiveParent");
     store.insert(activeParent);
     for (int i = 0; i < 12; i++) {
       store.insert(Jobs.awaitingWorkflowStep("com.example.Waiting" + i, activeParent));
     }
-
-    // Page size 5 — far smaller than the 13-job AWAITING population.
-    new WorkflowInterceptor(store).reconcileOrphanedAwaitingChildren(5);
+    var root = Jobs.enqueued("com.example.Root");
+    var stranded = Jobs.awaitingWorkflowStep("com.example.Stranded", root);
+    store.insert(stranded);
+    // Explicitly transition this root; the earlier active parent stays pending.
+    store.insert(root);
+    long version = root.version();
+    root.transitionTo(JobState.PROCESSING, Instant.now(), "test", null);
+    root.transitionTo(JobState.SUCCEEDED, Instant.now(), "test", null);
+    store.saveAtomic(root, version);
+    var reconciliation = new WorkflowInterceptor(store);
+    for (int pass = 0; pass < 4; pass++) {
+      reconciliation.reconcileOrphanedAwaitingChildren(5);
+    }
 
     assertThat(store.findById(stranded.id()).orElseThrow().currentState())
         .isEqualTo(JobState.ENQUEUED);

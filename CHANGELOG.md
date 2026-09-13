@@ -1,6 +1,55 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 (unreleased)
+
+This branch prepares Threadmill 1.0.0. Publication requires the complete release
+and soak qualification gates; this entry does not claim those runs have passed.
+See the [compatibility and upgrade guide](docs/compatibility.md) before upgrading
+from 0.3.0. Delivery remains **at least once**; handlers must be idempotent.
+
+- Hardened execution persistence through datastore outages. Finished handlers
+  retain a finalizer until their outcome commits or shutdown transfers recovery
+  to another node. Heartbeats renew only confirmed active attempts, so a lost
+  claim acknowledgement cannot leave an abandoned job permanently shielded.
+- Persisted retry decisions and attempt-local execution revisions. Recovery
+  retains the original retry policy, while delayed progress/log/check-in writes
+  cannot overwrite acknowledged newer diagnostics or liveness.
+- Fixed concurrency-hold release for unclaimed jobs and execution cleanup across
+  timeout, shutdown and orphan recovery. Metrics and tracing distinguish
+  overlapping contexts for the same job and unwind their resources on every exit.
+- Bounded atomic bulk inserts and deferred Spring enqueues to 1,000 jobs and
+  8 MiB of encoded bodies. New JSON jobs reserve lifecycle space; bounded
+  diagnostic compaction preserves identity, payload and execution policy.
+- Made deferred enqueue failures observable through `AfterCommitEnqueueFailure`.
+  The default `after_commit` mode does not make business and job writes atomic;
+  use PostgreSQL `join_transaction` with the same DataSource or a durable outbox.
+- Bounded maintenance and retention scans with resumable cursors. Retention
+  protects pending/unknown retries, waiting workflows and live deduplication;
+  idle queue and concurrency metadata can be reclaimed safely under churn.
+- Added PostgreSQL migrations V7–V11 for execution revisions, maintenance and
+  retention indexes, and sharded queue monitoring counters. Historical V1–V6
+  migrations remain unchanged. Monitoring and queue discovery use bounded or
+  indexed operations instead of repeatedly scanning all retained jobs.
+- Fixed Redis claim locks surviving timed-out/interrupted acquisitions, partial
+  bulk acquisition and failed workflow preparation. Token-checked cleanup
+  preserves replacement ownership and caller interruption, and tries remaining
+  locks after an ordinary cleanup failure. Expiry remains the crash fallback.
+- Raised the Redis data-node minimum to 7.4 and added an offline format-2 index
+  migration for existing namespaces. Script-cache recovery uses key-routed
+  EVALSHA/EVAL, including after Cluster promotion and live slot migration.
+  Standalone, Sentinel and Cluster contracts use real Redis; failover does not
+  imply zero acknowledged-write loss.
+- Hardened application-classloader handling, dashboard authentication/error
+  responses, Redis search capability enforcement, and optional asynchronous
+  metrics refresh. Updated locked dependencies, including the patched Vitest
+  development toolchain.
+- Expanded regression, migration, topology and production validation. The soak
+  harness records live invariants, operation latency, retention and fault
+  evidence, and recovers uncertain producer acknowledgements across datastore
+  pauses/restarts without changing job IDs.
+- Updated installation and migration documentation for 1.0.0. Commercial
+  support starts with 1.0 through [hemju.com](https://hemju.com/), with inquiries
+  to [sales@hemju.com](mailto:sales@hemju.com). LingoHub is a reference customer.
 
 ## 0.3.0
 

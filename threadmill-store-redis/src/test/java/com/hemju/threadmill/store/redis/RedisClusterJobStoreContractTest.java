@@ -14,6 +14,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.parallel.ResourceLock;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
@@ -109,6 +110,15 @@ class RedisClusterJobStoreContractTest extends AbstractJobStoreContractTest {
     }
   }
 
+  @Test
+  void nonemptyVersion030IndexesAndWireUpgradeThroughClusterRouting() {
+    RedisUpgradeFixtures.verify(
+        (RedisJobStore) store,
+        adminConnection.sync(),
+        () -> RedisIndexMigration.migrate(adminClient),
+        () -> new RedisJobStore(config));
+  }
+
   @Override
   protected JobStore createStore() {
     return new RedisJobStore(config);
@@ -139,7 +149,7 @@ class RedisClusterJobStoreContractTest extends AbstractJobStoreContractTest {
       extends GenericContainer<FixedPortRedisContainer> {
 
     private FixedPortRedisContainer(int hostPort) {
-      super(DockerImageName.parse("redis:7-alpine"));
+      super(DockerImageName.parse("redis:7.4-alpine"));
       addFixedExposedPort(hostPort, 6379);
     }
   }

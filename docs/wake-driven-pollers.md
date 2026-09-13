@@ -110,9 +110,13 @@ the interval is too fast for the pattern.
 - Nudging is not "run this with these arguments". It carries no payload; it
   asks an already-registered task to run. For work that carries data, use
   `enqueue`.
-- Latency is bounded by `maintenancePollInterval` (default 1 s), because the
-  nudge is a durable store write consumed by the maintenance leader rather
-  than a signal that could be dropped. Nothing to configure, nothing to lose.
+- The maintenance leader consumes the durable nudge as it visits recurring
+  definitions. Each tick inspects at most 64 definitions and yields between
+  tasks after 200 ms. A small, fast pass usually completes within one
+  `maintenancePollInterval` (default 1 s); larger registries need multiple
+  ticks, including an empty end-of-pass tick at exact page boundaries. Store
+  latency, catch-up work and an in-flight predecessor can delay it further.
+  This is durable demand, not a one-second execution deadline.
 
 ## Watching it work
 

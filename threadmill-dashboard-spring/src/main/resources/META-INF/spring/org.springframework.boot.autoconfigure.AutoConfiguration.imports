@@ -1,1 +1,2 @@
+com.hemju.threadmill.dashboard.spring.ThreadmillDashboardHostSecurityConfiguration
 com.hemju.threadmill.dashboard.spring.ThreadmillDashboardApiConfiguration

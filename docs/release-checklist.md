@@ -1,6 +1,6 @@
 # Release Checklist
 
-Before publishing the repository:
+Before publishing a release:
 
 - Confirm `LICENSE` is the Apache License 2.0 and the README license section
   points to it.
@@ -10,10 +10,22 @@ Before publishing the repository:
   requirement, PostgreSQL 18+ requirement, Redis AOF durability note, and
   Testcontainers requirement for real backend tests.
 
-Run from a clean git tree:
+Before merging a 1.0 release candidate:
+
+- Complete and review the [soak qualification plan](soak-plan-1.0.md), including
+  final drain/counter reconciliation, baseline-relative performance and resource
+  stability. An interrupted run or unexplained growth does not pass.
+- Record which datastore versions and topologies were qualified and resolve
+  every release-blocking finding. Requalify affected behavior after fixes.
+- Align `ThreadmillVersion.CURRENT`, installation examples, the changelog,
+  compatibility/migration guide and release notes at 1.0.0. Historical 0.3.0
+  references and immutable migration fixtures retain their original versions.
+- Check the final PR head, required CI, review disposition and merge result.
+
+Run the final candidate gate:
 
 ```bash
-./gradlew productionCheck
+./gradlew productionCheck verifyReleaseTag -PreleaseTag=v1.0.0 -PdependencyScanRequired=true
 ```
 
 `productionCheck` owns the clean-all-projects boundary, every subproject check,
@@ -39,7 +51,7 @@ reachability record, and the strict process for temporary exceptions.
 
 ## Publish
 
-[`RELEASING.md`](RELEASING.md) is the canonical publishing runbook. In short:
+[`RELEASING.md`](RELEASING.md) is the canonical publishing runbook:
 
 1. Set and commit the release version.
 2. Tag that exact commit with the matching `v<version>` tag.
@@ -50,6 +62,9 @@ reachability record, and the strict process for temporary exceptions.
    `publishAggregationToCentralPortal`.
 5. Central Portal validates and publishes the bundle automatically because
    `publishingType` is `AUTOMATIC`.
+6. Verify every published module and a fresh consumer installation, then create
+   the GitHub release with reviewed notes and the migration link. The workflow
+   does not create that GitHub release itself.
 
 Do not run the obsolete unconfigured `./gradlew publish` path and do not wait
 for a manual Central Portal promotion. If the automated deployment fails,

@@ -17,18 +17,7 @@ final class OwningPostgresTransactionBoundary implements PostgresTransactionBoun
   @Override
   public <T> T inTransaction(PostgresConnectionWork<T> work) throws SQLException {
     try (Connection conn = dataSource.getConnection()) {
-      boolean previousAutoCommit = conn.getAutoCommit();
-      conn.setAutoCommit(false);
-      try {
-        T result = work.execute(conn);
-        conn.commit();
-        return result;
-      } catch (RuntimeException | SQLException e) {
-        conn.rollback();
-        throw e;
-      } finally {
-        conn.setAutoCommit(previousAutoCommit);
-      }
+      return PostgresTransactions.execute(conn, work);
     }
   }
 

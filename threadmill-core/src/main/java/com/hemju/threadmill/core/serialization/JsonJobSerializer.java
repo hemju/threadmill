@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
+import com.hemju.threadmill.core.FailureDecision;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobLog;
@@ -106,7 +107,72 @@ public final class JsonJobSerializer implements JobSerializer {
   public String serializeJob(JobSnapshot s, JobStoreCapabilities caps) {
     Objects.requireNonNull(s, "snapshot");
     Objects.requireNonNull(caps, "capabilities");
-    return serializeJob(truncateForSerialization(s, caps), caps.maxSerializedJobBytes());
+    var bounded = truncateForSerialization(s, caps);
+    if (s.attempts() == 0 && !isTerminalSaveState(s.currentState())) {
+      return serializeJob(bounded, caps.maxInitialJobBytes());
+    }
+    try {
+      return serializeJob(bounded, caps.maxSerializedJobBytes());
+    } catch (OversizedJobException oversized) {
+      // The section budgets are soft and JSON escaping can expand their byte
+      // cost. Reduce optional diagnostics against the actual encoded budget.
+      // The work description, identity, owner, and failure decision survive.
+      for (int budget = 4096; budget >= 0; budget = budget == 0 ? -1 : budget / 2) {
+        try {
+          return serializeJob(compactLifecycle(bounded, budget), caps.maxSerializedJobBytes());
+        } catch (OversizedJobException stillTooLarge) {
+          // A legacy or custom-produced immutable payload can exceed the new
+          // admission budget. Never silently alter that payload.
+        }
+      }
+      throw oversized;
+    }
+  }
+
+  private static JobSnapshot compactLifecycle(JobSnapshot s, int budget) {
+    var history = new ArrayList<JobStateEntry>(2);
+    if (!s.stateHistory().isEmpty()) {
+      var first = s.stateHistory().getFirst();
+      history.add(new JobStateEntry(first.state(), first.at(), "engine.history-compacted", null));
+      if (s.stateHistory().size() > 1) {
+        var last = s.stateHistory().getLast();
+        history.add(new JobStateEntry(
+            last.state(),
+            last.at(),
+            "engine.history-compacted",
+            last.message() == null || budget == 0
+                ? null
+                : capFailureMessage(last.message(), budget)));
+      }
+    }
+    var metadata = trimMetadata(
+        s.metadata(),
+        Map.of("threadmill.truncated.lifecycle", "diagnostics compacted"),
+        Math.max(1, budget));
+    return new JobSnapshot(
+        s.id(),
+        s.spec(),
+        s.queue(),
+        s.priority(),
+        s.createdAt(),
+        s.cronTaskName(),
+        s.relationship(),
+        s.workflowRootId(),
+        s.concurrencyKey(),
+        s.concurrencyMode(),
+        history,
+        metadata,
+        List.of(),
+        s.progress() == null ? null : new JobProgress.Snapshot(s.progress().fraction(), null),
+        s.version(),
+        s.ownerNodeId(),
+        s.ownerHeartbeatAt(),
+        s.lastCheckinAt(),
+        s.scheduledFor(),
+        null,
+        s.attempts(),
+        s.failureDecision(),
+        s.executionRevision());
   }
 
   /**
@@ -155,6 +221,13 @@ public final class JsonJobSerializer implements JobSerializer {
     // OversizedJobException, silently cancelling every remaining retry. An
     // initial schedule (attempts == 0) still keeps the loud §6 rejection.
     boolean terminal = isElisionEligible(s.currentState(), s.attempts());
+    var progress = s.progress();
+    if (progress != null && progress.message() != null) {
+      var message =
+          capFailureMessage(progress.message(), Math.max(0, caps.maxFailureMetadataBytes()));
+      if (message != progress.message())
+        progress = new JobProgress.Snapshot(progress.fraction(), message);
+    }
     int elidedHistory = 0;
     int maxEntries = caps.maxStateHistoryEntries();
     if (terminal && maxEntries > 1 && trimmedHistory.size() > maxEntries) {
@@ -183,7 +256,8 @@ public final class JsonJobSerializer implements JobSerializer {
     if (trimmedLog == s.log()
         && trimmedHistory == s.stateHistory()
         && trimmedMetadata == s.metadata()
-        && result == s.result()) {
+        && result == s.result()
+        && progress == s.progress()) {
       return s;
     }
     return new JobSnapshot(
@@ -200,14 +274,16 @@ public final class JsonJobSerializer implements JobSerializer {
         trimmedHistory,
         trimmedMetadata,
         trimmedLog,
-        s.progress(),
+        progress,
         s.version(),
         s.ownerNodeId(),
         s.ownerHeartbeatAt(),
         s.lastCheckinAt(),
         s.scheduledFor(),
         result,
-        s.attempts());
+        s.attempts(),
+        s.failureDecision(),
+        s.executionRevision());
   }
 
   /**
@@ -221,7 +297,7 @@ public final class JsonJobSerializer implements JobSerializer {
 
   private static boolean isElisionEligible(JobState state, int attempts) {
     // Terminal saves, plus a retry/park reschedule of an already-run job.
-    return isTerminalSaveState(state) || (state == JobState.SCHEDULED && attempts > 0);
+    return isTerminalSaveState(state) || attempts > 0;
   }
 
   private static Map<String, String> trimMetadata(
@@ -240,8 +316,9 @@ public final class JsonJobSerializer implements JobSerializer {
       return out;
     }
     var mutable = out == metadata ? new HashMap<>(metadata) : (HashMap<String, String>) out;
-    // Drop largest user entries first; engine ("threadmill.") entries and
-    // the elision markers are kept longest.
+    // Execution policy and elision markers must survive every budget. If
+    // immutable work plus engine metadata cannot fit, fail instead of changing
+    // the retry, timeout, routing or recurring semantics of the next attempt.
     var dropOrder = mutable.entrySet().stream()
         .sorted(Comparator.comparing(
                 (Map.Entry<String, String> e) -> e.getKey().startsWith("threadmill."))
@@ -252,7 +329,7 @@ public final class JsonJobSerializer implements JobSerializer {
     int omitted = 0;
     for (var e : dropOrder) {
       if (total <= maxBytes) break;
-      if (e.getKey().startsWith("threadmill.truncated.")) continue;
+      if (e.getKey().startsWith("threadmill.")) continue;
       mutable.remove(e.getKey());
       total -= metadataByteCost(e);
       omitted++;
@@ -274,11 +351,11 @@ public final class JsonJobSerializer implements JobSerializer {
     long total = 0;
     for (var e : log) total += entryByteCost(e);
     if (total <= maxBytes) return log;
-    var trimmed = new ArrayList<>(log);
-    while (!trimmed.isEmpty() && total > maxBytes) {
-      total -= entryByteCost(trimmed.removeFirst());
+    int first = 0;
+    while (first < log.size() && total > maxBytes) {
+      total -= entryByteCost(log.get(first++));
     }
-    return trimmed;
+    return List.copyOf(log.subList(first, log.size()));
   }
 
   private static long entryByteCost(JobLog.Entry e) {
@@ -308,28 +385,13 @@ public final class JsonJobSerializer implements JobSerializer {
   private static String capFailureMessage(String message, int maxBytes) {
     byte[] bytes = message.getBytes(StandardCharsets.UTF_8);
     if (bytes.length <= maxBytes) return message;
-    int keep = Math.max(
-        0,
-        maxBytes
-            - truncationSuffix(bytes.length - maxBytes).getBytes(StandardCharsets.UTF_8).length);
-    int charBudget = Math.min(message.length(), keep);
-    while (charBudget > 0) {
-      // Never split a surrogate pair: a trailing lone high surrogate is dropped.
-      if (Character.isHighSurrogate(message.charAt(charBudget - 1))) {
-        charBudget--;
-        continue;
-      }
-      String prefix = message.substring(0, charBudget);
-      int prefixBytes = prefix.getBytes(StandardCharsets.UTF_8).length;
-      if (prefixBytes > keep) {
-        charBudget--;
-        continue;
-      }
-      String capped = prefix + truncationSuffix(bytes.length - prefixBytes);
-      if (capped.getBytes(StandardCharsets.UTF_8).length <= maxBytes) {
-        return capped;
-      }
-      charBudget--;
+    int keep = maxBytes - truncationSuffix(bytes.length).getBytes(StandardCharsets.UTF_8).length;
+    if (keep > 0) {
+      // UTF-8 continuation bytes cannot begin the suffix. A conservative
+      // sentinel allowance means the final omitted-byte count always fits.
+      while (keep > 0 && (bytes[keep] & 0xC0) == 0x80) keep--;
+      return new String(bytes, 0, keep, StandardCharsets.UTF_8)
+          + truncationSuffix(bytes.length - keep);
     }
     String suffixOnly = truncationSuffix(bytes.length);
     if (suffixOnly.getBytes(StandardCharsets.UTF_8).length <= maxBytes) {
@@ -395,6 +457,14 @@ public final class JsonJobSerializer implements JobSerializer {
         root.set("result", rn);
       }
       root.put("attempts", s.attempts());
+      root.put("executionRevision", s.executionRevision());
+      if (s.failureDecision() != null) {
+        var decision = root.putObject("failureDecision");
+        if (s.failureDecision().retryAt() != null) {
+          decision.put("retryAt", s.failureDecision().retryAt().toString());
+        }
+        decision.put("refundAttempt", s.failureDecision().refundAttempt());
+      }
 
       String wire = mapper.writeValueAsString(root);
       long byteLength = wire.getBytes(StandardCharsets.UTF_8).length;
@@ -456,6 +526,15 @@ public final class JsonJobSerializer implements JobSerializer {
       metadata.forEach(b::metadata);
 
       Job job = b.build();
+      job.adoptExecutionRevision(root.path("executionRevision").asLong(0));
+      if (root.hasNonNull("failureDecision")) {
+        var decision = root.get("failureDecision");
+        job.setFailureDecision(new FailureDecision(
+            decision.hasNonNull("retryAt")
+                ? Instant.parse(decision.get("retryAt").asText())
+                : null,
+            decision.path("refundAttempt").asBoolean(false)));
+      }
       if (root.hasNonNull("ownerNodeId") && root.hasNonNull("ownerHeartbeatAt")) {
         job.assignOwner(
             NodeId.parse(root.get("ownerNodeId").asText()),

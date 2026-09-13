@@ -137,9 +137,9 @@ end
 if old_active_node_key ~= no_key then
     redis.call('ZREM', old_active_node_key, job_id)
 end
-redis.call('ZREM', old_state_time_key, job_id)
+tm_state_remove(old_state_time_key, job_id)
 if old_pending_key ~= no_key and old_pending_member ~= '' then
-    redis.call('ZREM', old_pending_key, old_pending_member)
+    tm_pending_remove(old_pending_key, old_pending_member, old_queue_keys_key)
     if old_pending_root_key ~= no_key then
         redis.call('ZREM', old_pending_root_key, old_pending_member)
     end
@@ -147,10 +147,7 @@ end
 if old_state == 'ENQUEUED' then
     redis.call('ZREM', old_enqueued_at_key, job_id)
     if old_concurrency_key ~= '' then
-        local remaining = redis.call('HINCRBY', old_queue_keys_key, old_concurrency_key, -1)
-        if remaining <= 0 then
-            redis.call('HDEL', old_queue_keys_key, old_concurrency_key)
-        end
+        tm_queue_remove(old_queue_keys_key, old_concurrency_key)
     else
         redis.call('ZREM', old_unkeyed_key, job_id)
     end
@@ -175,7 +172,8 @@ if new_counted and not same_workflow_count and new_workflow_counts_key ~= no_key
 end
 
 if old_concurrency_key ~= '' and old_workflows_key ~= no_key and old_counters_key ~= no_key and
-   (not is_terminal(old_state)) and is_terminal(new_state) then
+   (not is_terminal(old_state)) and is_terminal(new_state) and
+   redis.call('HEXISTS', old_workflows_key, old_workflow_root_id) == 1 then
     local outstanding = redis.call('HINCRBY', old_workflows_key, old_workflow_root_id, -1)
     if outstanding <= 0 then
         redis.call('HDEL', old_workflows_key, old_workflow_root_id)
@@ -235,7 +233,7 @@ if new_state == 'ENQUEUED' then
     redis.call('SADD', queues_key, new_queue)
     redis.call('ZADD', new_enqueued_at_key, new_state_time, job_id)
     if concurrency_key ~= '' then
-        redis.call('HINCRBY', new_queue_keys_key, concurrency_key, 1)
+        tm_queue_add(new_queue_keys_key, concurrency_key)
     else
         redis.call('ZADD', new_unkeyed_key, new_active_score, job_id)
     end
@@ -245,11 +243,11 @@ if new_active_node_key ~= no_key and new_active_score ~= nil then
 end
 if concurrency_key ~= '' and new_pending_key ~= no_key and new_pending_member ~= '' and
    (new_state == 'ENQUEUED' or new_state == 'SCHEDULED' or new_state == 'AWAITING') then
-    redis.call('ZADD', new_pending_key, new_pending_score, new_pending_member)
+    tm_pending_add(new_pending_key, new_pending_score, new_pending_member, new_state, new_queue_keys_key)
     if new_pending_root_key ~= no_key then
         redis.call('ZADD', new_pending_root_key, new_pending_score, new_pending_member)
     end
 end
-redis.call('ZADD', new_state_time_key, new_state_time, job_id)
+tm_state_add(new_state_time_key, new_state_time, job_id)
 
 return 'OK'

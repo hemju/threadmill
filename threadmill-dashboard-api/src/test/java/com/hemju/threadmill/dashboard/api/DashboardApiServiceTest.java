@@ -42,6 +42,22 @@ import com.hemju.threadmill.store.memory.InMemoryJobStore;
 class DashboardApiServiceTest {
 
   @Test
+  void pausedEmptyQueuesRemainVisibleAndResumable() {
+    var store = new InMemoryJobStore();
+    var service = new DashboardApiService(
+        store, new LocalWakeBus(), DashboardJobDefinitionValidator.denyAll());
+    service.pauseQueue("empty", "paused before enqueue");
+    assertThat(service.queues()).singleElement().satisfies(queue -> {
+      assertThat(queue.queue()).isEqualTo("empty");
+      assertThat(queue.depth()).isZero();
+      assertThat(queue.paused()).isTrue();
+      assertThat(queue.oldestEnqueuedAt()).isNull();
+    });
+    service.resumeQueue("empty");
+    assertThat(service.queues()).isEmpty();
+  }
+
+  @Test
   void limitedSearchCapabilitiesFailWithDashboardException() {
     var store = new InMemoryJobStore(
         new JsonJobSerializer(),

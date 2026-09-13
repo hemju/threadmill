@@ -28,6 +28,51 @@ class JsonJobSerializerTest {
   private final JsonJobSerializer serializer = new JsonJobSerializer();
 
   @Test
+  void lifecycleCompactionNeverDiscardsExecutionPolicyToMakeAnOversizedJobFit() {
+    var caps = new JobStoreCapabilities(2048, 8192, 8192, 100, true, true, true, true, 8192, 100);
+    var job = Job.builder()
+        .spec(JobSpec.of("example.Handler"))
+        .metadata("threadmill.retry.maxAttempts", "7")
+        .metadata("threadmill.requiredTags", "x".repeat(2048))
+        .build();
+    job.transitionTo(JobState.PROCESSING, Instant.now(), "engine.claim", null);
+    job.incrementAttempts();
+    job.transitionTo(JobState.FAILED, Instant.now(), "engine.failure", null);
+    assertThatThrownBy(() -> serializer.serializeJob(job.snapshot(), caps))
+        .isInstanceOf(OversizedJobException.class);
+  }
+
+  @Test
+  void boundedLifecycleSurvivesManyRetriesWithEscapedUnicodeDiagnostics() {
+    var caps = JobStoreCapabilities.defaults();
+    var job = Job.builder()
+        .spec(JobSpec.of(
+            "example.Handler",
+            new JobArgument("example.Payload", "x".repeat((int) caps.maxInitialJobBytes() - 1024))))
+        .metadata("threadmill.retry.maxAttempts", "300")
+        .metadata("threadmill.timeoutSeconds", "60")
+        .build();
+    serializer.serializeJob(job.snapshot(), caps);
+    for (int attempt = 0; attempt < 250; attempt++) {
+      job.transitionTo(JobState.PROCESSING, Instant.now(), "engine.claim", null);
+      job.incrementAttempts();
+      job.assignOwner(NodeId.newId(), Instant.now());
+      job.progress().update(0.5, "😀\"".repeat(20_000));
+      job.transitionTo(JobState.FAILED, Instant.now(), "engine.exception", "😀\"".repeat(1000));
+      job = serializer.deserializeJob(serializer.serializeJob(job.snapshot(), caps));
+      job.transitionTo(JobState.SCHEDULED, Instant.now(), "engine.retry", null);
+      job = serializer.deserializeJob(serializer.serializeJob(job.snapshot(), caps));
+      job.transitionTo(JobState.ENQUEUED, Instant.now(), "engine.promote", null);
+      job = serializer.deserializeJob(serializer.serializeJob(job.snapshot(), caps));
+    }
+    assertThat(job.attempts()).isEqualTo(250);
+    assertThat(job.metadata().get("threadmill.retry.maxAttempts")).contains("300");
+    assertThat(job.metadata().get("threadmill.timeoutSeconds")).contains("60");
+    assertThat(job.spec().arguments().getFirst().serialized())
+        .hasSize((int) caps.maxInitialJobBytes() - 1024);
+  }
+
+  @Test
   void jobRoundTripsAllCoreFields() {
     Job j = Job.builder()
         .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.Long", "42")))

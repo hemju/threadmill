@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
@@ -18,6 +19,7 @@ import org.springframework.transaction.support.TransactionSynchronizationManager
 
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
+import com.hemju.threadmill.core.OversizedJobException;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
@@ -229,6 +231,119 @@ class TransactionAwareJobSchedulerTest {
     } finally {
       TransactionSynchronizationManager.clear();
     }
+  }
+
+  @Test
+  void unconfirmedInsertPublishesReservedIdsEvenWhenTheWriteActuallyCommitted() {
+    var failures = new ArrayList<AfterCommitEnqueueFailure>();
+    var failing = new ForwardingJobStore(store) {
+      @Override
+      public void insert(Job job) {
+        super.insert(job);
+        throw new IllegalStateException("acknowledgement lost");
+      }
+    };
+    var scheduler = new TransactionAwareJobScheduler(
+        failing,
+        new JsonJobSerializer(),
+        new TestRegistry(),
+        ProcessingNodeConfig.builder().build(),
+        new LocalWakeBus(),
+        failures::add);
+    TransactionSynchronizationManager.initSynchronization();
+    var id = scheduler.enqueue(GreetHandler.class, new GreetPayload("persisted"));
+    triggerAfterCommit();
+    assertThat(store.findById(id)).isPresent();
+    assertThat(failures).singleElement().satisfies(failure -> {
+      assertThat(failure.jobIds()).containsExactly(id);
+      assertThat(failure.cause()).hasMessage("acknowledgement lost");
+    });
+    assertThat(scheduler.deferredEnqueueFailureCount()).isEqualTo(1);
+  }
+
+  @Test
+  void failedBulkObserverCannotCancelLaterDeferredWrites() {
+    var failing = new ForwardingJobStore(store) {
+      @Override
+      public List<JobId> insertAll(List<Job> jobs) {
+        throw new IllegalStateException("bulk outage");
+      }
+    };
+    var failures = new ArrayList<AfterCommitEnqueueFailure>();
+    var scheduler = new TransactionAwareJobScheduler(
+        failing,
+        new JsonJobSerializer(),
+        new TestRegistry(),
+        ProcessingNodeConfig.builder().build(),
+        new LocalWakeBus(),
+        failure -> {
+          failures.add(failure);
+          throw new IllegalStateException("observer outage");
+        });
+    TransactionSynchronizationManager.initSynchronization();
+    var bulkIds = scheduler.enqueueAll(
+        GreetHandler.class, List.of(new GreetPayload("one"), new GreetPayload("two")));
+    var later = scheduler.enqueue(GreetHandler.class, new GreetPayload("later"));
+    triggerAfterCommit();
+    assertThat(failures)
+        .singleElement()
+        .satisfies(failure -> assertThat(failure.jobIds()).isEqualTo(bulkIds));
+    assertThat(scheduler.deferredEnqueueFailureCount()).isEqualTo(2);
+    assertThat(store.findById(later)).isPresent();
+    for (var id : bulkIds) assertThat(store.findById(id)).isEmpty();
+  }
+
+  @Test
+  void excessiveDeferredCountIsRejectedBeforeCommitWithoutDiscardingAcceptedJobs() {
+    TransactionSynchronizationManager.initSynchronization();
+    var ids = new ArrayList<JobId>();
+    for (int i = 0; i < 1000; i++)
+      ids.add(enqueuer.enqueue(GreetHandler.class, new GreetPayload("accepted")));
+    assertThatThrownBy(() -> enqueuer.enqueue(GreetHandler.class, new GreetPayload("too many")))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("Deferred enqueue transaction");
+    triggerAfterCommit();
+    for (var id : ids) assertThat(store.findById(id)).isPresent();
+  }
+
+  @Test
+  void oversizedDeferredJobAndAggregateBytesAreRejectedWhileTransactionCanRollback() {
+    TransactionSynchronizationManager.initSynchronization();
+    assertThatThrownBy(
+            () -> enqueuer.enqueue(GreetHandler.class, new GreetPayload("x".repeat(300_000))))
+        .isInstanceOf(OversizedJobException.class);
+    assertThat(TransactionSynchronizationManager.getSynchronizations()).isEmpty();
+    for (int i = 0; i < 80; i++)
+      enqueuer.enqueue(GreetHandler.class, new GreetPayload("x".repeat(100_000)));
+    assertThatThrownBy(() -> enqueuer.enqueueAll(
+            GreetHandler.class,
+            List.of(new GreetPayload("x".repeat(200_000)), new GreetPayload("x".repeat(200_000)))))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("serialized bytes");
+    // A rejected reservation must not poison the budget for a valid smaller write.
+    var accepted = enqueuer.enqueue(GreetHandler.class, new GreetPayload("small"));
+    triggerAfterCommit();
+    assertThat(store.findById(accepted)).isPresent();
+  }
+
+  @Test
+  void nudgesForDifferentStoresInOneTransactionRemainIndependent() {
+    registerRecurringTask("pump", true);
+    var secondStore = new InMemoryJobStore();
+    secondStore.upsertCronTask(store.findCronTask("pump").orElseThrow());
+    secondStore.upsertCronTaskState(store.findCronTaskState("pump").orElseThrow());
+    var second = new TransactionAwareJobScheduler(
+        secondStore,
+        new JsonJobSerializer(),
+        new TestRegistry(),
+        ProcessingNodeConfig.builder().build());
+    TransactionSynchronizationManager.initSynchronization();
+    enqueuer.nudgeRecurring("pump");
+    second.nudgeRecurring("pump");
+    triggerAfterCommit();
+    assertThat(store.findCronTaskState("pump").orElseThrow().nudgeRequestedAt()).isNotNull();
+    assertThat(secondStore.findCronTaskState("pump").orElseThrow().nudgeRequestedAt())
+        .isNotNull();
   }
 
   // -------- recurring nudge (issue #108) --------

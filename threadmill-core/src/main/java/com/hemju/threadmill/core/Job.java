@@ -64,6 +64,8 @@ public final class Job {
   private Instant scheduledFor;
   private JobResult result;
   private int attempts;
+  private FailureDecision failureDecision;
+  private long executionRevision;
 
   private Job(Builder b) {
     this.id = Objects.requireNonNull(b.id, "id");
@@ -95,6 +97,7 @@ public final class Job {
     this.version = b.version;
     this.scheduledFor = b.scheduledFor;
     this.attempts = b.attempts;
+    this.failureDecision = b.failureDecision;
   }
 
   // ---------------------------------------------------------------- identity & metadata
@@ -189,6 +192,28 @@ public final class Job {
     return attempts;
   }
 
+  /** Persisted revision of progress/log/check-in updates within this attempt. */
+  public synchronized long executionRevision() {
+    return executionRevision;
+  }
+
+  /** Store use only: adopt after a confirmed execution update. */
+  public synchronized void adoptExecutionRevision(long revision) {
+    if (revision < executionRevision)
+      throw new IllegalArgumentException("Execution revision cannot move backwards");
+    executionRevision = revision;
+  }
+
+  /** Persisted failure disposition; empty for jobs written before this field existed. */
+  public synchronized Optional<FailureDecision> failureDecision() {
+    return Optional.ofNullable(failureDecision);
+  }
+
+  /** Engine use: record the resolved disposition before persisting a failed attempt. */
+  public synchronized void setFailureDecision(FailureDecision decision) {
+    this.failureDecision = Objects.requireNonNull(decision, "decision");
+  }
+
   /**
    * Move the job to a new state. Routes through {@link JobStateMachine} so
    * the transition table is the single source of truth; throws
@@ -198,6 +223,10 @@ public final class Job {
     JobState current = currentState();
     JobStateMachine.requireLegal(current, next);
     stateHistory.add(new JobStateEntry(next, at, reason, message));
+    if (next == JobState.PROCESSING) {
+      failureDecision = null;
+      executionRevision = 0;
+    }
   }
 
   public synchronized void transitionTo(JobState next, Instant at) {
@@ -223,15 +252,13 @@ public final class Job {
 
   public synchronized void updateHeartbeat(Instant at) {
     Objects.requireNonNull(at, "at");
-    this.ownerHeartbeatAt = at;
+    if (ownerHeartbeatAt == null || ownerHeartbeatAt.isBefore(at)) this.ownerHeartbeatAt = at;
   }
 
   public synchronized void checkIn(Instant at) {
     Objects.requireNonNull(at, "at");
-    this.lastCheckinAt = at;
-    if (ownerHeartbeatAt == null || ownerHeartbeatAt.isBefore(at)) {
-      this.ownerHeartbeatAt = at;
-    }
+    if (lastCheckinAt == null || lastCheckinAt.isBefore(at)) this.lastCheckinAt = at;
+    if (ownerHeartbeatAt == null || ownerHeartbeatAt.isBefore(at)) this.ownerHeartbeatAt = at;
   }
 
   /**
@@ -314,7 +341,9 @@ public final class Job {
         lastCheckinAt,
         scheduledFor,
         result,
-        attempts);
+        attempts,
+        failureDecision,
+        executionRevision);
   }
 
   public static Builder builder() {
@@ -338,6 +367,7 @@ public final class Job {
     private long version = 0L;
     private Instant scheduledFor;
     private int attempts = 0;
+    private FailureDecision failureDecision;
     private final List<JobStateEntry> initialStateHistory = new ArrayList<>();
     private Clock clock = Clock.systemUTC();
 
@@ -410,6 +440,12 @@ public final class Job {
 
     public Builder attempts(int attempts) {
       this.attempts = attempts;
+      return this;
+    }
+
+    /** Restore a persisted failure disposition when reconstructing a job. */
+    public Builder failureDecision(FailureDecision decision) {
+      this.failureDecision = decision;
       return this;
     }
 

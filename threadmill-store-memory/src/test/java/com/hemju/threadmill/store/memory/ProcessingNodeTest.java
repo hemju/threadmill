@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -18,7 +19,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
+import com.hemju.threadmill.core.FailureDecision;
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.JobStateEntry;
 import com.hemju.threadmill.core.NodeId;
@@ -38,6 +41,8 @@ import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.RetentionCursor;
+import com.hemju.threadmill.core.store.RetentionPage;
 
 /**
  * End-to-end engine tests: enqueue a job, the dispatcher claims and runs
@@ -115,6 +120,36 @@ class ProcessingNodeTest {
       assertThat(loaded.currentState()).isEqualTo(JobState.SUCCEEDED);
     });
     assertThat(EngineTestHandlers.CountingHandler.COUNT).containsKey(job.id().toString());
+  }
+
+  @Test
+  void userFailureDecisionOverridesTheBuiltInPolicyBeforeTheFailedWrite() {
+    var job = enqueueHello(EngineTestHandlers.FailingHandler.class, fastConfig.defaultQueue());
+    var notifications = new AtomicInteger();
+    node = ProcessingNode.builder(store)
+        .config(fastConfig)
+        .interceptor(new JobInterceptor() {
+          @Override
+          public FailureDecision onProcessingFailureDecision(
+              Job failed, JobExecutionContext context, Throwable cause, FailureCause kind) {
+            return FailureDecision.finalFailure();
+          }
+
+          @Override
+          public void onProcessingFailed(
+              Job failed, JobExecutionContext context, Throwable cause, FailureCause kind) {
+            assertThat(failed.failureDecision()).contains(FailureDecision.finalFailure());
+            assertThat(failed.currentState()).isEqualTo(JobState.FAILED);
+            notifications.incrementAndGet();
+          }
+        })
+        .build();
+    node.start();
+    await().atMost(Duration.ofSeconds(5)).until(() -> notifications.get() == 1);
+    var failed = store.findById(job.id()).orElseThrow();
+    assertThat(failed.currentState()).isEqualTo(JobState.FAILED);
+    assertThat(failed.attempts()).isEqualTo(1);
+    assertThat(failed.failureDecision()).contains(FailureDecision.finalFailure());
   }
 
   @Test
@@ -1305,6 +1340,65 @@ class ProcessingNodeTest {
   }
 
   @Test
+  void completedRecoveryPassesPauseInsteadOfRescanningEveryMaintenanceTick() {
+    var scans = new AtomicInteger();
+    var measured = new ForwardingJobStore(store) {
+      @Override
+      public List<Job> scanJobs(JobState state, JobId after, int max) {
+        scans.incrementAndGet();
+        return super.scanJobs(state, after, max);
+      }
+    };
+    node = ProcessingNode.builder(measured)
+        .config(fastConfig.toBuilder()
+            .maintenancePollInterval(Duration.ofMillis(20))
+            .build())
+        .build();
+    node.start();
+    await().atMost(Duration.ofSeconds(3)).until(() -> scans.get() == 2);
+    await()
+        .during(Duration.ofMillis(300))
+        .atMost(Duration.ofSeconds(3))
+        .untilAsserted(() -> assertThat(scans).hasValue(2));
+  }
+
+  @Test
+  void completedJobRetentionStatesAreNotRepeatedWhileDedupCleanupIsStillBusy() {
+    var pages = new AtomicInteger();
+    var dedupCalls = new AtomicInteger();
+    var busy = new AtomicBoolean(true);
+    var measured = new ForwardingJobStore(store) {
+      @Override
+      public RetentionPage deleteFinishedPage(
+          Instant cutoff, JobState state, int max, RetentionCursor after) {
+        pages.incrementAndGet();
+        return super.deleteFinishedPage(cutoff, state, max, after);
+      }
+
+      @Override
+      public long deleteExpiredDedupKeys(Instant now, int max) {
+        // Simulate a dedup backlog independently of the real job retention.
+        dedupCalls.incrementAndGet();
+        return busy.get() ? max : super.deleteExpiredDedupKeys(now, max);
+      }
+    };
+    node = ProcessingNode.builder(measured)
+        .config(fastConfig.toBuilder()
+            .maintenancePollInterval(Duration.ofMillis(20))
+            .retentionInterval(Duration.ofHours(1))
+            .build())
+        .build();
+    node.start();
+    await().atMost(Duration.ofSeconds(3)).until(() -> dedupCalls.get() >= 100);
+    assertThat(pages).hasValue(4);
+    busy.set(false);
+    await()
+        .during(Duration.ofMillis(150))
+        .atMost(Duration.ofSeconds(3))
+        .untilAsserted(() -> assertThat(pages).hasValue(4));
+  }
+
+  @Test
   void retentionSweepDrainsBeyondOneBatchAndCoversAllTerminalStates() {
     Instant old = Instant.now().minus(Duration.ofDays(40));
     insertTerminal(JobState.SUCCEEDED, old, 250);
@@ -1332,6 +1426,22 @@ class ProcessingNodeTest {
     });
   }
 
+  @Test
+  void unfinishedRetentionResumesNextTickEvenWithAnHourlyInterval() {
+    insertTerminal(JobState.SUCCEEDED, Instant.now().minus(Duration.ofDays(40)), 5101);
+    node = ProcessingNode.builder(store)
+        .config(fastConfig.toBuilder()
+            .maintenancePollInterval(Duration.ofMillis(20))
+            .retentionInterval(Duration.ofHours(1))
+            .build())
+        .build();
+    node.start();
+    await()
+        .atMost(Duration.ofSeconds(15))
+        .untilAsserted(
+            () -> assertThat(store.countsByState().get(JobState.SUCCEEDED)).isZero());
+  }
+
   private void insertTerminal(JobState terminal, Instant at, int n) {
     JobArgument arg = serializer.serializePayload(new EngineTestHandlers.HelloPayload("x"));
     for (int i = 0; i < n; i++) {
@@ -1343,6 +1453,7 @@ class ProcessingNodeTest {
               new JobStateEntry(JobState.PROCESSING, at, "test", null),
               new JobStateEntry(terminal, at, "test", null)))
           .build();
+      if (terminal == JobState.FAILED) j.setFailureDecision(FailureDecision.finalFailure());
       store.insert(j);
     }
   }
@@ -1526,6 +1637,88 @@ class ProcessingNodeTest {
   }
 
   @Test
+  void quarantineRetainsFinalizationThroughTransientStoreFailures() {
+    var saves = new AtomicInteger();
+    var hooks = new AtomicInteger();
+    var failing = new ForwardingJobStore(store) {
+      @Override
+      public void saveAtomic(Job job, long expectedVersion) {
+        if (job.currentState() == JobState.QUARANTINED && saves.getAndIncrement() < 3) {
+          throw new IllegalStateException("transient quarantine outage");
+        }
+        super.saveAtomic(job, expectedVersion);
+      }
+    };
+    var poison = Job.builder()
+        .spec(JobSpec.of("com.example.DoesNotExist"))
+        .concurrencyKey("quarantine-outage")
+        .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+        .build();
+    store.insert(poison);
+    pauseForOrdering();
+    var follower = enqueueHello(
+        EngineTestHandlers.CountingHandler.class,
+        fastConfig.defaultQueue(),
+        "quarantine-outage",
+        ConcurrencyMode.EXCLUSIVE);
+    node = ProcessingNode.builder(failing)
+        .config(fastConfig)
+        .interceptor(new JobInterceptor() {
+          @Override
+          public void onProcessingFailed(
+              Job job, JobExecutionContext context, Throwable cause, FailureCause kind) {
+            if (kind == FailureCause.QUARANTINE) hooks.incrementAndGet();
+          }
+        })
+        .build();
+    node.start();
+    await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> {
+      assertThat(store.findById(poison.id()).orElseThrow().currentState())
+          .isEqualTo(JobState.QUARANTINED);
+      assertThat(store.findById(follower.id()).orElseThrow().currentState())
+          .isEqualTo(JobState.SUCCEEDED);
+      assertThat(hooks).hasValue(1);
+    });
+    assertThat(saves).hasValue(4);
+  }
+
+  @Test
+  void successFailureRetainsFinalizationThroughTransientReloadFailures() {
+    var reads = new AtomicInteger();
+    var rejectedSuccess = new AtomicBoolean();
+    var job = enqueueHello(EngineTestHandlers.CountingHandler.class, fastConfig.defaultQueue());
+    var failing = new ForwardingJobStore(store) {
+      @Override
+      public void saveAtomic(Job candidate, long expectedVersion) {
+        if (candidate.currentState() == JobState.SUCCEEDED) {
+          rejectedSuccess.set(true);
+          throw new SerializationException("rejected success snapshot");
+        }
+        super.saveAtomic(candidate, expectedVersion);
+      }
+
+      @Override
+      public Optional<Job> findById(JobId id) {
+        if (rejectedSuccess.get() && reads.getAndIncrement() < 3) {
+          throw new IllegalStateException("transient reload outage");
+        }
+        return super.findById(id);
+      }
+    };
+    node = ProcessingNode.builder(failing)
+        .config(fastConfig.toBuilder().defaultMaxAttempts(1).build())
+        .build();
+    node.start();
+    await()
+        .atMost(Duration.ofSeconds(10))
+        .untilAsserted(() -> assertThat(store.findById(job.id()).orElseThrow().currentState())
+            .isEqualTo(JobState.FAILED));
+    assertThat(reads.get()).isGreaterThanOrEqualTo(4);
+    assertThat(EngineTestHandlers.CountingHandler.COUNT.get(job.id().toString()))
+        .hasValue(1);
+  }
+
+  @Test
   void transientSucceededSaveFailureIsRetriedAndTheJobSucceeds() {
     var remainingFailures = new AtomicInteger(2);
     var failing = new ForwardingJobStore(store) {
@@ -1628,13 +1821,41 @@ class ProcessingNodeTest {
   }
 
   @Test
+  void aLostClaimReplyExpiresWithoutHeartbeatingUnreturnedJobsForever() {
+    var loseReply = new AtomicBoolean(true);
+    var uncertain = new ForwardingJobStore(store) {
+      @Override
+      public List<Job> claimReady(NodeId owner, String queue, int max, Instant now) {
+        var claimed = super.claimReady(owner, queue, max, now);
+        if (!claimed.isEmpty() && loseReply.compareAndSet(true, false))
+          throw new IllegalStateException("lost claim acknowledgement after commit");
+        return claimed;
+      }
+    };
+    var job = enqueueHello(EngineTestHandlers.CountingHandler.class, "default");
+    node = ProcessingNode.builder(uncertain)
+        .config(fastConfig.toBuilder()
+            .maintenancePollInterval(Duration.ofMillis(50))
+            .build())
+        .build();
+    node.start();
+    await().atMost(Duration.ofSeconds(8)).untilAsserted(() -> {
+      var persisted = store.findById(job.id()).orElseThrow();
+      assertThat(persisted.currentState()).isEqualTo(JobState.SUCCEEDED);
+      assertThat(persisted.attempts()).isEqualTo(2);
+    });
+    assertThat(EngineTestHandlers.CountingHandler.COUNT.get(job.id().toString()).get())
+        .isEqualTo(1);
+  }
+
+  @Test
   void persistentHeartbeatFailureSuspendsClaimingAndRecovers() throws Exception {
     var heartbeatDown = new AtomicInteger(1); // 1 = failing
     var failingStore = new ForwardingJobStore(store) {
       @Override
-      public void touchOwnerHeartbeat(NodeId n, Instant now) {
+      public void touchExecutionHeartbeats(NodeId n, Map<JobId, Long> activeClaims, Instant now) {
         if (heartbeatDown.get() == 1) throw new RuntimeException("heartbeat write failing");
-        super.touchOwnerHeartbeat(n, now);
+        super.touchExecutionHeartbeats(n, activeClaims, now);
       }
     };
     node = ProcessingNode.builder(failingStore)
@@ -1643,6 +1864,7 @@ class ProcessingNodeTest {
             .heartbeatTimeout(Duration.ofMillis(200))
             .build())
         .build();
+    enqueueHello(EngineTestHandlers.HangingHandler.class, "default");
     node.start();
 
     // Heartbeats fail for ~heartbeatTimeout, so the node suspends claiming.

@@ -4,6 +4,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Instant;
 import java.util.Optional;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import io.opentelemetry.api.trace.Span;
 import io.opentelemetry.sdk.OpenTelemetrySdk;
@@ -22,7 +24,13 @@ import com.hemju.threadmill.core.JobProgress;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.engine.JobInterceptor;
+import com.hemju.threadmill.core.engine.JobInterceptors;
+import com.hemju.threadmill.core.engine.JobRunner;
+import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
+import com.hemju.threadmill.core.handler.JobHandler;
+import com.hemju.threadmill.core.handler.JobPayload;
+import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
@@ -60,6 +68,7 @@ class ThreadmillTracingTest {
 
     job.transitionTo(JobState.SUCCEEDED, Instant.now());
     interceptor.onProcessingSucceeded(job, ctx);
+    interceptor.onProcessingFinished(job, ctx);
 
     var spans = exporter.getFinishedSpanItems();
     assertThat(spans).hasSize(1);
@@ -82,12 +91,82 @@ class ThreadmillTracingTest {
     job.transitionTo(JobState.FAILED, Instant.now(), "test", "boom");
     interceptor.onProcessingFailed(
         job, ctx, new IllegalStateException("boom"), JobInterceptor.FailureCause.EXCEPTION);
+    interceptor.onProcessingFinished(job, ctx);
 
     var span = exporter.getFinishedSpanItems().getFirst();
     assertThat(span.getStatus().getStatusCode().name()).isEqualTo("ERROR");
     assertThat(span.getAttributes().get(ThreadmillTracing.FAILURE_CAUSE)).isEqualTo("EXCEPTION");
     assertThat(span.getEvents())
         .anySatisfy(event -> assertThat(event.getName()).isEqualTo("exception"));
+  }
+
+  @Test
+  void staleTerminalWriteStillClosesTheExecutionScopeAndSpan() throws Exception {
+    var store = new InMemoryJobStore();
+    var job = Job.builder().spec(JobSpec.of("example.Handler")).build();
+    store.insert(job);
+    var owner = NodeId.newId();
+    var claimed = store.claimReady(owner, "default", 1, Instant.now()).getFirst();
+    JobHandler<JobPayload> handler = (payload, ctx) -> store.softDelete(job.id());
+    var runner = new JobRunner(
+        store,
+        owner,
+        name -> handler,
+        new JsonJobSerializer(),
+        new JobInterceptors().add(tracing.asInterceptor()),
+        ProcessingNodeConfig.defaults());
+    try (var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+      assertThat(workers
+              .submit(() -> {
+                runner.run(claimed);
+                return Span.current().getSpanContext().isValid();
+              })
+              .get(10, TimeUnit.SECONDS))
+          .isFalse();
+    } finally {
+      runner.shutdown();
+    }
+    var spans = exporter.getFinishedSpanItems();
+    assertThat(spans).hasSize(1);
+    assertThat(spans.getFirst().getAttributes().get(ThreadmillTracing.COMPLETION_CONFIRMED))
+        .isFalse();
+    assertThat(spans.getFirst().getAttributes().get(ThreadmillTracing.FINAL_STATE))
+        .isNull();
+    assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.DELETED);
+  }
+
+  @Test
+  void orphanRecoveryOnAnotherThreadNeverClosesTheOriginalExecutionsScope() throws Exception {
+    var job = sample();
+    job.transitionTo(JobState.PROCESSING, Instant.now());
+    var original = context(job);
+    var recovery = context(job);
+    var interceptor = tracing.asInterceptor();
+    interceptor.onProcessingStarting(job, original);
+    var originalSpan = Span.current().getSpanContext();
+    try {
+      job.transitionTo(JobState.FAILED, Instant.now());
+      try (var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+        assertThat(workers
+                .submit(() -> {
+                  interceptor.onProcessingFailed(
+                      job,
+                      recovery,
+                      new IllegalStateException("orphan"),
+                      JobInterceptor.FailureCause.ORPHAN_RECLAIM);
+                  interceptor.onProcessingFinished(job, recovery);
+                  return Span.current().getSpanContext().isValid();
+                })
+                .get(10, TimeUnit.SECONDS))
+            .isFalse();
+      }
+      assertThat(Span.current().getSpanContext()).isEqualTo(originalSpan);
+      assertThat(exporter.getFinishedSpanItems()).hasSize(1);
+    } finally {
+      interceptor.onProcessingFinished(job, original);
+    }
+    assertThat(exporter.getFinishedSpanItems()).hasSize(2);
+    assertThat(Span.current().getSpanContext().isValid()).isFalse();
   }
 
   @Test

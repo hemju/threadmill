@@ -83,15 +83,16 @@ final class DeferredNudge {
       throw new IllegalStateException(
           "Recurring task '" + taskName + "' is disabled; an explicit pause wins over a nudge");
     }
-    batchForCurrentTransaction(nudgeNow, log).add(taskName);
+    batchForCurrentTransaction(store, nudgeNow, log).add(taskName);
   }
 
-  private static NudgeBatch batchForCurrentTransaction(Consumer<String> nudgeNow, Logger log) {
+  private static NudgeBatch batchForCurrentTransaction(
+      JobStore store, Consumer<String> nudgeNow, Logger log) {
     for (TransactionSynchronization existing :
         TransactionSynchronizationManager.getSynchronizations()) {
-      if (existing instanceof NudgeBatch batch) return batch;
+      if (existing instanceof NudgeBatch batch && batch.store == store) return batch;
     }
-    NudgeBatch batch = new NudgeBatch(nudgeNow, log);
+    NudgeBatch batch = new NudgeBatch(store, nudgeNow, log);
     TransactionSynchronizationManager.registerSynchronization(batch);
     return batch;
   }
@@ -102,15 +103,21 @@ final class DeferredNudge {
     // Insertion-ordered so the writes fire in the order the caller asked
     // for them, which keeps logs and traces readable.
     private final Set<String> taskNames = new LinkedHashSet<>();
+    private final JobStore store;
     private final Consumer<String> nudgeNow;
     private final Logger log;
 
-    NudgeBatch(Consumer<String> nudgeNow, Logger log) {
+    NudgeBatch(JobStore store, Consumer<String> nudgeNow, Logger log) {
+      this.store = store;
       this.nudgeNow = nudgeNow;
       this.log = log;
     }
 
     void add(String taskName) {
+      if (!taskNames.contains(taskName) && taskNames.size() >= 1_000) {
+        throw new IllegalArgumentException(
+            "At most 1000 distinct recurring nudges per store and transaction");
+      }
       taskNames.add(taskName);
     }
 

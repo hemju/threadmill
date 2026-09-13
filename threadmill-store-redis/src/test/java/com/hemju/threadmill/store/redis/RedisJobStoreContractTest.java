@@ -6,23 +6,25 @@ import io.lettuce.core.api.StatefulRedisConnection;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
 
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.test.AbstractJobStoreContractTest;
+import com.hemju.threadmill.test.ClaimPoisonRegression;
 
 /**
  * Runs the {@link AbstractJobStoreContractTest} against real Redis via
- * Testcontainers. The exact same 20 tests the in-memory and PostgreSQL
+ * Testcontainers. The exact same contract tests the in-memory and PostgreSQL
  * stores pass must also pass here.
  */
 class RedisJobStoreContractTest extends AbstractJobStoreContractTest {
 
   @SuppressWarnings("resource")
   private static final GenericContainer<?> REDIS = new GenericContainer<>(
-          DockerImageName.parse("redis:7-alpine"))
+          DockerImageName.parse("redis:7.4-alpine"))
       .withExposedPorts(6379)
       .withCommand("redis-server", "--appendonly", "yes")
       .waitingFor(Wait.forListeningPort());
@@ -49,6 +51,14 @@ class RedisJobStoreContractTest extends AbstractJobStoreContractTest {
   @BeforeEach
   void flushBetweenTests() {
     adminConnection.sync().flushdb();
+  }
+
+  @Test
+  void poisonSerializationDoesNotDiscardEarlierClaims() {
+    try (var faulty =
+        new RedisJobStore(adminClient, ClaimPoisonRegression.serializer(), store.capabilities())) {
+      ClaimPoisonRegression.verify(faulty);
+    }
   }
 
   @Override

@@ -76,7 +76,7 @@ export interface QueueView {
 
 export interface JobDetail {
   summary: JobSummary;
-  stateHistory: Array<{ state: JobState; at: string; reason: string | null; detail: string | null }>;
+  stateHistory: Array<{ state: JobState; at: string; reason: string | null; message: string | null }>;
   arguments: Array<{ typeTag: string; serialized: string }>;
   metadata: Record<string, string>;
   log: Array<{ at: string; level: string; message: string }>;
@@ -147,6 +147,21 @@ export async function api<T>(path: string, init: RequestInit = {}, session?: Ses
     headers.set(session.csrf.headerName, session.csrf.token);
   }
   const response = await fetch(`${apiBasePath()}${path}`, { ...init, headers, credentials: "same-origin" });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  if (!response.ok) {
+    let message = `${response.status} ${response.statusText}`.trim();
+    // Only the server's public, redacted ProblemDetail contract is displayed.
+    // Never echo a proxy HTML body, stack trace, or unexpected server exception.
+    if (response.status >= 400 && response.status < 500 &&
+        response.headers?.get("Content-Type")?.includes("application/problem+json")) {
+      try {
+        const problem: unknown = await response.json();
+        if (problem && typeof problem === "object" && "detail" in problem &&
+            typeof problem.detail === "string" && problem.detail.trim()) {
+          message += `: ${problem.detail.slice(0, 1024)}`;
+        }
+      } catch { /* Keep the HTTP status when an upstream response is malformed. */ }
+    }
+    throw new Error(message);
+  }
   return response.json() as Promise<T>;
 }

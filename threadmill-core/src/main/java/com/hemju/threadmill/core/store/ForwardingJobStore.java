@@ -145,6 +145,11 @@ public class ForwardingJobStore implements JobStore {
   }
 
   @Override
+  public void touchExecutionHeartbeats(NodeId nodeId, Map<JobId, Long> activeClaims, Instant now) {
+    delegate.touchExecutionHeartbeats(nodeId, activeClaims, now);
+  }
+
+  @Override
   public boolean saveExecutionUpdate(Job job, NodeId nodeId) {
     return delegate.saveExecutionUpdate(job, nodeId);
   }
@@ -204,6 +209,16 @@ public class ForwardingJobStore implements JobStore {
   }
 
   @Override
+  public List<Job> scanJobs(JobState state, JobId after, int max) {
+    return delegate.scanJobs(state, after, max);
+  }
+
+  @Override
+  public List<CronTask> scanCronTasks(String after, int max) {
+    return delegate.scanCronTasks(after, max);
+  }
+
+  @Override
   public List<Job> searchJobs(JobSearch search) {
     return delegate.searchJobs(search);
   }
@@ -211,6 +226,11 @@ public class ForwardingJobStore implements JobStore {
   @Override
   public Optional<Instant> oldestEnqueuedAt(String queue) {
     return delegate.oldestEnqueuedAt(queue);
+  }
+
+  @Override
+  public Optional<Instant> oldestMaintenanceAt(JobState state) {
+    return delegate.oldestMaintenanceAt(state);
   }
 
   @Override
@@ -229,6 +249,16 @@ public class ForwardingJobStore implements JobStore {
   }
 
   @Override
+  public long deleteIdleConcurrencyGroups(int max) {
+    return delegate.deleteIdleConcurrencyGroups(max);
+  }
+
+  @Override
+  public long deleteIdleQueueMetadata(int max) {
+    return delegate.deleteIdleQueueMetadata(max);
+  }
+
+  @Override
   public long deleteExpiredDedupKeys(Instant now, int max) {
     return delegate.deleteExpiredDedupKeys(now, max);
   }
@@ -239,6 +269,13 @@ public class ForwardingJobStore implements JobStore {
   }
 
   // ---------------------------------------------------------------- retention
+
+  @Override
+  public RetentionPage deleteFinishedPage(
+      Instant cutoff, JobState state, int max, RetentionCursor after) {
+
+    return delegate.deleteFinishedPage(cutoff, state, max, after);
+  }
 
   @Override
   public long deleteFinishedOlderThan(Instant cutoff, JobState state, int max) {

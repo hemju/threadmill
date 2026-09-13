@@ -12,11 +12,13 @@ public sealed interface RedisStoreConfig
 
   RedisSafetyValidation safetyValidation();
 
+  /** Startup checks for Redis 7.4+ and durable no-eviction storage. */
   record RedisSafetyValidation(boolean requireNoEviction, boolean externallyValidated) {
     public static RedisSafetyValidation strict() {
       return new RedisSafetyValidation(true, false);
     }
 
+    /** Skip INFO/CONFIG only after independently verifying version and eviction policy on all nodes. */
     public static RedisSafetyValidation externallyValidatedMode() {
       return new RedisSafetyValidation(true, true);
     }

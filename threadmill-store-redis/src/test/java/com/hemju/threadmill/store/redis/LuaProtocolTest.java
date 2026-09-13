@@ -15,6 +15,21 @@ import org.junit.jupiter.api.Test;
 class LuaProtocolTest {
 
   @Test
+  void insertScriptsUseTheCurrentStorageFormatAndResolvedKeySuffixes() {
+    for (var script :
+        List.of(LuaScripts.insert(), LuaScripts.insertAll(), LuaScripts.enqueueIfAbsent())) {
+      assertThat(script)
+          .contains("'" + RedisStorageFormat.KEY + "', '" + RedisStorageFormat.CURRENT + "'")
+          .contains(
+              "'" + RedisKeys.ORDERED_SUFFIX + "'",
+              "'" + RedisKeys.READY_SUFFIX + "'",
+              "'" + RedisKeys.EXCLUSIVE_SUFFIX + "'",
+              "'" + RedisKeys.IDS_SUFFIX + "'")
+          .doesNotContain("__THREADMILL_");
+    }
+  }
+
+  @Test
   void insertAllStrideMatchesTheJavaPacking() {
     String lua = LuaScripts.insertAll();
     int keys = RedisJobStore.INSERT_KEYS_PER_JOB;

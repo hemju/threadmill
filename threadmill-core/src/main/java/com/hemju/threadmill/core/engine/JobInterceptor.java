@@ -1,5 +1,6 @@
 package com.hemju.threadmill.core.engine;
 
+import com.hemju.threadmill.core.FailureDecision;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
@@ -24,12 +25,35 @@ public interface JobInterceptor {
   default void onProcessingSucceeded(Job job, JobExecutionContext ctx) {}
 
   /**
+   * Resolve a durable disposition before FAILED is saved. Return null to defer
+   * to the next interceptor. The first decision wins; absent a policy the
+   * engine records final failure. This hook must not write to the store or
+   * perform external effects. Completion notification still uses onProcessingFailed.
+   * A {@link ProcessingNode} consults user interceptors in registration order
+   * before its built-in retry policy; returning null retains that policy.
+   * This decision precedence does not change completion notification order.
+   */
+  default FailureDecision onProcessingFailureDecision(
+      Job job, JobExecutionContext ctx, Throwable cause, FailureCause kind) {
+    return null;
+  }
+
+  /**
    * Invoked exactly once when the engine decides a job has failed —
    * regardless of whether the cause was a thrown exception, a timeout,
    * or an orphan reclaim. This is the engine's single failure path.
    */
   default void onProcessingFailed(
       Job job, JobExecutionContext ctx, Throwable cause, FailureCause causeKind) {}
+
+  /**
+   * Release attempt-local resources on every engine exit, including stale writes,
+   * quarantine, shutdown and orphan recovery. Runs on the execution's own thread
+   * in reverse registration order. The same context instance identifies this
+   * execution; recovery uses a separate context. This hook does not certify a
+   * persisted outcome and must not enqueue work or change job state.
+   */
+  default void onProcessingFinished(Job job, JobExecutionContext ctx) {}
 
   /** Invoked when the engine transitions a job between states. */
   default void onStateChange(Job job, JobState from, JobState to) {}

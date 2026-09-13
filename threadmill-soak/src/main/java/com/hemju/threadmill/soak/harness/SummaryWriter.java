@@ -101,7 +101,7 @@ public final class SummaryWriter {
     }
     if (!p.lockContention().byKey().isEmpty()) {
       sb.append("\n### Lock contention by key\n\n");
-      sb.append("| Key | Acquires | Max shared | Exclusive | Avg wait (ms) | p99 wait (ms) |\n");
+      sb.append("| Key | Acquires | Max shared | Exclusive | Avg held (ms) | p99 held (ms) |\n");
       sb.append("|---|---|---|---|---|---|\n");
       for (var e : p.lockContention().byKey().entrySet()) {
         var s = e.getValue();

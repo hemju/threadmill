@@ -13,6 +13,14 @@ maintenance lease. Only the lease holder promotes scheduled jobs, materializes
 recurring jobs, reclaims orphans, and runs retention. If the store is
 unreachable, nodes stop acting as maintenance leader.
 
+Shutdown immediately revokes local leadership and waits up to one second for
+the registry loop to finish its current write. It withdraws the heartbeat and
+lease both during shutdown and after the loop's last in-flight write, so a
+datastore call that ignores interruption cannot leave a renewed lease behind
+after it returns. Withdrawal is best effort during an outage; lease expiry
+remains the fallback. Cleanup temporarily clears and then restores interruption
+so interrupt-sensitive clients can send the final withdrawal.
+
 ## Store Outages During Completion
 
 If a handler finishes while its job store is unavailable, the worker remains
@@ -23,6 +31,13 @@ node cannot execute the same attempt concurrently. Once the store recovers,
 the terminal save completes normally. If the node shuts down first, its retry
 and heartbeats stop; the maintenance leader then reclaims the job after
 `heartbeatTimeout` under the usual at-least-once semantics.
+
+When no execution or finalization context is active, the execution-heartbeat
+tick makes no datastore call. It clears any heartbeat-related claim suspension
+because no active attempt needs renewal; this is not a successful datastore
+health probe. If the store is still unavailable, the dispatcher's next claim
+detects the outage and its circuit breaker pauses dispatch. Node-registry
+heartbeats remain independent.
 
 ## Fatal JVM Errors and Process Supervision
 
@@ -37,12 +52,11 @@ as healthy.
 
 Escaping an engine boundary terminates that engine thread, not necessarily the
 JVM. Threadmill deliberately does not call `System.exit` or `Runtime.halt`; the
-host owns termination policy. Without a host policy, a fatal error on a worker
-can leave its job `PROCESSING` while the node's owner heartbeat continues to
-refresh it. Orphan recovery cannot reclaim that job, and its claim-time
-concurrency slot remains held, until the node stops and its heartbeat expires.
-A fatal error on a long-lived engine loop can similarly leave a live but
-impaired process.
+host owns termination policy. Worker cleanup unregisters an exited attempt from
+execution heartbeats, allowing its persisted `PROCESSING` claim to expire even
+while the node remains alive. Fatal JVM failures can prevent cleanup or disable
+a long-lived engine loop, however; heartbeat expiry is no substitute for
+terminating an impaired process.
 
 Production deployments must therefore convert uncaught process-fatal errors
 into process termination and run the service under a supervisor that restarts
@@ -223,3 +237,106 @@ Invocation cheat-sheet:
 
 See `threadmill-soak/README.md` for the full `-P` property list, the output
 directory layout, and the AI-drop-in workflow.
+
+### Maintenance capacity and backlog ages
+
+Unfinished correctness-recovery passes resume on each `maintenancePollInterval`,
+independently of retention. Retry recovery and workflow reconciliation each
+inspect at most 500 jobs per tick, retaining an exclusive job-id cursor across
+ticks. After a complete pass each activity pauses for 30 seconds, so retained
+final failures and legitimate waiting children are not continuously re-read.
+Workflow reconciliation reads each distinct parent once per page. Recovery of a
+crashed completion hook can therefore wait that interval plus one pass; stranded
+retry recovery also requires a five-minute-old failure. Recurring
+materialization visits at most 64 definitions per tick with a stable name cursor.
+Promotion handles at most 500 candidates. These activities yield between records
+at a cooperative 200 ms budget; a single datastore call or interceptor can exceed
+that budget, so configure datastore timeouts as well. A full sweep takes at least
+`ceil(population / page size)` ticks, and can take longer under load. Monitor lag
+when sizing the maintenance interval and recurring-definition population.
+
+Retention still uses batches of 100 with at most 50 batches per terminal state
+and a cooperative 200 ms budget. When a sweep exhausts either budget, it resumes
+on the next maintenance tick. `retentionInterval` is the delay after a completed
+sweep, rather than a throttle limiting cleanup to 5,000 records per hour. Expired
+deduplication cleanup follows the same rule. Correctness activities run first;
+a nonfatal failure in one activity does not suppress the others.
+
+Retention scans at most 100 cutoff-eligible candidates per store call, ordered
+by transition time and ID in the bundled stores. Recent jobs do not consume its
+page budget or require body reads. Its opaque `RetentionCursor` advances past
+protected records and survives deletion of the previous cursor's job, including
+timestamp ties. Keep the state and cutoff fixed for an entire pass. Deletion
+atomically checks state/version, live dedup protection, and waiting
+children. A successful workflow predecessor remains until its waiting children
+have been promoted; `FAILED` jobs remain while a retry is pending or their legacy
+retry decision is unknown. Unreadable failure decisions also remain for operator
+review. Use `JobStore.deleteFinishedPage` and its returned cursor for manual
+bounded maintenance; `deleteFinishedOlderThan` inspects only the first page.
+
+With `ThreadmillMetrics.meteredStore()`, `threadmill.retention.deleted` counts
+actual deletions by terminal state or `dedup`; its rate measures cleanup capacity.
+`threadmill.maintenance.oldest.age` reports milliseconds since the oldest due time
+for `SCHEDULED`, and since the oldest state entry for other states. The scheduled
+gauge is promotion lag. `AWAITING` and `FAILED` ages are investigation signals:
+they include legitimate waiting children and final failures, respectively. For
+terminal states, subtract the configured retention age to estimate overdue
+storage. This is an upper bound: active deduplication windows can protect old
+records. The gauges share the normal cached snapshot and staleness indicators.
+
+A release soak must shorten retention enough to reach steady state, then compare
+input and deletion rates, record count and storage size, and promotion/recovery
+latency while cleanup is active. An eight-hour run with seven-day retention cannot
+validate retention capacity.
+
+Maintenance also inspects at most 100 persisted concurrency groups per poll,
+using resumable cursors. It removes counters only when no active hold or
+nonterminal work needs the key, with a one-minute idle grace to avoid deleting
+hot keys between consecutive jobs. PostgreSQL measures from `last_modified`;
+Redis starts the grace when cleanup first observes the idle key and resets it
+on a new claim. PostgreSQL locks and rechecks the candidate;
+Redis checks and removes it in one Lua call. New work can safely recreate the
+bookkeeping. This bounds accumulation from one-use business-operation keys once
+their workflows finish. The metered store exports these deletions with
+`threadmill.retention.deleted{kind="concurrency"}`. The in-memory store derives
+admission from its stored jobs and has no separate counter rows to reclaim.
+
+PostgreSQL also inspects at most 100 queue-counter groups per poll through
+`deleteIdleQueueMetadata`. It deletes only locked, zero-sum shard rows of empty
+queues; negative individual shards and concurrent producers remain valid.
+`threadmill.retention.deleted{kind="queue_metadata"}` counts removed rows.
+
+Queue cleanup reads at most 100 queue groups per page and locks only candidates
+whose counters sum to zero and which have no enqueued jobs. It rechecks both
+conditions while deleting the locked shards. Active queues advance the cursor
+without counter-row locks. Metadata cleanup remains on the maintenance poll:
+an hourly 100-key/page limit would accumulate metadata under sustained unique-key
+or unique-queue churn. Its bounded pages and idle-group grace limit the work;
+the soak must verify that cleanup capacity exceeds metadata creation.
+The in-memory and Redis stores need no corresponding empty-queue counter cleanup.
+
+Execution heartbeats renew only confirmed active job IDs and their captured
+claim versions, in batches of at most 500. A committed claim whose response is
+lost is absent from that active set and can expire into normal orphan recovery,
+even while its node remains alive. A stale attempt cannot refresh a newer claim
+of the same job. Active terminal finalizers retain their heartbeat while retrying
+a store outage. At-least-once delivery still requires idempotent handlers.
+
+Execution resources are released through `JobInterceptor.onProcessingFinished`,
+which runs in an engine `finally` block in reverse interceptor order. It also
+runs for stale or rejected completion writes, fatal errors, shutdown release and
+orphan recovery. Cleanup does not certify that the job reached a persisted
+terminal state. Use the context instance to identify an execution: job ID and
+attempt number alone can collide with concurrent recovery or a refunded retry.
+
+Metrics expose `threadmill.executions.active` and
+`threadmill.executions.unconfirmed`. Unconfirmed exits include attempts whose
+completion lost an optimistic-lock race; they do not imply that durable work was
+lost. OpenTelemetry spans include `threadmill.execution.completion_confirmed`;
+when false, the local attempt ended without a confirmed outcome notification.
+An orphan-recovery span never borrows or closes the original execution's scope.
+
+For scrape endpoints with strict latency budgets, configure the optional
+[asynchronous metrics refresh executor](../threadmill-metrics/README.md#wiring).
+A store outage then leaves cached values and increasing snapshot age visible
+without blocking the scrape. Explicit refresh calls remain synchronous.

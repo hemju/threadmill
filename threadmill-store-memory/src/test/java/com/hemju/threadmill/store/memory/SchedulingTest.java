@@ -216,6 +216,40 @@ class SchedulingTest {
   }
 
   @Test
+  void dormantDefinitionsDoNotPermanentlyHideLaterDueTasks() {
+    for (int i = 0; i < 140; i++) {
+      scheduler.defineIntervalTask(
+          "dormant-" + String.format("%03d", i),
+          Duration.ofDays(1),
+          new HelloPayload("idle"),
+          RecorderHandler.class,
+          "default",
+          0,
+          CronTask.MissedRunPolicy.DROP);
+    }
+    scheduler.defineIntervalTask(
+        "zz-due",
+        Duration.ofDays(1),
+        new HelloPayload("due"),
+        RecorderHandler.class,
+        "default",
+        0,
+        CronTask.MissedRunPolicy.DROP);
+    var state = store.findCronTaskState("zz-due").orElseThrow();
+    store.upsertCronTaskState(new CronTaskScheduleState(
+        state.taskName(),
+        null,
+        null,
+        Instant.now().minusSeconds(1),
+        null,
+        state.timingFingerprint()));
+    var materializer = new RecurringMaterializer(store);
+    for (int pass = 0; pass < 10; pass++) materializer.tick(Instant.now());
+    assertThat(store.findCronTaskState("zz-due").orElseThrow().lastRunJobId()).isNotNull();
+    assertThat(store.countsByState().get(JobState.ENQUEUED)).isEqualTo(1);
+  }
+
+  @Test
   void catchUpPolicyMaterializesEveryMissedFire() {
     // Pre-create a task whose next run is in the past, so the master tick has to catch up.
     scheduler.defineIntervalTask(

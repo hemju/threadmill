@@ -47,7 +47,7 @@ class StorePrecedenceTest {
 
   @SuppressWarnings("resource")
   private static final GenericContainer<?> REDIS = new GenericContainer<>(
-          DockerImageName.parse("redis:7-alpine"))
+          DockerImageName.parse("redis:7.4-alpine"))
       .withExposedPorts(6379)
       .withCommand("redis-server", "--appendonly", "yes")
       .waitingFor(Wait.forListeningPort());

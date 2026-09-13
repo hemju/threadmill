@@ -19,8 +19,9 @@ import com.fasterxml.jackson.annotation.JsonValue;
  * convention.
  *
  * <p>This parser is intentionally minimal. Richer expressions (business
- * days, last-day-of-month, etc.) can be added by subclassing or composing
- * with this class — its API is deliberately small for that reason.
+ * days, last-day-of-month, etc.) require an application-owned scheduling
+ * policy that composes the supported operations. This class is final;
+ * additional expression syntax is not part of its contract.
  */
 public final class CronExpression {
 
@@ -112,6 +113,25 @@ public final class CronExpression {
     }
     throw new IllegalStateException(
         "cron expression " + expression + " produced no next fire within a year");
+  }
+
+  /** Most recent matching minute, used to collapse DROP backlog without replaying missed fires. */
+  Instant previousOrSame(Instant before, ZoneId zone) {
+    var time = before.atZone(zone).withSecond(0).withNano(0);
+    for (int safety = 0; safety < 525_600; safety++) {
+      if (!months.get(time.getMonthValue())) {
+        time = time.withDayOfMonth(1).minusDays(1).withHour(23).withMinute(59);
+      } else if (!matchesDay(time.getDayOfMonth(), time.getDayOfWeek().getValue() % 7)) {
+        time = time.minusDays(1).withHour(23).withMinute(59);
+      } else if (!hours.get(time.getHour())) {
+        time = time.minusHours(1).withMinute(59);
+      } else if (!minutes.get(time.getMinute())) {
+        time = time.minusMinutes(1);
+      } else {
+        return time.toInstant();
+      }
+    }
+    throw new IllegalStateException("No prior fire found for cron expression " + expression);
   }
 
   private boolean matchesDay(int dom, int dow) {

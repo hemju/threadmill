@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Duration;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
@@ -12,7 +13,10 @@ import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.PayloadApplicationEvent;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
+import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.QueueLane;
@@ -25,6 +29,7 @@ import com.hemju.threadmill.core.handler.NoPayload;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.spec.JobArgument;
+import com.hemju.threadmill.core.store.ForwardingJobStore;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
 
@@ -67,6 +72,43 @@ class ThreadmillAutoConfigurationTest {
       assertThat(context.getBean(JobScheduler.class))
           .isInstanceOf(TransactionAwareJobScheduler.class);
     });
+  }
+
+  @Test
+  void autoConfiguredAfterCommitFailuresReachSpringEventListeners() {
+    var failures = new CopyOnWriteArrayList<AfterCommitEnqueueFailure>();
+    var memory = new InMemoryJobStore();
+    var failing = new ForwardingJobStore(memory) {
+      @Override
+      // The Spring @Job annotation and core Job model share a simple name.
+      public List<JobId> insertAll(List<com.hemju.threadmill.core.Job> jobs) {
+        throw new IllegalStateException("store outage");
+      }
+    };
+    contextRunner
+        .withBean(JobStore.class, () -> failing)
+        .withBean(QueueAHandler.class)
+        .run(context -> {
+          context.getSourceApplicationContext().addApplicationListener(event -> {
+            if (event instanceof PayloadApplicationEvent<?> payload
+                && payload.getPayload() instanceof AfterCommitEnqueueFailure failure) {
+              failures.add(failure);
+            }
+          });
+          TransactionSynchronizationManager.initSynchronization();
+          try {
+            var ids = context
+                .getBean(JobScheduler.class)
+                .enqueueAll(QueueAHandler.class, List.of(new PayloadA()));
+            for (var synchronization : TransactionSynchronizationManager.getSynchronizations())
+              synchronization.afterCommit();
+            assertThat(failures)
+                .singleElement()
+                .satisfies(failure -> assertThat(failure.jobIds()).isEqualTo(ids));
+          } finally {
+            TransactionSynchronizationManager.clear();
+          }
+        });
   }
 
   @Test

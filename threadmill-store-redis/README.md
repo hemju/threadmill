@@ -35,6 +35,24 @@ TLS resources or client options, inject a caller-managed `RedisClient` or
 Threadmill topology descriptions and wrapped connection failures never include
 ACL usernames or passwords.
 
+Redis **7.4 or later** is required on every data node, including replicas that
+may be promoted. Startup checks the connected server with `INFO server` against this tested
+support baseline. Keep all nodes in a topology on supported
+versions. Managed services that restrict `INFO`/`CONFIG` may use
+`RedisSafetyValidation.externallyValidatedMode()` only after independently
+verifying both the version and the no-eviction policy. Tests and examples use
+the minimum supported 7.4 release line.
+
+This is a qualification boundary, not a claim that each script needs a 7.4-only
+command. Redis 7.0/7.2 and Valkey have not passed Threadmill's supported
+version/topology matrix and are not supported. `externallyValidatedMode()` is
+for restricted administrative commands on an otherwise supported deployment;
+it does not extend the supported version or product matrix.
+
+`RedisJobStore` implements `AutoCloseable`: use try-with-resources for manually
+owned stores. Closing a store closes its connection; a caller-injected client
+remains owned by the caller.
+
 Durability is Redis-level. Run with `--appendonly yes`. Out of the box,
 Redis is less durable than PostgreSQL — a crash within 1 s of a state
 change may lose the state change depending on `appendfsync` setting.
@@ -65,7 +83,7 @@ indexes remain in the same slot too.
 
 | Key | Type | Purpose |
 |---|---|---|
-| `{threadmill}:job:{id}` | HASH | Per-job state. Fields: `body`, `state`, `queue`, `priority`, `handler_signature`, `scheduled_at`, `owner_node_id`, `owner_heartbeat_at`, `last_checkin_at`, `current_state_at`, `created_at`, `workflow_root_id`, `concurrency_key`, `concurrency_mode`, `version`. |
+| `{threadmill}:job:{id}` | HASH | Per-job state. Fields: `body`, `state`, `queue`, `priority`, `handler_signature`, `scheduled_at`, `owner_node_id`, `owner_heartbeat_at`, `last_checkin_at`, `current_state_at`, `created_at`, `workflow_root_id`, `concurrency_key`, `concurrency_mode`, `version`, `execution_revision`. |
 | `{threadmill}:queue:{queue}` | ZSET | ENQUEUED job ids per queue. Score `-priority` so `ZRANGE LIMIT 0 N` returns highest-priority first; Redis breaks equal-score ties lexicographically by the UUIDv7 job-id member. This exactly matches `(priority DESC, id)` across the full `int` priority and timestamp ranges. |
 | `{threadmill}:scheduled` | ZSET | SCHEDULED ids scored by `scheduled_at` (millis since epoch). |
 | `{threadmill}:awaiting` | ZSET | AWAITING ids scored by state-entry time. |
@@ -73,12 +91,17 @@ indexes remain in the same slot too.
 | `{threadmill}:processing:{node}` | ZSET | Per-node PROCESSING ids (same score). Lets `touchOwnerHeartbeat` rescore one ZSET, not scan globally. |
 | `{threadmill}:by_handler:{handler}` | SET | Members are job ids. Powers `findByHandlerSignature`. |
 | `{threadmill}:by_state_time:{STATE}` | ZSET | Ids scored by `current_state_at`. Used for retention. |
+| `{threadmill}:storage_format` | STRING | Completed index-format version (currently `2`), or an incomplete migration marker. |
+| `{threadmill}:storage_format_migration` | STRING with TTL | Offline migration lease. |
+| `{threadmill}:by_state_time:{STATE}:ids` | ZSET | Zero-score ID order for bounded retry/workflow recovery pages. |
 | `{threadmill}:counts` | HASH | State → cardinality. `HINCRBY` inside every state-changing script. **Never** `SCARD` / `ZCARD` for live counts. |
 | `{threadmill}:queues` | SET | Active queue names (membership maintained by `claim_commit`). |
-| `{threadmill}:queue_keys:{queue}` | HASH | Concurrency key → count of ENQUEUED keyed jobs of that key in the queue. The claim path uses a rotating bounded HSCAN cursor, so one pass stays bounded even at high key cardinality. |
+| `{threadmill}:queue_keys:{queue}` | HASH | Concurrency key → count of ENQUEUED keyed jobs of that key in the queue. An ordered ZSET mirror (`:ordered`) supplies bounded lexicographic registry pages. |
+| `{threadmill}:queue_keys:{queue}:ordered` | ZSET | Zero-score lexicographic queue-key registry. |
 | `{threadmill}:queue_unkeyed:{queue}` | ZSET | ENQUEUED unkeyed job ids, scored like the queue ZSET. The unkeyed claim lane never pages past keyed work. |
 | `{threadmill}:queue_enqueued_at:{queue}` | ZSET | Every ENQUEUED job id in the queue, scored by `current_state_at` millis. `oldestEnqueuedAt` (the `threadmill.queue.oldest.enqueued.age` gauge and the dashboard queue view) reads its head with one `ZRANGE 0 0 WITHSCORES`, so the age gauge never scans the priority-ordered queue ZSET. Maintained inside the same atomic scripts as queue membership. |
 | `{threadmill}:queue_pauses` | HASH | Paused queue → reason. |
+| `{threadmill}:cron_tasks:ordered` | ZSET | Zero-score recurring-name order for bounded materializer pages. |
 | `{threadmill}:cron_task_namespace:{namespace}` | SET | Cron task names owned by one reconciliation namespace. |
 | `{threadmill}:cron_task_namespaces` | SET | Known recurring reconciliation namespaces. |
 | `{threadmill}:nodes` | SET | Known NodeIds. |
@@ -87,8 +110,11 @@ indexes remain in the same slot too.
 | `{threadmill}:no_key` | Reserved sentinel | Placeholder for an absent optional Lua `KEYS` entry; never stores data. |
 | `{threadmill}:dedup:{queue}:{dedupKey}` | STRING | Dedup record. |
 | `{threadmill}:dedup_expiry` | ZSET | Dedup record expiries; maintenance cleanup reads this. |
-| `{threadmill}:concurrency:{key}:counters` | HASH | Per-key in-flight counts (`exclusive_in_flight`, `shared_in_flight`). |
+| `{threadmill}:concurrency_counters` | ZSET | Zero-score registry of counter keys for bounded idle cleanup. |
+| `{threadmill}:concurrency:{key}:counters` | HASH | Per-key in-flight counts (`exclusive_in_flight`, `shared_in_flight`) and optional `idle_since` grace marker. |
 | `{threadmill}:concurrency:{key}:pending` | ZSET | Pending concurrency members, scored by enqueue-time micros. |
+| `{threadmill}:concurrency:{key}:pending:exclusive` | ZSET | EXCLUSIVE-only pending mirror for the admission barrier. |
+| `{threadmill}:concurrency:{key}:pending:ready:{queueKeys}` | ZSET | Per-queue ENQUEUED pending mirror; `{queueKeys}` is the full encoded queue-key registry key. |
 | `{threadmill}:concurrency:{key}:pending_root:{root}` | ZSET | Per workflow-root mirror of `pending` (same members and scores), kept only for members whose workflow root differs from their own job id. Lets the claim path find active-hold members without scanning the pending population. |
 | `{threadmill}:concurrency:{key}:workflows` | HASH | Workflow root id → active outstanding hold count. Presence means the workflow currently owns the key. |
 | `{threadmill}:concurrency:{key}:workflow_counts` | HASH | Workflow root id → total non-terminal job count. Maintained incrementally so claim does not scan active jobs. |
@@ -129,13 +155,16 @@ server (single-threaded execution).
 | `enqueue_if_absent.lua` | Producer-side dedup: insert iff `(queue, dedupKey)` isn't already mapped to an active job. |
 | `save_atomic.lua` | Version-matched conditional update — the optimistic-lock save. |
 | `claim_commit.lua` | The reliable-fetch claim. Java prepares the PROCESSING body first, then this script verifies version / state / queue membership and commits body, scalars, indexes (queue → processing + per-node), attempts, owner heartbeat, and counts together. Consults concurrency counters, pending members, workflow counts, and workflow holds before committing. A crash before this script leaves the job ENQUEUED; a crash after leaves a complete PROCESSING record for orphan recovery. |
-| `touch_heartbeat.lua` | Rescore every owned PROCESSING id in the per-node ZSET. Does not bump optimistic-lock version. |
+| `touch_heartbeat.lua` | Explicit owner-wide heartbeat helper for external callers. Does not bump optimistic-lock version. |
+| `touch_execution_heartbeats.lua` | Engine heartbeat: refresh at most 500 confirmed ID/version/owner-matching PROCESSING attempts; unreturned claims can expire into recovery. |
 | `replace_job.lua` | Atomic in-place definition swap for non-running jobs. Moves the row between queue ZSETs if the queue changes. |
 | `soft_delete.lua` | Move a job to DELETED, removing it from active indexes and per-handler set, decrementing counts. |
 | `mutex_acquire.lua` | Acquire-or-refresh a named mutex with a millisecond-precision lease. One Lua call removes the race window that `SET NX` + `PEXPIRE` would have. |
 | `lease_acquire.lua` | Compare-and-renew for the maintenance lease. |
 | `lease_release.lua` | Compare-and-delete for the maintenance lease. |
 | `dedup_delete.lua` | Compare-and-delete an expired dedup record without erasing a concurrent replacement. |
+| `retention_candidates.lua` | Read-only cutoff-eligible time/ID paging, with bounded seeking through timestamp ties even after cursor deletion. |
+| `cleanup_concurrency.lua` | Reclaim idle counters after a one-minute grace, preserving active and pending work. |
 | `retention_delete.lua` | State-checked hard deletion with atomic index and count cleanup. |
 | `queue_prune.lua` | Remove an empty queue from the registry without racing a concurrent insert. |
 
@@ -143,25 +172,32 @@ server (single-threaded execution).
 
 Never a destructive `BLPOP` / `ZPOPMIN`. The flow is:
 
-1. Java gathers candidates from bounded, key-driven lanes — unkeyed heads
-   from `{threadmill}:queue_unkeyed:{queue}`, per-concurrency-key
-   pending-order head runs discovered through a rotating HSCAN over
-   `{threadmill}:queue_keys:{queue}`,
-   and active-workflow-hold members via the `pending_root` mirrors — then
-   sorts them by queue-ZSET score and UUID member, exactly `(priority DESC,
-   id)`. Per-key admission reads
-   and queue-score probes are asynchronously pipelined. Each pass is bounded
-   by a key-page budget and never scales with backlog depth or requires one
-   network round trip per registered key.
+1. Java gathers unkeyed heads and bounded windows from each selected key's
+   queue-specific ready ZSET. A lexicographic cursor pages the ordered queue-key
+   registry; per-key windows rotate so active workflow members remain reachable
+   behind blocked heads. Reads are pipelined, then candidates sort by priority
+   and UUID. No global pending window is filtered after truncation, and no pass
+   enumerates every active workflow hold.
 2. For each candidate, Java prepares the new body with the `PROCESSING`
    state-history entry appended and the version bumped.
 3. `claim_commit.lua` verifies version / state / queue membership plus the
    concurrency admission rules (it is the single admission authority — the
-   gathering reads are unlocked approximations) and commits the new body +
+   gathering reads are unlocked approximations). It reads only the earliest
+   pending or earliest EXCLUSIVE member, ordered by score then `id:MODE`,
+   and commits the new body +
    every index update + counts in one atomic call.
 
 A crash before step 3 leaves the job in ENQUEUED. A crash after step 3
 leaves a complete PROCESSING record for the orphan-recovery path.
+
+Short per-key preparation locks have a 30-second expiry as a crash fallback.
+A timed-out or interrupted lock acquisition may have committed in Redis, so
+cleanup compares the acquisition token before deleting it. Partial bulk
+acquisitions and failed workflow re-reads release every acquired lock; one
+cleanup error does not skip the other locks or replace the acquisition failure.
+Cleanup temporarily clears and then restores the caller's interrupt flag so
+Lettuce can complete its bounded release. A continuing outage can still prevent
+cleanup; expiry remains the fallback. This does not change at-least-once delivery.
 
 ## Capabilities
 
@@ -191,5 +227,34 @@ per script:
 ./gradlew :threadmill-store-redis:test
 ```
 
-Runs against a `redis:7-alpine` Testcontainer. 72 tests: 61 contract + 9
-regression + 2 keys-tests.
+Runs the shared store contract and backend regressions against real
+`redis:7.4-alpine` Testcontainers. The Gradle test report is the source for
+current executed, skipped, and failed test counts.
+
+### Admission index format 2
+
+The global pending ZSET uses `id:MODE` members, scored in microseconds. Its
+`:exclusive` mirror contains only EXCLUSIVE members. Its
+`:ready:<queue-keys-key>` mirror contains only ENQUEUED members of one queue.
+The queue-key count hash has a `:ordered` ZSET mirror. All these indexes change
+atomically with the job through the shared `pending_indexes.lua` helpers.
+
+Registry pages contain at most 256 keys. Per-key candidate windows divide the
+claim budget across those keys; a shrinking window may require one extra read
+to wrap. A claim call makes at most 20 passes. Cursor caches retain 1,024 active
+entries; eviction resets scan progress and can increase delay for cold queues
+or keys. These bounds constrain each call; they are not a latency SLA under
+unbounded queue/key growth. One namespace still occupies one Redis Cluster
+slot; Cluster support provides topology and failover integration, not horizontal
+sharding of that namespace.
+
+Existing v0.3 data requires the offline upgrade documented in
+[Redis topologies](../docs/redis-topologies.md#upgrading-existing-redis-data).
+
+`searchJobs` accepts a state with pagination. It rejects state-less requests and
+queue/handler filters with `IllegalArgumentException`, matching the advertised
+`supportsRichSearch=false` capability and the dashboard's existing validation.
+It never returns a filtered fragment of an unrelated global page. State-only
+pages preserve the Redis index order: newest transition millisecond first, then
+descending canonical job ID for ties. The order is independent of page size;
+concurrent state changes can still move records between pages.

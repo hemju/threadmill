@@ -26,9 +26,11 @@ local count = 0
 for _, id in ipairs(ids) do
     local job_key = prefix .. id
     if redis.call('EXISTS', job_key) == 1 then
-        redis.call('ZADD', node_key, hb_ms, id)
-        redis.call('ZADD', all_key, hb_ms, id)
-        redis.call('HSET', job_key, 'owner_heartbeat_at', tostring(hb_ms))
+        local current = tonumber(redis.call('HGET', job_key, 'owner_heartbeat_at')) or 0
+        local advanced = math.max(current, hb_ms)
+        redis.call('ZADD', node_key, advanced, id)
+        redis.call('ZADD', all_key, advanced, id)
+        redis.call('HSET', job_key, 'owner_heartbeat_at', tostring(advanced))
         count = count + 1
     else
         -- A dangling id (partial deletion, manual intervention) must not be

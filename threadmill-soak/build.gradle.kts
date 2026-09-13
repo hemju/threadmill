@@ -37,7 +37,7 @@ val soakRegression by
         forkEvery = 0
     }
 
-tasks.named<Test>("test") { useJUnitPlatform { excludeTags("soak") } }
+tasks.named<Test>("test") { useJUnitPlatform { excludeTags("soak", "monitoring-benchmark") } }
 
 tasks.named("check") {
     // Explicitly do NOT depend on `soakRegression`.
@@ -117,3 +117,13 @@ tasks.register<JavaExec>("soakEndurance") {
     mainClass.set("com.hemju.threadmill.soak.harness.endurance.EnduranceMain")
     passSoakProps()
 }
+
+val benchmarkPostgresMonitoring by
+    tasks.registering(Test::class) {
+        group = "verification"
+        description = "Measure pooled PostgreSQL claims with monitoring at 10k/100k/1m backlog."
+        useJUnitPlatform { includeTags("monitoring-benchmark") }
+        testClassesDirs = sourceSets["test"].output.classesDirs
+        classpath = sourceSets["test"].runtimeClasspath
+        outputs.upToDateWhen { false }
+    }

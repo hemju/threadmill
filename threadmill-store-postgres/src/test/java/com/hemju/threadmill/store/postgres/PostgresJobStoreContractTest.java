@@ -8,12 +8,14 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.test.AbstractJobStoreContractTest;
+import com.hemju.threadmill.test.ClaimPoisonRegression;
 
 /**
  * Runs the {@link AbstractJobStoreContractTest} against real PostgreSQL via
@@ -62,7 +64,14 @@ class PostgresJobStoreContractTest extends AbstractJobStoreContractTest {
       // The counts table is kept in sync by triggers, but TRUNCATE bypasses them — reset counts
       // manually.
       st.execute("UPDATE threadmill_job_counts SET count = 0");
+      st.execute("TRUNCATE threadmill_queue_counts");
     }
+  }
+
+  @Test
+  void poisonSerializationDoesNotDiscardEarlierClaims() {
+    ClaimPoisonRegression.verify(
+        new PostgresJobStore(dataSource, ClaimPoisonRegression.serializer(), store.capabilities()));
   }
 
   @Override

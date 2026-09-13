@@ -41,6 +41,20 @@ test("requires authentication and honors the configured API base path", async ({
 }) => {
   const anonymous = await request.get(dashboardPath, { maxRedirects: 0 });
   expect(anonymous.status()).toBe(401);
+  // A servlet ERROR dispatch must retain the Basic challenge. A catch-all
+  // host chain must not turn this into an HTML login redirect.
+  const anonymousHtml = await request.get(dashboardPath, {
+    maxRedirects: 0,
+    headers: { Accept: "text/html" }
+  });
+  expect(anonymousHtml.status()).toBe(401);
+  expect(anonymousHtml.headers()["www-authenticate"]).toContain("Basic");
+  expect(anonymousHtml.headers()["location"]).toBeUndefined();
+  const directError = await request.get("/error", {
+    maxRedirects: 0,
+    headers: { Accept: "application/json" }
+  });
+  expect(directError.status()).toBe(401);
 
   const requests: string[] = [];
   const { context, page } = await openDashboard(browser);

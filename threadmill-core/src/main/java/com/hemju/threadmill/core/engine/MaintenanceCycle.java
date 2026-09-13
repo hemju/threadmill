@@ -2,8 +2,13 @@ package com.hemju.threadmill.core.engine;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.EnumMap;
+import java.util.EnumSet;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -11,12 +16,15 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.JobId;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.StaleJobException;
+import com.hemju.threadmill.core.internal.ExecutionHeartbeats;
 import com.hemju.threadmill.core.internal.FatalErrors;
 import com.hemju.threadmill.core.schedule.RecurringMaterializer;
 import com.hemju.threadmill.core.store.JobStore;
+import com.hemju.threadmill.core.store.RetentionCursor;
 
 /**
  * Master-only housekeeping loop. Runs on the elected master node only;
@@ -38,7 +46,7 @@ import com.hemju.threadmill.core.store.JobStore;
  * <p>Three independent cadences share one loop thread to avoid coupling
  * latency-sensitive ops to slow housekeeping:
  * <ul>
- *   <li>{@code maintenancePollInterval} (the loop tick) bounds materialization,
+ *   <li>{@code maintenancePollInterval} (the loop tick) paces materialization,
  *       promotion, and orphan reclaim latency. Default 1 s.</li>
  *   <li>{@code claimHeartbeat} drives owner-heartbeat refresh — slow enough not
  *       to thrash the store, fast enough to stay well below {@code heartbeatTimeout}.
@@ -66,6 +74,11 @@ public final class MaintenanceCycle {
   private final RetryInterceptor retryInterceptor;
   private final ProcessingNodeConfig config;
   private final LocalWakeBus wakeBus;
+  private final WorkflowInterceptor workflowInterceptor;
+  private Instant nextRetention = Instant.EPOCH;
+  private Instant nextRetryRecovery = Instant.EPOCH;
+  private Instant nextWorkflowReconciliation = Instant.EPOCH;
+  private static final Duration RECOVERY_PASS_INTERVAL = Duration.ofSeconds(30);
   private final AtomicBoolean running = new AtomicBoolean(false);
   private final AtomicReference<Thread> loopThread = new AtomicReference<>();
   private final AtomicReference<Thread> heartbeatThread = new AtomicReference<>();
@@ -99,6 +112,7 @@ public final class MaintenanceCycle {
       ProcessingNodeConfig config,
       LocalWakeBus wakeBus) {
     this.store = Objects.requireNonNull(store, "store");
+    this.workflowInterceptor = new WorkflowInterceptor(store);
     this.nodeId = Objects.requireNonNull(nodeId, "nodeId");
     this.registry = Objects.requireNonNull(registry, "registry");
     this.runner = Objects.requireNonNull(runner, "runner");
@@ -159,7 +173,7 @@ public final class MaintenanceCycle {
     int consecutiveFailures = 0;
     while (running.get() && !Thread.currentThread().isInterrupted()) {
       try {
-        store.touchOwnerHeartbeat(nodeId, Instant.now());
+        refreshActiveHeartbeats();
         if (consecutiveFailures > 0) {
           consecutiveFailures = 0;
           if (claimSuspended != null && claimSuspended.compareAndSet(true, false)) {
@@ -190,25 +204,44 @@ public final class MaintenanceCycle {
 
   private void loop() {
     // Two cadences share the master thread:
-    //   - the loop ticks at maintenancePollInterval (fast; bounds materialize/promote/orphan
+    //   - the loop ticks at maintenancePollInterval (fast; resumes materialize/promote/orphan
     // latency)
     //   - retention sweeps fire at retentionInterval (slowest; deletion is not time-sensitive)
     // Owner-heartbeat refresh runs on its own thread (see start()).
-    Instant nextRetention = Instant.EPOCH;
     while (running.get() && !Thread.currentThread().isInterrupted()) {
       try {
         Instant now = Instant.now();
         if (registry.isMaster()) {
-          materializer.tick(now);
-          promoteScheduled();
-          reclaimOrphans();
+          runActivity("promotion", this::promoteScheduled);
+          runActivity("recurring", () -> materializer.tick(now));
+          if (!now.isBefore(nextRetryRecovery)) {
+            runActivity("retry recovery", () -> {
+              recoverStrandedFailedJobs();
+              if (retryInterceptor.recoveryPassComplete())
+                nextRetryRecovery = Instant.now().plus(RECOVERY_PASS_INTERVAL);
+            });
+          }
+          if (!now.isBefore(nextWorkflowReconciliation)) {
+            runActivity("workflow reconciliation", () -> {
+              reconcileOrphanedWorkflowChildren();
+              if (workflowInterceptor.reconciliationPassComplete())
+                nextWorkflowReconciliation = Instant.now().plus(RECOVERY_PASS_INTERVAL);
+            });
+          }
+          runActivity("orphan recovery", this::reclaimOrphans);
+          runActivity("concurrency metadata", () -> store.deleteIdleConcurrencyGroups(100));
+          runActivity("queue metadata", () -> store.deleteIdleQueueMetadata(100));
           if (!now.isBefore(nextRetention)) {
-            retentionSweep();
-            recoverStrandedFailedJobs();
-            nodeHeartbeatRetentionSweep();
-            dedupRetentionSweep();
-            reconcileOrphanedWorkflowChildren();
-            nextRetention = now.plus(config.retentionInterval());
+            runActivity("retention", () -> {
+              boolean more = retentionSweep();
+              more |= dedupRetentionSweep();
+              nodeHeartbeatRetentionSweep();
+              if (!more) {
+                completedRetentionStates.clear();
+                retentionCutoffs.clear();
+              }
+              nextRetention = more ? now : now.plus(config.retentionInterval());
+            });
           }
         }
         sleep(config.maintenancePollInterval());
@@ -220,21 +253,47 @@ public final class MaintenanceCycle {
     }
   }
 
-  private void promoteScheduled() {
-    List<Job> due = store.findDueForPromotion(Instant.now(), 100);
-    for (Job j : due) {
-      try {
-        long v = j.version();
-        JobState from = j.currentState();
-        j.transitionTo(JobState.ENQUEUED, Instant.now(), "engine.promote", null);
-        j.clearScheduledFor();
-        store.saveAtomic(j, v);
-        wakeBus.wake(j.queue());
-        // No interceptor for state-change here keeps the failure path responsibility-clear;
-        // the engine's only state-change hook is JobInterceptors via JobRunner.
-      } catch (StaleJobException ignored) {
-        // Another node beat us; that's fine.
+  private void refreshActiveHeartbeats() {
+    var now = Instant.now();
+    var batch = new HashMap<JobId, Long>();
+    for (var claim : runner.activeClaims().entrySet()) {
+      batch.put(claim.getKey(), claim.getValue());
+      if (batch.size() == ExecutionHeartbeats.MAX_BATCH) {
+        store.touchExecutionHeartbeats(nodeId, batch, now);
+        batch.clear();
       }
+    }
+    if (!batch.isEmpty()) store.touchExecutionHeartbeats(nodeId, batch, now);
+  }
+
+  private static void runActivity(String name, Runnable activity) {
+    try {
+      activity.run();
+    } catch (RuntimeException failure) {
+      FatalErrors.rethrowIfFatal(failure);
+      LOG.warn("Maintenance {} failed; continuing other activities", name, failure);
+    }
+  }
+
+  private void promoteScheduled() {
+    long deadline = System.nanoTime() + 200_000_000L;
+    int promoted = 0;
+    while (promoted < 500) {
+      var due = store.findDueForPromotion(Instant.now(), Math.min(50, 500 - promoted));
+      for (var job : due) {
+        if (promoted > 0 && System.nanoTime() >= deadline) return;
+        try {
+          long version = job.version();
+          job.transitionTo(JobState.ENQUEUED, Instant.now(), "engine.promote", null);
+          job.clearScheduledFor();
+          store.saveAtomic(job, version);
+          wakeBus.wake(job.queue());
+        } catch (StaleJobException ignored) {
+          // Another node handled this candidate.
+        }
+        promoted++;
+      }
+      if (due.size() < 50 || System.nanoTime() >= deadline) return;
     }
   }
 
@@ -251,8 +310,8 @@ public final class MaintenanceCycle {
 
   /**
    * Per-tick cap on retention batches per state, bounding tick duration so
-   * housekeeping cannot starve the owner-heartbeat refresh that shares
-   * this loop. Anything left over carries to the next retention tick.
+   * housekeeping cannot starve promotion and recovery. Anything left over
+   * resumes on the next maintenance tick, without waiting for the retention interval.
    */
   private static final int MAX_RETENTION_BATCHES_PER_TICK = 50;
 
@@ -284,30 +343,43 @@ public final class MaintenanceCycle {
    * Recover workflow children stranded in AWAITING because their predecessor
    * reached a terminal state but the promote/abandon hook never ran (a crash
    * between the terminal save and the interceptor). Reuses the workflow
-   * interceptor's idempotent promote/abandon logic. Runs on the retention
-   * cadence — recovery latency for this rare crash window is not urgent.
+   * interceptor's idempotent transitions. An unfinished pass advances every
+   * maintenance tick; complete passes pause for 30 seconds independently of retention.
    */
   private void reconcileOrphanedWorkflowChildren() {
-    new WorkflowInterceptor(store).reconcileOrphanedAwaitingChildren(WORKFLOW_RECONCILE_SCAN);
+    workflowInterceptor.reconcileOrphanedAwaitingChildren(WORKFLOW_RECONCILE_SCAN);
   }
 
-  private void retentionSweep() {
+  private final Map<JobState, RetentionCursor> retentionCursors = new EnumMap<>(JobState.class);
+  private final Map<JobState, Instant> retentionCutoffs = new EnumMap<>(JobState.class);
+
+  private final Set<JobState> completedRetentionStates = EnumSet.noneOf(JobState.class);
+
+  private boolean retentionSweep() {
     var now = Instant.now();
-    sweepTerminalState(JobState.SUCCEEDED, now.minus(config.succeededRetention()));
-    sweepTerminalState(JobState.FAILED, now.minus(config.failedRetention()));
-    sweepTerminalState(JobState.DELETED, now.minus(config.deletedRetention()));
-    sweepTerminalState(JobState.QUARANTINED, now.minus(config.quarantinedRetention()));
+    boolean more = sweepTerminalState(JobState.SUCCEEDED, now.minus(config.succeededRetention()));
+    more |= sweepTerminalState(JobState.FAILED, now.minus(config.failedRetention()));
+    more |= sweepTerminalState(JobState.DELETED, now.minus(config.deletedRetention()));
+    more |= sweepTerminalState(JobState.QUARANTINED, now.minus(config.quarantinedRetention()));
+    return more;
   }
 
-  private void sweepTerminalState(JobState state, Instant cutoff) {
+  private boolean sweepTerminalState(JobState state, Instant cutoff) {
+    if (completedRetentionStates.contains(state)) return false;
+    var passCutoff = retentionCutoffs.computeIfAbsent(state, ignored -> cutoff);
+    long deadline = System.nanoTime() + 200_000_000L;
     for (int i = 0; i < MAX_RETENTION_BATCHES_PER_TICK; i++) {
-      long deleted = store.deleteFinishedOlderThan(cutoff, state, RETENTION_BATCH);
-      if (deleted < RETENTION_BATCH) {
-        return;
+      var page =
+          store.deleteFinishedPage(passCutoff, state, RETENTION_BATCH, retentionCursors.get(state));
+      if (page.nextAfter() == null) {
+        retentionCursors.remove(state);
+        completedRetentionStates.add(state);
+        return false;
       }
+      retentionCursors.put(state, page.nextAfter());
+      if (System.nanoTime() >= deadline) return true;
     }
-    LOG.debug(
-        "Retention sweep for {} hit the per-tick batch cap; continuing on the next tick", state);
+    return true;
   }
 
   private void nodeHeartbeatRetentionSweep() {
@@ -318,15 +390,17 @@ public final class MaintenanceCycle {
     }
   }
 
-  private void dedupRetentionSweep() {
+  private boolean dedupRetentionSweep() {
     var now = Instant.now();
+    long deadline = System.nanoTime() + 200_000_000L;
     for (int i = 0; i < MAX_RETENTION_BATCHES_PER_TICK; i++) {
       long deleted = store.deleteExpiredDedupKeys(now, RETENTION_BATCH);
       if (deleted < RETENTION_BATCH) {
-        return;
+        return false;
       }
+      if (System.nanoTime() >= deadline) return true;
     }
-    LOG.debug("Dedup retention sweep hit the per-tick batch cap; continuing on the next tick");
+    return true;
   }
 
   private static void sleep(Duration d) {

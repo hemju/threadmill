@@ -33,3 +33,10 @@ so capability lookups such as `describe()`, `supportsExternalTransactions()`,
 and `createRemoteWakeChannel(...)` reach the wrapped store unchanged and
 `delegate()` returns the wrapped store. Wrapping a PostgreSQL store keeps its
 `join_transaction` support and `LISTEN`/`NOTIFY` wake channel.
+
+Processing scopes are tied to each execution context and closed on the same
+thread by the engine's guaranteed `onProcessingFinished` hook. Orphan recovery
+uses a separate span. `threadmill.execution.completion_confirmed=false` marks
+an execution exit without a confirmed persisted outcome notification, including
+stale terminal writes. Custom direct interceptor drivers must invoke the cleanup
+hook in `finally`, after success/failure notifications.

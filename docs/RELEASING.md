@@ -1,137 +1,123 @@
 # Releasing Threadmill
 
-This is the maintainer runbook for cutting a public release and publishing
-artifacts to Maven Central. It assumes the one-time setup in
-[§1](#1-one-time-setup) is already done.
+This runbook covers merging a qualified candidate, publishing the complete
+Threadmill 1.0.0 artifact set to Maven Central, and creating its GitHub release.
+A release tag triggers publication automatically; create it only after every
+qualification and release check has passed.
 
-Artifacts are published to the **Sonatype Central Portal**
-(<https://central.sonatype.com>) — the successor to the retired OSSRH staging
-API — via the [`nmcp`](https://gradleup.com/nmcp/) aggregation plugin wired in
-the root `build.gradle.kts`. Per-module POM metadata and PGP signing live in the
-`threadmill.publish` convention plugin (`buildSrc/`).
+## Publication prerequisites
 
----
+The published namespace is `com.hemju.threadmill`. Keep it consistent with
+existing releases and verify that the release account can publish to that
+namespace in [Sonatype Central Portal](https://central.sonatype.com/publishing/namespaces).
 
-## 1. One-time setup
+The `Release` workflow in `.github/workflows/release.yml` uses the GitHub
+`release` environment and these repository or environment secrets:
 
-### 1.1 Namespace verification (do this first — it can force a group-id change)
-
-The published coordinate group is **`com.hemju.threadmill`** (see
-`buildSrc/src/main/kotlin/threadmill.java-base.gradle.kts`). Central Portal will
-not accept a bundle until the namespace is verified to you:
-
-- **`com.hemju`** requires proving control of the domain **`hemju.com`** by
-  adding a DNS `TXT` record that Central Portal generates. Use this only if you
-  own `hemju.com`.
-- **If you do not own `hemju.com`**, switch the group to **`io.github.hemju`**,
-  which Central Portal verifies by having you create a throwaway public GitHub
-  repo with a generated name. This changes only the Maven *coordinates*, not the
-  Java package names (`com.hemju.threadmill.*` stay as-is). To switch:
-  - edit `group = "com.hemju.threadmill"` → `group = "io.github.hemju"` in
-    `buildSrc/src/main/kotlin/threadmill.java-base.gradle.kts`;
-  - update the coordinates in `README.md`, `docs/quickstart.md`, and
-    `threadmill-spring-boot/README.md` (search for `com.hemju.threadmill:`).
-
-Register/verify the namespace at
-<https://central.sonatype.com/publishing/namespaces>.
-
-### 1.2 Central Portal user token
-
-In Central Portal → **Account → Generate User Token**. This yields a
-`username` / `password` pair (NOT your login). These map to the Gradle
-properties `centralPortalUsername` / `centralPortalPassword`.
-
-### 1.3 PGP signing key
-
-Central Portal requires every artifact to be signed.
-
-```sh
-# Generate a key (RSA 4096, no expiry) if you don't have one:
-gpg --full-generate-key
-# Find its id and publish the public half to a keyserver Central Portal checks:
-gpg --list-secret-keys --keyid-format=long
-gpg --keyserver keyserver.ubuntu.com --send-keys <KEY_ID>
-# Export the ASCII-armored PRIVATE key (this whole block is the secret):
-gpg --armor --export-secret-keys <KEY_ID>
-```
-
-### 1.4 GitHub Actions secrets
-
-In the repo → **Settings → Secrets and variables → Actions**, add:
-
-| Secret | Value |
+| Secret | Purpose |
 |---|---|
-| `SIGNING_KEY` | the full ASCII-armored **private** key block from §1.3 |
-| `SIGNING_PASSWORD` | passphrase for that key |
-| `CENTRAL_PORTAL_USERNAME` | user-token name from §1.2 |
-| `CENTRAL_PORTAL_PASSWORD` | user-token secret from §1.2 |
+| `SIGNING_KEY` | ASCII-armored private PGP signing key |
+| `SIGNING_PASSWORD` | Signing-key passphrase |
+| `CENTRAL_PORTAL_USERNAME` | Central Portal user-token name |
+| `CENTRAL_PORTAL_PASSWORD` | Central Portal user-token secret |
 
-The `Release` workflow (`.github/workflows/release.yml`) reads these and passes
-them to Gradle as `ORG_GRADLE_PROJECT_*` properties. Consider putting them in a
-GitHub Environment named `release` with required reviewers for an approval gate.
+Check secret availability and any environment approval requirements before
+tagging. Do not print or copy secret values into logs or release notes. The
+signing public key must be available to Central Portal. Credentials are passed
+to Gradle as `ORG_GRADLE_PROJECT_*` properties; per-module POM metadata and
+signing are configured by `threadmill.publish` in `buildSrc`.
 
----
+## Qualify and merge the candidate
 
-## 2. Cut a release
+1. Complete the [1.0 soak plan](soak-plan-1.0.md) and review correctness,
+   performance and stability separately. Preserve candidate/runtime hashes,
+   baseline comparisons, fault recovery, raw counter reconciliation and final
+   datastore snapshots. Interrupted runs are incomplete. Explain or fix every
+   outlier and unexplained resource-growth trend before sign-off; do not weaken
+   acceptance thresholds after a run. Record the exact qualified versions and
+   topologies, and do not present a short topology test as hours-scale evidence.
+2. Resolve release-blocking issues and review feedback, update documentation and
+   the changelog, and run the complete production gate with dependency scanning
+   required. Any correctness fix needs fresh relevant soak qualification.
+3. Confirm that the PR head matches the reviewed candidate, all required CI
+   checks pass, and there are no unresolved blocking reviews or merge conflicts.
+   Merge through the PR. If the resulting source differs from the qualified
+   source beyond reviewed documentation/version metadata, assess and rerun the
+   affected qualification before proceeding.
 
-1. Make sure `main` is green (the `CI` workflow runs `./gradlew check` on every
-   push and PR) and `CHANGELOG.md` is updated.
-2. Set `ThreadmillVersion.CURRENT` in
+## Prepare the release commit
+
+1. On `main`, set `ThreadmillVersion.CURRENT` in
    `buildSrc/src/main/kotlin/com/hemju/threadmill/gradle/ThreadmillVersion.kt`
-   (e.g. `"0.1.0"`). Releases must not be `-SNAPSHOT`.
-3. Commit, tag, and push the tag:
+   to `"1.0.0"`. Every published module must use that same non-SNAPSHOT version.
+2. Confirm the README, Spring quickstart and module installation examples all
+   use `1.0.0`. Preserve historical versions in the changelog and frozen 0.3.0
+   migration fixtures. Finalize the compatibility guide, commercial-support
+   wording and project status. Change the candidate notices to release wording
+   and date the 1.0.0 changelog entry when cutting the release.
+3. Run formatting, then the complete gate and tag/version validation:
+
    ```sh
-   git commit -am "release: v0.1.0"
-   git tag v0.1.0
-   git push origin main --tags
+   ./gradlew spotlessApply
+   ./gradlew productionCheck verifyReleaseTag \
+     -PreleaseTag=v1.0.0 -PdependencyScanRequired=true
    ```
-4. The tag push triggers `.github/workflows/release.yml`. The publication task
-   first requires the tag to exactly equal `v` plus the Gradle project version,
-   rejects snapshot versions, and runs the complete `productionCheck` gate from
-   clean outputs. The same task graph then signs the verified artifacts,
-   assembles one bundle, and uploads it to the Central Portal.
-5. The build uses `publishingType = "AUTOMATIC"`, so the deployment is
-   validated and then **published to Maven Central automatically** — no manual
-   click. Sync to `repo.maven.apache.org` takes ~15–30 min; the search UI can
-   lag a few hours. Track the deployment at
-   <https://central.sonatype.com/publishing/deployments>.
-   - To gate releases behind a manual review instead, change `publishingType`
-     back to `"USER_MANAGED"` in the root `build.gradle.kts`; the deployment
-     then waits for a **Publish** click in the Central Portal UI.
-6. Bump the version back to the next `-SNAPSHOT`/`rc` on `main`.
 
-### Local dry-run (optional)
+   Review the reports for failures or skipped real-store tests. Confirm the
+   example, browser tests, simulations, dependency scans, Javadoc and artifact
+   inspection passed. Check all eleven published modules, their POMs and
+   intra-Threadmill dependency versions. Binary JARs must contain
+   `META-INF/LICENSE` and `META-INF/NOTICE`, with no test or private local files.
+4. Commit any remaining release preparation using a Conventional Commit such
+   as `chore(release): prepare 1.0.0`. Require a clean working tree and record the
+   final commit and the relationship to the qualified runtime. Keep qualification
+   artifacts outside build directories because `productionCheck` cleans outputs.
 
-You can exercise everything except the upload without credentials:
+## Tag and publish
+
+Confirm `v1.0.0` does not already exist locally or remotely. Tag the verified
+commit, then push only `main` and the intended release tag:
 
 ```sh
-./gradlew publishToMavenLocal   # installs all modules to ~/.m2 (unsigned)
+git tag -a v1.0.0 -m "Threadmill 1.0.0"
+git push origin main
+git push origin refs/tags/v1.0.0
 ```
 
-Dependency locks and SHA-256 verification metadata are enforced during this
-build. Each binary JAR must contain `META-INF/LICENSE` and `META-INF/NOTICE`;
-the release-candidate `artifactInspection` task checks both files.
+The tag push triggers the `Release` workflow. It validates that the tag equals
+`v` plus every published module's version, runs `productionCheck` from clean
+outputs, and signs and uploads the same verified artifacts as one aggregated
+bundle through `publishAggregationToCentralPortal`. Central Portal validates
+and publishes automatically because `publishingType` is `AUTOMATIC`.
 
-To build the exact bundle that would be uploaded (needs a signing key + dummy
-Central Portal props), run `./gradlew zipAggregation` and inspect the zip under
-`build/`.
+Watch the workflow to completion and verify the deployment in
+[Central Portal](https://central.sonatype.com/publishing/deployments). Confirm all
+eleven modules at version 1.0.0 are retrievable from Maven Central, including
+POMs, binary/source/Javadoc JARs and signatures. Resolve the README's installation
+coordinates from a fresh consumer project on Java 25.
 
----
+The workflow publishes Maven artifacts; it does not create the GitHub release.
+After verifying publication, create the GitHub release for the existing
+`v1.0.0` tag with reviewed notes based on `CHANGELOG.md`, a prominent
+[0.3.0 upgrade guide](compatibility.md#upgrade-from-v030), supported platform
+requirements, the at-least-once guarantee, and the commercial-support contact.
+Use a notes file with actual newlines. Keep private operational evidence and
+credentials out of public notes.
 
-## 3. Making the repository public (first release only)
+Confirm GitHub and Maven Central reference the intended version before closing
+release issues and cleaning up merged branches/worktrees. Preserve all soak
+artifacts, backups and frozen runtimes. Do not automatically invent a next
+version or move an existing release tag.
 
-The repo starts private. Before flipping it public, scrub internal-only files
-from history (see the pre-publication checklist handed off separately), then:
+## Failure and local inspection
 
-```sh
-gh repo edit hemju/threadmill --visibility public --accept-visibility-change-consequences
-```
+If publication fails, determine whether any version became public before
+retrying. Never overwrite published coordinates or retarget a released tag;
+fix source changes in a new version. Do not use direct per-module Central tasks
+or the obsolete unconfigured `./gradlew publish` path.
 
-Set the repo description and topics while you're there:
-
-```sh
-gh repo edit hemju/threadmill \
-  --description "Modern, lightweight background job-processing library for Java 25" \
-  --add-topic java --add-topic jobs --add-topic background-jobs \
-  --add-topic postgresql --add-topic redis --add-topic scheduler
-```
+`./gradlew publishToMavenLocal` can inspect unsigned artifacts in a local Maven
+repository. This does not run the complete release gate and does not establish
+public availability. To inspect aggregation locally, use the configured
+`nmcpZipAggregation` task and inspect its output under `build/`; it is not
+release qualification or an upload.

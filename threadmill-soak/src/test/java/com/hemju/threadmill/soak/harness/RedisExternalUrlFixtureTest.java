@@ -27,7 +27,8 @@ final class RedisExternalUrlFixtureTest {
   @Test
   @SuppressWarnings("resource")
   void externalUrlRunResetsOnlyTheThreadmillNamespace(@TempDir Path tempDir) throws Exception {
-    try (GenericContainer<?> redis = new GenericContainer<>(DockerImageName.parse("redis:7-alpine"))
+    try (GenericContainer<?> redis = new GenericContainer<>(
+            DockerImageName.parse("redis:7.4-alpine"))
         .withExposedPorts(6379)
         .withCommand("redis-server", "--appendonly", "yes")
         .waitingFor(Wait.forListeningPort())) {

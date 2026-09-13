@@ -94,24 +94,21 @@ if new_active ~= no_key and new_score ~= nil then
     redis.call('ZADD', new_active, new_score, job_id)
 end
 if old_pending_k ~= no_key and old_pending_member ~= '' then
-    redis.call('ZREM', old_pending_k, old_pending_member)
+    tm_pending_remove(old_pending_k, old_pending_member, old_queue_keys_key)
     if pending_root_key ~= no_key then
         redis.call('ZREM', pending_root_key, old_pending_member)
     end
 end
 if concurrency_key ~= '' and new_pending_k ~= no_key and new_pending_member ~= '' then
-    redis.call('ZADD', new_pending_k, new_pending_score, new_pending_member)
+    tm_pending_add(new_pending_k, new_pending_score, new_pending_member, state, new_queue_keys_key)
     if pending_root_key ~= no_key then
         redis.call('ZADD', pending_root_key, new_pending_score, new_pending_member)
     end
 end
 if state == 'ENQUEUED' then
     if concurrency_key ~= '' then
-        local remaining = redis.call('HINCRBY', old_queue_keys_key, concurrency_key, -1)
-        if remaining <= 0 then
-            redis.call('HDEL', old_queue_keys_key, concurrency_key)
-        end
-        redis.call('HINCRBY', new_queue_keys_key, concurrency_key, 1)
+        tm_queue_remove(old_queue_keys_key, concurrency_key)
+        tm_queue_add(new_queue_keys_key, concurrency_key)
     else
         redis.call('ZREM', old_unkeyed_key, job_id)
         redis.call('ZADD', new_unkeyed_key, new_score, job_id)
@@ -128,7 +125,7 @@ if state == 'ENQUEUED' then
     redis.call('ZADD', new_enqueued_at_key, new_state_at, job_id)
 end
 -- Rescore in the by_state_time index too (state is unchanged).
-redis.call('ZADD', state_time_k, new_state_at, job_id)
+tm_state_add(state_time_k, new_state_at, job_id)
 
 redis.call('HSET', job_key,
     'body', new_body,

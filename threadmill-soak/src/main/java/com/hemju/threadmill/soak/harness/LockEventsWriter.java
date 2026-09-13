@@ -24,10 +24,14 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
  * trace when the question is purely about lock semantics.
  *
  * <p>Streams the trace file line by line — in-memory state is the open-acquire
- * map (bounded by concurrently held locks) plus per-key hold-duration samples
- * for the contention summary.
+ * map (bounded by concurrently held locks) plus hold-duration samples for
+ * at most 127 named keys and one additional-keys aggregate. Full per-key
+ * evidence remains in the streamed output, even for high-cardinality runs.
  */
 public final class LockEventsWriter {
+
+  private static final int NAMED_KEY_LIMIT = 127;
+  private static final String ADDITIONAL_KEYS = "(additional keys)";
 
   private LockEventsWriter() {}
 
@@ -61,7 +65,7 @@ public final class LockEventsWriter {
         if ("lock_acquired".equals(event)) {
           String openKey = jobId + "::" + key;
           openAcquires.put(openKey, new Acquire(ts, mode));
-          KeyStats stats = byKey.computeIfAbsent(key, k -> new KeyStats());
+          KeyStats stats = byKey.computeIfAbsent(summaryKey(key, byKey), k -> new KeyStats());
           stats.acquires++;
           if ("EXCLUSIVE".equals(mode)) stats.exclusiveCount++;
           if ("SHARED".equals(mode)) {
@@ -86,9 +90,11 @@ public final class LockEventsWriter {
             } catch (IOException ex) {
               throw new UncheckedIOException(ex);
             }
-            holdsByKey.computeIfAbsent(key, k -> new GrowableLongArray()).add(heldMs);
+            holdsByKey
+                .computeIfAbsent(summaryKey(key, byKey), k -> new GrowableLongArray())
+                .add(heldMs);
             if ("SHARED".equals(open.mode)) {
-              activeShared.merge(key, -1, Integer::sum);
+              activeShared.computeIfPresent(key, (ignored, count) -> count <= 1 ? null : count - 1);
             }
           }
         }
@@ -111,6 +117,10 @@ public final class LockEventsWriter {
               s.acquires, s.maxConcurrentShared, s.exclusiveCount, avg, p99));
     }
     return new SummaryReport.LockContention(stats);
+  }
+
+  private static String summaryKey(String key, Map<String, KeyStats> byKey) {
+    return byKey.containsKey(key) || byKey.size() < NAMED_KEY_LIMIT ? key : ADDITIONAL_KEYS;
   }
 
   private record Acquire(Instant at, String mode) {}

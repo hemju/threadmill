@@ -25,6 +25,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.hemju.threadmill.core.JobState;
+import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 
 /**
@@ -81,6 +82,7 @@ public final class MetricsSampler implements AutoCloseable {
 
   private void sampleAndWrite() {
     try {
+      long sampleStarted = System.nanoTime();
       Map<JobState, Long> counts = store.countsByState();
       Map<String, Long> queueDepths = store.queueDepths();
       int inflight = latencyTracker.inflight();
@@ -98,6 +100,39 @@ public final class MetricsSampler implements AutoCloseable {
       row.put("queueDepths", queueDepths);
       row.put("inflight", inflight);
       row.put("endToEndP99Ms", p99);
+      var now = Instant.now();
+      var ages = new LinkedHashMap<String, Long>();
+      for (var state : JobState.values()) {
+        ages.put(
+            state.name(),
+            store
+                .oldestMaintenanceAt(state)
+                .map(at -> Math.max(0, Duration.between(at, now).toMillis()))
+                .orElse(0L));
+      }
+      row.put("oldestStateAgeMs", ages);
+      var queueAges = new LinkedHashMap<String, Long>();
+      queueDepths.keySet().stream()
+          .sorted()
+          .limit(32)
+          .forEach(queue -> queueAges.put(
+              queue,
+              store
+                  .oldestEnqueuedAt(queue)
+                  .map(at -> Math.max(0, Duration.between(at, now).toMillis()))
+                  .orElse(0L)));
+      row.put("oldestQueueAgeMs", queueAges);
+      // The same bounded state-page shape used by the dashboard, once per second.
+      store.searchJobs(new JobSearch(JobState.SUCCEEDED, null, null, 20, 0));
+      if (store instanceof MeasuredJobStore measured) {
+        row.put("operations", measured.snapshot());
+        row.put("jobsDeleted", measured.jobsDeleted());
+        row.put("concurrencyGroupsDeleted", measured.groupsDeleted());
+      }
+      var runtime = Runtime.getRuntime();
+      row.put("heapUsedBytes", runtime.totalMemory() - runtime.freeMemory());
+      row.put("heapCommittedBytes", runtime.totalMemory());
+      row.put("monitoringMicros", (System.nanoTime() - sampleStarted) / 1000);
       writeLine(row);
     } catch (RuntimeException e) {
       // The store outage circuit breaker pauses the cluster, not the harness;

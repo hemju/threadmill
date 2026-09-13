@@ -50,7 +50,12 @@ public final class MigrationRunner {
       "V3__integrity_constraints.sql",
       "V4__cron_state_timing_fingerprint.sql",
       "V5__cron_state_nudge.sql",
-      "V6__cron_task_exclusive.sql");
+      "V6__cron_task_exclusive.sql",
+      "V7__execution_revision.sql",
+      "V8__maintenance_scan.sql",
+      "V9__queue_monitoring.sql",
+      "V10__idle_concurrency_groups.sql",
+      "V11__retention_candidates.sql");
   private static final long MIGRATION_LOCK_KEY = 0x5468726561646D6CL;
   private static final Logger LOG = LoggerFactory.getLogger(MigrationRunner.class);
   private static final Duration LOCK_ACQUIRE_TIMEOUT = Duration.ofMinutes(5);
@@ -68,9 +73,13 @@ public final class MigrationRunner {
       "threadmill_leases",
       "threadmill_metadata",
       "threadmill_job_counts",
+      "threadmill_queue_counts",
       "threadmill_queue_pauses",
       "threadmill_schema_history");
-  private static final List<String> THREADMILL_FUNCTIONS = List.of("threadmill_maintain_counts()");
+  private static final List<String> THREADMILL_FUNCTIONS = List.of(
+      "threadmill_maintain_counts()",
+      "threadmill_maintain_queue_counts()",
+      "threadmill_adjust_queue_count(TEXT, BIGINT)");
 
   private final DataSource dataSource;
 
@@ -278,24 +287,7 @@ public final class MigrationRunner {
 
   private static <T> T inTransaction(Connection conn, PostgresConnectionWork<T> work)
       throws SQLException {
-    boolean previousAutoCommit = conn.getAutoCommit();
-    conn.setAutoCommit(false);
-    try {
-      T result = work.execute(conn);
-      conn.commit();
-      return result;
-    } catch (RuntimeException | SQLException e) {
-      // Preserve the original failure even if rollback also fails (for
-      // example because the connection died mid-DDL).
-      try {
-        conn.rollback();
-      } catch (SQLException rollbackError) {
-        e.addSuppressed(rollbackError);
-      }
-      throw e;
-    } finally {
-      conn.setAutoCommit(previousAutoCommit);
-    }
+    return PostgresTransactions.execute(conn, work);
   }
 
   private void acquireMigrationLock(Connection conn) throws SQLException {

@@ -17,6 +17,22 @@ class CronExpressionTest {
   private static final ZoneId UTC = ZoneOffset.UTC;
 
   @Test
+  @Timeout(2)
+  void previousFireUsesCalendarFieldsAcrossLeapYearsAndDst() {
+    var vienna = ZoneId.of("Europe/Vienna");
+    var daily = CronExpression.parse("30 2 * * *");
+    assertThat(daily.previousOrSame(Instant.parse("2026-03-29T02:00:00Z"), vienna))
+        .isEqualTo(Instant.parse("2026-03-28T01:30:00Z"));
+    assertThat(daily.previousOrSame(Instant.parse("2026-10-25T01:15:00Z"), vienna))
+        .isEqualTo(Instant.parse("2026-10-25T00:30:00Z"));
+    assertThat(daily.previousOrSame(Instant.parse("2026-10-25T01:45:00Z"), vienna))
+        .isEqualTo(Instant.parse("2026-10-25T01:30:00Z"));
+    assertThat(CronExpression.parse("0 0 29 2 *")
+            .previousOrSame(Instant.parse("2026-09-09T00:00:00Z"), UTC))
+        .isEqualTo(Instant.parse("2024-02-29T00:00:00Z"));
+  }
+
+  @Test
   void everyMinuteWildcardFiresOnTheNextMinute() {
     Instant t = LocalDateTime.of(2026, 6, 1, 10, 30, 15).toInstant(ZoneOffset.UTC);
     Instant next = CronExpression.parse("* * * * *").nextAfter(t, UTC);

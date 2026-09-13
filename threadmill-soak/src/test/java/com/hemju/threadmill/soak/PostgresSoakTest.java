@@ -88,9 +88,11 @@ class PostgresSoakTest {
         Statement st = conn.createStatement()) {
       st.execute("TRUNCATE threadmill_jobs, threadmill_nodes, threadmill_metadata, "
           + "threadmill_cron_task_state, threadmill_cron_tasks, threadmill_mutexes, "
+          + "threadmill_leases, threadmill_queue_pauses, "
           + "threadmill_dedup_keys, threadmill_concurrency_groups, "
           + "threadmill_concurrency_workflow_holds RESTART IDENTITY CASCADE");
       st.execute("UPDATE threadmill_job_counts SET count = 0");
+      st.execute("TRUNCATE threadmill_queue_counts");
     }
     store = new PostgresJobStore(dataSource);
     scheduler = new Scheduler(store, serializer);

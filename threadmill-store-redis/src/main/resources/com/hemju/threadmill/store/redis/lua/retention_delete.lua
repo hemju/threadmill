@@ -9,11 +9,14 @@
 --   [2] by_state_time ZSET for the expected state
 --   [3] counts hash
 --   [4] by_handler SET observed during the scan, or no-key sentinel
+--   [5] awaiting-by-parent SET for this job
 --
 -- ARGV:
 --   [1] job id
 --   [2] expected state
 --   [3] now (epoch millis)
+--   [4] expected version
+--   [5] inclusive state-entry cutoff (epoch millis)
 --
 -- Returns 1 if the job was deleted, 0 if it was skipped.
 
@@ -23,12 +26,17 @@ local now_ms = tonumber(ARGV[3])
 local state = redis.call('HGET', KEYS[1], 'state')
 if state == false then
     -- Hash already gone: clean the dangling index entry only.
-    redis.call('ZREM', KEYS[2], ARGV[1])
+    tm_state_remove(KEYS[2], ARGV[1])
     return 0
 end
 if state ~= ARGV[2] then
     return 0
 end
+-- The Java caller checked the durable retry decision; reject a newer snapshot.
+if redis.call('HGET', KEYS[1], 'version') ~= ARGV[4] then return 0 end
+if tonumber(redis.call('HGET', KEYS[1], 'current_state_at')) > tonumber(ARGV[5]) then return 0 end
+-- Recovery still needs this predecessor's outcome while a child awaits it.
+if redis.call('SCARD', KEYS[5]) > 0 then return 0 end
 -- Keep a job whose dedup key is still unexpired: deleting it would end the
 -- producer-dedup window early. The dedup_key is discovered from the job hash
 -- (a deliberate non-KEYS access; safe under the single {threadmill} slot).
@@ -40,7 +48,7 @@ if dedup_key and dedup_key ~= false then
     end
 end
 redis.call('DEL', KEYS[1])
-redis.call('ZREM', KEYS[2], ARGV[1])
+tm_state_remove(KEYS[2], ARGV[1])
 if KEYS[4] ~= no_key then
     redis.call('SREM', KEYS[4], ARGV[1])
 end

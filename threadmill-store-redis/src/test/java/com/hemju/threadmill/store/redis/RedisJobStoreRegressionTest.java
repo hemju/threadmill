@@ -59,6 +59,7 @@ import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.serialization.SerializationException;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
+import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.store.redis.RedisStoreConfig.RedisSafetyValidation;
@@ -83,7 +84,7 @@ class RedisJobStoreRegressionTest {
 
   @SuppressWarnings("resource")
   private static final GenericContainer<?> REDIS = new GenericContainer<>(
-          DockerImageName.parse("redis:7-alpine"))
+          DockerImageName.parse("redis:7.4-alpine"))
       .withExposedPorts(6379)
       .withCommand("redis-server", "--appendonly", "yes")
       .waitingFor(Wait.forListeningPort());
@@ -131,6 +132,152 @@ class RedisJobStoreRegressionTest {
     return Job.builder()
         .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
         .build();
+  }
+
+  @Test
+  void scriptCacheMissesRecoverWithoutClusterWideScriptLoading() {
+    var store = store();
+    var admin = adminConnection.sync();
+    admin.scriptFlush();
+    admin.configResetstat();
+    var job = sample();
+    store.insert(job);
+    admin.scriptFlush();
+    var claimed = store.claimReady(NodeId.newId(), "default", 1, Instant.now()).getFirst();
+    claimed.transitionTo(JobState.SUCCEEDED, Instant.now());
+    store.saveAtomic(claimed, claimed.version());
+    assertThat(store.findById(job.id()).orElseThrow().currentState()).isEqualTo(JobState.SUCCEEDED);
+    assertThat(commandCalls(admin, "script|load")).isZero();
+    assertThat(commandCalls(admin, "eval")).isPositive();
+  }
+
+  @Test
+  void equalTimestampSearchOrderIsIdenticalAcrossPageSizes() {
+    var store = store();
+    var at = Instant.now();
+    var jobs = new ArrayList<Job>();
+    for (int i = 0; i < 6; i++)
+      jobs.add(Job.builder().spec(JobSpec.of("example.Handler")).createdAt(at).build());
+    store.insertAll(jobs);
+    var whole = store.searchJobs(new JobSearch(JobState.ENQUEUED, null, null, 6, 0));
+    var paged = new ArrayList<Job>();
+    for (int offset = 0; offset < 6; offset += 2)
+      paged.addAll(store.searchJobs(new JobSearch(JobState.ENQUEUED, null, null, 2, offset)));
+    assertThat(paged)
+        .extracting(Job::id)
+        .containsExactlyElementsOf(whole.stream().map(Job::id).toList());
+    assertThat(whole)
+        .extracting(Job::id)
+        .containsExactlyElementsOf(jobs.stream().map(Job::id).sorted().toList().reversed());
+  }
+
+  @Test
+  void recentlyUsedConcurrencyKeysSurviveCleanupAndNewClaimsResetTheirIdleGrace() {
+    var store = store();
+    var r = adminConnection.sync();
+    var counters = RedisKeys.concurrencyCounters("reused");
+    r.hset(counters, "shared_in_flight", "0");
+    r.zadd(RedisKeys.CONCURRENCY_COUNTERS, 0, counters);
+    assertThat(store.deleteIdleConcurrencyGroups(100)).isZero();
+    assertThat(r.hget(counters, "idle_since")).isNotBlank();
+    r.hset(counters, "idle_since", "1");
+    var job = Job.builder()
+        .spec(JobSpec.of("example.Handler"))
+        .concurrencyKey("reused")
+        .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+        .build();
+    store.insert(job);
+    var claimed = store.claimReady(NodeId.newId(), "default", 1, Instant.now()).getFirst();
+    assertThat(r.hget(counters, "idle_since")).isNull();
+    claimed.transitionTo(JobState.SUCCEEDED, Instant.now());
+    store.saveAtomic(claimed, claimed.version());
+    assertThat(store.deleteIdleConcurrencyGroups(100)).isZero();
+    r.hset(counters, "idle_since", "1");
+    assertThat(store.deleteIdleConcurrencyGroups(100)).isEqualTo(1);
+  }
+
+  @Test
+  void offlineMigrationFindsAndReclaimsCounterHashesAfterTheirJobsWereRetainedAway() {
+    var r = adminConnection.sync();
+    for (int i = 0; i < 250; i++) {
+      r.hset(
+          RedisKeys.concurrencyCounters("old-" + i),
+          Map.of("shared_in_flight", "0", "idle_since", "1"));
+    }
+    r.set(RedisStorageFormat.KEY, "migrating:2");
+    RedisIndexMigration.migrate(adminClient);
+    var upgraded = store();
+    assertThat(upgraded.deleteIdleConcurrencyGroups(1000)).isEqualTo(100);
+    assertThat(upgraded.deleteIdleConcurrencyGroups(1000)).isEqualTo(100);
+    assertThat(upgraded.deleteIdleConcurrencyGroups(1000)).isEqualTo(50);
+    assertThat(upgraded.deleteIdleConcurrencyGroups(1000)).isZero();
+    assertThat(r.keys(RedisKeys.PREFIX + "concurrency:*:counters")).isEmpty();
+    assertThat(r.exists(RedisKeys.CONCURRENCY_COUNTERS)).isEqualTo(0);
+  }
+
+  @Test
+  void nonemptyVersion030IndexesAndWireUpgradeOnStandalone() {
+    RedisUpgradeFixtures.verify(
+        store(),
+        adminConnection.sync(),
+        () -> RedisIndexMigration.migrate(adminClient),
+        () -> new RedisJobStore(uri));
+  }
+
+  @Test
+  void offlineIndexMigrationResumesMixedLegacyAndNewMembersWithoutChangingJobs() {
+    var store = store();
+    var first = keyedJob("example.First", "migration", ConcurrencyMode.SHARED);
+    var second = keyedJob("example.Second", "migration", ConcurrencyMode.EXCLUSIVE);
+    store.insertAll(List.of(first, second));
+    var r = adminConnection.sync();
+    var firstBody = r.hget(RedisKeys.job(first.id()), "body");
+    var secondBody = r.hget(RedisKeys.job(second.id()), "body");
+    var pending = RedisKeys.concurrencyPending("migration");
+    var firstMember = RedisKeys.concurrencyPendingMember(ConcurrencyMode.SHARED, first.id());
+    var score = r.zscore(pending, firstMember);
+    r.zrem(pending, firstMember);
+    r.zadd(pending, score, "SHARED:" + first.id());
+    r.del(
+        pending + ":exclusive",
+        RedisKeys.concurrencyReady("migration", "default"),
+        RedisKeys.orderedQueueKeys("default"),
+        RedisKeys.byStateTime(JobState.ENQUEUED) + ":ids");
+    r.set(RedisStorageFormat.KEY, "migrating:2");
+    assertThatThrownBy(() -> new RedisJobStore(uri))
+        .isInstanceOf(JobEngineFatalException.class)
+        .hasMessageContaining("offline upgrade");
+    assertThat(RedisIndexMigration.migrate(adminClient)).isEqualTo(2);
+    assertThat(r.get(RedisStorageFormat.KEY)).isEqualTo(RedisStorageFormat.CURRENT);
+    assertThat(r.zscore(pending, firstMember)).isEqualTo(score);
+    assertThat(r.zscore(pending, "SHARED:" + first.id())).isNull();
+    assertThat(r.hget(RedisKeys.job(first.id()), "body")).isEqualTo(firstBody);
+    assertThat(r.hget(RedisKeys.job(second.id()), "body")).isEqualTo(secondBody);
+    assertThat(RedisIndexMigration.migrate(adminClient)).isZero();
+    var upgraded = store();
+    assertThat(upgraded.scanJobs(JobState.ENQUEUED, null, 500)).hasSize(2);
+    assertThat(upgraded.claimReady(NodeId.newId(), "default", 1, Instant.now()))
+        .extracting(Job::id)
+        .containsExactly(first.id());
+    assertRedisIndexesConsistent();
+  }
+
+  @Test
+  void offlineIndexMigrationRefusesLiveWorkersAndUnknownFormats() {
+    var store = store();
+    var node = NodeId.newId();
+    store.recordNodeHeartbeat(node, Instant.now());
+    var r = adminConnection.sync();
+    r.set(RedisStorageFormat.KEY, "1");
+    assertThatThrownBy(() -> RedisIndexMigration.migrate(adminClient))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("Stop every");
+    assertThat(r.get(RedisStorageFormat.KEY)).isEqualTo("1");
+    r.set(RedisStorageFormat.KEY, "99");
+    assertThatThrownBy(() -> RedisIndexMigration.migrate(adminClient))
+        .isInstanceOf(IllegalStateException.class)
+        .hasMessageContaining("Unsupported");
+    assertThat(r.get(RedisStorageFormat.KEY)).isEqualTo("99");
   }
 
   @Test
@@ -370,10 +517,11 @@ class RedisJobStoreRegressionTest {
     // job (2,000+ commands and a per-key lock cycle each) before finding
     // the independent work. Key-driven gathering is bounded by the number
     // of keys and claims — never reintroduce a candidate path whose cost
-    // scales with pending jobs rather than keys.
+    // scales with pending jobs rather than keys. The fixed allowance includes
+    // maintaining the ordered maintenance indexes on the two claimed jobs.
     assertThat(commands)
         .as("claim-pass command count with a %s-deep blocked backlog", backlog)
-        .isLessThan(200L);
+        .isLessThan(220L);
 
     // Once the gate releases, the deep key drains from its pending head.
     finish(store, gateClaim.get(0), JobState.SUCCEEDED);
@@ -393,7 +541,8 @@ class RedisJobStoreRegressionTest {
     assertThat(store.claimReady(NodeId.newId(), "high-cardinality", 1, Instant.now()))
         .isEmpty();
 
-    assertThat(commandCalls(r, "hscan")).isPositive();
+    assertThat(commandCalls(r, "hscan")).isZero();
+    assertThat(commandCalls(r, "zrangebylex")).isPositive();
     assertThat(commandCalls(r, "hgetall")).isZero();
     assertThat(commandCalls(r, "hmget"))
         .as("one pass must not probe every registered key")
@@ -427,6 +576,7 @@ class RedisJobStoreRegressionTest {
     for (int i = 0; i < keys; i++) {
       String key = "blocked-key-" + i;
       registry.put(key, "1");
+      r.zadd(RedisKeys.orderedQueueKeys(queue), 0, key);
       r.hset(RedisKeys.concurrencyCounters(key), "exclusive_in_flight", "1");
     }
     r.hset(RedisKeys.queueKeys(queue), registry);
@@ -959,7 +1109,7 @@ class RedisJobStoreRegressionTest {
     var node = NodeId.newId();
     Job orphan = sample();
     store.insert(orphan);
-    store.claimReady(node, "default", 1, Instant.now());
+    store.claimReady(node, "default", 1, Instant.ofEpochMilli(3));
 
     // Backdate the real orphan's heartbeat and seed dangling ids at the
     // very bottom of the scan window — historically they consumed the
@@ -1472,8 +1622,42 @@ class RedisJobStoreRegressionTest {
     for (var entry : expectedQueueKeys.entrySet()) {
       assertLongHashEquals(r.hgetall(RedisKeys.queueKeys(entry.getKey())), entry.getValue());
       strayQueueKeys.remove(RedisKeys.queueKeys(entry.getKey()));
+      assertThat(r.zrange(RedisKeys.orderedQueueKeys(entry.getKey()), 0, -1))
+          .containsExactlyInAnyOrderElementsOf(entry.getValue().keySet());
+      strayQueueKeys.remove(RedisKeys.orderedQueueKeys(entry.getKey()));
     }
     assertThat(strayQueueKeys).as("stray queue key registries").isEmpty();
+
+    var expectedReady = new HashMap<String, Set<String>>();
+    for (var jobKey : r.keys(RedisKeys.PREFIX + "job:*")) {
+      var hash = r.hgetall(jobKey);
+      var key = hash.get("concurrency_key");
+      if (key == null || key.isEmpty() || !"ENQUEUED".equals(hash.get("state"))) continue;
+      var id = JobId.parse(jobKey.substring((RedisKeys.PREFIX + "job:").length()));
+      expectedReady
+          .computeIfAbsent(
+              RedisKeys.concurrencyReady(key, hash.get("queue")), ignored -> new HashSet<>())
+          .add(RedisKeys.concurrencyPendingMember(
+              ConcurrencyMode.valueOf(hash.get("concurrency_mode")), id));
+    }
+    var strayReady = new HashSet<>(r.keys(RedisKeys.PREFIX + "concurrency:*:pending:ready:*"));
+    for (var entry : expectedReady.entrySet()) {
+      assertThat(r.zrange(entry.getKey(), 0, -1))
+          .containsExactlyInAnyOrderElementsOf(entry.getValue());
+      strayReady.remove(entry.getKey());
+    }
+    assertThat(strayReady).as("stray queue-ready indexes").isEmpty();
+    var strayExclusive =
+        new HashSet<>(r.keys(RedisKeys.PREFIX + "concurrency:*:pending:exclusive"));
+    for (var entry : expectedPending.entrySet()) {
+      var index = RedisKeys.concurrencyPending(entry.getKey()) + ":exclusive";
+      assertThat(r.zrange(index, 0, -1))
+          .containsExactlyInAnyOrderElementsOf(entry.getValue().stream()
+              .filter(member -> member.endsWith(":EXCLUSIVE"))
+              .toList());
+      strayExclusive.remove(index);
+    }
+    assertThat(strayExclusive).as("stray exclusive barrier indexes").isEmpty();
 
     var strayPendingRoots =
         new HashSet<>(r.keys(RedisKeys.PREFIX + "concurrency:*:pending_root:*"));

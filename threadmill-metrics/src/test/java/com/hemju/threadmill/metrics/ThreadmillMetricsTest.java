@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -23,6 +24,8 @@ import com.hemju.threadmill.core.JobEngineFatalException;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.StaleJobException;
+import com.hemju.threadmill.core.engine.JobInterceptors;
+import com.hemju.threadmill.core.engine.JobRunner;
 import com.hemju.threadmill.core.engine.ProcessingNode;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
@@ -63,6 +66,158 @@ class ThreadmillMetricsTest {
     @Override
     public void run(P p, JobExecutionContext c) {
       throw new IllegalStateException("boom");
+    }
+  }
+
+  @Test
+  void asynchronousRefreshNeverBlocksScrapesOrQueuesDuplicateWorkDuringAStoreStall()
+      throws Exception {
+    var entered = new CountDownLatch(1);
+    var release = new CountDownLatch(1);
+    var reads = new AtomicInteger();
+    var inner = new InMemoryJobStore();
+    inner.insert(Job.builder().spec(JobSpec.of("example.Handler")).build());
+    var stalled = new ForwardingJobStore(inner) {
+      @Override
+      public Map<JobState, Long> countsByState() {
+        reads.incrementAndGet();
+        entered.countDown();
+        try {
+          if (!release.await(5, TimeUnit.SECONDS))
+            throw new IllegalStateException("test timed out");
+        } catch (InterruptedException failure) {
+          Thread.currentThread().interrupt();
+          throw new IllegalStateException(failure);
+        }
+        return super.countsByState();
+      }
+    };
+    var registry = new SimpleMeterRegistry();
+    try (var executor = Executors.newSingleThreadExecutor()) {
+      new ThreadmillMetrics(registry, stalled, Duration.ofSeconds(10), 100, executor);
+      try {
+        assertThat(entered.await(2, TimeUnit.SECONDS)).isTrue();
+        try (var scrapeExecutor = Executors.newSingleThreadExecutor()) {
+          var scrape = scrapeExecutor.submit(() -> {
+            for (int i = 0; i < 100; i++)
+              registry
+                  .get("threadmill.jobs.count")
+                  .tag("state", "ENQUEUED")
+                  .gauge()
+                  .value();
+          });
+          scrape.get(1, TimeUnit.SECONDS);
+        }
+        assertThat(reads).hasValue(1);
+      } finally {
+        release.countDown();
+      }
+      await()
+          .atMost(Duration.ofSeconds(2))
+          .untilAsserted(() -> assertThat(registry
+                  .get("threadmill.jobs.count")
+                  .tag("state", "ENQUEUED")
+                  .gauge()
+                  .value())
+              .isEqualTo(1));
+      assertThat(executor.isShutdown()).isFalse();
+    }
+  }
+
+  @Test
+  void rejectedAsynchronousRefreshIsObservableAndRateLimited() {
+    var submissions = new AtomicInteger();
+    var registry = new SimpleMeterRegistry();
+    try {
+      new ThreadmillMetrics(
+          registry, new InMemoryJobStore(), Duration.ofSeconds(10), 100, command -> {
+            submissions.incrementAndGet();
+            throw new RejectedExecutionException("stopped executor");
+          });
+      for (int i = 0; i < 100; i++)
+        registry.get("threadmill.metrics.snapshot.stale").gauge().value();
+      assertThat(submissions).hasValue(1);
+      assertThat(registry.get("threadmill.metrics.refresh.errors").counter().count())
+          .isEqualTo(1);
+      assertThat(registry.get("threadmill.metrics.snapshot.stale").gauge().value())
+          .isEqualTo(1);
+    } finally {
+      registry.close();
+    }
+  }
+
+  @Test
+  void staleTerminalWriteReleasesTheAttemptTimerWithoutRecordingSuccess() throws Exception {
+    var store = new InMemoryJobStore();
+    var registry = new SimpleMeterRegistry();
+    var metrics = new ThreadmillMetrics(registry, store);
+    var job = Job.builder().spec(JobSpec.of("example.Handler")).build();
+    store.insert(job);
+    var owner = NodeId.newId();
+    var claimed = store.claimReady(owner, "default", 1, Instant.now()).getFirst();
+    JobHandler<JobPayload> handler = (payload, ctx) -> {
+      assertThat(registry.get("threadmill.executions.active").gauge().value()).isEqualTo(1);
+      store.softDelete(job.id());
+    };
+    var runner = new JobRunner(
+        store,
+        owner,
+        name -> handler,
+        new JsonJobSerializer(),
+        new JobInterceptors().add(metrics.asInterceptor()),
+        ProcessingNodeConfig.defaults());
+    try (var workers = Executors.newVirtualThreadPerTaskExecutor()) {
+      workers.submit(() -> runner.run(claimed)).get(10, TimeUnit.SECONDS);
+      assertThat(registry.get("threadmill.executions.active").gauge().value()).isZero();
+      assertThat(registry.get("threadmill.executions.unconfirmed").counter().count())
+          .isEqualTo(1);
+      assertThat(registry.get("threadmill.jobs.processed").counter().count()).isZero();
+      assertThat(registry.get("threadmill.jobs.processing.time").timer().count())
+          .isEqualTo(1);
+    } finally {
+      runner.shutdown();
+      registry.close();
+    }
+  }
+
+  @Test
+  void reportsMaintenanceAgeAndActualRetentionDeletes() {
+    var backing = new InMemoryJobStore();
+    var old = Instant.now().minusSeconds(7200);
+    var job = Job.builder()
+        .spec(JobSpec.of("example.Handler"))
+        .initialState(JobState.SUCCEEDED)
+        .createdAt(old)
+        .build();
+    backing.insert(job);
+    var registry = new SimpleMeterRegistry();
+    try {
+      var metrics = new ThreadmillMetrics(registry, backing);
+      assertThat(registry
+              .get("threadmill.maintenance.oldest.age")
+              .tag("state", "SUCCEEDED")
+              .gauge()
+              .value())
+          .isGreaterThanOrEqualTo(7_200_000);
+      assertThat(metrics
+              .meteredStore()
+              .deleteFinishedOlderThan(Instant.now(), JobState.SUCCEEDED, 100))
+          .isEqualTo(1);
+      assertThat(registry
+              .get("threadmill.retention.deleted")
+              .tag("kind", "SUCCEEDED")
+              .counter()
+              .count())
+          .isEqualTo(1);
+      metrics.refresh();
+      assertThat(registry
+              .get("threadmill.maintenance.oldest.age")
+              .tag("state", "SUCCEEDED")
+              .gauge()
+              .value())
+          .isZero();
+    } finally {
+      registry.close();
     }
   }
 

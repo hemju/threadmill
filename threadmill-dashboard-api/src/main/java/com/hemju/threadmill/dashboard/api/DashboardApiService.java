@@ -12,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.TreeSet;
 import java.util.UUID;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
@@ -169,12 +170,14 @@ public final class DashboardApiService {
 
   public List<QueueView> queues() {
     var snapshot = snapshotData().snapshot();
-    return snapshot.queueDepths().entrySet().stream()
-        .map(e -> new QueueView(
-            e.getKey(),
-            e.getValue(),
-            snapshot.pausedQueues().contains(e.getKey()),
-            snapshot.oldestEnqueuedAt().get(e.getKey())))
+    var queueNames = new TreeSet<>(snapshot.queueDepths().keySet());
+    queueNames.addAll(snapshot.pausedQueues());
+    return queueNames.stream()
+        .map(queue -> new QueueView(
+            queue,
+            snapshot.queueDepths().getOrDefault(queue, 0L),
+            snapshot.pausedQueues().contains(queue),
+            snapshot.oldestEnqueuedAt().get(queue)))
         .toList();
   }
 
