@@ -17,6 +17,7 @@ assertj = "3.27.7"
 awaitility = "4.2.2"
 testcontainers = "2.0.5"
 postgresql = "42.7.12"
+oracleJdbc = "23.26.3.0.0"
 lettuce = "6.8.2.RELEASE"
 netty = "4.1.137.Final"
 networkntJsonschema = "1.5.4"
@@ -58,6 +59,7 @@ testcontainers-bom = { module = "org.testcontainers:testcontainers-bom", version
 testcontainers-junit-jupiter = { module = "org.testcontainers:testcontainers-junit-jupiter" }
 testcontainers-postgresql = { module = "org.testcontainers:testcontainers-postgresql" }
 postgresql-jdbc = { module = "org.postgresql:postgresql", version.ref = "postgresql" }
+oracle-jdbc = { module = "com.oracle.database.jdbc:ojdbc11", version.ref = "oracleJdbc" }
 lettuce-core = { module = "io.lettuce:lettuce-core", version.ref = "lettuce" }
 netty-bom = { module = "io.netty:netty-bom", version.ref = "netty" }
 networknt-jsonschema = { module = "com.networknt:json-schema-validator", version.ref = "networkntJsonschema" }
