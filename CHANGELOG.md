@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Upgraded Jackson 2 to 2.21.7 and constrained Spring Boot's test-scope
+  Jackson 3 to 3.1.7, resolving GHSA-7hhh-6rmp-j9qf, GHSA-p6pp-m3f8-5c89,
+  GHSA-cxp5-3px4-pw24, GHSA-wv8q-qhhj-9h54, GHSA-gx83-3vf8-gh7j,
+  GHSA-q4xh-88c3-wmh7 and GHSA-wjgm-6hv5-3cvf. Applications that manage
+  Jackson through their own BOM should move to the same patched releases.
 - Moved the dashboard UI build to Tailwind CSS 4.3.3 through the
   `@tailwindcss/vite` plugin, replacing Tailwind 3, PostCSS config and
   Autoprefixer. Tailwind 3 resolved `braces` (GHSA-vfj7-8cjw-p6xm, no patched
