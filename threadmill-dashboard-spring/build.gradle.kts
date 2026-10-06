@@ -31,6 +31,13 @@ dependencies {
         testImplementation(
             "org.apache.tomcat.embed:tomcat-embed-websocket:${libs.versions.tomcat.get()}"
         )
+        // Spring Boot 4.0.8 resolves Jackson 3.1.5, below the 3.1.7 floor for
+        // GHSA-7hhh-6rmp-j9qf, GHSA-p6pp-m3f8-5c89, GHSA-cxp5-3px4-pw24,
+        // GHSA-wv8q-qhhj-9h54, GHSA-gx83-3vf8-gh7j, GHSA-q4xh-88c3-wmh7, and
+        // GHSA-wjgm-6hv5-3cvf. Remove these constraints when Boot's BOM resolves
+        // Jackson 3 >= 3.1.7.
+        testImplementation("tools.jackson.core:jackson-core:${libs.versions.jackson3.get()}")
+        testImplementation("tools.jackson.core:jackson-databind:${libs.versions.jackson3.get()}")
     }
     api(project(":threadmill-core"))
     api(project(":threadmill-dashboard-api"))

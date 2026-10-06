@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Upgraded Jackson 2 to 2.21.7 and constrained Spring Boot's test-scope
+  Jackson 3 to 3.1.7, resolving GHSA-7hhh-6rmp-j9qf, GHSA-p6pp-m3f8-5c89,
+  GHSA-cxp5-3px4-pw24, GHSA-wv8q-qhhj-9h54, GHSA-gx83-3vf8-gh7j,
+  GHSA-q4xh-88c3-wmh7 and GHSA-wjgm-6hv5-3cvf. Applications that manage
+  Jackson through their own BOM should move to the same patched releases.
+
 ## 1.0.0 — 2026-09-13
 
 Threadmill 1.0.0 adds production hardening, operational tooling and migration
