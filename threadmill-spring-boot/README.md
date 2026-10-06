@@ -60,10 +60,13 @@ start; `JobScheduler` verifies the handler/payload pair at enqueue time.
 `ThreadmillAutoConfiguration` resolves a `JobStore` bean by precedence:
 
 1. **Explicit Redis config** (`threadmill.store.redis.*` populated) → `RedisJobStore`.
-2. **DataSource present + Postgres store on classpath** → `PostgresJobStore`
+2. **DataSource present + a JDBC store on classpath** → `PostgresJobStore`
+   (`threadmill-store-postgres`) or `OracleJobStore` (`threadmill-store-oracle`)
    wired from the application's existing `DataSource`. The auto-configured
    store applies pending Threadmill schema migrations by default before it is
-   created.
+   created. With both store modules on the classpath, `threadmill.store.jdbc-type`
+   (`postgres` / `oracle`) decides; otherwise the `spring.datasource.url` scheme
+   does, and PostgreSQL wins a tie.
 3. **Explicit development opt-in** (`threadmill.store.memory.enabled=true`) →
    `InMemoryJobStore` with a loud warning that jobs won't survive restart.
 4. **Otherwise** → startup fails with an actionable error instead of silently
@@ -125,7 +128,7 @@ threadmill:
     enqueue-mode: immediate
 ```
 
-Use caller-transaction participation with Spring + Postgres:
+Use caller-transaction participation with Spring + PostgreSQL or Oracle:
 
 ```yaml
 threadmill:
@@ -133,8 +136,8 @@ threadmill:
     enqueue-mode: join_transaction
 ```
 
-`join_transaction` wires `PostgresJobStore` with a Spring transaction-bound
-connection strategy. Job inserts and dedup rows commit or roll back with the
+`join_transaction` wires `PostgresJobStore` or `OracleJobStore` with a Spring
+transaction-bound connection strategy. Job inserts and dedup rows commit or roll back with the
 application transaction; local worker wakeups still fire only after commit.
 Redis and custom stores cannot join a SQL transaction and fail fast if this
 mode is requested.
@@ -164,6 +167,8 @@ Durable auto-configured stores publish remote wake hints by default:
 
 - Postgres: `LISTEN`/`NOTIFY` on `threadmill_wake`.
 - Redis: Pub/Sub on `{threadmill}:wake`.
+- Oracle: none — Oracle has no lightweight equivalent, so other nodes pick up
+  new work within `threadmill.poll-interval`.
 
 The listener calls `ProcessingNode.wake(queue)` on matching local dispatchers.
 This is a latency optimization only; polling remains the fallback when a
@@ -227,6 +232,9 @@ list). The most common:
 | `threadmill.store.memory.enabled` | `false` | Explicitly allow volatile in-memory storage for development or tests. Without a durable store or this opt-in, startup fails. |
 | `threadmill.store.postgres.schema-mode` | `migrate` | `migrate`, `validate`, `none`, or `drop-and-migrate`. |
 | `threadmill.store.postgres.allow-destructive-schema-reset` | `false` | Required for `drop-and-migrate`; destroys stored Threadmill jobs. |
+| `threadmill.store.oracle.schema-mode` | `migrate` | `migrate`, `validate`, `none`, or `drop-and-migrate`. |
+| `threadmill.store.oracle.allow-destructive-schema-reset` | `false` | Required for `drop-and-migrate`; destroys stored Threadmill jobs. |
+| `threadmill.store.jdbc-type` | — | `postgres` or `oracle`; only needed when both JDBC store modules are on the classpath and `spring.datasource.url` does not name the database. |
 | `threadmill.store.redis.mode` | `standalone` | `standalone` / `sentinel` / `cluster`. |
 | `threadmill.store.redis.uri` | — | Lettuce `redis://` / `rediss://` URI for standalone mode. |
 | `threadmill.store.redis.sentinel.data-node-username` / `.data-node-password` | — | Redis data-node ACL credentials. |

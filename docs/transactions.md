@@ -118,8 +118,8 @@ void onDeferredEnqueueFailure(AfterCommitEnqueueFailure failure) {
 ```
 
 The event is an in-process observation, not durable recovery: a process crash
-can prevent its delivery. Use `join_transaction` with the same PostgreSQL
-`DataSource` for atomic business and job writes, or an application-owned durable
+can prevent its delivery. Use `join_transaction` with the same PostgreSQL or
+Oracle `DataSource` for atomic business and job writes, or an application-owned durable
 outbox when crossing datastores. Handlers still require idempotency under
 Threadmill's at-least-once delivery guarantee.
 
@@ -136,12 +136,13 @@ the job row are written when the method is called — and they **survive a
 rollback** of the surrounding business transaction. A DEBUG log line is
 emitted when `enqueueIfAbsent` runs inside an active transaction. If the
 deduplicated enqueue must roll back with the caller, use
-`join_transaction` (Postgres) — there the dedup write shares the caller's
+`join_transaction` (PostgreSQL or Oracle) — there the dedup write shares the caller's
 JDBC transaction — or restructure to a plain `enqueue()` after commit.
 
 ### `join_transaction`
 
-Postgres + Spring can make scheduling part of the caller's SQL transaction:
+PostgreSQL or Oracle + Spring can make scheduling part of the caller's SQL
+transaction:
 
 ```yaml
 threadmill:
@@ -156,16 +157,21 @@ Threadmill job visible; rollback removes both. Local worker wakeups still run
 only after commit so workers never race an uncommitted row.
 
 This mode is intentionally limited to the Spring auto-configured
-`PostgresJobStore` using the same `DataSource` as the caller transaction.
-Redis cannot join a SQL transaction; unsupported combinations fail fast at
-startup.
+`PostgresJobStore` or `OracleJobStore` using the same `DataSource` as the caller
+transaction. Redis cannot join a SQL transaction; unsupported combinations fail
+fast at startup.
 
-One deduplication edge is intentionally different in this mode. If two
-transactions race on the same `(queue, dedupKey)`, the loser receives the
-Postgres unique-constraint failure instead of Threadmill coalescing it into an
-existing job id. Once Postgres aborts a statement inside the caller's
-transaction, Threadmill cannot safely run the fallback lookup without also
-owning the transaction boundary.
+One deduplication edge differs between the two databases in this mode. If two
+transactions race on the same `(queue, dedupKey)`:
+
+- **PostgreSQL** — the loser receives the unique-constraint failure instead of
+  Threadmill coalescing it into an existing job id. Once PostgreSQL aborts a
+  statement inside the caller's transaction, the whole transaction is unusable,
+  so Threadmill cannot run the fallback lookup without owning the boundary.
+- **Oracle** — the loser waits for the winner's commit and then coalesces onto
+  the winner's job id. Oracle rolls back only the failed statement, so
+  Threadmill undoes its own writes to a savepoint and runs the lookup inside the
+  caller's transaction.
 
 ### `immediate`
 

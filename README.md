@@ -7,8 +7,8 @@
 A modern, lightweight background-job-processing library for Java 25.
 
 Threadmill runs your idempotent background work durably, on a cluster of
-application nodes, against a real datastore (PostgreSQL or Redis) — or an
-in-memory store for local development. The design uses well-understood
+application nodes, against a real datastore (PostgreSQL, Oracle Database, or
+Redis) — or an in-memory store for local development. The design uses well-understood
 techniques: a durable job store, optimistic concurrency control, polling
 worker loops, an explicit state machine, and a small, deliberate public
 API.
@@ -20,8 +20,8 @@ and **[JobRunr](https://www.jobrunr.io/)** on Java 25. It gives you both what
 Quartz gives you (durable cron and interval scheduling, clustering, misfire
 handling) and what JobRunr gives you (fire-and-forget background jobs, a
 dashboard, retries) behind one small, idempotency-first API — built on virtual
-threads and scoped values, with first-class PostgreSQL **and** Redis backends
-held to a single shared contract test suite. If you are choosing between the
+threads and scoped values, with first-class PostgreSQL, Oracle, **and** Redis
+backends held to a single shared contract test suite. If you are choosing between the
 two, or want to consolidate both onto one library, Threadmill is the
 replacement.
 
@@ -50,7 +50,7 @@ These examples use **1.0.0**. Upgrade existing installations using the
 ```kotlin
 // build.gradle.kts
 implementation("com.hemju.threadmill:threadmill-core:1.0.0")
-implementation("com.hemju.threadmill:threadmill-store-postgres:1.0.0") // or -store-redis / -store-memory
+implementation("com.hemju.threadmill:threadmill-store-postgres:1.0.0") // or -store-oracle / -store-redis / -store-memory
 implementation("com.hemju.threadmill:threadmill-spring-boot:1.0.0")    // optional Spring Boot integration
 ```
 
@@ -116,6 +116,7 @@ See [docs/quickstart.md](docs/quickstart.md) for a complete Spring walkthrough, 
 | `threadmill-core` | Job model, state machine, `JobStore` SPI, serialization, engine (`ProcessingNode`, `Dispatcher`, `MaintenanceCycle`), interceptors, scheduling API. **No storage, no framework code.** |
 | `threadmill-store-memory` | In-memory `JobStore` for tests and local dev. Held to the same contract as the real backends. |
 | `threadmill-store-postgres` | PostgreSQL backend (auto-migrations, `SELECT … FOR UPDATE SKIP LOCKED` claim, per-state counter table with trigger). |
+| `threadmill-store-oracle` | Oracle Database 19c+ backend (standard JDBC, indexed virtual columns as partial indexes, `FOR UPDATE SKIP LOCKED` claim, resumable migrations). |
 | `threadmill-store-redis` | Redis backend (reliable-fetch via Lua, per-job HASH + per-queue ZSET + counts HASH). |
 | `threadmill-spring-boot` | Spring Boot 4.x auto-configuration. |
 | `threadmill-metrics` | Micrometer integration: jobs-per-state gauges, processed/failed counters, processing-time timer. |
@@ -134,6 +135,16 @@ by a trigger (so the observability path never contends with the claim
 path). Migrations are applied automatically on startup; an
 `emitPendingSql()` method produces pending SQL for teams that prefer
 Flyway/Liquibase, and `emitCleanInstallSql()` emits the full clean-install DDL.
+
+**Oracle Database 19c+** is a first-class backend with the same model: the
+body is a `CLOB`, scalar columns are indexed through virtual columns that emulate
+partial indexes, and the claim uses `FOR UPDATE SKIP LOCKED`. It needs an
+`AL32UTF8` database and only `CREATE TABLE`/`CREATE TRIGGER` privileges, uses
+standard JDBC (bring your own driver), and resumes interrupted migrations
+because Oracle commits DDL statement by statement. It has no cross-node wake
+channel; other nodes pick up new work within `poll-interval`. See the
+[module README](threadmill-store-oracle/README.md) and
+[Oracle schema](docs/oracle-schema.md).
 
 **Redis 7.4+** is a first-class backend and requires `noeviction`. Every multi-key state
 transition is a single atomic Lua script. Standalone, Sentinel, and Cluster
@@ -230,8 +241,8 @@ process.
 - Job model with append-only state history, optimistic-lock versioning,
   relationship and result fields, and bounded size.
 - Centralised state machine; illegal transitions throw.
-- `JobStore` SPI plus three backends (in-memory, PostgreSQL, Redis), each
-  held to one shared abstract contract test.
+- `JobStore` SPI plus four backends (in-memory, PostgreSQL, Oracle, Redis),
+  each held to one shared abstract contract test.
 - Processing engine: virtual-thread workers, scoped-value context
   propagation, per-job timeout, single failure code path, circuit-breaker
   decay, store-outage tolerance, orphan-reclaim, poison-job quarantine.
@@ -301,8 +312,11 @@ and the engine resumes automatically once the store is reachable again.
 ./gradlew productionCheck        # release-candidate validation gauntlet
 ```
 
-The PostgreSQL and Redis tests use Testcontainers and require a running
-container runtime (Docker / Podman / Colima / OrbStack).
+The PostgreSQL, Oracle, and Redis tests use Testcontainers and require a
+running container runtime (Docker / Podman / Colima / OrbStack). The Oracle
+suite runs on Oracle 23ai Free by default; see the
+[Oracle store README](threadmill-store-oracle/README.md#tests) for 21c XE and
+real 19c runs.
 
 ## Examples
 

@@ -36,6 +36,8 @@
 - [Configuration](configuration.md) — every `threadmill.*` property.
 - [PostgreSQL schema](postgres-schema.md) — schema modes, manual DDL, and
   reset guidance.
+- [Oracle schema](oracle-schema.md) — privileges, schema modes, resumable
+  migrations, and SQL*Plus-ready manual DDL.
 - [Redis topologies](redis-topologies.md) — standalone, Sentinel, Cluster.
 - [Operations](operations.md) — production runbook, pause / resume, monitoring.
 - [Troubleshooting](troubleshooting.md) — symptom → cause → fix.
@@ -69,6 +71,9 @@ operational notes:
 - [`threadmill-store-postgres`](../threadmill-store-postgres/README.md) — the
   full schema, PG18-only enforcement, claim semantics, deadlock retry,
   connection-pool sizing.
+- [`threadmill-store-oracle`](../threadmill-store-oracle/README.md) — Oracle
+  19c+ requirements, virtual-column indexes, the claim path, driver and locale
+  notes, and how to test against 21c XE or a real 19c database.
 - [`threadmill-store-redis`](../threadmill-store-redis/README.md) — the full
   key layout, the Lua script inventory, the reliable-fetch claim, AOF
   durability.

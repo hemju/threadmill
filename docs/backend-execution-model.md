@@ -130,6 +130,19 @@ database, connection pool, worker count, or queue topology can drain. A growing
 queue with passing concurrency invariants is a capacity signal, not by itself a
 same-key correctness failure.
 
+### Oracle Path
+
+Oracle follows the Postgres path — the same tables, row locks, group rows, and
+workflow holds in one transaction — with three mechanical differences. Oracle
+rejects a row limit on a locking query, so locking cursors are index-ordered and
+fetched only as far as the page budget; Oracle locks `SKIP LOCKED` rows as they
+are fetched. Keyed candidates are first read through one top-n branch per key
+(at most 128 keys per unproductive poll, rotated like Postgres) and then locked
+by primary key with `SKIP LOCKED`, dropping rows another claimer holds. The
+leapfrog rule is decided by `EXISTS` range probes bounded at each candidate's own
+`current_state_at`. See the
+[Oracle store README](../threadmill-store-oracle/README.md#how-the-claim-works).
+
 ## Redis Path
 
 Redis uses server-side Lua scripts as the atomic boundary. Java may inspect
