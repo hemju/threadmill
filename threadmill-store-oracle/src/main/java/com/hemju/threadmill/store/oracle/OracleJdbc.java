@@ -90,9 +90,13 @@ final class OracleJdbc {
     return value == null ? null : value.toInstant(ZoneOffset.UTC);
   }
 
-  /** Seconds as an exact decimal, for {@code NUMTODSINTERVAL(?, 'SECOND')}. */
+  /**
+   * Seconds as an exact decimal, for {@code NUMTODSINTERVAL(?, 'SECOND')}.
+   * Keeps nanoseconds so a positive sub-millisecond duration never binds zero.
+   */
   static void setSeconds(PreparedStatement ps, int index, Duration value) throws SQLException {
-    ps.setBigDecimal(index, BigDecimal.valueOf(value.toMillis(), 3));
+    ps.setBigDecimal(
+        index, BigDecimal.valueOf(value.getSeconds()).add(BigDecimal.valueOf(value.getNano(), 9)));
   }
 
   /**

@@ -13,6 +13,7 @@ import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -247,12 +248,20 @@ class OracleQueryPlanTest {
     void bind(PreparedStatement ps) throws SQLException;
   }
 
-  /** Run {@code sql} with typed binds and return the plan of the executed cursor. */
+  /**
+   * Run {@code sql} with typed binds and return the plan of the executed cursor.
+   *
+   * <p>A unique trailing comment gives the probe its own cursor, which is then
+   * found in {@code V$SQL} by that tag. Relying on the session's previous
+   * statement ({@code DISPLAY_CURSOR(NULL, NULL)}) returned no plan on 21c
+   * XE. The comment does not change optimization: hints sit at the start.
+   */
   private static String executedPlan(String sql, Binder binder) throws SQLException {
+    String tag = "threadmill-plan-probe-" + UUID.randomUUID();
     try (Connection conn = OracleTestDatabase.dataSource().getConnection()) {
       conn.setAutoCommit(false);
       try {
-        try (PreparedStatement ps = conn.prepareStatement(sql)) {
+        try (PreparedStatement ps = conn.prepareStatement(sql + " /* " + tag + " */")) {
           binder.bind(ps);
           try (ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
@@ -260,11 +269,26 @@ class OracleQueryPlanTest {
             }
           }
         }
+        String sqlId;
+        int child;
+        try (PreparedStatement ps = conn.prepareStatement("SELECT sql_id, child_number FROM v$sql "
+            + "WHERE sql_fulltext LIKE ? AND sql_fulltext NOT LIKE '%v$sql%' "
+            + "ORDER BY last_active_time DESC FETCH FIRST 1 ROW ONLY")) {
+          ps.setString(1, "%" + tag + "%");
+          try (ResultSet rs = ps.executeQuery()) {
+            assertThat(rs.next()).as("cursor for %s in V$SQL", tag).isTrue();
+            sqlId = rs.getString(1);
+            child = rs.getInt(2);
+          }
+        }
         var plan = new StringBuilder();
-        try (Statement st = conn.createStatement();
-            ResultSet rs = st.executeQuery("SELECT plan_table_output FROM TABLE("
-                + "DBMS_XPLAN.DISPLAY_CURSOR(NULL, NULL, 'BASIC'))")) {
-          while (rs.next()) plan.append(rs.getString(1)).append('\n');
+        try (PreparedStatement ps = conn.prepareStatement(
+            "SELECT plan_table_output FROM TABLE(" + "DBMS_XPLAN.DISPLAY_CURSOR(?, ?, 'BASIC'))")) {
+          ps.setString(1, sqlId);
+          ps.setInt(2, child);
+          try (ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) plan.append(rs.getString(1)).append('\n');
+          }
         }
         assertThat(plan.toString()).as("executed-cursor plan").contains("Plan hash value");
         return plan.toString();

@@ -8,6 +8,7 @@ import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -21,7 +22,9 @@ import org.springframework.jdbc.datasource.DelegatingDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.hemju.threadmill.core.EnqueueResult;
+import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobId;
+import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.engine.LocalWakeBus;
 import com.hemju.threadmill.core.engine.ProcessingNodeConfig;
 import com.hemju.threadmill.core.handler.JobExecutionContext;
@@ -31,6 +34,7 @@ import com.hemju.threadmill.core.schedule.CronTask;
 import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.serialization.JsonJobSerializer;
 import com.hemju.threadmill.core.spec.JobArgument;
+import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.store.oracle.OracleJobStore;
 import com.hemju.threadmill.store.oracle.OracleMigrationRunner;
@@ -106,6 +110,34 @@ class SpringOracleTransactionBoundaryTest {
     assertThat(store.findById(id.get())).isEmpty();
     assertThat(store.queueDepths()).isEmpty();
     assertThat(wakes).isEmpty();
+  }
+
+  @Test
+  void aFailedJoinedWriteLeavesNothingBehindWhenTheCallerCatchesAndCommits() {
+    // Oracle rolls back only the failing statement. Without a savepoint per
+    // write unit, the batch row inserted before the duplicate id survived the
+    // caller's commit, breaking insertAll's all-or-none contract.
+    var earlier = job();
+    var duplicated = job();
+
+    transactions.executeWithoutResult(status -> {
+      store.insert(earlier);
+      assertThatThrownBy(() -> store.insertAll(List.of(duplicated, duplicated)))
+          .isInstanceOf(IllegalStateException.class);
+    });
+
+    assertThat(store.findById(earlier.id()))
+        .as("an earlier, successful write unit")
+        .isPresent();
+    assertThat(store.findById(duplicated.id())).as("the failed batch").isEmpty();
+    assertThat(store.countsByState().get(JobState.ENQUEUED)).isEqualTo(1L);
+  }
+
+  private static Job job() {
+    return Job.builder()
+        .spec(JobSpec.of(
+            GreetHandler.class.getName(), new JobArgument(GreetPayload.class.getName(), "{}")))
+        .build();
   }
 
   @Test

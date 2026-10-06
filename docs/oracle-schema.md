@@ -127,6 +127,6 @@ migrations in production.
   through temporary LOBs that the store frees after each statement; size the
   `TEMP` tablespace for the concurrent write rate of large jobs.
 - **No cross-node wake.** Nodes pick up work enqueued on another node within
-  their `pollInterval` (default 1 s); same-JVM wakes are immediate.
+  their `pollInterval` (default 500 ms); same-JVM wakes are immediate.
 - **Driver.** The store uses standard JDBC. It was tested with `ojdbc11`
   23.26.3; older drivers that report no batch update counts are not supported.

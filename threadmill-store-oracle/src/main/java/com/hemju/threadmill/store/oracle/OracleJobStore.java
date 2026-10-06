@@ -263,9 +263,32 @@ public final class OracleJobStore implements JobStore {
 
   private <T> T writeTransaction(OracleConnectionWork<T> work) throws SQLException {
     if (transactionBoundary.externallyManagedTransactionActive()) {
-      return transactionBoundary.inTransaction(work);
+      return transactionBoundary.inTransaction(conn -> atomically(conn, work));
     }
     return OracleDeadlockRetry.run(() -> transactionBoundary.inTransaction(work));
+  }
+
+  /**
+   * Run one write unit inside a caller-owned transaction all-or-nothing.
+   * Oracle rolls back only the failing statement, not the transaction: without
+   * the savepoint, a caller that catches the store's exception and commits
+   * would also commit the unit's earlier statements, for example the rows of
+   * an {@code insertAll} batch before its duplicate id. PostgreSQL aborts the
+   * whole transaction instead, so its store needs no equivalent.
+   */
+  private static <T> T atomically(Connection conn, OracleConnectionWork<T> work)
+      throws SQLException {
+    Savepoint unit = conn.setSavepoint();
+    try {
+      return work.execute(conn);
+    } catch (SQLException | RuntimeException | Error failure) {
+      try {
+        conn.rollback(unit);
+      } catch (SQLException | RuntimeException rollbackFailure) {
+        failure.addSuppressed(rollbackFailure);
+      }
+      throw failure;
+    }
   }
 
   /**
@@ -2008,6 +2031,9 @@ public final class OracleJobStore implements JobStore {
   @Override
   public void releaseMutex(String name, String holder) {
     Names.requireName("mutex", name);
+    // Oracle stores an acquired empty holder as NULL and DECODE matches two
+    // NULLs, so a null release would free another holder's mutex.
+    Objects.requireNonNull(holder, "holder");
     try {
       ownedTransaction(conn -> {
         try (PreparedStatement ps = conn.prepareStatement(
