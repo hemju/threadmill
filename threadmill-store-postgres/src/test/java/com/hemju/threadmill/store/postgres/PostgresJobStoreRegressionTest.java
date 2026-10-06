@@ -1547,8 +1547,19 @@ class PostgresJobStoreRegressionTest {
     store.insert(parent);
     store.insert(otherParent);
 
-    for (int i = 0; i < 80; i++) {
-      store.insert(awaitingChildOf(i % 3 == 0 ? otherParent : parent, i));
+    // The queried parent owns a small share of a large AWAITING population, the shape the
+    // partial parent index exists for. With a fixture where most AWAITING rows belong to the
+    // queried parent, walking the V11 (state, current_state_at, id) retention index is just as
+    // cheap and the planner's choice between the two flips on statistics noise.
+    for (int batch = 0; batch < 4; batch++) {
+      var children = new ArrayList<Job>();
+      for (int i = 0; i < 500; i++) {
+        children.add(awaitingChildOf(otherParent, batch * 500 + i));
+      }
+      store.insertAll(children);
+    }
+    for (int i = 0; i < 20; i++) {
+      store.insert(awaitingChildOf(parent, 2_000 + i));
     }
 
     assertThat(store.findAwaitingByParent(parent.id(), 10))
@@ -1559,6 +1570,7 @@ class PostgresJobStoreRegressionTest {
 
     try (Connection conn = dataSource.getConnection();
         Statement st = conn.createStatement()) {
+      st.execute("ANALYZE threadmill_jobs");
       st.execute("SET enable_seqscan = off");
       try (PreparedStatement ps = conn.prepareStatement("EXPLAIN (FORMAT TEXT) "
           + "SELECT body FROM threadmill_jobs WHERE state = 'AWAITING' AND parent_job_id = ? "
