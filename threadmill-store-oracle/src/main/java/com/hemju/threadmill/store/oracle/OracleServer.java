@@ -4,6 +4,7 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.Locale;
 import java.util.regex.Pattern;
 
 import javax.sql.DataSource;
@@ -65,9 +66,16 @@ final class OracleServer {
     try (Connection conn = dataSource.getConnection();
         Statement st = conn.createStatement()) {
       var meta = conn.getMetaData();
+      String product = String.valueOf(meta.getDatabaseProductName());
+      if (!product.toLowerCase(Locale.ROOT).contains("oracle")) {
+        throw new JobEngineFatalException(
+            "Threadmill's OracleJobStore needs an Oracle database, but"
+                + " the DataSource points at " + product + ". With Spring Boot, set"
+                + " threadmill.store.jdbc-type for the intended store.");
+      }
       int major = meta.getDatabaseMajorVersion();
-      String product = meta.getDatabaseProductVersion();
-      var matcher = VERSION.matcher(product == null ? "" : product);
+      String release = meta.getDatabaseProductVersion();
+      var matcher = VERSION.matcher(release == null ? "" : release);
       String version = matcher.find() ? matcher.group() : Integer.toString(major);
       String characterSet;
       try (ResultSet rs = st.executeQuery(

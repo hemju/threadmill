@@ -23,6 +23,8 @@ dependencies {
     // use Redis exclusively) don't pull in the JDBC driver. The auto-config
     // bean for Postgres is gated by @ConditionalOnClass so this is safe.
     compileOnly(project(":threadmill-store-postgres"))
+    // Same for the Oracle store, gated by @ConditionalOnClass(OracleJobStore.class).
+    compileOnly(project(":threadmill-store-oracle"))
     compileOnly(libs.spring.boot.autoconfigure)
     compileOnly(libs.spring.context)
     compileOnly(libs.spring.jdbc)
@@ -32,6 +34,8 @@ dependencies {
     )
 
     testImplementation(project(":threadmill-store-postgres"))
+    testImplementation(project(":threadmill-store-oracle"))
+    testImplementation(libs.oracle.jdbc)
     testImplementation(project(":threadmill-store-redis"))
     testImplementation(project(":threadmill-test-support"))
     testImplementation(libs.spring.boot.autoconfigure)

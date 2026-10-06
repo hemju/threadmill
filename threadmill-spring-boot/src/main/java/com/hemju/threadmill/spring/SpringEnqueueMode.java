@@ -5,7 +5,7 @@ public enum SpringEnqueueMode {
   /** Reserve ids immediately, then write jobs in an {@code afterCommit} callback. */
   AFTER_COMMIT,
 
-  /** Write Postgres jobs inside the caller's Spring JDBC transaction. */
+  /** Write PostgreSQL or Oracle jobs inside the caller's Spring JDBC transaction. */
   JOIN_TRANSACTION,
 
   /** Write jobs immediately, regardless of Spring transaction state. */

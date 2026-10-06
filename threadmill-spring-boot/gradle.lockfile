@@ -16,6 +16,7 @@ com.google.errorprone:error_prone_annotations:2.38.0=testCompileClasspath
 com.gradleup.gratatouille:gratatouille-tasks-runtime:0.2.3=nmcpTasks
 com.gradleup.nmcp:nmcp-tasks:1.6.1=nmcpTasks
 com.jayway.jsonpath:json-path:2.10.0=testCompileClasspath,testRuntimeClasspath
+com.oracle.database.jdbc:ojdbc11:23.26.3.0.0=testCompileClasspath,testRuntimeClasspath
 com.squareup.okhttp3:okhttp-jvm:5.4.0=nmcpTasks
 com.squareup.okhttp3:okhttp:5.4.0=nmcpTasks
 com.squareup.okio:okio-jvm:3.17.0=nmcpTasks
