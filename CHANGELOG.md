@@ -7,6 +7,16 @@
   GHSA-cxp5-3px4-pw24, GHSA-wv8q-qhhj-9h54, GHSA-gx83-3vf8-gh7j,
   GHSA-q4xh-88c3-wmh7 and GHSA-wjgm-6hv5-3cvf. Applications that manage
   Jackson through their own BOM should move to the same patched releases.
+- Moved the dashboard UI build to Tailwind CSS 4.3.3 through the
+  `@tailwindcss/vite` plugin, replacing Tailwind 3, PostCSS config and
+  Autoprefixer. Tailwind 3 resolved `braces` (GHSA-vfj7-8cjw-p6xm, no patched
+  release) through `fast-glob`, `micromatch` and `chokidar`, plus a vulnerable
+  `postcss-selector-parser` (GHSA-rj75-hqrm-r3gf); Tailwind 4 has neither
+  dependency. `source-map-js` moves to 1.2.2 (GHSA-68fv-2mgg-jv7q). `npm audit`
+  reports zero known vulnerabilities. The theme moves into `src/styles.css`, with
+  a small base layer that keeps Tailwind 3's border, placeholder and button
+  cursor defaults. The packaged console now targets the browsers Tailwind 4
+  supports (Safari 16.4+, Chrome 111+, Firefox 128+).
 
 ## 1.0.0 — 2026-09-13
 
