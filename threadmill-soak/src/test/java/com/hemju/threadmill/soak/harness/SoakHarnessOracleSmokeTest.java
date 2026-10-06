@@ -9,28 +9,28 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * End-to-end smoke against Redis 7 via Testcontainers. Tagged {@code soak}
+ * End-to-end smoke against Oracle Database Free via Testcontainers. Tagged {@code soak}
  * — runs in the fixed {@code :soakRegression} task, not on every {@code check}.
  */
 @Tag("soak")
-final class SoakHarnessRedisSmokeTest {
+final class SoakHarnessOracleSmokeTest {
 
   @Test
-  void redisSmokeProducesPassedVerdict(@TempDir Path tempDir) throws Exception {
-    Path outputDir = tempDir.resolve("redis-smoke");
+  void oracleSmokeProducesPassedVerdict(@TempDir Path tempDir) throws Exception {
+    Path outputDir = tempDir.resolve("oracle-smoke");
     System.setProperty("threadmill.soak.scenario", "mixed-workload");
     System.setProperty("threadmill.soak.duration", "10s");
     System.setProperty("threadmill.soak.jobsPerSecond", "60");
     System.setProperty("threadmill.soak.workerCount", "4");
     System.setProperty("threadmill.soak.nodes", "1");
     System.setProperty("threadmill.soak.outputDir", outputDir.toString());
-    System.setProperty("threadmill.soak.runId", "redis-smoke");
+    System.setProperty("threadmill.soak.runId", "oracle-smoke");
     try {
-      SoakHarnessConfig config = SoakHarnessConfig.fromSystemProperties("redis");
+      SoakHarnessConfig config = SoakHarnessConfig.fromSystemProperties("oracle");
       OutputDir dir = new OutputDir(config.outputDir(), config.force());
       SummaryReport report;
-      try (BackendFixture fixture = new RedisHarnessFixture("standalone")) {
-        report = new SoakHarnessRunner(config, fixture, dir, "soakRedis").run();
+      try (BackendFixture fixture = new OracleHarnessFixture()) {
+        report = new SoakHarnessRunner(config, fixture, dir, "soakOracle").run();
       }
       assertThat(report.verdict()).isEqualTo("passed");
       assertThat(outputDir.resolve("summary.json")).exists();

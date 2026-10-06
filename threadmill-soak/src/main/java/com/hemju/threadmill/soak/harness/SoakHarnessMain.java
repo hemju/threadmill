@@ -6,8 +6,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * Entry point invoked by the {@code soakMemory}, {@code soakPostgres}, and
- * {@code soakRedis} Gradle tasks.
+ * Entry point invoked by the {@code soakMemory}, {@code soakPostgres},
+ * {@code soakOracle}, and {@code soakRedis} Gradle tasks.
  *
  * <p>Reads {@code --backend X} from the command line; everything else
  * (scenario, duration, rates, output dir) is read from
@@ -52,6 +52,8 @@ public final class SoakHarnessMain {
     return switch (config.backend()) {
       case "memory" -> new MemoryHarnessFixture();
       case "postgres" -> new PostgresHarnessFixture(config.postgresUrl());
+      case "oracle" ->
+        new OracleHarnessFixture(config.oracleUrl(), config.oracleUser(), config.oraclePassword());
       case "redis" -> new RedisHarnessFixture(config.redisTopology(), config.redisUrl());
       default -> throw new IllegalArgumentException("unknown backend: " + config.backend());
     };

@@ -136,6 +136,11 @@ public final class EnduranceMain {
     if ("postgres".equals(backend)) {
       config.postgresUrl().ifPresent(url -> addProp(command, "postgresUrl", url));
     }
+    if ("oracle".equals(backend)) {
+      config.oracleUrl().ifPresent(url -> addProp(command, "oracleUrl", url));
+      config.oracleUser().ifPresent(user -> addProp(command, "oracleUser", user));
+      config.oraclePassword().ifPresent(password -> addProp(command, "oraclePassword", password));
+    }
     if ("redis".equals(backend)) {
       config.redisUrl().ifPresent(url -> addProp(command, "redisUrl", url));
     }
@@ -230,6 +235,10 @@ public final class EnduranceMain {
     m.put("failFast", config.failFast());
     m.put("progressInterval", config.progressInterval().toString());
     m.put("postgresUrl", config.postgresUrl().orElse(null));
+    m.put("oracleUrl", config.oracleUrl().orElse(null));
+    m.put("oracleUser", config.oracleUser().orElse(null));
+    // Never write the Oracle password into the run artifacts.
+    m.put("oraclePasswordSet", config.oraclePassword().isPresent());
     m.put("redisUrl", config.redisUrl().orElse(null));
     m.put("outputDir", config.outputDir().toString());
     Files.writeString(

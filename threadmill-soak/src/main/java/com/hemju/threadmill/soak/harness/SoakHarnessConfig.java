@@ -30,6 +30,9 @@ public record SoakHarnessConfig(
     String runId,
     boolean failFast,
     Optional<String> postgresUrl,
+    Optional<String> oracleUrl,
+    Optional<String> oracleUser,
+    Optional<String> oraclePassword,
     String redisTopology,
     Optional<String> redisUrl,
     boolean force,
@@ -71,6 +74,9 @@ public record SoakHarnessConfig(
     boolean failFast = Boolean.parseBoolean(prop("failFast", "true"));
     boolean force = Boolean.parseBoolean(prop("force", "false"));
     Optional<String> postgresUrl = Optional.ofNullable(prop("postgresUrl", null));
+    Optional<String> oracleUrl = Optional.ofNullable(prop("oracleUrl", null));
+    Optional<String> oracleUser = Optional.ofNullable(prop("oracleUser", null));
+    Optional<String> oraclePassword = Optional.ofNullable(prop("oraclePassword", null));
     String redisTopology = prop("redisTopology", "standalone");
     Optional<String> redisUrl = Optional.ofNullable(prop("redisUrl", null));
     String runId = Optional.ofNullable(prop("runId", null))
@@ -97,6 +103,9 @@ public record SoakHarnessConfig(
         runId,
         failFast,
         postgresUrl,
+        oracleUrl,
+        oracleUser,
+        oraclePassword,
         redisTopology,
         redisUrl,
         force,

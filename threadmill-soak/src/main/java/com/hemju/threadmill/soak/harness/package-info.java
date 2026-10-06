@@ -5,7 +5,7 @@
  * AI agent (or human) can ingest cold to answer two questions: did the engine
  * behave correctly under the chosen scenario, and how fast was it. The entry
  * points are the Gradle tasks {@code soakMemory}, {@code soakPostgres},
- * {@code soakRedis}, and {@code soakAll}, defined in this module's build.
+ * {@code soakOracle}, {@code soakRedis}, and {@code soakAll}, defined in this module's build.
  *
  * <p>Distinct from the {@code :soakRegression} JUnit task (fixed sustained
  * throughput, recurring no-skip, container-pause recovery) and from

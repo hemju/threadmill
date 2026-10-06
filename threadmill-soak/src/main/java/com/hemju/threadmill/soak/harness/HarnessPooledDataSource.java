@@ -72,7 +72,7 @@ final class HarnessPooledDataSource implements DataSource, AutoCloseable {
         created.decrementAndGet();
       } catch (InterruptedException e) {
         Thread.currentThread().interrupt();
-        throw new SQLException("interrupted while waiting for a pooled Postgres connection", e);
+        throw new SQLException("interrupted while waiting for a pooled JDBC connection", e);
       }
     }
   }
@@ -135,7 +135,7 @@ final class HarnessPooledDataSource implements DataSource, AutoCloseable {
 
   private void ensureOpen() throws SQLException {
     if (closed.get()) {
-      throw new SQLException("pooled Postgres datasource is closed");
+      throw new SQLException("pooled JDBC datasource is closed");
     }
   }
 

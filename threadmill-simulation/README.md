@@ -9,20 +9,22 @@ JSON-lines traces for verification or review.
 ## Correctness Simulation
 
 This is the short fixed invariant verifier. It runs in seconds, uses
-Testcontainers for Postgres and Redis, and fails the Gradle task when a backend
+Testcontainers for Postgres, Oracle, and Redis, and fails the Gradle task when a backend
 does not drain or the trace verifier finds an invariant violation.
 
 ```bash
 ./gradlew :threadmill-simulation:simulate
 ```
 
-Runs all three backends sequentially (in-memory, Postgres 18 via
-Testcontainers, Redis via Testcontainers). One command, full validation. Or
-pick one:
+Runs all four backends sequentially (in-memory, Postgres 18 via
+Testcontainers, Oracle Database 23ai Free via Testcontainers
+`gvenzl/oracle-free:23-slim-faststart`, Redis via Testcontainers). One command,
+full validation. Or pick one:
 
 ```bash
 ./gradlew :threadmill-simulation:simulateMemory     # fast, no Docker
 ./gradlew :threadmill-simulation:simulatePostgres   # Testcontainers
+./gradlew :threadmill-simulation:simulateOracle     # Testcontainers
 ./gradlew :threadmill-simulation:simulateRedis      # Testcontainers
 ```
 
@@ -79,7 +81,7 @@ object with at least `timestamp` (ISO-8601 UTC) and `event`. Common fields:
 { "timestamp": "…", "event": "lock_released",  "jobId": "…", "lockKey": "…", "lockMode": "…" }
 { "timestamp": "…", "event": "queue_paused",   "queue": "…" }
 { "timestamp": "…", "event": "queue_resumed",  "queue": "…" }
-{ "timestamp": "…", "event": "node_started",   "nodeId": "…", "workerCount": 8, "backend": "memory|postgres|redis" }
+{ "timestamp": "…", "event": "node_started",   "nodeId": "…", "workerCount": 8, "backend": "memory|postgres|oracle|redis" }
 { "timestamp": "…", "event": "node_stopped",   "nodeId": "…" }
 ```
 
@@ -103,6 +105,8 @@ This is the long-running multi-process simulation. A supervisor starts worker
 JVMs against one shared external datastore, enqueues jobs continuously, kills
 and recreates workers, and writes a JSON-lines trace under
 `build/simulation/worker-churn-<timestamp>-<backend>.jsonl` by default.
+It covers PostgreSQL and Redis; the Oracle store is exercised by the short
+correctness simulation above and the soak suites, not by worker churn.
 
 Start local shared datastores from the repository root:
 
@@ -149,7 +153,8 @@ when the queue does not drain within `--drain-timeout`.
 
 This fixed simulation starts real Postgres and Redis datastores with
 Testcontainers, then runs the maintenance leader, standby, and producers in
-separate JVMs. Run both backends:
+separate JVMs. It covers PostgreSQL and Redis only; Oracle is not yet part of
+this simulation. Run both backends:
 
 ```bash
 ./gradlew :threadmill-simulation:simulateNudge

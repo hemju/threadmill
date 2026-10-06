@@ -30,6 +30,10 @@ public final class RunConfigWriter {
     m.put("failFast", c.failFast());
     m.put("force", c.force());
     m.put("postgresUrl", c.postgresUrl().orElse(null));
+    m.put("oracleUrl", c.oracleUrl().orElse(null));
+    m.put("oracleUser", c.oracleUser().orElse(null));
+    // Never write the Oracle password into the run artifacts.
+    m.put("oraclePasswordSet", c.oraclePassword().isPresent());
     m.put("redisTopology", c.redisTopology());
     m.put("redisUrl", c.redisUrl().orElse(null));
     m.put("progressInterval", c.progressInterval().toString());

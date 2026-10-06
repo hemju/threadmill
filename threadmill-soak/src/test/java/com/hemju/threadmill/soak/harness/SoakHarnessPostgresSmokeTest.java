@@ -51,6 +51,9 @@ final class SoakHarnessPostgresSmokeTest {
       "runId",
       "failFast",
       "postgresUrl",
+      "oracleUrl",
+      "oracleUser",
+      "oraclePassword",
       "force",
       "redisTopology"
     }) {
