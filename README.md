@@ -44,14 +44,16 @@ Threadmill is published to Maven Central under the `com.hemju.threadmill`
 group. Pick the core plus the store you run against (and the Spring Boot
 starter if you use Spring):
 
-These examples use **1.0.0**. Upgrade existing installations using the
-[0.3.0-to-1.0 migration guide](docs/compatibility.md#upgrade-from-v030).
+These examples use **1.1.0**. 1.0.x installations upgrade by bumping the
+version (see the [1.0-to-1.1 notes](docs/compatibility.md#upgrade-from-100));
+0.3.0 installations follow the
+[0.3.0-to-1.0 migration guide](docs/compatibility.md#upgrade-from-v030) first.
 
 ```kotlin
 // build.gradle.kts
-implementation("com.hemju.threadmill:threadmill-core:1.0.0")
-implementation("com.hemju.threadmill:threadmill-store-postgres:1.0.0") // or -store-oracle / -store-redis / -store-memory
-implementation("com.hemju.threadmill:threadmill-spring-boot:1.0.0")    // optional Spring Boot integration
+implementation("com.hemju.threadmill:threadmill-core:1.1.0")
+implementation("com.hemju.threadmill:threadmill-store-postgres:1.1.0") // or -store-oracle / -store-redis / -store-memory
+implementation("com.hemju.threadmill:threadmill-spring-boot:1.1.0")    // optional Spring Boot integration
 ```
 
 ```xml
@@ -59,7 +61,7 @@ implementation("com.hemju.threadmill:threadmill-spring-boot:1.0.0")    // option
 <dependency>
   <groupId>com.hemju.threadmill</groupId>
   <artifactId>threadmill-core</artifactId>
-  <version>1.0.0</version>
+  <version>1.1.0</version>
 </dependency>
 ```
 
@@ -234,7 +236,7 @@ stable API.
 
 ## Status
 
-**Threadmill 1.0.0** includes the features below. See the
+**Threadmill 1.1.0** includes the features below. See the
 [release checklist](docs/release-checklist.md) for the validation and publication
 process.
 

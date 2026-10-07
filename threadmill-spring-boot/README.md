@@ -22,14 +22,13 @@ single place to confirm "which engine, which store, which lanes" at boot time.
 
 ## Quick start
 
-These dependencies target the unreleased 1.0.0 candidate; see the
-[release status](../README.md#status). Add the store your application uses.
+These dependencies use the 1.1.0 release. Add the store your application uses.
 
 ```kotlin
 dependencies {
-    implementation("com.hemju.threadmill:threadmill-spring-boot:1.0.0")
-    implementation("com.hemju.threadmill:threadmill-store-postgres:1.0.0")
-    // or: implementation("com.hemju.threadmill:threadmill-store-redis:1.0.0")
+    implementation("com.hemju.threadmill:threadmill-spring-boot:1.1.0")
+    implementation("com.hemju.threadmill:threadmill-store-postgres:1.1.0")
+    // or: implementation("com.hemju.threadmill:threadmill-store-redis:1.1.0")
 }
 ```
 

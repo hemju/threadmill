@@ -18,14 +18,14 @@ Before merging a 1.0 release candidate:
 - Record which datastore versions and topologies were qualified and resolve
   every release-blocking finding. Requalify affected behavior after fixes.
 - Align `ThreadmillVersion.CURRENT`, installation examples, the changelog,
-  compatibility/migration guide and release notes at 1.0.0. Historical 0.3.0
+  compatibility/migration guide and release notes at the release version. Historical 0.3.0
   references and immutable migration fixtures retain their original versions.
 - Check the final PR head, required CI, review disposition and merge result.
 
 Run the final candidate gate:
 
 ```bash
-./gradlew productionCheck verifyReleaseTag -PreleaseTag=v1.0.0 -PdependencyScanRequired=true
+./gradlew productionCheck verifyReleaseTag -PreleaseTag=v<version> -PdependencyScanRequired=true
 ```
 
 `productionCheck` owns the clean-all-projects boundary, every subproject check,

@@ -5,7 +5,7 @@ Oracle Database 19c+ backend for the `JobStore` SPI. It passes the same shared
 and uses standard JDBC only: applications bring their own Oracle driver.
 
 ```kotlin
-implementation("com.hemju.threadmill:threadmill-store-oracle:1.0.0")
+implementation("com.hemju.threadmill:threadmill-store-oracle:1.1.0")
 runtimeOnly("com.oracle.database.jdbc:ojdbc11:23.26.3.0.0") // or the driver your platform mandates
 ```
 
