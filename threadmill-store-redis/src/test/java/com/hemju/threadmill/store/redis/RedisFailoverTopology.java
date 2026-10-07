@@ -35,7 +35,7 @@ final class RedisFailoverTopology implements AutoCloseable {
   }
 
   static RedisFailoverTopology start(String image, boolean cluster) throws Exception {
-    RuntimeException lastFailure = null;
+    AssertionError lastFailure = null;
     for (int attempt = 0; attempt < 3; attempt++) {
       var ports = availablePorts(cluster ? 6 : 5);
       var container = new ProcessContainer(image, ports);
@@ -135,8 +135,15 @@ final class RedisFailoverTopology implements AutoCloseable {
           });
         }
         return result;
-      } catch (RuntimeException failure) {
-        lastFailure = failure;
+      } catch (RuntimeException | AssertionError failure) {
+        // A node that is not yet serving, or a cluster that has not converged, is a
+        // startup failure: retry on fresh ports and keep the node logs for diagnosis.
+        var startup = new AssertionError(
+            "Redis " + (cluster ? "Cluster" : "Sentinel") + " topology on " + image
+                + " failed to start (attempt " + (attempt + 1) + ")" + nodeLogs(container),
+            failure);
+        if (lastFailure != null) startup.addSuppressed(lastFailure);
+        lastFailure = startup;
         container.close();
       } catch (Throwable failure) {
         container.close();
@@ -246,6 +253,21 @@ final class RedisFailoverTopology implements AutoCloseable {
       throw new IllegalStateException("Could not preserve Redis process diagnostics", failure);
     } finally {
       container.close();
+    }
+  }
+
+  private static String nodeLogs(ProcessContainer container) {
+    try {
+      var logs = container.execInContainer(
+          "sh",
+          "-c",
+          "for f in /data/node-*/redis.log; do echo \"== $f\"; tail -n 20 \"$f\"; done");
+      return "\n" + logs.getStdout() + logs.getStderr();
+    } catch (InterruptedException interrupted) {
+      Thread.currentThread().interrupt();
+      return " (node logs unavailable: interrupted)";
+    } catch (Exception unavailable) {
+      return " (node logs unavailable: " + unavailable + ")";
     }
   }
 

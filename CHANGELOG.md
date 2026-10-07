@@ -1,7 +1,31 @@
 # Changelog
 
-## Unreleased
+## 1.1.0 — 2026-10-07
 
+Threadmill 1.1.0 adds an Oracle Database backend. It is a compatible minor
+release: core, the PostgreSQL, Redis and in-memory stores and their storage
+formats are unchanged, so upgrading from 1.0.x is a version bump. See
+[Upgrade from 1.0.0](docs/compatibility.md#upgrade-from-100).
+
+- Added `threadmill-store-oracle`, an `OracleJobStore` for Oracle Database 19c
+  and later (issue #137). It passes the same shared contract suite as the other
+  backends and requires the `AL32UTF8` database character set and the default
+  `NLS_COMP=BINARY`, both checked at startup. It uses standard JDBC only;
+  applications supply the Oracle driver. The schema user needs `CREATE TABLE`,
+  `CREATE TRIGGER` and a tablespace quota. See
+  [Oracle schema](docs/oracle-schema.md).
+- Added `OracleMigrationRunner`. Oracle commits each DDL statement, so the runner
+  records progress per statement and resumes an interrupted migration where it
+  stopped. Concurrent migrators are serialized.
+- Added Spring Boot auto-configuration for the Oracle store, including
+  `join_transaction` enqueue. With both JDBC stores on the classpath, Spring
+  picks one from `threadmill.store.jdbc-type`, then the `spring.datasource.url`
+  scheme, and otherwise keeps PostgreSQL. Oracle schema handling is set with
+  `threadmill.store.oracle.schema-mode`.
+- Oracle has no cross-node wake channel: a job enqueued on one node is picked up
+  by another within `pollInterval` (default 500 ms).
+- The shared store contract now requires that a `null` mutex release holder
+  never frees another holder's mutex.
 - Upgraded Jackson 2 to 2.21.7 and constrained Spring Boot's test-scope
   Jackson 3 to 3.1.7, resolving GHSA-7hhh-6rmp-j9qf, GHSA-p6pp-m3f8-5c89,
   GHSA-cxp5-3px4-pw24, GHSA-wv8q-qhhj-9h54, GHSA-gx83-3vf8-gh7j,

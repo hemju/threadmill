@@ -5,8 +5,9 @@ execute again; handlers and external side effects must be idempotent. The change
 in issue [#135](https://github.com/hemju/threadmill/issues/135) harden that contract.
 They do not make execution exactly once. This document defines the 1.0
 compatibility boundary; a release still requires the recorded validation and
-endurance gates in the [release checklist](release-checklist.md). The branch
-targets 1.0.0; it is not yet a published release.
+endurance gates in the [release checklist](release-checklist.md). It applies
+to every 1.x release; [Upgrade from 1.0.0](#upgrade-from-100) lists what 1.1
+adds.
 
 ## Supported platform and storage
 
@@ -132,6 +133,27 @@ and operational state. Redis tests exercise nonempty legacy-index conversion
 through both standalone and Cluster clients, including an acquired exclusive
 workflow hold. These tests cover the shipped upgrade path; they are not a promise
 of arbitrary payload-shape migration.
+
+## Upgrade from 1.0.0
+
+1.1.0 is a compatible minor release. It adds the Oracle Database store
+(`threadmill-store-oracle`) and its Spring Boot auto-configuration; core, the
+PostgreSQL, Redis and in-memory stores, and their storage formats are unchanged.
+There are no PostgreSQL migrations and no Redis format change, so upgrading is a
+version bump. Keep every Threadmill module on the same version.
+
+- **Spring with both JDBC stores on the classpath.** When `threadmill-store-oracle`
+  and `threadmill-store-postgres` are both present, Spring chooses one from
+  `threadmill.store.jdbc-type`, then the `spring.datasource.url` scheme, and falls
+  back to PostgreSQL. Applications with only the PostgreSQL module behave exactly
+  as before.
+- **Custom `JobStore` implementations.** The shared contract suite adds
+  `releaseWithANullHolderNeverFreesAnotherHoldersMutex`; a store must either
+  reject a `null` release holder or leave the mutex held.
+- **Dashboard UI.** The packaged console is built with Tailwind CSS 4 and targets
+  Safari 16.4+, Chrome 111+ and Firefox 128+.
+- **Jackson.** Threadmill now depends on Jackson 2.21.7. Applications that manage
+  Jackson through their own BOM should move to the same patched release.
 
 ## Changes after 1.0
 

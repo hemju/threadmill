@@ -65,7 +65,7 @@ signing are configured by `threadmill.publish` in `buildSrc`.
 
    Review the reports for failures or skipped real-store tests. Confirm the
    example, browser tests, simulations, dependency scans, Javadoc and artifact
-   inspection passed. Check all eleven published modules, their POMs and
+   inspection passed. Check all twelve published modules, their POMs and
    intra-Threadmill dependency versions. Binary JARs must contain
    `META-INF/LICENSE` and `META-INF/NOTICE`, with no test or private local files.
 4. Commit any remaining release preparation using a Conventional Commit such
@@ -92,7 +92,7 @@ and publishes automatically because `publishingType` is `AUTOMATIC`.
 
 Watch the workflow to completion and verify the deployment in
 [Central Portal](https://central.sonatype.com/publishing/deployments). Confirm all
-eleven modules at version 1.0.0 are retrievable from Maven Central, including
+twelve modules at the release version are retrievable from Maven Central, including
 POMs, binary/source/Javadoc JARs and signatures. Resolve the README's installation
 coordinates from a fresh consumer project on Java 25.
 

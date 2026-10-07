@@ -10,14 +10,14 @@ run the same logical job more than once.
 
 ## Dependencies
 
-Use Java 25 and add the Spring module plus one store. These examples target
-the unreleased 1.0.0 candidate; see the [release status](../README.md#status).
+Use Java 25 and add the Spring module plus one store. These examples use
+the 1.1.0 release.
 
 ```kotlin
-implementation("com.hemju.threadmill:threadmill-spring-boot:1.0.0")
-implementation("com.hemju.threadmill:threadmill-store-postgres:1.0.0")
-// or: implementation("com.hemju.threadmill:threadmill-store-oracle:1.0.0") + your Oracle JDBC driver
-// or: implementation("com.hemju.threadmill:threadmill-store-redis:1.0.0")
+implementation("com.hemju.threadmill:threadmill-spring-boot:1.1.0")
+implementation("com.hemju.threadmill:threadmill-store-postgres:1.1.0")
+// or: implementation("com.hemju.threadmill:threadmill-store-oracle:1.1.0") + your Oracle JDBC driver
+// or: implementation("com.hemju.threadmill:threadmill-store-redis:1.1.0")
 ```
 
 The default Spring enqueue mode is `after_commit`: returned ids are reserved
