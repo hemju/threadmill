@@ -8,7 +8,7 @@
   "properties": {
     "runId": { "type": "string" },
     "scenario": { "type": "string" },
-    "backend": { "type": "string", "enum": ["memory", "postgres", "redis"] },
+    "backend": { "type": "string", "enum": ["memory", "postgres", "oracle", "redis"] },
     "config": {
       "type": "object",
       "additionalProperties": true

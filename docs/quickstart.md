@@ -16,13 +16,14 @@ the unreleased 1.0.0 candidate; see the [release status](../README.md#status).
 ```kotlin
 implementation("com.hemju.threadmill:threadmill-spring-boot:1.0.0")
 implementation("com.hemju.threadmill:threadmill-store-postgres:1.0.0")
+// or: implementation("com.hemju.threadmill:threadmill-store-oracle:1.0.0") + your Oracle JDBC driver
 // or: implementation("com.hemju.threadmill:threadmill-store-redis:1.0.0")
 ```
 
 The default Spring enqueue mode is `after_commit`: returned ids are reserved
 before persistence, and the job insert can fail after the business transaction
 commits. Observe `AfterCommitEnqueueFailure`, or choose `join_transaction` with
-the same PostgreSQL DataSource for atomic business/job writes. Cross-datastore
+the same PostgreSQL or Oracle DataSource for atomic business/job writes. Cross-datastore
 atomicity requires an application-owned durable outbox. See
 [transaction modes](transactions.md#after_commit-default).
 
@@ -110,7 +111,7 @@ caller's SQL transaction.
 Without a configured durable store or an application-provided `JobStore`,
 startup fails. For disposable local development only, explicitly set
 `threadmill.store.memory.enabled=true`; all jobs are lost when that process
-stops. Configure PostgreSQL or Redis for durable work.
+stops. Configure PostgreSQL, Oracle, or Redis for durable work.
 
 ```yaml
 threadmill:
@@ -126,3 +127,10 @@ and runs pending Threadmill schema migrations by default. Use
 `threadmill.store.postgres.schema-mode=validate` if your deployment pipeline
 applies the DDL separately. See [postgres-schema.md](postgres-schema.md) for
 manual SQL and reset guidance.
+
+For Oracle Database 19c+, add `threadmill-store-oracle` plus the Oracle JDBC
+driver and define the `DataSource` the same way; Spring auto-configures
+`OracleJobStore` and migrates by default (`threadmill.store.oracle.schema-mode`).
+If both JDBC store modules are on the classpath, a `jdbc:oracle:` datasource
+URL or `threadmill.store.jdbc-type=oracle` selects Oracle. See
+[oracle-schema.md](oracle-schema.md) for privileges and manual SQL.

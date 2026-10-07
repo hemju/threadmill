@@ -438,9 +438,24 @@ public class ThreadmillProperties {
   }
 
   public static final class StoreProperties {
+    private JdbcStoreType jdbcType;
     private MemoryProperties memory = new MemoryProperties();
     private PostgresProperties postgres = new PostgresProperties();
+    private OracleProperties oracle = new OracleProperties();
     private RedisProperties redis = new RedisProperties();
+
+    /**
+     * The JDBC store to wire from the application's {@code DataSource} when both
+     * JDBC store modules are on the classpath; unset selects by
+     * {@code spring.datasource.url}.
+     */
+    public JdbcStoreType getJdbcType() {
+      return jdbcType;
+    }
+
+    public void setJdbcType(JdbcStoreType jdbcType) {
+      this.jdbcType = jdbcType;
+    }
 
     public MemoryProperties getMemory() {
       return memory;
@@ -456,6 +471,14 @@ public class ThreadmillProperties {
 
     public void setPostgres(PostgresProperties postgres) {
       this.postgres = postgres;
+    }
+
+    public OracleProperties getOracle() {
+      return oracle;
+    }
+
+    public void setOracle(OracleProperties oracle) {
+      this.oracle = oracle;
     }
 
     public RedisProperties getRedis() {
@@ -488,6 +511,27 @@ public class ThreadmillProperties {
     }
 
     public void setSchemaMode(PostgresSchemaMode schemaMode) {
+      this.schemaMode = schemaMode;
+    }
+
+    public boolean isAllowDestructiveSchemaReset() {
+      return allowDestructiveSchemaReset;
+    }
+
+    public void setAllowDestructiveSchemaReset(boolean allowDestructiveSchemaReset) {
+      this.allowDestructiveSchemaReset = allowDestructiveSchemaReset;
+    }
+  }
+
+  public static final class OracleProperties {
+    private OracleSchemaMode schemaMode = OracleSchemaMode.MIGRATE;
+    private boolean allowDestructiveSchemaReset;
+
+    public OracleSchemaMode getSchemaMode() {
+      return schemaMode;
+    }
+
+    public void setSchemaMode(OracleSchemaMode schemaMode) {
       this.schemaMode = schemaMode;
     }
 

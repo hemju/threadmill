@@ -4,12 +4,15 @@ dependencies {
     implementation(project(":threadmill-core"))
     implementation(project(":threadmill-store-memory"))
     implementation(project(":threadmill-store-postgres"))
+    implementation(project(":threadmill-store-oracle"))
     implementation(project(":threadmill-store-redis"))
     implementation(libs.jackson.databind)
     implementation(libs.jackson.datatype.jsr310)
     implementation(libs.slf4j.api)
     implementation(libs.slf4j.simple)
     implementation(libs.postgresql.jdbc)
+    implementation(libs.oracle.jdbc)
+    implementation(libs.hikaricp)
     implementation(libs.lettuce.core)
     implementation(platform(libs.testcontainers.bom))
     implementation(libs.testcontainers.postgresql)
@@ -21,7 +24,7 @@ dependencies {
     testImplementation(libs.assertj.core)
 }
 
-// Per-backend simulation tasks. The base `simulate` runs all three sequentially.
+// Per-backend simulation tasks. The base `simulate` runs all four sequentially.
 val simulationMainClass = "com.hemju.threadmill.simulation.SimulationMain"
 val workerChurnMainClass = "com.hemju.threadmill.simulation.workerchurn.WorkerChurnSimulatorMain"
 val nudgeSimulationMainClass = "com.hemju.threadmill.simulation.nudge.NudgeSimulationMain"
@@ -42,6 +45,14 @@ tasks.register<JavaExec>("simulatePostgres") {
     args = listOf("--backend", "postgres")
 }
 
+tasks.register<JavaExec>("simulateOracle") {
+    group = "verification"
+    description = "Run the simulation against Oracle Database Free via Testcontainers."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set(simulationMainClass)
+    args = listOf("--backend", "oracle")
+}
+
 tasks.register<JavaExec>("simulateRedis") {
     group = "verification"
     description = "Run the simulation against Redis via Testcontainers."
@@ -52,8 +63,8 @@ tasks.register<JavaExec>("simulateRedis") {
 
 tasks.register("simulate") {
     group = "verification"
-    description = "Run the full simulation against all three backends."
-    dependsOn("simulateMemory", "simulatePostgres", "simulateRedis")
+    description = "Run the full simulation against all four backends."
+    dependsOn("simulateMemory", "simulatePostgres", "simulateOracle", "simulateRedis")
 }
 
 tasks.register<JavaExec>("simulateWorkerChurnPostgres") {

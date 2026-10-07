@@ -238,13 +238,13 @@ public class ThreadmillAutoConfiguration {
       case IMMEDIATE -> new JobScheduler(store, serializer, registry, config, wakeBus);
       case JOIN_TRANSACTION -> {
         // Routed through the generic JobStore SPI flag so this method does not
-        // need to reference any postgres-store class — keeping the auto-config
-        // loadable even when threadmill-store-postgres is not on the classpath.
+        // need to reference any JDBC store class — keeping the auto-config
+        // loadable when threadmill-store-postgres or -oracle is absent.
         if (!unwrapStore(store).supportsExternalTransactions()) {
           throw new IllegalStateException(
               "threadmill.spring.enqueue-mode=join_transaction requires a JobStore that supports"
                   + " external transactions (today: the Spring auto-configured PostgresJobStore"
-                  + " using the same DataSource as the caller's transaction)");
+                  + " or OracleJobStore using the same DataSource as the caller's transaction)");
         }
         yield new TransactionJoinedJobScheduler(store, serializer, registry, config, wakeBus);
       }

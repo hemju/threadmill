@@ -74,6 +74,22 @@ its own `JobStore` bean.
 See [postgres-schema.md](postgres-schema.md) for manual DDL, validation, and
 reset guidance.
 
+## Oracle Store Properties
+
+Spring auto-creates an Oracle store when a `DataSource` bean exists and
+`threadmill-store-oracle` is on the classpath, unless the application defines
+its own `JobStore` bean or Redis is configured. The application supplies the
+Oracle JDBC driver.
+
+| Setting | Default | Notes |
+|---|---:|---|
+| `threadmill.store.oracle.schema-mode` | `migrate` | `migrate`, `validate`, `none`, or `drop-and-migrate`. Auto-configured Oracle stores run this action before `OracleJobStore` is created. |
+| `threadmill.store.oracle.allow-destructive-schema-reset` | `false` | Must be `true` for `drop-and-migrate`. This drops only Threadmill-owned tables and destroys stored jobs. |
+| `threadmill.store.jdbc-type` | | `postgres` or `oracle`. Needed only when both JDBC store modules are on the classpath and `spring.datasource.url` does not name the database. Without it, a `jdbc:oracle:` URL selects Oracle, a `jdbc:postgresql:` URL selects PostgreSQL, and otherwise the one module present wins (PostgreSQL when both are). |
+
+See [oracle-schema.md](oracle-schema.md) for privileges, manual DDL, and how
+interrupted migrations resume.
+
 ## Redis Store Properties
 
 Spring can auto-create a Redis store when `threadmill.store.redis.*` is set.
@@ -111,14 +127,14 @@ correctness fallback.
 
 | Setting | Default | Notes |
 |---|---:|---|
-| `threadmill.remote-wake.enabled` | `true` | Auto-create Postgres `LISTEN`/`NOTIFY` or Redis Pub/Sub wake hints for Spring auto-configured durable stores. In-memory and custom stores stay local-wake only unless the application provides a `RemoteWakeChannel` bean. |
+| `threadmill.remote-wake.enabled` | `true` | Auto-create Postgres `LISTEN`/`NOTIFY` or Redis Pub/Sub wake hints for Spring auto-configured durable stores. Oracle, in-memory, and custom stores stay local-wake only unless the application provides a `RemoteWakeChannel` bean; their other nodes pick up work within `poll-interval`. |
 | `threadmill.remote-wake.channel` | backend default | Optional channel override. Defaults to `threadmill_wake` for Postgres and `{threadmill}:wake` for Redis. Set this when multiple isolated Threadmill deployments share one Postgres database or Redis instance. |
 
 ## Spring Recurring Properties
 
 | Setting | Default | Notes |
 |---|---:|---|
-| `threadmill.spring.enqueue-mode` | `after_commit` | `after_commit`, `join_transaction`, or `immediate`. `join_transaction` is Spring + Postgres only. |
+| `threadmill.spring.enqueue-mode` | `after_commit` | `after_commit`, `join_transaction`, or `immediate`. `join_transaction` is Spring + PostgreSQL or Oracle only. |
 | `threadmill.spring.recurring-namespace` | `spring.application.name` | Namespace whose annotation-driven recurring tasks are reconciled at startup. If neither value is set, Threadmill only upserts discovered tasks and does not delete stale ones. |
 
 ### Initial and lifecycle size budgets

@@ -20,7 +20,9 @@ import com.hemju.threadmill.soak.harness.SoakHarnessConfig;
  *
  * <p>{@code -Pbackends} exists mainly so the orchestrator can be exercised
  * cheaply ({@code memory,memory} in tests); production sign-off uses the
- * default pair.
+ * default pair. {@code oracle} may be added explicitly
+ * ({@code -Pbackends=postgres,redis,oracle}), optionally with
+ * {@code -PoracleUrl} / {@code -PoracleUser} / {@code -PoraclePassword}.
  */
 public record EnduranceConfig(
     List<String> backends,
@@ -34,12 +36,15 @@ public record EnduranceConfig(
     boolean failFast,
     Duration progressInterval,
     Optional<String> postgresUrl,
+    Optional<String> oracleUrl,
+    Optional<String> oracleUser,
+    Optional<String> oraclePassword,
     Optional<String> redisUrl,
     Path outputDir,
     String runId,
     boolean force) {
 
-  private static final Set<String> KNOWN_BACKENDS = Set.of("memory", "postgres", "redis");
+  private static final Set<String> KNOWN_BACKENDS = Set.of("memory", "postgres", "oracle", "redis");
 
   public static EnduranceConfig fromSystemProperties() {
     List<String> backends = new ArrayList<>();
@@ -73,6 +78,9 @@ public record EnduranceConfig(
     boolean failFast = Boolean.parseBoolean(prop("failFast", "true"));
     Duration progressInterval = SoakHarnessConfig.parseDuration(prop("progressInterval", "30s"));
     Optional<String> postgresUrl = Optional.ofNullable(prop("postgresUrl", null));
+    Optional<String> oracleUrl = Optional.ofNullable(prop("oracleUrl", null));
+    Optional<String> oracleUser = Optional.ofNullable(prop("oracleUser", null));
+    Optional<String> oraclePassword = Optional.ofNullable(prop("oraclePassword", null));
     Optional<String> redisUrl = Optional.ofNullable(prop("redisUrl", null));
     boolean force = Boolean.parseBoolean(prop("force", "false"));
     String runId = Optional.ofNullable(prop("runId", null))
@@ -92,6 +100,9 @@ public record EnduranceConfig(
         failFast,
         progressInterval,
         postgresUrl,
+        oracleUrl,
+        oracleUser,
+        oraclePassword,
         redisUrl,
         outputDir,
         runId,

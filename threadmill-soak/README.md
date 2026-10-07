@@ -9,7 +9,7 @@ Three complementary pieces:
 2. The **load soak harness** — operator-driven, per-backend, per-scenario
    sustained load runs that produce a self-contained artifact directory rich
    enough for an AI agent to read cold. Tasks: `soakMemory`, `soakPostgres`,
-   `soakRedis`, `soakAll`.
+   `soakOracle`, `soakRedis`, `soakAll`.
 3. The **endurance run** — the production-readiness sign-off: one harness
    JVM per backend (PostgreSQL **and** Redis in parallel) for hours, with
    node churn, live invariant verification, and a collated verdict. Task:
@@ -26,7 +26,7 @@ Three complementary pieces:
 - **Recurring no-skip.** Defines a tight-interval recurring task and
   verifies it fires every interval over a multi-second window without
   catch-up storms.
-- **Induced container-pause recovery.** Pauses the Postgres or Redis
+- **Induced container-pause recovery.** Pauses the Postgres, Oracle, or Redis
   Testcontainer mid-run via the Docker API, asserts no progress while
   paused, unpauses, and asserts the engine resumes — the store-outage
   circuit-breaker recovery path in production.
@@ -37,7 +37,9 @@ Three complementary pieces:
 ./gradlew :threadmill-soak:soakRegression
 ```
 
-Requires Docker (Testcontainers) for the Postgres and Redis runs.
+Requires Docker (Testcontainers) for the Postgres, Oracle, and Redis runs.
+The Oracle runs use `gvenzl/oracle-free:23-slim-faststart` (Oracle Database 23ai
+Free); the first pull is large, so pull it once before a timed run.
 Numbers are reported in the test output:
 
 | Backend | Throughput (5k–10k jobs) | Recurring (5 s, 100 ms interval) | Container-pause recovery |
@@ -45,6 +47,7 @@ Numbers are reported in the test output:
 | In-memory | ~950 jobs/sec | ~46 runs | n/a |
 | PostgreSQL 18 | ~270 jobs/sec | ~20 runs | pause → wait → unpause → drain |
 | Redis 7 (AOF) | ~250 jobs/sec | ~22 runs | pause → wait → unpause → drain |
+| Oracle 23ai Free | ~900 jobs/sec | ~49 runs | pause → wait → unpause → drain |
 
 Numbers are from a developer laptop (Apple Silicon, Docker Desktop, single
 node, 8 workers, 32-batch claim). Treat them as a baseline; production
@@ -71,8 +74,9 @@ The harness is distinct from:
 ```bash
 ./gradlew :threadmill-soak:soakMemory [-P…]
 ./gradlew :threadmill-soak:soakPostgres [-P…]
+./gradlew :threadmill-soak:soakOracle [-P…]
 ./gradlew :threadmill-soak:soakRedis [-P…]
-./gradlew :threadmill-soak:soakAll [-P…]   # runs Postgres then Redis
+./gradlew :threadmill-soak:soakAll [-P…]   # runs Postgres, Oracle, then Redis
 ```
 
 ### `-P` properties
@@ -91,6 +95,8 @@ The harness is distinct from:
 | `-PfailFast=<bool>` | `true` | Abort the run on the first *definite* invariant violation (see below). |
 | `-PprogressInterval=<duration>` | `30s` | How often `progress.json` is rewritten. |
 | `-PpostgresUrl=<jdbc>` | unset → Testcontainers | External JDBC URL alternative. |
+| `-PoracleUrl=<jdbc>` | unset → Testcontainers | External Oracle thin-driver URL (for example `jdbc:oracle:thin:@//host:1521/service`). Every Threadmill table in that schema is emptied before the run, so use a disposable schema. |
+| `-PoracleUser=<user>` / `-PoraclePassword=<password>` | unset | Credentials for `-PoracleUrl`. `config.json` records the user and only whether a password was set. |
 | `-PredisUrl=<redis://…>` | unset → Testcontainers | External Redis alternative. Only the `{threadmill}:*` namespace is reset — never `FLUSHDB`. |
 | `-PredisTopology=<topology>` | `standalone` | `standalone`; `sentinel`/`cluster` require an external topology URL. |
 | `-Pforce=<bool>` | `false` | Allow overwriting an existing `-PoutputDir`. |
@@ -134,7 +140,9 @@ live p99, and per-invariant status. `summary.json` supersedes it once the
 run ends. `TraceReplay` (in `…soak.harness.invariant`) re-verifies a
 finished `trace.jsonl` offline, streaming, without loading it into memory.
 
-The Postgres harness uses a fixed connection pool (`maxConnections=80`)
+The Postgres harness uses a fixed connection pool (`maxConnections=80`), the
+Oracle harness one of `maxConnections=48` (Oracle refuses new dedicated-server
+sessions with `ORA-12516` long before PostgreSQL runs out of backends),
 because the soak loop intentionally creates enough claim, completion, heartbeat,
 and metric traffic to make one-connection-per-operation fixtures distort the
 result.
@@ -246,6 +254,10 @@ docker compose -f threadmill-soak/docker-compose.endurance.yml up -d
 
 Without the URL knobs each child provisions its own Testcontainer — fine for
 short validation runs, not recommended for hours.
+
+Oracle is not part of the default pair; add it explicitly with
+`-Pbackends=postgres,redis,oracle` (plus `-PoracleUrl` / `-PoracleUser` /
+`-PoraclePassword` for an external database).
 
 Defaults are the sign-off profile: **8 hours**, `mixed-workload`,
 **50 jobs/second**, **3 nodes per backend**, **node churn every 10 minutes**

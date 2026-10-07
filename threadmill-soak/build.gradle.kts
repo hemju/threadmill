@@ -4,12 +4,14 @@ dependencies {
     implementation(project(":threadmill-core"))
     implementation(project(":threadmill-store-memory"))
     implementation(project(":threadmill-store-postgres"))
+    implementation(project(":threadmill-store-oracle"))
     implementation(project(":threadmill-store-redis"))
     implementation(libs.jackson.databind)
     implementation(libs.jackson.datatype.jsr310)
     implementation(libs.slf4j.api)
     implementation(libs.slf4j.simple)
     implementation(libs.postgresql.jdbc)
+    implementation(libs.oracle.jdbc)
     implementation(libs.lettuce.core)
     implementation(libs.networknt.jsonschema)
     implementation(platform(libs.testcontainers.bom))
@@ -62,6 +64,9 @@ fun JavaExec.passSoakProps() {
             "runId",
             "failFast",
             "postgresUrl",
+            "oracleUrl",
+            "oracleUser",
+            "oraclePassword",
             "force",
             "redisTopology",
             "redisUrl",
@@ -92,6 +97,17 @@ tasks.register<JavaExec>("soakPostgres") {
     passSoakProps()
 }
 
+tasks.register<JavaExec>("soakOracle") {
+    group = "verification"
+    description =
+        "Run a soak scenario against Oracle Database via Testcontainers " +
+            "(or -PoracleUrl / -PoracleUser / -PoraclePassword)."
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set(soakHarnessMainClass)
+    args = listOf("--backend", "oracle")
+    passSoakProps()
+}
+
 tasks.register<JavaExec>("soakRedis") {
     group = "verification"
     description = "Run a soak scenario against Redis via Testcontainers."
@@ -103,8 +119,8 @@ tasks.register<JavaExec>("soakRedis") {
 
 tasks.register("soakAll") {
     group = "verification"
-    description = "Run the chosen scenario against Postgres then Redis sequentially."
-    dependsOn("soakPostgres", "soakRedis")
+    description = "Run the chosen scenario against Postgres, Oracle, then Redis sequentially."
+    dependsOn("soakPostgres", "soakOracle", "soakRedis")
 }
 
 tasks.register<JavaExec>("soakEndurance") {

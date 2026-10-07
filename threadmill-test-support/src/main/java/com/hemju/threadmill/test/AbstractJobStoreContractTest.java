@@ -2238,6 +2238,26 @@ public abstract class AbstractJobStoreContractTest {
     assertThat(store.tryAcquireMutex("m", "node-c", Duration.ofSeconds(5))).isTrue();
   }
 
+  @Test
+  @DisplayName("a null release holder never frees a mutex, including one held by an empty holder")
+  void releaseWithANullHolderNeverFreesAnotherHoldersMutex() {
+    // Stores may reject a null holder or ignore it; either way the lease must
+    // survive. Oracle stores an empty string as NULL, so an unguarded
+    // NULL-equal comparison released the empty holder's mutex.
+    for (String holder : List.of("node-a", "")) {
+      String name = "null-release-" + (holder.isEmpty() ? "empty" : holder);
+      assertThat(store.tryAcquireMutex(name, holder, Duration.ofMinutes(1))).isTrue();
+      try {
+        store.releaseMutex(name, null);
+      } catch (RuntimeException rejected) {
+        // rejecting a null holder is an accepted outcome
+      }
+      assertThat(store.tryAcquireMutex(name, "other", Duration.ofMinutes(1)))
+          .as("mutex held by %s after a null release", holder.isEmpty() ? "\"\"" : holder)
+          .isFalse();
+    }
+  }
+
   // ================================================================ replaceJob
 
   @Test

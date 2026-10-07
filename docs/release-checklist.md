@@ -33,6 +33,19 @@ real-store tests, soak and correctness simulations, Javadoc, the example,
 dependency scanning, and artifact inspection. If it fails, fix the cause and
 re-run it from a clean tree — no failure is acceptable for a release build.
 
+No freely available container image provides Oracle Database 19c, the oldest
+supported Oracle release; CI covers 23ai Free and 21c XE. Run the Oracle store
+suite against a real 19c database before release and record the server release
+in the validation notes:
+
+```bash
+./gradlew :threadmill-store-oracle:test -PoracleJdbcUrl=jdbc:oracle:thin:@//host:1521/SERVICE -PoracleUser=... -PoraclePassword=...
+```
+
+It deletes all Threadmill rows in that account's schema: use a disposable
+schema. Grant it `SELECT ANY DICTIONARY` (or access to `V$SESSION`, `V$SQL`, and
+`V$SQL_PLAN`) so the execution-plan tests run instead of skipping.
+
 Then inspect artifacts:
 
 ```bash

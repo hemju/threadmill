@@ -137,7 +137,12 @@ stores also publish cross-node wake hints after local wake timing has already
 decided that work is visible. Postgres uses `LISTEN`/`NOTIFY` on
 `threadmill_wake` by default. Redis uses Pub/Sub on `{threadmill}:wake` by
 default. Set `threadmill.remote-wake.channel` when multiple isolated
-Threadmill deployments share one datastore.
+Threadmill deployments share one datastore. Oracle has no lightweight
+notification primitive (`DBMS_ALERT` would serialize every enqueuing
+transaction), so an Oracle deployment relies on polling across nodes: work
+enqueued on another node starts within `threadmill.pollInterval`, while same-JVM
+enqueues still wake their dispatcher immediately. Lower the poll interval if that
+latency matters more than the extra idle queries.
 
 The Postgres listener holds one JDBC connection for as long as remote wake is
 enabled. If it uses the same application pool, size that pool with one

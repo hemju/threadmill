@@ -2,6 +2,7 @@ package com.hemju.threadmill.simulation;
 
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -12,6 +13,8 @@ import java.util.Locale;
 
 import javax.sql.DataSource;
 
+import com.zaxxer.hikari.HikariConfig;
+import com.zaxxer.hikari.HikariDataSource;
 import io.lettuce.core.RedisURI;
 import org.postgresql.ds.PGSimpleDataSource;
 import org.slf4j.Logger;
@@ -24,6 +27,8 @@ import org.testcontainers.utility.DockerImageName;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.simulation.SimulationRunner.SimulationResult;
 import com.hemju.threadmill.store.memory.InMemoryJobStore;
+import com.hemju.threadmill.store.oracle.OracleJobStore;
+import com.hemju.threadmill.store.oracle.OracleMigrationRunner;
 import com.hemju.threadmill.store.postgres.MigrationRunner;
 import com.hemju.threadmill.store.postgres.PostgresJobStore;
 import com.hemju.threadmill.store.redis.RedisJobStore;
@@ -34,8 +39,10 @@ import com.hemju.threadmill.store.redis.RedisJobStore;
  * <ul>
  *   <li>{@code --backend memory} — fast, no Docker dependency.</li>
  *   <li>{@code --backend postgres} — boots a {@code postgres:18-alpine} Testcontainer.</li>
+ *   <li>{@code --backend oracle} — boots a {@code gvenzl/oracle-free:23-slim-faststart}
+ *       Testcontainer.</li>
  *   <li>{@code --backend redis} — boots a {@code redis:7.4-alpine} Testcontainer.</li>
- *   <li>{@code --backend all} (default) — runs all three sequentially.</li>
+ *   <li>{@code --backend all} (default) — runs all four sequentially.</li>
  * </ul>
  *
  * <p>Writes one JSON-lines trace per backend under {@code build/simulation/}, runs the
@@ -57,6 +64,9 @@ public final class SimulationMain {
       .toFormatter(Locale.ROOT)
       .withZone(ZoneOffset.UTC);
 
+  private static final String ORACLE_IMAGE = "gvenzl/oracle-free:23-slim-faststart";
+  private static final int ORACLE_MAX_CONNECTIONS = 32;
+
   private SimulationMain() {}
 
   static void main(String[] args) {
@@ -71,10 +81,12 @@ public final class SimulationMain {
       switch (backend) {
         case "memory" -> results.add(runMemory(config));
         case "postgres" -> results.add(runPostgres(config));
+        case "oracle" -> results.add(runOracle(config));
         case "redis" -> results.add(runRedis(config));
         case "all" -> {
           results.add(runMemory(config));
           results.add(runPostgres(config));
+          results.add(runOracle(config));
           results.add(runRedis(config));
         }
         default -> {
@@ -127,6 +139,42 @@ public final class SimulationMain {
       }
       var verifier = new TraceVerifier(trace).verify();
       return new RunOutcome("postgres", trace, result, verifier);
+    } finally {
+      container.stop();
+    }
+  }
+
+  @SuppressWarnings("resource")
+  private static RunOutcome runOracle(SimulationConfig config)
+      throws IOException, InterruptedException {
+    Path trace = traceFile("oracle");
+    var container = new GenericContainer<>(DockerImageName.parse(ORACLE_IMAGE))
+        .withEnv("ORACLE_PASSWORD", "threadmill")
+        .withEnv("APP_USER", "threadmill")
+        .withEnv("APP_USER_PASSWORD", "threadmill")
+        .withExposedPorts(1521)
+        .waitingFor(Wait.forLogMessage(".*DATABASE IS READY TO USE!.*\\n", 1)
+            .withStartupTimeout(Duration.ofMinutes(10)));
+    container.start();
+    try {
+      // A real host supplies a pool; without one, a burst of short-lived
+      // dedicated-server sessions outruns Oracle's process limit (ORA-12516).
+      var pool = new HikariConfig();
+      pool.setJdbcUrl("jdbc:oracle:thin:@//" + container.getHost() + ":"
+          + container.getMappedPort(1521) + "/FREEPDB1");
+      pool.setUsername("threadmill");
+      pool.setPassword("threadmill");
+      pool.setMaximumPoolSize(ORACLE_MAX_CONNECTIONS);
+      SimulationResult result;
+      try (var ds = new HikariDataSource(pool);
+          var writer = new TraceWriter(trace)) {
+        new OracleMigrationRunner(ds).migrate();
+        JobStore store = new OracleJobStore(ds);
+        var runner = new SimulationRunner(store, config, writer, "oracle");
+        result = runner.run();
+      }
+      var verifier = new TraceVerifier(trace).verify();
+      return new RunOutcome("oracle", trace, result, verifier);
     } finally {
       container.stop();
     }

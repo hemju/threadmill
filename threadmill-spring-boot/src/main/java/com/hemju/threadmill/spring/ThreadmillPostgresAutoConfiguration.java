@@ -35,7 +35,9 @@ import com.hemju.threadmill.store.postgres.PostgresJobStore;
  * {@link DataSource} bean is present, and Redis is not configured) the
  * Postgres store wins the {@link ConditionalOnMissingBean} race in the core
  * config and Redis precedence is preserved by the
- * {@link OnRedisStoreNotConfigured} gate.
+ * {@link OnRedisStoreNotConfigured} gate. When {@code threadmill-store-oracle}
+ * is on the classpath too, {@link JdbcStoreSelection} decides which JDBC store
+ * owns the {@code DataSource}.
  */
 @AutoConfiguration
 @AutoConfigureBefore(ThreadmillAutoConfiguration.class)
@@ -55,7 +57,7 @@ public class ThreadmillPostgresAutoConfiguration {
   @Bean
   @ConditionalOnMissingBean(JobStore.class)
   @ConditionalOnBean(DataSource.class)
-  @Conditional(OnRedisStoreNotConfigured.class)
+  @Conditional({OnRedisStoreNotConfigured.class, JdbcStoreSelection.PostgresSelected.class})
   public JobStore threadmillJobStore(ThreadmillProperties properties, DataSource dataSource) {
     LOG.info("Threadmill: using Postgres store wired from the application's DataSource");
     PostgresJobStore.requireSupportedServer(dataSource);

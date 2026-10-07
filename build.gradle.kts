@@ -36,6 +36,7 @@ val publishedProjects =
         project(":threadmill-core"),
         project(":threadmill-store-memory"),
         project(":threadmill-store-postgres"),
+        project(":threadmill-store-oracle"),
         project(":threadmill-store-redis"),
         project(":threadmill-spring-boot"),
         project(":threadmill-test-support"),
@@ -337,6 +338,7 @@ val productionCheck by
         dependsOn(subprojects.map { it.tasks.matching { task -> task.name == "javadoc" } })
         dependsOn(
             ":threadmill-store-postgres:test",
+            ":threadmill-store-oracle:test",
             ":threadmill-store-redis:test",
             ":threadmill-dashboard-spring:browserTest",
             ":threadmill-soak:soakRegression",

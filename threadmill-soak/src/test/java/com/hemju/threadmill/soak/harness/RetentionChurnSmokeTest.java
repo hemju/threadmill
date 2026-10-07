@@ -19,7 +19,7 @@ import com.hemju.threadmill.core.JobState;
 @Tag("soak")
 class RetentionChurnSmokeTest {
   @ParameterizedTest
-  @ValueSource(strings = {"memory", "postgres", "redis"})
+  @ValueSource(strings = {"memory", "postgres", "oracle", "redis"})
   void retainedPopulationShrinksWhileRetriesAndWorkflowsComplete(
       String backend, @TempDir Path temporary) throws Exception {
     var output = temporary.resolve("run");
@@ -38,6 +38,9 @@ class RetentionChurnSmokeTest {
         "retention-regression",
         true,
         Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
         "standalone",
         Optional.empty(),
         false,
@@ -46,6 +49,7 @@ class RetentionChurnSmokeTest {
     try (var fixture =
         switch (backend) {
           case "postgres" -> new PostgresHarnessFixture(Optional.empty());
+          case "oracle" -> new OracleHarnessFixture();
           case "redis" -> new RedisHarnessFixture("standalone");
           default -> new MemoryHarnessFixture();
         }) {

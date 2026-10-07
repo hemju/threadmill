@@ -12,6 +12,7 @@ com.github.docker-java:docker-java-api:3.7.1=compileClasspath,runtimeClasspath,t
 com.github.docker-java:docker-java-transport-zerodep:3.7.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 com.github.docker-java:docker-java-transport:3.7.1=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 com.networknt:json-schema-validator:1.5.4=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
+com.oracle.database.jdbc:ojdbc11:23.26.3.0.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 commons-codec:commons-codec:1.19.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 commons-io:commons-io:2.20.0=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
 io.lettuce:lettuce-core:6.8.2.RELEASE=compileClasspath,runtimeClasspath,testCompileClasspath,testRuntimeClasspath
