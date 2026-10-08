@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.1.1 — 2026-10-08
+
+Threadmill 1.1.1 is a patch release for the Oracle store. See
+[Upgrade from 1.1.0](docs/compatibility.md#upgrade-from-110).
+
+- Fixed the Oracle baseline migration failing with ORA-12899 at statement 28 of
+  `V1__baseline.sql` on databases with `MAX_STRING_SIZE=EXTENDED`. The
+  `threadmill_concurrency_groups.idle_sort` virtual column declared `RAW(2000)`,
+  but Oracle sizes its `NLSSORT` expression at `RAW(2058)` under `EXTENDED`; the
+  column now takes its derived type. A schema stopped at that statement resumes
+  with the corrected statement, and a completed 1.1.0 schema stays valid.
+
 ## 1.1.0 — 2026-10-07
 
 Threadmill 1.1.0 adds an Oracle Database backend. It is a compatible minor

@@ -155,6 +155,19 @@ version bump. Keep every Threadmill module on the same version.
 - **Jackson.** Threadmill now depends on Jackson 2.21.7. Applications that manage
   Jackson through their own BOM should move to the same patched release.
 
+## Upgrade from 1.1.0
+
+1.1.1 is a patch release that fixes the Oracle baseline migration on databases
+with `MAX_STRING_SIZE=EXTENDED`, where 1.1.0 failed at statement 28 of
+`V1__baseline.sql` with ORA-12899. Upgrading is a version bump:
+
+- A schema that 1.1.0 installed completely stays valid; the runner accepts the
+  1.1.0 baseline checksum and the schema is identical.
+- A schema whose 1.1.0 migration stopped at statement 28 resumes there with the
+  corrected statement on the next `migrate`. No manual cleanup is needed.
+- Hosts that apply DDL themselves can run `emitPendingSql()` to get the
+  remaining statements.
+
 ## Changes after 1.0
 
 Compatible minor releases may add optional fields/operations with explicit

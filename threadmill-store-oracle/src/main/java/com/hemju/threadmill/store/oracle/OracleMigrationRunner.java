@@ -52,6 +52,15 @@ import org.slf4j.LoggerFactory;
  *   <li>validates the description and SHA-256 checksum of every applied
  *       migration before applying anything.</li>
  * </ul>
+ *
+ * <p>A shipped migration is never edited, with one narrow exception: a
+ * statement that cannot succeed on some supported database may be corrected
+ * when every earlier statement stays byte-identical and the corrected
+ * statement builds an equivalent schema wherever the old one succeeded. The
+ * earlier copy's checksum is then listed in {@link #SUPERSEDED_CHECKSUMS}: a
+ * schema that completed it stays valid, and a schema that stopped at the
+ * failing statement resumes with the corrected text and records the current
+ * checksum on completion.
  */
 public final class OracleMigrationRunner {
 
@@ -61,6 +70,15 @@ public final class OracleMigrationRunner {
   private static final Logger LOG = LoggerFactory.getLogger(OracleMigrationRunner.class);
   private static final Duration LOCK_ACQUIRE_TIMEOUT = Duration.ofMinutes(5);
   private static final Duration LOCK_POLL_INTERVAL = Duration.ofMillis(250);
+
+  /**
+   * Checksums of earlier shipped copies of a migration that the schema history
+   * may still record; see the class documentation for when an entry is allowed.
+   */
+  private static final Map<Integer, Set<String>> SUPERSEDED_CHECKSUMS = Map.of(
+      // v1.1.0 declared threadmill_concurrency_groups.idle_sort as RAW(2000),
+      // which fails with ORA-12899 under MAX_STRING_SIZE=EXTENDED (statement 28).
+      1, Set.of("e95c99fc412a90e037ef8dabcccdbc3005820ccc90aa8d539fdbee8bca95e463"));
 
   /** Tables dropped by {@link #dropThreadmillObjects()}, children before parents. */
   private static final List<String> THREADMILL_TABLES = List.of(
@@ -274,9 +292,13 @@ public final class OracleMigrationRunner {
       }
     }
     OracleTransactions.execute(conn, tx -> {
+      // Resuming a superseded copy finishes with the current statements, so the
+      // completed record carries the current checksum.
       try (PreparedStatement ps = tx.prepareStatement("UPDATE threadmill_schema_history "
-          + "SET success = 1, applied_at = SYS_EXTRACT_UTC(SYSTIMESTAMP) WHERE version = ?")) {
-        ps.setInt(1, m.version());
+          + "SET success = 1, checksum = ?, applied_at = SYS_EXTRACT_UTC(SYSTIMESTAMP) "
+          + "WHERE version = ?")) {
+        ps.setString(1, m.checksum());
+        ps.setInt(2, m.version());
         ps.executeUpdate();
       }
       return null;
@@ -319,7 +341,10 @@ public final class OracleMigrationRunner {
             + " with description '" + actual.description() + "', expected '"
             + expected.description() + "'");
       }
-      if (!expected.checksum().equals(actual.checksum())) {
+      if (!expected.checksum().equals(actual.checksum())
+          && !SUPERSEDED_CHECKSUMS
+              .getOrDefault(actual.version(), Set.of())
+              .contains(actual.checksum())) {
         throw new MigrationException("Threadmill schema history version " + actual.version()
             + " has checksum " + actual.checksum() + " but the shipped migration hashes to "
             + expected.checksum() + " — the migration file was edited after it was applied");
@@ -480,7 +505,9 @@ public final class OracleMigrationRunner {
           sb,
           "UPDATE threadmill_schema_history SET statements_applied = "
               + m.statements().size()
-              + ", success = 1, applied_at = SYS_EXTRACT_UTC(SYSTIMESTAMP) WHERE version = "
+              + ", success = 1, checksum = '"
+              + m.checksum()
+              + "', applied_at = SYS_EXTRACT_UTC(SYSTIMESTAMP) WHERE version = "
               + m.version());
     }
     appendStatement(sb, "COMMIT");

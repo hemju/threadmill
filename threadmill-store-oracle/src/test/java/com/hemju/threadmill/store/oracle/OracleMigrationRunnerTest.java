@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -35,6 +36,13 @@ import com.hemju.threadmill.core.spec.JobSpec;
  * migrators, and stay honest about incomplete or edited migrations.
  */
 class OracleMigrationRunnerTest {
+
+  /** Checksum of {@code V1__baseline.sql} as shipped in v1.1.0 (frozen test resource). */
+  private static final String RELEASED_BASELINE_CHECKSUM =
+      "e95c99fc412a90e037ef8dabcccdbc3005820ccc90aa8d539fdbee8bca95e463";
+
+  /** The 1-based v1.1.0 baseline statement that fails under {@code MAX_STRING_SIZE=EXTENDED}. */
+  private static final int EXTENDED_FAILURE_STATEMENT = 28;
 
   private DataSource dataSource;
   private OracleMigrationRunner runner;
@@ -127,6 +135,71 @@ class OracleMigrationRunnerTest {
       rs.next();
       assertThat(rs.getInt(1)).isEqualTo(9 * 16);
     }
+  }
+
+  /**
+   * v1.1.0 declared {@code idle_sort RAW(2000)}, which fails with ORA-12899
+   * under {@code MAX_STRING_SIZE=EXTENDED} at statement 28. The corrected
+   * baseline must leave every earlier statement byte-identical so a schema
+   * stopped there resumes with the corrected statement.
+   */
+  @Test
+  void releasedBaselineDiffersOnlyInTheStatementThatFailsUnderExtendedStringSize()
+      throws IOException {
+    var released = releasedBaselineStatements();
+    var current = baselineStatements();
+
+    assertThat(sha256(releasedBaselineSql())).isEqualTo(RELEASED_BASELINE_CHECKSUM);
+    assertThat(current).hasSameSizeAs(released);
+    assertThat(current.subList(0, EXTENDED_FAILURE_STATEMENT - 1))
+        .isEqualTo(released.subList(0, EXTENDED_FAILURE_STATEMENT - 1));
+    assertThat(released.get(EXTENDED_FAILURE_STATEMENT - 1)).contains("idle_sort RAW(2000)");
+    assertThat(current.get(EXTENDED_FAILURE_STATEMENT - 1))
+        .contains("idle_sort GENERATED ALWAYS AS");
+    assertThat(current.subList(EXTENDED_FAILURE_STATEMENT, current.size()))
+        .isEqualTo(released.subList(EXTENDED_FAILURE_STATEMENT, released.size()));
+  }
+
+  @Test
+  void releasedBaselineStoppedAtTheExtendedStringSizeFailureResumesAndRecordsTheCurrentChecksum()
+      throws Exception {
+    runner.dropThreadmillObjects();
+    var released = releasedBaselineStatements();
+    // The v1.1.0 runner committed statements 1-27, then statement 28 failed.
+    try (Connection conn = dataSource.getConnection();
+        Statement st = conn.createStatement()) {
+      conn.setAutoCommit(true);
+      for (int i = 0; i < EXTENDED_FAILURE_STATEMENT - 1; i++) st.execute(released.get(i));
+      st.execute(historyDdl());
+      try (PreparedStatement ps = conn.prepareStatement(
+          "INSERT INTO threadmill_schema_history (version, description, checksum, "
+              + "statements_applied, statements_total, success) VALUES (1, 'baseline', ?, ?, ?, 0)")) {
+        ps.setString(1, RELEASED_BASELINE_CHECKSUM);
+        ps.setInt(2, EXTENDED_FAILURE_STATEMENT - 1);
+        ps.setInt(3, released.size());
+        ps.executeUpdate();
+      }
+    }
+
+    runner.migrate();
+
+    runner.validate();
+    assertThat(recordedBaselineChecksum()).isEqualTo(baselineChecksum());
+    var store = new OracleJobStore(dataSource);
+    var job = job();
+    store.insert(job);
+    assertThat(store.findById(job.id())).isPresent();
+  }
+
+  @Test
+  void schemaCompletedByTheReleasedBaselineStillValidatesAndMigrates() throws Exception {
+    execute("UPDATE threadmill_schema_history SET checksum = '" + RELEASED_BASELINE_CHECKSUM
+        + "' WHERE version = 1");
+
+    runner.validate();
+    runner.migrate();
+    assertThat(runner.emitPendingSql()).isEmpty();
+    assertThat(recordedBaselineChecksum()).isEqualTo(RELEASED_BASELINE_CHECKSUM);
   }
 
   @Test
@@ -229,6 +302,29 @@ class OracleMigrationRunnerTest {
     }
   }
 
+  private static String releasedBaselineSql() throws IOException {
+    try (var in = OracleMigrationRunnerTest.class
+        .getClassLoader()
+        .getResourceAsStream(
+            "com/hemju/threadmill/store/oracle/released/v1.1.0/V1__baseline.sql")) {
+      return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+    }
+  }
+
+  private static List<String> releasedBaselineStatements() throws IOException {
+    return OracleMigrationRunner.splitStatements("V1__baseline.sql", releasedBaselineSql());
+  }
+
+  private String recordedBaselineChecksum() throws SQLException {
+    try (Connection conn = dataSource.getConnection();
+        Statement st = conn.createStatement();
+        ResultSet rs =
+            st.executeQuery("SELECT checksum FROM threadmill_schema_history WHERE version = 1")) {
+      rs.next();
+      return rs.getString(1);
+    }
+  }
+
   private static List<String> baselineStatements() throws IOException {
     return OracleMigrationRunner.splitStatements("V1__baseline.sql", baselineSql());
   }
@@ -239,9 +335,17 @@ class OracleMigrationRunnerTest {
         .getFirst();
   }
 
-  private static String baselineChecksum() throws Exception {
-    var digest =
-        MessageDigest.getInstance("SHA-256").digest(baselineSql().getBytes(StandardCharsets.UTF_8));
-    return HexFormat.of().formatHex(digest);
+  private static String baselineChecksum() throws IOException {
+    return sha256(baselineSql());
+  }
+
+  private static String sha256(String sql) {
+    try {
+      var digest =
+          MessageDigest.getInstance("SHA-256").digest(sql.getBytes(StandardCharsets.UTF_8));
+      return HexFormat.of().formatHex(digest);
+    } catch (NoSuchAlgorithmException e) {
+      throw new IllegalStateException(e);
+    }
   }
 }

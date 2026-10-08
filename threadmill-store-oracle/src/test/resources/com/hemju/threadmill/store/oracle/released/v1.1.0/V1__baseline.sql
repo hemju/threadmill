@@ -314,10 +314,7 @@ CREATE TABLE threadmill_concurrency_groups (
     -- orders identically in every session, whatever its NLS_SORT; ordering the
     -- text column would follow a linguistic NLS_SORT (derived from the client
     -- JVM locale) and could neither use the index nor match keyset predicates.
-    -- The type is derived, never declared: Oracle sizes NLSSORT for linguistic
-    -- sorts whatever the literal says, RAW(2000) under MAX_STRING_SIZE=STANDARD
-    -- but RAW(2058) under EXTENDED, where a declared RAW(2000) fails ORA-12899.
-    idle_sort GENERATED ALWAYS AS (
+    idle_sort RAW(2000) GENERATED ALWAYS AS (
         CASE WHEN exclusive_in_flight = 0 AND shared_in_flight = 0
             THEN NLSSORT(concurrency_key, 'NLS_SORT = BINARY') END) VIRTUAL,
     CONSTRAINT threadmill_concurrency_pk PRIMARY KEY (concurrency_key),
