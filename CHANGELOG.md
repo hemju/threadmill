@@ -12,6 +12,8 @@
   GHSA-r825-w8mm-5pxw, GHSA-587h-7wmj-h5pm, GHSA-qxg6-89mg-rqv8 and
   GHSA-xp26-3454-mjgp. These tools run only during dashboard development,
   builds and tests; the packaged dashboard assets are unaffected.
+- CI no longer runs on a daily schedule. The dependency scan runs on pull
+  requests, pushes to `main`, and tag releases.
 
 ## 1.1.1 — 2026-10-08
 

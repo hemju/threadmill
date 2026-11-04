@@ -1,10 +1,12 @@
 # Dependency Security
 
 Threadmill's dependency-security job fails when it finds a known vulnerability
-in a pull request, a nightly scan of `main`, or a tagged release. Repository
-branch protection is configured separately and determines whether a failing
-pull-request check blocks a merge. The Gradle `dependencySecurityScan` task is
-the single entry point for the scan.
+in a pull request, a push to `main`, or a tagged release. There is no scheduled
+run: an advisory published after the last push surfaces at the next pull
+request, push, or release. Repository branch protection is configured
+separately and determines whether a failing pull-request check blocks a merge.
+The Gradle `dependencySecurityScan` task is the single entry point for the
+scan.
 
 ## Scan inputs and thresholds
 
