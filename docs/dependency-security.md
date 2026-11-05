@@ -1,10 +1,12 @@
 # Dependency Security
 
 Threadmill's dependency-security job fails when it finds a known vulnerability
-in a pull request, a nightly scan of `main`, or a tagged release. Repository
-branch protection is configured separately and determines whether a failing
-pull-request check blocks a merge. The Gradle `dependencySecurityScan` task is
-the single entry point for the scan.
+in a pull request, a push to `main`, or a tagged release. There is no scheduled
+run: an advisory published after the last push surfaces at the next pull
+request, push, or release. Repository branch protection is configured
+separately and determines whether a failing pull-request check blocks a merge.
+The Gradle `dependencySecurityScan` task is the single entry point for the
+scan.
 
 ## Scan inputs and thresholds
 
@@ -59,12 +61,14 @@ churn; do not mix it into a routine dependency upgrade.
 
 ## Reachability record
 
-The following assessment was refreshed on 2026-10-06. Re-run it whenever the
+The following assessment was refreshed on 2026-11-04. Re-run it whenever the
 dependency graph or the relevant code paths change.
 
 | Dependency surface | Advisories assessed | Reachability and decision |
 | --- | --- | --- |
-| Vitest test tooling | `GHSA-82fw-gwwq-j7x9` | Vitest and its mocker execute during UI development and testing, not in the packaged static dashboard. The audit resolved vulnerable 4.1.7 packages; Vitest is now pinned to the patched 4.1.11 release and the lockfile updates its matching packages. Test scope does not exempt the graph from either dependency gate. |
+| Vitest test tooling | `GHSA-82fw-gwwq-j7x9`, `GHSA-qxg6-89mg-rqv8`, `GHSA-xp26-3454-mjgp` | Vitest and its mocker execute during UI development and testing, not in the packaged static dashboard. The audit first resolved vulnerable 4.1.7 packages, then 4.1.11, whose `@vitest/mocker` permitted unauthenticated manual-mock registration and a Windows path-traversal bypass of its redirect allowlist. Vitest is now pinned to the patched 4.1.12 release and the lockfile updates its matching packages, including the `chai` and `tinyrainbow` versions 4.1.12 requires. Test scope does not exempt the graph from either dependency gate. |
+| Vite dev server | `GHSA-9jrq-w75r-8gcw`, `GHSA-rq7h-c2jc-7f22`, `GHSA-698v-4r3x-3vcv`, `GHSA-r825-w8mm-5pxw`, `GHSA-587h-7wmj-h5pm` | Vite 7.3.6 permitted cross-origin script execution through custom dev-server middleware and could serve files outside `server.fs.allow`; its bundled `launch-editor` copy (no separate lockfile entry) mis-escaped Windows arguments and editor CLI flags. These paths belong to the dev server started by `npm run dev`, which binds to 127.0.0.1. The CI build runs `vite build`, and the published JAR contains compiled static assets, not the toolchain. Vite is updated to the patched 7.3.7 within its existing `^7.2.4` range, so `package.json` is unchanged for it. |
+| OpenTelemetry API | `GHSA-ccrj-gw8r-854m` | `opentelemetry-api` 1.62.0 is an `api` dependency of `threadmill-tracing`, so it is published to applications. Its `W3CTraceContextPropagator.extract()` parsed crafted `tracestate` headers in quadratic time. Threadmill's tracing code only creates spans and never calls a propagator, but a host application that extracts incoming trace context with the same library resolves the same artifact. The catalog moves OpenTelemetry to 1.67.0, the first fixed release; the lockfile and verification metadata update the API, context, common and test-only SDK artifacts together. |
 | Lettuce and Netty | `GHSA-5pvg-856g-cp85`, `GHSA-676x-f7gg-47vc`, `GHSA-xmv7-r254-6q78`, `GHSA-c653-97m9-rcg9`, `GHSA-cm33-6792-r9fm`, `GHSA-mfg7-5gfp-c4w3`, `GHSA-x4gw-5cx5-pgmh`, `GHSA-3qp7-7mw8-wx86`, `GHSA-558v-64gr-wgg4`, `GHSA-mj4r-2hfc-f8p6` | Lettuce 6.8.2.RELEASE declares Netty 4.1.125.Final, where these ten advisories affect the resolved Redis graph. Hostname-based Redis connections may exercise `netty-resolver-dns` and `netty-codec-dns`: three advisories permit DNS cache poisoning, while two concern DNS validation or decoder resource handling. TLS connections may exercise the `netty-handler` hostname-verification defect. Five of the ten findings are in the two DNS artifacts newly added by Lettuce 6.8. Threadmill does not use the affected server-side SNI/subnet-filter or compression-decoder paths, but upgrades the complete Netty graph rather than suppressing them. The resolved security floor is Netty 4.1.137.Final; remove the explicit BOM only when Lettuce's own transitive floor reaches that version. |
 | Dashboard CSS toolchain | `GHSA-vfj7-8cjw-p6xm`, `GHSA-rj75-hqrm-r3gf`, `GHSA-68fv-2mgg-jv7q` | Tailwind 3.4 resolved `braces` through `fast-glob`, `micromatch` and `chokidar`. Every `braces` release is affected and none is patched, so neither an override nor an exception could clear it. Tailwind 3.4 also resolved `postcss-selector-parser` 6.x through `postcss-nested`. The dashboard build moved to Tailwind 4.3.3 through `@tailwindcss/vite`, whose Oxide scanner and Lightning CSS pipeline use none of these packages. The PostCSS config and Autoprefixer were removed. `source-map-js`, still reached through Vite's PostCSS, Tailwind's node helper and jsdom, is locked at the patched 1.2.2 within those dependents' existing ranges, so no `overrides` entry is needed. These packages run only during dashboard builds and tests; the JAR ships compiled CSS. |
 | Dashboard JavaScript toolchain | `GHSA-73wf-gq98-2v4g`, `GHSA-c83g-rgw3-j3cx`, `GHSA-w9m9-85wc-3x92` | Vite 7.3.6, Babel 7.29.7, and esbuild 0.28.1 were already patched on `main` before this change. This change removes the remaining audit findings by moving Browserslist to 4.28.9 and PostCSS Selector Parser to 6.1.4. These packages run only during local or CI dashboard builds; the published JAR contains compiled static assets, not the toolchain. Build-time execution is still trusted code execution, so vulnerable transitives are upgraded rather than ignored. |

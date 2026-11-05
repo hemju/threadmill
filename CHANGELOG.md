@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Upgraded the OpenTelemetry API used by `threadmill-tracing` to 1.67.0,
+  resolving GHSA-ccrj-gw8r-854m (quadratic CPU use when parsing crafted
+  `tracestate` headers). Threadmill does not parse trace headers itself;
+  applications that manage OpenTelemetry through their own BOM should move to
+  1.67.0 or later.
+- Upgraded the dashboard UI build tooling to Vite 7.3.7 and Vitest 4.1.12,
+  resolving GHSA-9jrq-w75r-8gcw, GHSA-rq7h-c2jc-7f22, GHSA-698v-4r3x-3vcv,
+  GHSA-r825-w8mm-5pxw, GHSA-587h-7wmj-h5pm, GHSA-qxg6-89mg-rqv8 and
+  GHSA-xp26-3454-mjgp. These tools run only during dashboard development,
+  builds and tests; the packaged dashboard assets are unaffected.
+- CI no longer runs on a daily schedule. The dependency scan runs on pull
+  requests, pushes to `main`, and tag releases.
+
 ## 1.1.1 — 2026-10-08
 
 Threadmill 1.1.1 is a patch release for the Oracle store. See
