@@ -3,6 +3,7 @@ package com.hemju.threadmill.store.oracle;
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
@@ -45,7 +46,9 @@ import com.hemju.threadmill.core.store.JobStoreCapabilities;
  * for real data. Sessions then convert text exactly as on a database created
  * with that character set, so a bind that bypasses the national character set
  * loses characters and fails the round-trip tests. The gvenzl images ship only
- * {@code AL32UTF8} databases; this is how CI tests a non-Unicode one.
+ * {@code AL32UTF8} databases; this is how CI tests a non-Unicode one. An
+ * existing database ({@code threadmill.oracle.jdbcUrl}) is never relabelled
+ * and keeps its own character set, which {@link #databaseCharacterSet()} reads.
  */
 final class OracleTestDatabase {
 
@@ -57,6 +60,7 @@ final class OracleTestDatabase {
       "ALTER SESSION SET OPTIMIZER_FEATURES_ENABLE = '19.1.0'";
 
   private static DataSource pooled;
+  private static String databaseCharacterSet;
 
   private OracleTestDatabase() {}
 
@@ -75,10 +79,30 @@ final class OracleTestDatabase {
         System.getProperty("threadmill.oracle.textType", "STANDARD").toUpperCase(Locale.ROOT));
   }
 
-  /** The database character set this run relabelled the test database to, if any. */
-  static Optional<String> characterSet() {
+  /** The test database's character set ({@code NLS_CHARACTERSET}), as the database reports it. */
+  static synchronized String databaseCharacterSet() {
+    if (databaseCharacterSet == null) {
+      databaseCharacterSet = readDatabaseCharacterSet(dataSource());
+    }
+    return databaseCharacterSet;
+  }
+
+  /** The character set to relabel a container database to, if this run asks for one. */
+  private static Optional<String> requestedCharacterSet() {
     String value = System.getProperty("threadmill.oracle.characterSet");
     return value == null || value.isBlank() ? Optional.empty() : Optional.of(value);
+  }
+
+  private static String readDatabaseCharacterSet(DataSource dataSource) {
+    try (Connection conn = dataSource.getConnection();
+        Statement st = conn.createStatement();
+        ResultSet rs = st.executeQuery("SELECT value FROM nls_database_parameters "
+            + "WHERE parameter = 'NLS_CHARACTERSET'")) {
+      rs.next();
+      return rs.getString(1);
+    } catch (SQLException e) {
+      throw new IllegalStateException("Could not read the test database's character set", e);
+    }
   }
 
   /** Binds application-supplied text the way this run's stores do. */
@@ -137,6 +161,7 @@ final class OracleTestDatabase {
     String url = System.getProperty("threadmill.oracle.jdbcUrl");
     String user = System.getProperty("threadmill.oracle.user", USER);
     String password = System.getProperty("threadmill.oracle.password", PASSWORD);
+    Optional<String> relabelled = Optional.empty();
     if (url == null || url.isBlank()) {
       String image = System.getProperty("threadmill.oracle.image", DEFAULT_IMAGE);
       var container = new GenericContainer<>(DockerImageName.parse(image))
@@ -148,7 +173,8 @@ final class OracleTestDatabase {
               .withStartupTimeout(Duration.ofMinutes(10)));
       container.start();
       String service = image.contains("oracle-xe") ? "XEPDB1" : "FREEPDB1";
-      characterSet().ifPresent(set -> relabelCharacterSet(container, service, set));
+      relabelled = requestedCharacterSet();
+      relabelled.ifPresent(set -> relabelCharacterSet(container, service, set));
       url = "jdbc:oracle:thin:@//" + container.getHost() + ":" + container.getMappedPort(1521) + "/"
           + service;
       user = USER;
@@ -162,7 +188,15 @@ final class OracleTestDatabase {
     config.setMaximumPoolSize(24);
     config.setConnectionInitSql(SESSION_INIT);
     config.setPoolName("threadmill-oracle-test");
-    return new HikariDataSource(config);
+    var dataSource = new HikariDataSource(config);
+    relabelled.ifPresent(set -> {
+      String reported = readDatabaseCharacterSet(dataSource);
+      if (!reported.equals(set)) {
+        throw new IllegalStateException(
+            "The test database reports character set " + reported + " after relabelling to " + set);
+      }
+    });
+    return dataSource;
   }
 
   /**

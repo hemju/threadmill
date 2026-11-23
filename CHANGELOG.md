@@ -11,8 +11,8 @@
   including emoji, round-trips whatever the database character set is. The
   default, `standard`, is unchanged and still requires `AL32UTF8`; on another
   database character set the startup check now names the setting to change.
-  The text type is chosen when the schema is created; `migrate` and `validate`
-  refuse a schema created for the other type. Without Spring, pass the type to
+  The text type is chosen when the schema is created; `migrate`, `validate`,
+  and `emitPendingSql()` refuse a schema created for the other type. Without Spring, pass the type to
   both `OracleMigrationRunner` and `OracleJobStore`.
 - Upgraded the OpenTelemetry API used by `threadmill-tracing` to 1.67.0,
   resolving GHSA-ccrj-gw8r-854m (quadratic CPU use when parsing crafted

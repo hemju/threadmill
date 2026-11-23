@@ -64,9 +64,9 @@ existing schema. The store binds each value with the form of use of its column:
 a database-character-set bind would lose characters before reaching an
 `NVARCHAR2` column, and a national bind compared with a `VARCHAR2` column
 converts the column, so its index is no longer used. The migration history
-records the type through its checksums, so `migrate` and `validate` refuse a
-schema created for the other type with a message naming both; `none` does not
-check.
+records the type through its checksums, so `migrate`, `validate`, and
+`emitPendingSql()` refuse a schema created for the other type with a message
+naming both; `none` does not check.
 
 National column lengths count UTF-16 code units, the unit of Java's
 `String.length()`. The 128-character name limit and the 256-byte key limits fit
@@ -148,7 +148,8 @@ String pending = runner.emitPendingSql();
 completed history row per migration. `emitPendingSql()` is read-only: it reads
 `threadmill_schema_history` (prepending its DDL if the table does not exist yet)
 and returns only what is missing, including the remainder of an interrupted
-migration. Run the output with SQL*Plus or SQLcl, stop at the first error, and
+migration. It refuses the histories `migrate` refuses: an unknown version, an
+edited migration, or a schema created for the other text type. Run the output with SQL*Plus or SQLcl, stop at the first error, and
 then start the application with:
 
 ```yaml

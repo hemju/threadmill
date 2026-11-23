@@ -16,6 +16,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
@@ -94,15 +95,7 @@ class OracleMigrationRunnerTest {
   void emittedCleanInstallSqlAppliesToACleanSchemaAndValidates() throws SQLException {
     runner.dropThreadmillObjects();
 
-    // Apply the emitted script the way SQL*Plus does: statement by statement.
-    try (Connection conn = dataSource.getConnection();
-        Statement st = conn.createStatement()) {
-      conn.setAutoCommit(true);
-      for (String statement : OracleMigrationRunner.splitStatements(
-          "clean-install.sql", runner.emitCleanInstallSql())) {
-        st.execute(statement);
-      }
-    }
+    applyScript(runner.emitCleanInstallSql());
 
     runner.validate();
     var store = OracleTestDatabase.store(dataSource);
@@ -288,32 +281,65 @@ class OracleMigrationRunnerTest {
     runner.dropThreadmillObjects();
     new OracleMigrationRunner(dataSource, type).migrate();
 
-    var expected = new TreeMap<String, String>();
-    for (String column : STANDARD_ASCII_COLUMNS) expected.put(column, "VARCHAR2");
-    for (var column : APPLICATION_TEXT_COLUMNS.entrySet()) {
-      boolean lob = column.getValue().equals("CLOB");
-      expected.put(
-          column.getKey(),
-          type == OracleTextType.NATIONAL ? (lob ? "NCLOB" : "NVARCHAR2") : column.getValue());
-    }
-    assertThat(characterColumnTypes()).isEqualTo(expected);
+    assertThat(characterColumnTypes()).isEqualTo(expectedColumnTypes(type));
   }
 
   @Test
   void aSchemaInstalledForTheOtherTextTypeIsRefusedWithBothTypesNamed() {
-    var other = OracleTestDatabase.textType() == OracleTextType.STANDARD
-        ? OracleTextType.NATIONAL
-        : OracleTextType.STANDARD;
+    var other = otherThan(OracleTestDatabase.textType());
     var mismatched = new OracleMigrationRunner(dataSource, other);
 
     assertThatThrownBy(mismatched::validate)
         .isInstanceOf(OracleMigrationRunner.MigrationException.class)
-        .hasMessageContaining(
-            "installed for the " + OracleTestDatabase.textType().name().toLowerCase())
-        .hasMessageContaining("configured for the " + other.name().toLowerCase());
+        .hasMessageContaining("installed for the " + name(OracleTestDatabase.textType()))
+        .hasMessageContaining("configured for the " + name(other));
     assertThatThrownBy(mismatched::migrate)
         .isInstanceOf(OracleMigrationRunner.MigrationException.class)
         .hasMessageContaining("installed for the");
+    assertThatThrownBy(mismatched::emitPendingSql)
+        .isInstanceOf(OracleMigrationRunner.MigrationException.class)
+        .hasMessageContaining("installed for the");
+  }
+
+  /**
+   * A DBA applying {@code emitPendingSql()} output must get the same text-type
+   * check as {@code migrate()}: emitting the rest of an interrupted install of
+   * the other type would leave columns of both types and stamp this type's
+   * checksum, which {@code validate()} then accepts. A runner of the type the
+   * install started with still resumes it.
+   */
+  @ParameterizedTest
+  @EnumSource(OracleTextType.class)
+  void emitPendingSqlRefusesToResumeAnInstallOfTheOtherTextType(OracleTextType installed)
+      throws SQLException {
+    runner.dropThreadmillObjects();
+    var statements = baselineStatements(installed);
+    try (Connection conn = dataSource.getConnection();
+        Statement st = conn.createStatement()) {
+      conn.setAutoCommit(true);
+      for (int i = 0; i < 3; i++) st.execute(statements.get(i));
+      st.execute(historyDdl());
+      try (PreparedStatement ps = conn.prepareStatement(
+          "INSERT INTO threadmill_schema_history (version, description, checksum, "
+              + "statements_applied, statements_total, success) VALUES (1, 'baseline', ?, 3, ?, 0)")) {
+        ps.setString(1, sha256(OracleMigrationRunner.migrationSql("V1__baseline.sql", installed)));
+        ps.setInt(2, statements.size());
+        ps.executeUpdate();
+      }
+    }
+    var mismatched = new OracleMigrationRunner(dataSource, otherThan(installed));
+
+    assertThatThrownBy(mismatched::emitPendingSql)
+        .isInstanceOf(OracleMigrationRunner.MigrationException.class)
+        .hasMessageContaining("installed for the " + name(installed))
+        .hasMessageContaining("configured for the " + name(otherThan(installed)));
+
+    var matching = new OracleMigrationRunner(dataSource, installed);
+    String pending = matching.emitPendingSql();
+    assertThat(pending).contains("(resuming at statement 4)");
+    applyScript(pending);
+    matching.validate();
+    assertThat(characterColumnTypes()).isEqualTo(expectedColumnTypes(installed));
   }
 
   @Test
@@ -376,6 +402,37 @@ class OracleMigrationRunnerTest {
       Map.entry("THREADMILL_QUEUE_PAUSES.QUEUE", "VARCHAR2"),
       Map.entry("THREADMILL_QUEUE_PAUSES.PAUSED_BY", "CLOB"),
       Map.entry("THREADMILL_QUEUE_COUNTS.QUEUE", "VARCHAR2"));
+
+  private static Map<String, String> expectedColumnTypes(OracleTextType type) {
+    var expected = new TreeMap<String, String>();
+    for (String column : STANDARD_ASCII_COLUMNS) expected.put(column, "VARCHAR2");
+    for (var column : APPLICATION_TEXT_COLUMNS.entrySet()) {
+      boolean lob = column.getValue().equals("CLOB");
+      expected.put(
+          column.getKey(),
+          type == OracleTextType.NATIONAL ? (lob ? "NCLOB" : "NVARCHAR2") : column.getValue());
+    }
+    return expected;
+  }
+
+  private static OracleTextType otherThan(OracleTextType type) {
+    return type == OracleTextType.STANDARD ? OracleTextType.NATIONAL : OracleTextType.STANDARD;
+  }
+
+  private static String name(OracleTextType type) {
+    return type.name().toLowerCase(Locale.ROOT);
+  }
+
+  /** Apply an emitted script the way SQL*Plus does: statement by statement. */
+  private void applyScript(String script) throws SQLException {
+    try (Connection conn = dataSource.getConnection();
+        Statement st = conn.createStatement()) {
+      conn.setAutoCommit(true);
+      for (String statement : OracleMigrationRunner.splitStatements("emitted.sql", script)) {
+        st.execute(statement);
+      }
+    }
+  }
 
   private Map<String, String> characterColumnTypes() throws SQLException {
     var types = new TreeMap<String, String>();

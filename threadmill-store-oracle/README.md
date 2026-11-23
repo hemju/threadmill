@@ -183,7 +183,9 @@ declared character set without converting data, which is exact for the fresh,
 ASCII-only test database (and never acceptable for real data). Sessions then
 convert text exactly as on a database created with that character set, so a
 bind that bypasses the national character set loses characters and fails the
-round-trip tests. `-PoracleCharacterSet=...` picks another single-byte set. The plan tests need
+round-trip tests. `-PoracleCharacterSet=...` picks another single-byte set for
+the container; with `-PoracleJdbcUrl=...` the database keeps its own character
+set. The plan tests need
 `SELECT ANY DICTIONARY` (or `V$SESSION`/`V$SQL`/`V$SQL_PLAN` access) and skip
 otherwise.
 
@@ -192,5 +194,5 @@ otherwise.
 | `OracleJobStoreContractTest` | The shared contract suite, through connections that start with `autoCommit=false`. |
 | `OracleJobStoreRegressionTest` | Lock-as-you-fetch claiming, concurrent claims, keyed rotation, quarantine, CLOB supplementary characters, Unicode round-trips through every application-text column, keys on both sides of the surrogate range, time-zone independence, empty strings, locale-independent paging, counters. |
 | `OracleQueryPlanTest` | Executed plans of the hot and periodic statements. |
-| `OracleMigrationRunnerTest` | Resume after a crash, DBA-applied SQL, concurrent migrators, edited migrations, constraints, the column types of each text type, a schema created for the other text type. |
+| `OracleMigrationRunnerTest` | Resume after a crash, DBA-applied SQL, concurrent migrators, edited migrations, constraints, the column types of each text type, a schema created for the other text type (including its emitted pending SQL). |
 | `OracleServerTest`, `OracleDeadlockRetryTest`, `OracleStatementSplitTest` | Startup gate, retry classification, statement splitting. |

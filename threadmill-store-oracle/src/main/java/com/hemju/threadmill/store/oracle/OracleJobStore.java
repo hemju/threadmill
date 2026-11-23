@@ -31,6 +31,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -302,7 +303,7 @@ public final class OracleJobStore implements JobStore {
 
   @Override
   public String describe() {
-    return server.describe();
+    return server.describe() + ", " + text.type().name().toLowerCase(Locale.ROOT) + " text type";
   }
 
   @Override

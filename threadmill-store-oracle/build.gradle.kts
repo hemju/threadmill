@@ -43,6 +43,8 @@ tasks.named<Test>("test") { passDatabaseSelection() }
 // The whole suite again with the national text type (NVARCHAR2/NCLOB) on a
 // WE8MSWIN1252 database: the container's pluggable database is relabelled, so a
 // bind that bypasses the national character set loses characters and fails.
+// -PoracleCharacterSet picks another set for the container; an existing
+// database (-PoracleJdbcUrl) keeps its own character set.
 val nationalTest by
     tasks.registering(Test::class) {
         description =

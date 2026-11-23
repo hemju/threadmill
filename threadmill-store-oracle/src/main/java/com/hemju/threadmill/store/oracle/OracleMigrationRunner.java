@@ -208,19 +208,25 @@ public final class OracleMigrationRunner {
    * format. Strictly read-only, so it works for roles without DDL rights. When
    * the history table does not exist, its DDL is prepended (never executed).
    *
+   * <p>Refuses exactly the schema histories {@link #migrate()} refuses: an
+   * unknown version, an edited migration, or a schema created for the other
+   * {@link OracleTextType}. Resuming an install of the other type would leave
+   * columns of both types behind while recording this type's checksum.
+   *
    * @return the pending SQL script, empty when the schema is current
    */
   public String emitPendingSql() {
+    List<Migration> all = loadAll();
     try (Connection conn = dataSource.getConnection()) {
       var sb = new StringBuilder();
       Map<Integer, AppliedMigration> applied;
       if (tableExists(conn, "THREADMILL_SCHEMA_HISTORY")) {
-        applied = readAppliedMigrations(conn);
+        applied = validateAppliedMigrations(conn, all, false);
       } else {
         appendStatement(sb, historyTableSql());
         applied = Map.of();
       }
-      for (Migration m : loadAll()) {
+      for (Migration m : all) {
         AppliedMigration progress = applied.get(m.version());
         if (progress != null && progress.complete()) continue;
         appendMigrationSql(sb, m, progress == null ? 0 : progress.statementsApplied());

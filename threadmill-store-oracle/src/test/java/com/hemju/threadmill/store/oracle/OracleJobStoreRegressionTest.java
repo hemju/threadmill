@@ -17,6 +17,7 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.TimeZone;
 import java.util.UUID;
@@ -426,6 +427,9 @@ class OracleJobStoreRegressionTest {
    */
   private static final String UNICODE = "Grüße äöüß € 中文 日本語 😀🎉 \uE000\uFFFD";
 
+  /** Database character sets that hold all of Unicode, so nothing is lost in them. */
+  private static final Set<String> UNICODE_CHARACTER_SETS = Set.of("AL32UTF8", "UTF8", "UTFE");
+
   @Test
   void applicationTextRoundTripsCharactersTheDatabaseCharacterSetCannotHold() throws SQLException {
     var store = store();
@@ -518,23 +522,20 @@ class OracleJobStoreRegressionTest {
   }
 
   /**
-   * The negative control for the national round-trip tests: on a relabelled
-   * non-Unicode test database, text bound in the database character set loses
-   * exactly the characters the national binds keep. Without this the national
-   * suite could pass on a database that never converts anything.
+   * The negative control for the national round-trip tests: on a non-Unicode
+   * database, text bound in the database character set loses exactly the
+   * characters the national binds keep. Without this the national suite could
+   * pass on a database that never converts anything. Which characters survive
+   * the database character set depends on that set (ISO-8859-1 has no euro
+   * sign), so only the CJK and emoji every single-byte set lacks are asserted
+   * lost.
    */
   @Test
   void aDatabaseCharacterSetBindLosesWhatTheNationalCharacterSetKeeps() throws SQLException {
+    String characterSet = OracleTestDatabase.databaseCharacterSet();
     assumeTrue(
-        OracleTestDatabase.characterSet().isPresent(),
-        "needs a relabelled non-Unicode test database (nationalTest)");
-    try (Connection conn = dataSource.getConnection();
-        Statement st = conn.createStatement();
-        ResultSet rs = st.executeQuery("SELECT value FROM nls_database_parameters "
-            + "WHERE parameter = 'NLS_CHARACTERSET'")) {
-      assertThat(rs.next()).isTrue();
-      assertThat(rs.getString(1)).isEqualTo(OracleTestDatabase.characterSet().orElseThrow());
-    }
+        !UNICODE_CHARACTER_SETS.contains(characterSet),
+        "needs a non-Unicode database character set (nationalTest); this one is " + characterSet);
     try (Connection conn = dataSource.getConnection()) {
       conn.setAutoCommit(true);
       try (PreparedStatement ps = conn.prepareStatement(
@@ -545,10 +546,14 @@ class OracleJobStoreRegressionTest {
         ps.executeUpdate();
       }
     }
-    assertThat(store().listPausedQueues())
-        .contains("bound " + UNICODE)
-        .doesNotContain("plain " + UNICODE)
-        .anyMatch(queue -> queue.startsWith("plain Grüße äöüß € ¿"));
+    var queues = store().listPausedQueues();
+    assertThat(queues).contains("bound " + UNICODE);
+    assertThat(queues)
+        .filteredOn(queue -> queue.startsWith("plain "))
+        .singleElement()
+        .satisfies(plain -> assertThat(plain)
+            .isNotEqualTo("plain " + UNICODE)
+            .doesNotContain("中文", "日本語", "😀", "🎉"));
   }
 
   /**
@@ -809,7 +814,11 @@ class OracleJobStoreRegressionTest {
   void describeNamesTheServerReleaseAndSchemaAndOffersNoRemoteWake() {
     var store = store();
 
-    assertThat(store.describe()).startsWith("Oracle Database ").contains(" @ ");
+    assertThat(store.describe())
+        .startsWith("Oracle Database ")
+        .contains(" @ ")
+        .endsWith(
+            ", " + OracleTestDatabase.textType().name().toLowerCase(Locale.ROOT) + " text type");
     assertThat(store.createRemoteWakeChannel("threadmill_wake")).isEmpty();
   }
 }
