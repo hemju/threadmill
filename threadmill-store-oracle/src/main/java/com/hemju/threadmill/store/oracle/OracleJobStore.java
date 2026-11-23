@@ -3,7 +3,6 @@ package com.hemju.threadmill.store.oracle;
 import static com.hemju.threadmill.store.oracle.OracleJdbc.MAX_IN_LIST;
 import static com.hemju.threadmill.store.oracle.OracleJdbc.PARENT_KEY_NOT_FOUND;
 import static com.hemju.threadmill.store.oracle.OracleJdbc.UNIQUE_VIOLATION;
-import static com.hemju.threadmill.store.oracle.OracleJdbc.bindStrings;
 import static com.hemju.threadmill.store.oracle.OracleJdbc.bindUuids;
 import static com.hemju.threadmill.store.oracle.OracleJdbc.bucket;
 import static com.hemju.threadmill.store.oracle.OracleJdbc.chunks;
@@ -32,6 +31,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -104,6 +104,10 @@ import com.hemju.threadmill.core.store.RetentionPage;
  *       {@link OracleDeadlockRetry} after {@code ORA-00060}.</li>
  *   <li>Per-state and per-queue counts come from sharded counter tables
  *       maintained by a trigger; a {@code COUNT(*)} would contend with claims.</li>
+ *   <li>Application-supplied text uses {@code VARCHAR2}/{@code CLOB} columns
+ *       in an {@code AL32UTF8} database or, for databases with another
+ *       character set, {@code NVARCHAR2}/{@code NCLOB} columns in the national
+ *       character set; see {@link OracleTextType}.</li>
  *   <li>Only standard JDBC is used. The application supplies the driver.</li>
  * </ul>
  *
@@ -155,6 +159,7 @@ public final class OracleJobStore implements JobStore {
 
   private final JobSerializer serializer;
   private final JobStoreCapabilities capabilities;
+  private final OracleText text;
   private final OracleServer.Facts server;
   private final PendingKeyCursors pendingKeyCursors =
       new PendingKeyCursors(MAX_TRACKED_PENDING_KEY_CURSORS);
@@ -163,16 +168,33 @@ public final class OracleJobStore implements JobStore {
   private String idleQueueAfter;
 
   /**
-   * Create a store with the JSON serializer and default capabilities.
+   * Create a store for an {@link OracleTextType#STANDARD} schema with the JSON
+   * serializer and default capabilities.
    *
    * @param dataSource host-owned connection source for a 19c+ AL32UTF8 database
    */
   public OracleJobStore(DataSource dataSource) {
-    this(dataSource, new JsonJobSerializer(), JobStoreCapabilities.defaults());
+    this(dataSource, OracleTextType.STANDARD);
   }
 
   /**
-   * Create a store that owns its transactions.
+   * Create a store with the JSON serializer and default capabilities.
+   *
+   * @param dataSource host-owned connection source for a 19c+ database
+   * @param textType the column types the schema uses for application-supplied text
+   */
+  public OracleJobStore(DataSource dataSource, OracleTextType textType) {
+    this(
+        dataSource,
+        new JsonJobSerializer(),
+        JobStoreCapabilities.defaults(),
+        OracleTransactionBoundary.owning(dataSource),
+        textType);
+  }
+
+  /**
+   * Create a store for an {@link OracleTextType#STANDARD} schema that owns its
+   * transactions.
    *
    * @param dataSource host-owned connection source for a 19c+ AL32UTF8 database
    * @param serializer the job wire-format serializer
@@ -184,7 +206,8 @@ public final class OracleJobStore implements JobStore {
   }
 
   /**
-   * Create a store whose job writes run inside {@code transactionBoundary}.
+   * Create a store for an {@link OracleTextType#STANDARD} schema whose job
+   * writes run inside {@code transactionBoundary}.
    *
    * @param dataSource host-owned connection source for a 19c+ AL32UTF8 database
    * @param serializer the job wire-format serializer
@@ -199,23 +222,61 @@ public final class OracleJobStore implements JobStore {
       JobSerializer serializer,
       JobStoreCapabilities capabilities,
       OracleTransactionBoundary transactionBoundary) {
+    this(dataSource, serializer, capabilities, transactionBoundary, OracleTextType.STANDARD);
+  }
+
+  /**
+   * Create a store whose job writes run inside {@code transactionBoundary}.
+   *
+   * @param dataSource host-owned connection source for a 19c+ database
+   * @param serializer the job wire-format serializer
+   * @param capabilities size limits and feature flags
+   * @param transactionBoundary boundary for enqueue writes, for example one that
+   *     joins a framework-managed transaction
+   * @param textType the column types the schema uses for application-supplied
+   *     text; it must match the type the schema was created with
+   * @throws com.hemju.threadmill.core.JobEngineFatalException if the server is
+   *     older than 19c or the character set {@code textType} stores text in is
+   *     not Unicode (see {@link OracleTextType})
+   */
+  public OracleJobStore(
+      DataSource dataSource,
+      JobSerializer serializer,
+      JobStoreCapabilities capabilities,
+      OracleTransactionBoundary transactionBoundary,
+      OracleTextType textType) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
     this.transactionBoundary = Objects.requireNonNull(transactionBoundary, "transactionBoundary");
     this.owningBoundary = OracleTransactionBoundary.owning(this.dataSource);
     this.serializer = Objects.requireNonNull(serializer, "serializer");
     this.capabilities = Objects.requireNonNull(capabilities, "capabilities");
-    this.server = OracleServer.require(OracleServer.read(this.dataSource));
+    this.text = new OracleText(textType);
+    this.server = OracleServer.require(OracleServer.read(this.dataSource), textType);
   }
 
   /**
-   * Validate that {@code dataSource} points at a supported Oracle server.
+   * Validate that {@code dataSource} points at a supported Oracle server for an
+   * {@link OracleTextType#STANDARD} schema.
    *
    * @param dataSource the connection source to check
    * @throws com.hemju.threadmill.core.JobEngineFatalException if the server is
    *     older than 19c or its character set is not AL32UTF8
    */
   public static void requireSupportedServer(DataSource dataSource) {
-    OracleServer.require(OracleServer.read(dataSource));
+    requireSupportedServer(dataSource, OracleTextType.STANDARD);
+  }
+
+  /**
+   * Validate that {@code dataSource} points at a supported Oracle server.
+   *
+   * @param dataSource the connection source to check
+   * @param textType the column types the schema uses for application-supplied text
+   * @throws com.hemju.threadmill.core.JobEngineFatalException if the server is
+   *     older than 19c or the character set {@code textType} stores text in is
+   *     not Unicode (see {@link OracleTextType})
+   */
+  public static void requireSupportedServer(DataSource dataSource, OracleTextType textType) {
+    OracleServer.require(OracleServer.read(dataSource), Objects.requireNonNull(textType));
   }
 
   // ---------------------------------------------------------------- capabilities
@@ -242,7 +303,7 @@ public final class OracleJobStore implements JobStore {
 
   @Override
   public String describe() {
-    return server.describe();
+    return server.describe() + ", " + text.type().name().toLowerCase(Locale.ROOT) + " text type";
   }
 
   @Override
@@ -355,7 +416,7 @@ public final class OracleJobStore implements JobStore {
           snapshots.add(snapshot);
           bodies.add(body);
         }
-        try (var clobs = new OracleClobs();
+        try (var clobs = text.clobs();
             PreparedStatement ps = conn.prepareStatement(JOB_INSERT)) {
           for (int i = 0; i < snapshots.size(); i++) {
             JobSnapshot snapshot = snapshots.get(i);
@@ -428,8 +489,8 @@ public final class OracleJobStore implements JobStore {
         try (PreparedStatement ps = conn.prepareStatement(
             "INSERT INTO threadmill_dedup_keys (queue, dedup_key, job_id, expires_at) "
                 + "VALUES (?, ?, ?, ?)")) {
-          ps.setString(1, job.queue());
-          ps.setString(2, dedupKey);
+          text.bind(ps, 1, job.queue());
+          text.bind(ps, 2, dedupKey);
           setUuid(ps, 3, job.id().asUuid());
           setInstant(ps, 4, now.plus(ttl));
           ps.executeUpdate();
@@ -492,7 +553,7 @@ public final class OracleJobStore implements JobStore {
           lockConcurrencyGroup(conn, oldSnapshot.concurrencyKey());
         }
         adjustWorkflowHoldOnTransition(conn, oldSnapshot, snapshot.currentState());
-        try (var clobs = new OracleClobs();
+        try (var clobs = text.clobs();
             PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
                 + "state = ?, queue = ?, priority = ?, handler_signature = ?, "
                 + "scheduled_at = ?, owner_node_id = ?, owner_heartbeat_at = ?, last_checkin_at = ?, "
@@ -500,9 +561,9 @@ public final class OracleJobStore implements JobStore {
                 + "concurrency_key = ?, concurrency_mode = ?, workflow_root_id = ?, parent_job_id = ? "
                 + "WHERE id = ? AND version = ?")) {
           ps.setString(1, snapshot.currentState().name());
-          ps.setString(2, snapshot.queue());
+          text.bind(ps, 2, snapshot.queue());
           ps.setInt(3, snapshot.priority());
-          ps.setString(4, snapshot.spec().handlerType());
+          text.bind(ps, 4, snapshot.spec().handlerType());
           setInstant(ps, 5, snapshot.scheduledFor());
           setUuid(
               ps,
@@ -558,7 +619,7 @@ public final class OracleJobStore implements JobStore {
         JobSnapshot snapshot = withVersion(job, nextVersion);
         String newBody = serializer.serializeJob(snapshot, capabilities);
         adjustWorkflowHoldOnTransition(conn, oldSnapshot, JobState.DELETED);
-        try (var clobs = new OracleClobs();
+        try (var clobs = text.clobs();
             PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET state = ?, "
                 + "version = ?, body = ?, current_state_at = ? WHERE id = ?")) {
           ps.setString(1, JobState.DELETED.name());
@@ -592,7 +653,7 @@ public final class OracleJobStore implements JobStore {
         // SKIP LOCKED row locks taken while gathering, but if a refactor ever
         // fetched candidates without them, this turns a silent double claim
         // into a loud failure.
-        try (var clobs = new OracleClobs();
+        try (var clobs = text.clobs();
             PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
                 + "state = 'PROCESSING', owner_node_id = ?, owner_heartbeat_at = ?, "
                 + "last_checkin_at = NULL, execution_revision = 0, current_state_at = ?, version = ?, "
@@ -735,7 +796,7 @@ public final class OracleJobStore implements JobStore {
   private void collectUnkeyedCandidates(
       Connection conn, String queue, int page, Map<UUID, PendingClaim> into) throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(UNKEYED_CLAIM_SQL)) {
-      ps.setString(1, queue);
+      text.bind(ps, 1, queue);
       // Oracle locks SKIP LOCKED rows as they are fetched: fetch exactly one
       // page so the cursor locks no more than the budget.
       ps.setFetchSize(page);
@@ -756,11 +817,11 @@ public final class OracleJobStore implements JobStore {
       try (PreparedStatement ps = conn.prepareStatement(keyedHeadsSql(size))) {
         int parameter = 1;
         for (int i = 0; i < size; i++) {
-          ps.setString(parameter++, queue);
+          text.bind(ps, parameter++, queue);
           if (i < chunk.size()) {
-            ps.setString(parameter++, chunk.get(i));
+            text.bind(ps, parameter++, chunk.get(i));
           } else {
-            ps.setNull(parameter++, Types.VARCHAR);
+            text.bind(ps, parameter++, null);
           }
           ps.setInt(parameter++, perKey);
         }
@@ -779,7 +840,7 @@ public final class OracleJobStore implements JobStore {
     try (PreparedStatement ps = conn.prepareStatement("SELECT concurrency_key, workflow_root_id "
         + "FROM threadmill_concurrency_workflow_holds WHERE concurrency_key IN ("
         + placeholders(size) + ")")) {
-      bindStrings(ps, 1, keys, size);
+      text.bindAll(ps, 1, keys, size);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) {
           holds.add(new WorkflowKey(rs.getString(1), getUuid(rs, 2)));
@@ -792,13 +853,13 @@ public final class OracleJobStore implements JobStore {
         int parameter = 1;
         for (int i = 0; i < branches; i++) {
           if (i < chunk.size()) {
-            ps.setString(parameter++, chunk.get(i).concurrencyKey());
+            text.bind(ps, parameter++, chunk.get(i).concurrencyKey());
             setUuid(ps, parameter++, chunk.get(i).workflowRootId());
           } else {
-            ps.setNull(parameter++, Types.VARCHAR);
+            text.bind(ps, parameter++, null);
             setUuid(ps, parameter++, null);
           }
-          ps.setString(parameter++, queue);
+          text.bind(ps, parameter++, queue);
           ps.setInt(parameter++, perKey);
         }
         readPendingClaims(ps, Integer.MAX_VALUE, into);
@@ -885,9 +946,9 @@ public final class OracleJobStore implements JobStore {
       throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(pendingKeysSql(after != null))) {
       int parameter = 1;
-      ps.setString(parameter++, queue);
-      if (after != null) ps.setString(parameter++, after);
-      ps.setString(parameter++, queue);
+      text.bind(ps, parameter++, queue);
+      if (after != null) text.bind(ps, parameter++, after);
+      text.bind(ps, parameter++, queue);
       ps.setInt(parameter, MAX_PENDING_KEYS_PER_PASS);
       ps.setFetchSize(MAX_PENDING_KEYS_PER_PASS + 1);
       try (ResultSet rs = ps.executeQuery()) {
@@ -998,15 +1059,20 @@ public final class OracleJobStore implements JobStore {
       Connection conn, PendingClaim candidate, Instant now, String originalBody)
       throws SQLException {
     String rejectedBody = quarantineBody(originalBody, candidate.version() + 1, now);
-    try (var clobs = new OracleClobs();
+    // Without a rejected body the raw evidence stays. The column is left out
+    // rather than written as NVL(?, body): a NULL bind there takes the
+    // database character set, which an NCLOB body rejects (ORA-12704).
+    try (var clobs = text.clobs();
         PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
-            + "state = 'QUARANTINED', current_state_at = ?, version = ?, body = NVL(?, body) "
-            + "WHERE id = ? AND version = ? AND state = 'ENQUEUED'")) {
-      setInstant(ps, 1, now);
-      ps.setLong(2, candidate.version() + 1);
-      clobs.bind(ps, 3, rejectedBody);
-      setUuid(ps, 4, candidate.id());
-      ps.setLong(5, candidate.version());
+            + "state = 'QUARANTINED', current_state_at = ?, version = ?"
+            + (rejectedBody == null ? "" : ", body = ?")
+            + " WHERE id = ? AND version = ? AND state = 'ENQUEUED'")) {
+      int parameter = 1;
+      setInstant(ps, parameter++, now);
+      ps.setLong(parameter++, candidate.version() + 1);
+      if (rejectedBody != null) clobs.bind(ps, parameter++, rejectedBody);
+      setUuid(ps, parameter++, candidate.id());
+      ps.setLong(parameter, candidate.version());
       if (ps.executeUpdate() == 0) {
         return; // raced away — nothing was quarantined
       }
@@ -1025,7 +1091,7 @@ public final class OracleJobStore implements JobStore {
         candidate.id());
   }
 
-  private static void lockConcurrencyGroups(Connection conn, Set<String> keys) throws SQLException {
+  private void lockConcurrencyGroups(Connection conn, Set<String> keys) throws SQLException {
     for (String key : new TreeSet<>(keys)) {
       lockConcurrencyGroup(conn, key);
     }
@@ -1036,14 +1102,14 @@ public final class OracleJobStore implements JobStore {
    * failed INSERT is a statement-level rollback in Oracle, so the loop is safe
    * inside a caller-owned transaction as well.
    */
-  private static void lockConcurrencyGroup(Connection conn, String key) throws SQLException {
+  private void lockConcurrencyGroup(Connection conn, String key) throws SQLException {
     try (var lock = conn.prepareStatement("SELECT concurrency_key FROM "
             + "threadmill_concurrency_groups WHERE concurrency_key = ? FOR UPDATE");
         var insert = conn.prepareStatement("INSERT INTO threadmill_concurrency_groups "
             + "(concurrency_key, exclusive_in_flight, shared_in_flight, last_modified) "
             + "VALUES (?, 0, 0, " + NOW_UTC + ")")) {
-      lock.setString(1, key);
-      insert.setString(1, key);
+      text.bind(lock, 1, key);
+      text.bind(insert, 1, key);
       for (int attempt = 0; attempt < 10; attempt++) {
         try (var row = lock.executeQuery()) {
           if (row.next()) return;
@@ -1060,7 +1126,7 @@ public final class OracleJobStore implements JobStore {
     }
   }
 
-  private static Map<String, GroupState> loadGroupStates(Connection conn, Set<String> keys)
+  private Map<String, GroupState> loadGroupStates(Connection conn, Set<String> keys)
       throws SQLException {
     var groups = new HashMap<String, GroupState>();
     for (var chunk : chunks(List.copyOf(keys), MAX_IN_LIST)) {
@@ -1068,7 +1134,7 @@ public final class OracleJobStore implements JobStore {
       try (PreparedStatement ps = conn.prepareStatement("SELECT concurrency_key, "
           + "exclusive_in_flight, shared_in_flight FROM threadmill_concurrency_groups "
           + "WHERE concurrency_key IN (" + placeholders(size) + ")")) {
-        bindStrings(ps, 1, chunk, size);
+        text.bindAll(ps, 1, chunk, size);
         try (ResultSet rs = ps.executeQuery()) {
           while (rs.next()) {
             groups.put(rs.getString(1), new GroupState(rs.getInt(2), rs.getInt(3)));
@@ -1079,7 +1145,7 @@ public final class OracleJobStore implements JobStore {
     return groups;
   }
 
-  private static Set<WorkflowKey> loadActiveWorkflowHolds(
+  private Set<WorkflowKey> loadActiveWorkflowHolds(
       Connection conn, List<PendingClaim> keyed, Set<String> keys) throws SQLException {
     var roots = keyed.stream().map(PendingClaim::workflowRootId).distinct().toList();
     var holds = new HashSet<WorkflowKey>();
@@ -1091,7 +1157,7 @@ public final class OracleJobStore implements JobStore {
             + "workflow_root_id FROM threadmill_concurrency_workflow_holds WHERE concurrency_key IN ("
             + placeholders(keySize) + ") AND workflow_root_id IN (" + placeholders(rootSize)
             + ")")) {
-          int next = bindStrings(ps, 1, keyChunk, keySize);
+          int next = text.bindAll(ps, 1, keyChunk, keySize);
           bindUuids(ps, next, rootChunk, rootSize);
           try (ResultSet rs = ps.executeQuery()) {
             while (rs.next()) {
@@ -1235,18 +1301,18 @@ public final class OracleJobStore implements JobStore {
     Names.requireName("queue", queue);
     try {
       ownedTransaction(conn -> {
-        try (var clobs = new OracleClobs()) {
+        try (var clobs = text.clobs()) {
           upsert(
               conn,
               "UPDATE threadmill_queue_pauses SET paused_at = ?, paused_by = ? WHERE queue = ?",
               ps -> {
                 setInstant(ps, 1, Instant.now());
                 clobs.bind(ps, 2, reason);
-                ps.setString(3, queue);
+                text.bind(ps, 3, queue);
               },
               "INSERT INTO threadmill_queue_pauses (queue, paused_at, paused_by) VALUES (?, ?, ?)",
               ps -> {
-                ps.setString(1, queue);
+                text.bind(ps, 1, queue);
                 setInstant(ps, 2, Instant.now());
                 clobs.bind(ps, 3, reason);
               });
@@ -1265,7 +1331,7 @@ public final class OracleJobStore implements JobStore {
       ownedTransaction(conn -> {
         try (PreparedStatement ps =
             conn.prepareStatement("DELETE FROM threadmill_queue_pauses WHERE queue = ?")) {
-          ps.setString(1, queue);
+          text.bind(ps, 1, queue);
           ps.executeUpdate();
         }
         return null;
@@ -1292,7 +1358,7 @@ public final class OracleJobStore implements JobStore {
     try (Connection conn = dataSource.getConnection();
         PreparedStatement ps =
             conn.prepareStatement("SELECT 1 FROM threadmill_queue_pauses WHERE queue = ?")) {
-      ps.setString(1, queue);
+      text.bind(ps, 1, queue);
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next();
       }
@@ -1382,7 +1448,7 @@ public final class OracleJobStore implements JobStore {
         }
         var updated = incoming.withExecutionUpdate(incoming.executionRevision() + 1, heartbeat);
         var body = serializer.serializeJob(updated, capabilities);
-        try (var clobs = new OracleClobs();
+        try (var clobs = text.clobs();
             var update = conn.prepareStatement("UPDATE threadmill_jobs SET "
                 + "owner_heartbeat_at = ?, last_checkin_at = ?, body = ?, execution_revision = ? "
                 + "WHERE id = ?")) {
@@ -1669,7 +1735,7 @@ public final class OracleJobStore implements JobStore {
         PreparedStatement ps = conn.prepareStatement(firstRows("SELECT " + CRON_TASK_COLUMNS
             + " FROM threadmill_cron_tasks " + (after == null ? "" : "WHERE name > ? ")
             + "ORDER BY " + binary("name")))) {
-      if (after != null) ps.setString(1, after);
+      if (after != null) text.bind(ps, 1, after);
       ps.setInt(after == null ? 1 : 2, limit);
       ps.setFetchSize(Math.max(1, limit));
       try (ResultSet rs = ps.executeQuery()) {
@@ -1685,25 +1751,25 @@ public final class OracleJobStore implements JobStore {
   public List<Job> searchJobs(JobSearch search) {
     Objects.requireNonNull(search, "search");
     var sql = new StringBuilder("SELECT " + JOB_PROJECTION + " FROM threadmill_jobs WHERE 1 = 1");
-    var args = new ArrayList<Object>();
+    var binds = new ArrayList<StatementBind>();
     if (search.state() != null) {
       sql.append(" AND state = ?");
-      args.add(search.state().name());
+      binds.add((ps, i) -> ps.setString(i, search.state().name()));
     }
     if (search.queue() != null) {
       sql.append(" AND queue = ?");
-      args.add(search.queue());
+      binds.add((ps, i) -> text.bind(ps, i, search.queue()));
     }
     if (search.handlerType() != null) {
       sql.append(" AND handler_signature = ?");
-      args.add(search.handlerType());
+      binds.add((ps, i) -> text.bind(ps, i, search.handlerType()));
     }
     sql.append(" ORDER BY current_state_at DESC, id ASC OFFSET ? ROWS FETCH NEXT ? ROWS ONLY");
-    args.add(search.offset());
-    args.add(search.limit());
+    binds.add((ps, i) -> ps.setInt(i, search.offset()));
+    binds.add((ps, i) -> ps.setInt(i, search.limit()));
     return queryJobs(sql.toString(), search.limit(), ps -> {
-      for (int i = 0; i < args.size(); i++) {
-        ps.setObject(i + 1, args.get(i));
+      for (int i = 0; i < binds.size(); i++) {
+        binds.get(i).apply(ps, i + 1);
       }
     });
   }
@@ -1711,7 +1777,7 @@ public final class OracleJobStore implements JobStore {
   @Override
   public Optional<Instant> oldestEnqueuedAt(String queue) {
     Names.requireName("queue", queue);
-    return firstInstant(QUEUE_AGE_SQL, ps -> ps.setString(1, queue), "oldestEnqueuedAt");
+    return firstInstant(QUEUE_AGE_SQL, ps -> text.bind(ps, 1, queue), "oldestEnqueuedAt");
   }
 
   @Override
@@ -1772,7 +1838,7 @@ public final class OracleJobStore implements JobStore {
       var page = writeTransaction(conn -> {
         var keys = new ArrayList<String>();
         try (var query = conn.prepareStatement(idleGroupsSql(after != null))) {
-          if (after != null) query.setString(1, after);
+          if (after != null) text.bind(query, 1, after);
           query.setFetchSize(limit);
           query.setMaxRows(limit);
           try (var rows = query.executeQuery()) {
@@ -1787,7 +1853,7 @@ public final class OracleJobStore implements JobStore {
             + "AND NOT EXISTS (SELECT 1 FROM threadmill_jobs j WHERE "
             + "j.outstanding_key = g.concurrency_key)")) {
           for (var key : keys) {
-            delete.setString(1, key);
+            text.bind(delete, 1, key);
             removed += delete.executeUpdate();
           }
         }
@@ -1816,7 +1882,7 @@ public final class OracleJobStore implements JobStore {
         try (var query = conn.prepareStatement("SELECT c.queue, CASE WHEN c.total = 0 "
             + "AND NOT EXISTS (SELECT 1 FROM threadmill_jobs j WHERE j.enqueued_queue = c.queue) "
             + "THEN 1 ELSE 0 END FROM (" + candidates + ") c ORDER BY " + binary("c.queue"))) {
-          if (after != null) query.setString(1, after);
+          if (after != null) text.bind(query, 1, after);
           query.setInt(after == null ? 1 : 2, limit);
           try (var rows = query.executeQuery()) {
             while (rows.next()) {
@@ -1844,12 +1910,12 @@ public final class OracleJobStore implements JobStore {
    * to shards this transaction could not lock. The idle check is repeated
    * under the locks because a producer may have arrived since the prefilter.
    */
-  private static long deleteBalancedQueueShards(Connection conn, String queue) throws SQLException {
+  private long deleteBalancedQueueShards(Connection conn, String queue) throws SQLException {
     var shards = new ArrayList<Integer>();
     long total = 0;
     try (var lock = conn.prepareStatement("SELECT shard_no, job_count FROM threadmill_queue_counts "
         + "WHERE queue = ? FOR UPDATE SKIP LOCKED")) {
-      lock.setString(1, queue);
+      text.bind(lock, 1, queue);
       lock.setFetchSize(16);
       try (var rows = lock.executeQuery()) {
         while (rows.next()) {
@@ -1865,11 +1931,11 @@ public final class OracleJobStore implements JobStore {
     try (var delete = conn.prepareStatement("DELETE FROM threadmill_queue_counts WHERE queue = ? "
         + "AND shard_no IN (" + placeholders(size) + ") AND NOT EXISTS (SELECT 1 FROM "
         + "threadmill_jobs j WHERE j.enqueued_queue = ?)")) {
-      delete.setString(1, queue);
+      text.bind(delete, 1, queue);
       int parameter = 2;
       for (int shard : shards) delete.setInt(parameter++, shard);
       while (parameter < 2 + size) delete.setNull(parameter++, Types.INTEGER);
-      delete.setString(parameter, queue);
+      text.bind(delete, parameter, queue);
       return delete.executeUpdate();
     }
   }
@@ -1904,7 +1970,7 @@ public final class OracleJobStore implements JobStore {
             + "AND ROWNUM <= ?",
         limit,
         ps -> {
-          ps.setString(1, handlerType);
+          text.bind(ps, 1, handlerType);
           ps.setInt(2, limit);
         });
   }
@@ -2011,16 +2077,16 @@ public final class OracleJobStore implements JobStore {
               + " + NUMTODSINTERVAL(?, 'SECOND') WHERE name = ? AND (expires_at <= " + NOW_UTC
               + " OR DECODE(holder, ?, 1, 0) = 1)",
           ps -> {
-            ps.setString(1, holder);
+            text.bind(ps, 1, holder);
             setSeconds(ps, 2, leaseDuration);
-            ps.setString(3, name);
-            ps.setString(4, holder);
+            text.bind(ps, 3, name);
+            text.bind(ps, 4, holder);
           },
           "INSERT INTO threadmill_mutexes (name, holder, expires_at) VALUES (?, ?, " + NOW_UTC
               + " + NUMTODSINTERVAL(?, 'SECOND'))",
           ps -> {
-            ps.setString(1, name);
-            ps.setString(2, holder);
+            text.bind(ps, 1, name);
+            text.bind(ps, 2, holder);
             setSeconds(ps, 3, leaseDuration);
           }));
     } catch (SQLException e) {
@@ -2038,8 +2104,8 @@ public final class OracleJobStore implements JobStore {
       ownedTransaction(conn -> {
         try (PreparedStatement ps = conn.prepareStatement(
             "DELETE FROM threadmill_mutexes WHERE name = ? AND DECODE(holder, ?, 1, 0) = 1")) {
-          ps.setString(1, name);
-          ps.setString(2, holder);
+          text.bind(ps, 1, name);
+          text.bind(ps, 2, holder);
           ps.executeUpdate();
         }
         return null;
@@ -2078,15 +2144,15 @@ public final class OracleJobStore implements JobStore {
         long nextVersion = version + 1;
         JobSnapshot snapshot = withVersion(replaced, nextVersion);
         String newBody = serializer.serializeJob(snapshot, capabilities);
-        try (var clobs = new OracleClobs();
+        try (var clobs = text.clobs();
             PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_jobs SET "
                 + "queue = ?, priority = ?, handler_signature = ?, scheduled_at = ?, "
                 + "current_state_at = ?, version = ?, body = ?, concurrency_key = ?, "
                 + "concurrency_mode = ?, workflow_root_id = ?, parent_job_id = ? "
                 + "WHERE id = ? AND version = ?")) {
-          ps.setString(1, snapshot.queue());
+          text.bind(ps, 1, snapshot.queue());
           ps.setInt(2, snapshot.priority());
-          ps.setString(3, snapshot.spec().handlerType());
+          text.bind(ps, 3, snapshot.spec().handlerType());
           setInstant(ps, 4, snapshot.scheduledFor());
           setInstant(ps, 5, lastTransitionTime(snapshot, snapshot.currentState()));
           ps.setLong(6, nextVersion);
@@ -2128,7 +2194,7 @@ public final class OracleJobStore implements JobStore {
     }
     try {
       ownedTransaction(conn -> {
-        try (var clobs = new OracleClobs()) {
+        try (var clobs = text.clobs()) {
           upsert(
               conn,
               "UPDATE threadmill_cron_tasks SET trigger_kind = ?, trigger_value = ?, "
@@ -2137,7 +2203,7 @@ public final class OracleJobStore implements JobStore {
                   + "missed_run_policy = ?, time_zone = ?, enabled = ? WHERE name = ?",
               ps -> {
                 bindCronTaskValues(clobs, ps, 1, task, kind, value);
-                ps.setString(14, task.name());
+                text.bind(ps, 14, task.name());
               },
               "INSERT INTO threadmill_cron_tasks (trigger_kind, trigger_value, handler_signature, "
                   + "payload_type_tag, payload_serialized, queue, priority, timeout_seconds, "
@@ -2145,7 +2211,7 @@ public final class OracleJobStore implements JobStore {
                   + "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
               ps -> {
                 bindCronTaskValues(clobs, ps, 1, task, kind, value);
-                ps.setString(14, task.name());
+                text.bind(ps, 14, task.name());
               });
         }
         return null;
@@ -2155,15 +2221,15 @@ public final class OracleJobStore implements JobStore {
     }
   }
 
-  private static void bindCronTaskValues(
+  private void bindCronTaskValues(
       OracleClobs clobs, PreparedStatement ps, int start, CronTask task, String kind, String value)
       throws SQLException {
     ps.setString(start, kind);
-    ps.setString(start + 1, value);
-    ps.setString(start + 2, task.handlerType());
-    ps.setString(start + 3, task.payloadArgument().typeTag());
+    text.bind(ps, start + 1, value);
+    text.bind(ps, start + 2, task.handlerType());
+    text.bind(ps, start + 3, task.payloadArgument().typeTag());
     clobs.bind(ps, start + 4, task.payloadArgument().serialized());
-    ps.setString(start + 5, task.queue());
+    text.bind(ps, start + 5, task.queue());
     ps.setInt(start + 6, task.priority());
     if (task.timeout() == null) {
       ps.setNull(start + 7, Types.BIGINT);
@@ -2186,7 +2252,7 @@ public final class OracleJobStore implements JobStore {
     try (Connection conn = dataSource.getConnection();
         PreparedStatement ps = conn.prepareStatement(
             "SELECT " + CRON_TASK_COLUMNS + " FROM threadmill_cron_tasks WHERE name = ?")) {
-      ps.setString(1, name);
+      text.bind(ps, 1, name);
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next() ? Optional.of(readCronTask(rs)) : Optional.empty();
       }
@@ -2217,7 +2283,7 @@ public final class OracleJobStore implements JobStore {
       ownedTransaction(conn -> {
         try (PreparedStatement ps =
             conn.prepareStatement("DELETE FROM threadmill_cron_tasks WHERE name = ?")) {
-          ps.setString(1, name);
+          text.bind(ps, 1, name);
           ps.executeUpdate();
         }
         return null;
@@ -2235,8 +2301,8 @@ public final class OracleJobStore implements JobStore {
       ownedTransaction(conn -> {
         try (PreparedStatement ps = conn.prepareStatement(
             "INSERT INTO threadmill_cron_task_ownership (namespace, task_name) VALUES (?, ?)")) {
-          ps.setString(1, namespace);
-          ps.setString(2, taskName);
+          text.bind(ps, 1, namespace);
+          text.bind(ps, 2, taskName);
           ps.executeUpdate();
         } catch (SQLException e) {
           if (!hasErrorCode(e, UNIQUE_VIOLATION)) throw e; // already recorded
@@ -2255,7 +2321,7 @@ public final class OracleJobStore implements JobStore {
     try (Connection conn = dataSource.getConnection();
         PreparedStatement ps = conn.prepareStatement(
             "SELECT task_name FROM threadmill_cron_task_ownership WHERE namespace = ?")) {
-      ps.setString(1, namespace);
+      text.bind(ps, 1, namespace);
       try (ResultSet rs = ps.executeQuery()) {
         while (rs.next()) out.add(rs.getString(1));
       }
@@ -2279,13 +2345,13 @@ public final class OracleJobStore implements JobStore {
                 + "next_run_at = ?, in_flight_job_id = ?, timing_fingerprint = ? WHERE task_name = ?",
             ps -> {
               bindCronStateValues(ps, state);
-              ps.setString(6, state.taskName());
+              text.bind(ps, 6, state.taskName());
             },
             "INSERT INTO threadmill_cron_task_state (last_run_at, last_run_job_id, next_run_at, "
                 + "in_flight_job_id, timing_fingerprint, task_name) VALUES (?, ?, ?, ?, ?, ?)",
             ps -> {
               bindCronStateValues(ps, state);
-              ps.setString(6, state.taskName());
+              text.bind(ps, 6, state.taskName());
             });
         return null;
       });
@@ -2294,13 +2360,13 @@ public final class OracleJobStore implements JobStore {
     }
   }
 
-  private static void bindCronStateValues(PreparedStatement ps, CronTaskScheduleState state)
+  private void bindCronStateValues(PreparedStatement ps, CronTaskScheduleState state)
       throws SQLException {
     setInstant(ps, 1, state.lastRunAt());
     setUuid(ps, 2, state.lastRunJobId());
     setInstant(ps, 3, state.nextRunAt());
     setUuid(ps, 4, state.inFlightJobId());
-    ps.setString(5, state.timingFingerprint());
+    text.bind(ps, 5, state.timingFingerprint());
   }
 
   @Override
@@ -2310,7 +2376,7 @@ public final class OracleJobStore implements JobStore {
             + "last_run_job_id, next_run_at, in_flight_job_id, timing_fingerprint, "
             + "nudge_requested_at, nudge_revision FROM threadmill_cron_task_state "
             + "WHERE task_name = ?")) {
-      ps.setString(1, name);
+      text.bind(ps, 1, name);
       try (ResultSet rs = ps.executeQuery()) {
         if (!rs.next()) return Optional.empty();
         long revision = rs.getLong(8);
@@ -2341,7 +2407,7 @@ public final class OracleJobStore implements JobStore {
         // transaction, and a nudge racing removal cannot resurrect state.
         try (PreparedStatement ps = conn.prepareStatement(
             "SELECT enabled FROM threadmill_cron_tasks WHERE name = ? FOR UPDATE")) {
-          ps.setString(1, taskName);
+          text.bind(ps, 1, taskName);
           try (ResultSet rs = ps.executeQuery()) {
             if (!rs.next()) return NudgeOutcome.UNKNOWN_TASK;
             if (rs.getInt(1) != 1) return NudgeOutcome.DISABLED;
@@ -2357,12 +2423,12 @@ public final class OracleJobStore implements JobStore {
                   + "nudge_revision = NVL(nudge_revision, 0) + 1 WHERE task_name = ?",
               ps -> {
                 setInstant(ps, 1, requestedAt);
-                ps.setString(2, taskName);
+                text.bind(ps, 2, taskName);
               },
               "INSERT INTO threadmill_cron_task_state (task_name, nudge_requested_at, "
                   + "nudge_revision) VALUES (?, ?, 1)",
               ps -> {
-                ps.setString(1, taskName);
+                text.bind(ps, 1, taskName);
                 setInstant(ps, 2, requestedAt);
               });
         } catch (SQLException e) {
@@ -2386,7 +2452,7 @@ public final class OracleJobStore implements JobStore {
         try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_cron_task_state "
             + "SET nudge_requested_at = NULL WHERE task_name = ? AND nudge_revision = ? "
             + "AND nudge_requested_at IS NOT NULL")) {
-          ps.setString(1, taskName);
+          text.bind(ps, 1, taskName);
           ps.setLong(2, observedRevision);
           ps.executeUpdate();
         }
@@ -2432,6 +2498,11 @@ public final class OracleJobStore implements JobStore {
   @FunctionalInterface
   private interface StatementSetup {
     void apply(PreparedStatement ps) throws SQLException;
+  }
+
+  @FunctionalInterface
+  private interface StatementBind {
+    void apply(PreparedStatement ps, int index) throws SQLException;
   }
 
   /**
@@ -2529,8 +2600,8 @@ public final class OracleJobStore implements JobStore {
     Instant expiresAt;
     try (PreparedStatement ps = conn.prepareStatement("SELECT job_id, expires_at "
         + "FROM threadmill_dedup_keys WHERE queue = ? AND dedup_key = ? FOR UPDATE")) {
-      ps.setString(1, queue);
-      ps.setString(2, dedupKey);
+      text.bind(ps, 1, queue);
+      text.bind(ps, 2, dedupKey);
       try (ResultSet rs = ps.executeQuery()) {
         if (!rs.next()) return Optional.empty();
         jobId = getUuid(rs, 1);
@@ -2551,8 +2622,8 @@ public final class OracleJobStore implements JobStore {
     }
     try (PreparedStatement ps = conn.prepareStatement(
         "DELETE FROM threadmill_dedup_keys WHERE queue = ? AND dedup_key = ?")) {
-      ps.setString(1, queue);
-      ps.setString(2, dedupKey);
+      text.bind(ps, 1, queue);
+      text.bind(ps, 2, dedupKey);
       ps.executeUpdate();
     }
     return Optional.empty();
@@ -2609,12 +2680,12 @@ public final class OracleJobStore implements JobStore {
     return Math.max(cap, cap * 2);
   }
 
-  private static boolean hasActiveWorkflowHoldForRoot(Connection conn, JobSnapshot candidate)
+  private boolean hasActiveWorkflowHoldForRoot(Connection conn, JobSnapshot candidate)
       throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement(
         "SELECT 1 FROM "
             + "threadmill_concurrency_workflow_holds WHERE concurrency_key = ? AND workflow_root_id = ?")) {
-      ps.setString(1, candidate.concurrencyKey());
+      text.bind(ps, 1, candidate.concurrencyKey());
       setUuid(ps, 2, candidate.workflowRootId().asUuid());
       try (ResultSet rs = ps.executeQuery()) {
         return rs.next();
@@ -2622,7 +2693,7 @@ public final class OracleJobStore implements JobStore {
     }
   }
 
-  private static void noteInsertedWorkflowDescendant(Connection conn, JobSnapshot snapshot)
+  private void noteInsertedWorkflowDescendant(Connection conn, JobSnapshot snapshot)
       throws SQLException {
     if (snapshot.concurrencyKey() == null) {
       return;
@@ -2632,7 +2703,7 @@ public final class OracleJobStore implements JobStore {
   }
 
   /** Caller must already hold the concurrency-group row lock for the snapshot's key. */
-  private static void incrementWorkflowHoldOutstanding(Connection conn, JobSnapshot snapshot)
+  private void incrementWorkflowHoldOutstanding(Connection conn, JobSnapshot snapshot)
       throws SQLException {
     if (snapshot.concurrencyKey() == null) {
       return;
@@ -2640,15 +2711,14 @@ public final class OracleJobStore implements JobStore {
     try (PreparedStatement ps = conn.prepareStatement(
         "UPDATE threadmill_concurrency_workflow_holds "
             + "SET outstanding = outstanding + 1 WHERE concurrency_key = ? AND workflow_root_id = ?")) {
-      ps.setString(1, snapshot.concurrencyKey());
+      text.bind(ps, 1, snapshot.concurrencyKey());
       setUuid(ps, 2, snapshot.workflowRootId().asUuid());
       ps.executeUpdate();
     }
   }
 
   /** Caller must already hold the concurrency-group row lock for the snapshot's key. */
-  private static void acquireWorkflowHold(Connection conn, JobSnapshot snapshot)
-      throws SQLException {
+  private void acquireWorkflowHold(Connection conn, JobSnapshot snapshot) throws SQLException {
     if (snapshot.concurrencyKey() == null || hasActiveWorkflowHoldForRoot(conn, snapshot)) {
       return;
     }
@@ -2656,7 +2726,7 @@ public final class OracleJobStore implements JobStore {
     try (PreparedStatement ps = conn.prepareStatement("INSERT INTO "
         + "threadmill_concurrency_workflow_holds (concurrency_key, workflow_root_id, outstanding) "
         + "VALUES (?, ?, ?)")) {
-      ps.setString(1, snapshot.concurrencyKey());
+      text.bind(ps, 1, snapshot.concurrencyKey());
       setUuid(ps, 2, snapshot.workflowRootId().asUuid());
       ps.setInt(3, outstanding);
       ps.executeUpdate();
@@ -2667,17 +2737,17 @@ public final class OracleJobStore implements JobStore {
     try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_concurrency_groups SET "
         + column + " = " + column + " + 1, last_modified = " + NOW_UTC
         + " WHERE concurrency_key = ?")) {
-      ps.setString(1, snapshot.concurrencyKey());
+      text.bind(ps, 1, snapshot.concurrencyKey());
       ps.executeUpdate();
     }
   }
 
-  private static int countOutstandingWorkflowJobs(Connection conn, JobSnapshot snapshot)
+  private int countOutstandingWorkflowJobs(Connection conn, JobSnapshot snapshot)
       throws SQLException {
     try (PreparedStatement ps = conn.prepareStatement("SELECT /*+ INDEX(j "
         + "threadmill_jobs_workflow_idx) */ COUNT(*) FROM threadmill_jobs j WHERE "
         + "outstanding_key = ? AND outstanding_root = ?")) {
-      ps.setString(1, snapshot.concurrencyKey());
+      text.bind(ps, 1, snapshot.concurrencyKey());
       setUuid(ps, 2, snapshot.workflowRootId().asUuid());
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
@@ -2686,7 +2756,7 @@ public final class OracleJobStore implements JobStore {
     }
   }
 
-  private static void adjustWorkflowHoldOnTransition(
+  private void adjustWorkflowHoldOnTransition(
       Connection conn, JobSnapshot oldSnapshot, JobState newState) throws SQLException {
     if (oldSnapshot.concurrencyKey() == null) {
       return;
@@ -2700,7 +2770,7 @@ public final class OracleJobStore implements JobStore {
       try (PreparedStatement ps = conn.prepareStatement("UPDATE "
           + "threadmill_concurrency_workflow_holds SET outstanding = outstanding + 1 "
           + "WHERE concurrency_key = ? AND workflow_root_id = ?")) {
-        ps.setString(1, oldSnapshot.concurrencyKey());
+        text.bind(ps, 1, oldSnapshot.concurrencyKey());
         setUuid(ps, 2, oldSnapshot.workflowRootId().asUuid());
         ps.executeUpdate();
       }
@@ -2722,13 +2792,13 @@ public final class OracleJobStore implements JobStore {
    * the hold and free its in-flight slot. A missing hold row is a no-op —
    * never-claimed standalone jobs hold nothing. Caller holds the group lock.
    */
-  private static void releaseWorkflowHoldShare(
+  private void releaseWorkflowHoldShare(
       Connection conn, String concurrencyKey, ConcurrencyMode mode, UUID root) throws SQLException {
     int outstanding;
     try (PreparedStatement ps = conn.prepareStatement("SELECT outstanding FROM "
         + "threadmill_concurrency_workflow_holds WHERE concurrency_key = ? AND workflow_root_id = ? "
         + "FOR UPDATE")) {
-      ps.setString(1, concurrencyKey);
+      text.bind(ps, 1, concurrencyKey);
       setUuid(ps, 2, root);
       try (ResultSet rs = ps.executeQuery()) {
         if (!rs.next()) {
@@ -2742,7 +2812,7 @@ public final class OracleJobStore implements JobStore {
           + "threadmill_concurrency_workflow_holds SET outstanding = ? "
           + "WHERE concurrency_key = ? AND workflow_root_id = ?")) {
         ps.setInt(1, outstanding);
-        ps.setString(2, concurrencyKey);
+        text.bind(ps, 2, concurrencyKey);
         setUuid(ps, 3, root);
         ps.executeUpdate();
       }
@@ -2751,7 +2821,7 @@ public final class OracleJobStore implements JobStore {
     try (PreparedStatement ps = conn.prepareStatement(
         "DELETE FROM "
             + "threadmill_concurrency_workflow_holds WHERE concurrency_key = ? AND workflow_root_id = ?")) {
-      ps.setString(1, concurrencyKey);
+      text.bind(ps, 1, concurrencyKey);
       setUuid(ps, 2, root);
       ps.executeUpdate();
     }
@@ -2759,22 +2829,22 @@ public final class OracleJobStore implements JobStore {
     try (PreparedStatement ps = conn.prepareStatement("UPDATE threadmill_concurrency_groups SET "
         + column + " = GREATEST(" + column + " - 1, 0), last_modified = " + NOW_UTC
         + " WHERE concurrency_key = ?")) {
-      ps.setString(1, concurrencyKey);
+      text.bind(ps, 1, concurrencyKey);
       ps.executeUpdate();
     }
   }
 
-  private static void insertSnapshot(
+  private void insertSnapshot(
       Connection conn, JobSnapshot snapshot, String body, Instant currentStateAt, long version)
       throws SQLException {
-    try (var clobs = new OracleClobs();
+    try (var clobs = text.clobs();
         PreparedStatement ps = conn.prepareStatement(JOB_INSERT)) {
       bindJobInsert(clobs, ps, snapshot, body, currentStateAt, version);
       ps.executeUpdate();
     }
   }
 
-  private static void bindJobInsert(
+  private void bindJobInsert(
       OracleClobs clobs,
       PreparedStatement ps,
       JobSnapshot snapshot,
@@ -2784,9 +2854,9 @@ public final class OracleJobStore implements JobStore {
       throws SQLException {
     setUuid(ps, 1, snapshot.id().asUuid());
     ps.setString(2, snapshot.currentState().name());
-    ps.setString(3, snapshot.queue());
+    text.bind(ps, 3, snapshot.queue());
     ps.setInt(4, snapshot.priority());
-    ps.setString(5, snapshot.spec().handlerType());
+    text.bind(ps, 5, snapshot.spec().handlerType());
     setInstant(ps, 6, snapshot.scheduledFor());
     setUuid(
         ps, 7, snapshot.ownerNodeId() == null ? null : snapshot.ownerNodeId().asUuid());
@@ -2807,13 +2877,13 @@ public final class OracleJobStore implements JobStore {
         : snapshot.relationship().parentId().asUuid();
   }
 
-  private static void setNullableConcurrency(
+  private void setNullableConcurrency(
       PreparedStatement ps, int startIndex, String key, ConcurrencyMode mode) throws SQLException {
     if (key == null) {
-      ps.setNull(startIndex, Types.VARCHAR);
+      text.bind(ps, startIndex, null);
       ps.setNull(startIndex + 1, Types.VARCHAR);
     } else {
-      ps.setString(startIndex, key);
+      text.bind(ps, startIndex, key);
       ps.setString(startIndex + 1, mode.name());
     }
   }

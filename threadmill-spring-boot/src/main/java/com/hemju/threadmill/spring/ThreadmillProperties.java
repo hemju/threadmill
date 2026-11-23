@@ -526,6 +526,15 @@ public class ThreadmillProperties {
   public static final class OracleProperties {
     private OracleSchemaMode schemaMode = OracleSchemaMode.MIGRATE;
     private boolean allowDestructiveSchemaReset;
+    private OracleStoreTextType textType = OracleStoreTextType.STANDARD;
+
+    public OracleStoreTextType getTextType() {
+      return textType;
+    }
+
+    public void setTextType(OracleStoreTextType textType) {
+      this.textType = textType;
+    }
 
     public OracleSchemaMode getSchemaMode() {
       return schemaMode;

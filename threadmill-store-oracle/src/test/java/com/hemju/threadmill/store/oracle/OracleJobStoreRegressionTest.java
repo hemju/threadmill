@@ -2,6 +2,7 @@ package com.hemju.threadmill.store.oracle;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
@@ -16,6 +17,7 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.TimeZone;
 import java.util.UUID;
@@ -31,13 +33,16 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import com.hemju.threadmill.core.ConcurrencyMode;
+import com.hemju.threadmill.core.EnqueueResult;
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.JobState;
 import com.hemju.threadmill.core.NodeId;
 import com.hemju.threadmill.core.schedule.CronExpression;
 import com.hemju.threadmill.core.schedule.CronTask;
+import com.hemju.threadmill.core.schedule.CronTaskScheduleState;
 import com.hemju.threadmill.core.spec.JobArgument;
 import com.hemju.threadmill.core.spec.JobSpec;
+import com.hemju.threadmill.core.store.JobSearch;
 import com.hemju.threadmill.core.store.JobStore;
 
 /**
@@ -58,7 +63,7 @@ class OracleJobStoreRegressionTest {
   }
 
   private JobStore store() {
-    return new OracleJobStore(dataSource);
+    return OracleTestDatabase.store(dataSource);
   }
 
   private static Job job() {
@@ -95,7 +100,7 @@ class OracleJobStoreRegressionTest {
       claimer.setAutoCommit(false);
       observer.setAutoCommit(false);
       try (PreparedStatement ps = claimer.prepareStatement(OracleJobStore.UNKEYED_CLAIM_SQL)) {
-        ps.setString(1, "default");
+        OracleTestDatabase.text().bind(ps, 1, "default");
         ps.setFetchSize(4);
         ps.setMaxRows(4);
         try (ResultSet rs = ps.executeQuery()) {
@@ -337,7 +342,7 @@ class OracleJobStoreRegressionTest {
     try (Connection conn = dataSource.getConnection();
         PreparedStatement ps = conn.prepareStatement("SELECT COUNT(*) FROM "
             + "threadmill_concurrency_workflow_holds WHERE concurrency_key = ?")) {
-      ps.setString(1, "project:corrupt");
+      OracleTestDatabase.text().bind(ps, 1, "project:corrupt");
       try (ResultSet rs = ps.executeQuery()) {
         rs.next();
         assertThat(rs.getInt(1)).as("hold rows left for the key").isZero();
@@ -414,13 +419,222 @@ class OracleJobStoreRegressionTest {
     }
   }
 
+  /**
+   * German, CJK, a 4-byte emoji, and BMP characters above the surrogate range.
+   * Most of it does not exist in {@code WE8MSWIN1252}; the national text type
+   * must round-trip it there, character by character, through every column
+   * that holds application-supplied text.
+   */
+  private static final String UNICODE = "Grüße äöüß € 中文 日本語 😀🎉 \uE000\uFFFD";
+
+  /** Database character sets that hold all of Unicode, so nothing is lost in them. */
+  private static final Set<String> UNICODE_CHARACTER_SETS = Set.of("AL32UTF8", "UTF8", "UTFE");
+
+  @Test
+  void applicationTextRoundTripsCharactersTheDatabaseCharacterSetCannotHold() throws SQLException {
+    var store = store();
+    String queue = "q " + UNICODE;
+    String handler = "com.example.Büro" + UNICODE.replace(" ", "");
+    String key = "key " + UNICODE;
+    var job = Job.builder()
+        .spec(JobSpec.of(handler, new JobArgument("java.lang.String", "\"" + UNICODE + "\"")))
+        .queue(queue)
+        .concurrencyKey(key)
+        .concurrencyMode(ConcurrencyMode.EXCLUSIVE)
+        .metadata("note", UNICODE)
+        .build();
+    var created =
+        store.enqueueIfAbsent(job, "dedup " + UNICODE, Duration.ofHours(1), Instant.now());
+    assertThat(created).isInstanceOf(EnqueueResult.Created.class);
+    var duplicate = Job.builder()
+        .spec(JobSpec.of(handler, new JobArgument("java.lang.String", "\"x\"")))
+        .queue(queue)
+        .build();
+    assertThat(store.enqueueIfAbsent(
+            duplicate, "dedup " + UNICODE, Duration.ofHours(1), Instant.now()))
+        .isEqualTo(new EnqueueResult.Coalesced(job.id()));
+
+    var loaded = store.findById(job.id()).orElseThrow();
+    assertThat(loaded.queue()).isEqualTo(queue);
+    assertThat(loaded.spec().handlerType()).isEqualTo(handler);
+    assertThat(loaded.spec().arguments().getFirst().serialized()).isEqualTo("\"" + UNICODE + "\"");
+    assertThat(loaded.concurrencyKey()).hasValue(key);
+    assertThat(loaded.metadata().get("note")).hasValue(UNICODE);
+    assertThat(store.queueDepths()).containsEntry(queue, 1L);
+    assertThat(store.oldestEnqueuedAt(queue)).isPresent();
+    assertThat(store.findByHandlerSignature(handler, 10)).extracting(Job::id).contains(job.id());
+    assertThat(store.searchJobs(new JobSearch(JobState.ENQUEUED, queue, handler, 10, 0)))
+        .extracting(Job::id)
+        .containsExactly(job.id());
+
+    store.pauseQueue(queue, "paused by " + UNICODE);
+    assertThat(store.listPausedQueues()).containsExactly(queue);
+    assertThat(store.claimReady(NodeId.newId(), queue, 1, Instant.now())).isEmpty();
+    try (Connection conn = dataSource.getConnection();
+        Statement st = conn.createStatement();
+        ResultSet rs = st.executeQuery("SELECT paused_by FROM threadmill_queue_pauses")) {
+      assertThat(rs.next()).isTrue();
+      assertThat(rs.getString(1)).isEqualTo("paused by " + UNICODE);
+    }
+    store.resumeQueue(queue);
+    var claimed = store.claimReady(NodeId.newId(), queue, 1, Instant.now());
+    assertThat(claimed).extracting(Job::id).containsExactly(job.id());
+    assertThat(claimed.getFirst().concurrencyKey()).hasValue(key);
+
+    String taskName = "task " + UNICODE;
+    var task = new CronTask(
+        taskName,
+        new CronTask.Trigger.CronExpr(CronExpression.parse("*/5 * * * *")),
+        handler,
+        new JobArgument("payload.Type" + UNICODE.replace(" ", ""), "\"" + UNICODE + "\""),
+        queue,
+        0,
+        null,
+        null,
+        false,
+        CronTask.MissedRunPolicy.DROP,
+        ZoneId.of("Europe/Vienna"),
+        true);
+    store.upsertCronTask(task);
+    assertThat(store.findCronTask(taskName)).contains(task);
+    assertThat(store.listCronTasks()).containsExactly(task);
+    assertThat(store.scanCronTasks(null, 10)).containsExactly(task);
+    store.upsertCronTaskState(new CronTaskScheduleState(
+        taskName, null, null, Instant.now(), null, "fingerprint " + UNICODE, null, null));
+    assertThat(store.requestCronNudge(taskName, Instant.now()))
+        .isEqualTo(JobStore.NudgeOutcome.ACCEPTED);
+    var state = store.findCronTaskState(taskName).orElseThrow();
+    assertThat(state.taskName()).isEqualTo(taskName);
+    assertThat(state.timingFingerprint()).isEqualTo("fingerprint " + UNICODE);
+    store.recordCronTaskOwnership("namespace " + UNICODE, taskName);
+    assertThat(store.listCronTaskNamesOwnedBy("namespace " + UNICODE)).containsExactly(taskName);
+
+    String mutex = "mutex " + UNICODE;
+    assertThat(store.tryAcquireMutex(mutex, "holder " + UNICODE, Duration.ofMinutes(1)))
+        .isTrue();
+    assertThat(store.tryAcquireMutex(mutex, "holder " + UNICODE, Duration.ofMinutes(1)))
+        .isTrue();
+    assertThat(store.tryAcquireMutex(mutex, "other holder", Duration.ofMinutes(1)))
+        .isFalse();
+    store.releaseMutex(mutex, "holder " + UNICODE);
+    assertThat(store.tryAcquireMutex(mutex, "other holder", Duration.ofMinutes(1)))
+        .isTrue();
+  }
+
+  /**
+   * The negative control for the national round-trip tests: on a non-Unicode
+   * database, text bound in the database character set loses exactly the
+   * characters the national binds keep. Without this the national suite could
+   * pass on a database that never converts anything. Which characters survive
+   * the database character set depends on that set (ISO-8859-1 has no euro
+   * sign), so only the CJK and emoji every single-byte set lacks are asserted
+   * lost.
+   */
+  @Test
+  void aDatabaseCharacterSetBindLosesWhatTheNationalCharacterSetKeeps() throws SQLException {
+    String characterSet = OracleTestDatabase.databaseCharacterSet();
+    assumeTrue(
+        !UNICODE_CHARACTER_SETS.contains(characterSet),
+        "needs a non-Unicode database character set (nationalTest); this one is " + characterSet);
+    try (Connection conn = dataSource.getConnection()) {
+      conn.setAutoCommit(true);
+      try (PreparedStatement ps = conn.prepareStatement(
+          "INSERT INTO threadmill_queue_pauses (queue, paused_at) VALUES (?, SYSTIMESTAMP)")) {
+        ps.setString(1, "plain " + UNICODE);
+        ps.executeUpdate();
+        OracleTestDatabase.text().bind(ps, 1, "bound " + UNICODE);
+        ps.executeUpdate();
+      }
+    }
+    var queues = store().listPausedQueues();
+    assertThat(queues).contains("bound " + UNICODE);
+    assertThat(queues)
+        .filteredOn(queue -> queue.startsWith("plain "))
+        .singleElement()
+        .satisfies(plain -> assertThat(plain)
+            .isNotEqualTo("plain " + UNICODE)
+            .doesNotContain("中文", "日本語", "😀", "🎉"));
+  }
+
+  /**
+   * Keyset pages and the keyed claim lane rely on the database's binary order.
+   * In {@code AL32UTF8} that is code-point order; in {@code AL16UTF16} it is
+   * UTF-16 code-unit order, where characters from U+E000 to U+FFFF sort after
+   * supplementary characters. Keys from both sides of that range, more than one
+   * key-enumeration page of them, must all be reached.
+   */
+  @Test
+  void keyedClaimsAndKeysetPagesReachKeysOnBothSidesOfTheSurrogateRange() throws SQLException {
+    var store = store();
+    var prefixes = List.of("a", "Ä", "中", "\uE000", "\uFFFD", "😀", "𐀀");
+    var keys = new ArrayList<String>();
+    for (int i = 0; i < OracleJobStore.MAX_PENDING_KEYS_PER_PASS + 40; i++) {
+      keys.add(prefixes.get(i % prefixes.size()) + i);
+    }
+    var inserted = new HashSet<Object>();
+    for (String key : keys) {
+      var job = keyedJob(key);
+      store.insert(job);
+      inserted.add(job.id());
+    }
+    var claimed = new HashSet<Object>();
+    for (int poll = 0; poll < 20 && claimed.size() < keys.size(); poll++) {
+      for (var job : store.claimReady(NodeId.newId(), "default", 50, Instant.now())) {
+        assertThat(claimed.add(job.id())).as("claimed twice: %s", job.id()).isTrue();
+      }
+    }
+    assertThat(claimed).isEqualTo(inserted);
+
+    for (String name : keys.subList(0, 40)) {
+      store.upsertCronTask(new CronTask(
+          name,
+          new CronTask.Trigger.CronExpr(CronExpression.parse("*/5 * * * *")),
+          "com.example.H",
+          new JobArgument("java.lang.String", "\"x\""),
+          "default",
+          0,
+          null,
+          null,
+          false,
+          CronTask.MissedRunPolicy.DROP,
+          ZoneId.of("UTC"),
+          true));
+    }
+    var scanned = new ArrayList<String>();
+    String after = null;
+    for (int page = 0; page < 40; page++) {
+      var batch = store.scanCronTasks(after, 3);
+      batch.forEach(task -> scanned.add(task.name()));
+      if (batch.size() < 3) break;
+      after = batch.getLast().name();
+    }
+    assertThat(scanned).containsExactlyInAnyOrderElementsOf(keys.subList(0, 40));
+
+    OracleTestDatabase.reset();
+    try (Connection conn = dataSource.getConnection();
+        PreparedStatement ps = conn.prepareStatement("INSERT INTO threadmill_concurrency_groups "
+            + "(concurrency_key, last_modified) VALUES (?, SYS_EXTRACT_UTC(SYSTIMESTAMP) "
+            + "- INTERVAL '1' HOUR)")) {
+      conn.setAutoCommit(true);
+      for (String key : keys) {
+        OracleTestDatabase.text().bind(ps, 1, key);
+        ps.executeUpdate();
+      }
+    }
+    long removed = 0;
+    for (int page = 0; page < keys.size() / 7 + 2 && removed < keys.size(); page++) {
+      removed += store.deleteIdleConcurrencyGroups(7);
+    }
+    assertThat(removed).isEqualTo(keys.size());
+  }
+
   @Test
   void instantsRoundTripIndependentlyOfJvmAndSessionTimeZones() throws SQLException {
     var original = TimeZone.getDefault();
     var scheduledFor = Instant.parse("2026-03-29T01:30:00.123456789Z"); // inside a DST change
     try {
       TimeZone.setDefault(TimeZone.getTimeZone("Pacific/Chatham"));
-      var store = new OracleJobStore(session("ALTER SESSION SET TIME_ZONE = 'Asia/Tokyo'"));
+      var store = OracleTestDatabase.store(session("ALTER SESSION SET TIME_ZONE = 'Asia/Tokyo'"));
       var job = Job.builder()
           .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"x\"")))
           .initialState(JobState.SCHEDULED)
@@ -462,7 +676,7 @@ class OracleJobStoreRegressionTest {
     // The driver derives NLS_LANGUAGE (and so NLS_SORT) from the client JVM
     // locale. A German locale sorts a < Ä < B while keyset predicates compare
     // binary (B < a < Ä): ordering pages by the text column skipped rows.
-    var store = new OracleJobStore(session("ALTER SESSION SET NLS_LANGUAGE = 'GERMAN'"));
+    var store = OracleTestDatabase.store(session("ALTER SESSION SET NLS_LANGUAGE = 'GERMAN'"));
     var names = List.of("a", "B", "Ä", "ab", "b", "Z", "z", "é", "A", "Ab", "aB", "ä", "zz", "0");
     for (String name : names) {
       store.upsertCronTask(new CronTask(
@@ -495,7 +709,7 @@ class OracleJobStoreRegressionTest {
             + "- INTERVAL '1' HOUR)")) {
       conn.setAutoCommit(true);
       for (String name : names) {
-        ps.setString(1, name);
+        OracleTestDatabase.text().bind(ps, 1, name);
         ps.executeUpdate();
       }
     }
@@ -587,7 +801,7 @@ class OracleJobStoreRegressionTest {
             throw e.getCause();
           }
         });
-    var store = new OracleJobStore(flaky);
+    var store = OracleTestDatabase.store(flaky);
 
     store.verifyWritable();
     down.set(true);
@@ -600,7 +814,11 @@ class OracleJobStoreRegressionTest {
   void describeNamesTheServerReleaseAndSchemaAndOffersNoRemoteWake() {
     var store = store();
 
-    assertThat(store.describe()).startsWith("Oracle Database ").contains(" @ ");
+    assertThat(store.describe())
+        .startsWith("Oracle Database ")
+        .contains(" @ ")
+        .endsWith(
+            ", " + OracleTestDatabase.textType().name().toLowerCase(Locale.ROOT) + " text type");
     assertThat(store.createRemoteWakeChannel("threadmill_wake")).isEmpty();
   }
 }

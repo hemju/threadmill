@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Added a national text type to the Oracle store for databases whose
+  character set is not `AL32UTF8`, such as `WE8MSWIN1252`.
+  `OracleTextType.NATIONAL` (Spring Boot:
+  `threadmill.store.oracle.text-type=national`) stores application-supplied
+  text (names, keys, job bodies, recurring payloads) in `NVARCHAR2`/`NCLOB`
+  columns of the `AL16UTF16` national character set, so every character,
+  including emoji, round-trips whatever the database character set is. The
+  default, `standard`, is unchanged and still requires `AL32UTF8`; on another
+  database character set the startup check now names the setting to change.
+  The text type is chosen when the schema is created; `migrate`, `validate`,
+  and `emitPendingSql()` refuse a schema created for the other type. Without Spring, pass the type to
+  both `OracleMigrationRunner` and `OracleJobStore`.
 - Upgraded the OpenTelemetry API used by `threadmill-tracing` to 1.67.0,
   resolving GHSA-ccrj-gw8r-854m (quadratic CPU use when parsing crafted
   `tracestate` headers). Threadmill does not parse trace headers itself;

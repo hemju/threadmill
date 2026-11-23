@@ -16,10 +16,13 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import javax.sql.DataSource;
@@ -35,6 +38,13 @@ import org.slf4j.LoggerFactory;
  * Statements inside a file end with a line holding only {@code /}, the SQL*Plus
  * convention, so {@link #emitPendingSql()} output runs unchanged in SQL*Plus or
  * SQLcl for hosts whose application user has no DDL rights.
+ *
+ * <p>The files are templates for both {@link OracleTextType}s: a column that
+ * holds application-supplied text names its standard type in double braces
+ * (for example {@code queue {{VARCHAR2(128 CHAR)}}}), which the runner expands
+ * to that type or to its national counterpart ({@code NVARCHAR2(128)}). Each
+ * text type has its own checksums, so a schema installed for one type fails
+ * validation under the other with a message naming both.
  *
  * <p>Oracle commits every DDL statement implicitly, so a migration cannot be
  * applied atomically. The runner therefore:
@@ -76,9 +86,29 @@ public final class OracleMigrationRunner {
    * may still record; see the class documentation for when an entry is allowed.
    */
   private static final Map<Integer, Set<String>> SUPERSEDED_CHECKSUMS = Map.of(
-      // v1.1.0 declared threadmill_concurrency_groups.idle_sort as RAW(2000),
-      // which fails with ORA-12899 under MAX_STRING_SIZE=EXTENDED (statement 28).
-      1, Set.of("e95c99fc412a90e037ef8dabcccdbc3005820ccc90aa8d539fdbee8bca95e463"));
+      1,
+      Set.of(
+          // v1.1.0 declared threadmill_concurrency_groups.idle_sort as RAW(2000),
+          // which fails with ORA-12899 under MAX_STRING_SIZE=EXTENDED (statement 28).
+          "e95c99fc412a90e037ef8dabcccdbc3005820ccc90aa8d539fdbee8bca95e463",
+          // v1.1.1: the same statements; only the header comment changed when
+          // the text-type templates were introduced.
+          "752e87c4ba76b8ad0b11587883153dfad653fc1bd48b8f14d71e4976d4c73eff"));
+
+  /**
+   * National counterpart of each standard type a migration template may name
+   * in double braces. {@code NVARCHAR2} lengths always count characters (UTF-16
+   * code units in AL16UTF16), at most 2000 under {@code MAX_STRING_SIZE=STANDARD}.
+   */
+  private static final Map<String, String> NATIONAL_TYPES = Map.of(
+      "VARCHAR2(128 CHAR)", "NVARCHAR2(128)",
+      "VARCHAR2(256 BYTE)", "NVARCHAR2(256)",
+      "VARCHAR2(1000 CHAR)", "NVARCHAR2(1000)",
+      "VARCHAR2(4000 BYTE)", "NVARCHAR2(2000)",
+      "CLOB", "NCLOB",
+      "VARCHAR2", "NVARCHAR2");
+
+  private static final Pattern TYPE_TOKEN = Pattern.compile("\\{\\{([^{}]+)}}");
 
   /** Tables dropped by {@link #dropThreadmillObjects()}, children before parents. */
   private static final List<String> THREADMILL_TABLES = List.of(
@@ -125,14 +155,28 @@ public final class OracleMigrationRunner {
       TABLE_MISSING);
 
   private final DataSource dataSource;
+  private final OracleTextType textType;
+
+  /**
+   * Create a runner for the {@link OracleTextType#STANDARD} schema reachable
+   * through {@code dataSource}.
+   *
+   * @param dataSource connections whose current schema receives the Threadmill objects
+   */
+  public OracleMigrationRunner(DataSource dataSource) {
+    this(dataSource, OracleTextType.STANDARD);
+  }
 
   /**
    * Create a runner for the schema reachable through {@code dataSource}.
    *
    * @param dataSource connections whose current schema receives the Threadmill objects
+   * @param textType the column types for application-supplied text; the store
+   *     must be configured with the same type
    */
-  public OracleMigrationRunner(DataSource dataSource) {
+  public OracleMigrationRunner(DataSource dataSource, OracleTextType textType) {
     this.dataSource = Objects.requireNonNull(dataSource, "dataSource");
+    this.textType = Objects.requireNonNull(textType, "textType");
   }
 
   /** Apply every pending migration, resuming one that a crash interrupted. Idempotent. */
@@ -164,19 +208,25 @@ public final class OracleMigrationRunner {
    * format. Strictly read-only, so it works for roles without DDL rights. When
    * the history table does not exist, its DDL is prepended (never executed).
    *
+   * <p>Refuses exactly the schema histories {@link #migrate()} refuses: an
+   * unknown version, an edited migration, or a schema created for the other
+   * {@link OracleTextType}. Resuming an install of the other type would leave
+   * columns of both types behind while recording this type's checksum.
+   *
    * @return the pending SQL script, empty when the schema is current
    */
   public String emitPendingSql() {
+    List<Migration> all = loadAll();
     try (Connection conn = dataSource.getConnection()) {
       var sb = new StringBuilder();
       Map<Integer, AppliedMigration> applied;
       if (tableExists(conn, "THREADMILL_SCHEMA_HISTORY")) {
-        applied = readAppliedMigrations(conn);
+        applied = validateAppliedMigrations(conn, all, false);
       } else {
         appendStatement(sb, historyTableSql());
         applied = Map.of();
       }
-      for (Migration m : loadAll()) {
+      for (Migration m : all) {
         AppliedMigration progress = applied.get(m.version());
         if (progress != null && progress.complete()) continue;
         appendMigrationSql(sb, m, progress == null ? 0 : progress.statementsApplied());
@@ -321,7 +371,7 @@ public final class OracleMigrationRunner {
 
   // ------------------------------------------------------------------ history
 
-  private static Map<Integer, AppliedMigration> validateAppliedMigrations(
+  private Map<Integer, AppliedMigration> validateAppliedMigrations(
       Connection conn, List<Migration> shipped, boolean requireComplete) throws SQLException {
     Map<Integer, AppliedMigration> applied = readAppliedMigrations(conn);
     if (requireComplete && applied.size() != shipped.size()) {
@@ -342,9 +392,14 @@ public final class OracleMigrationRunner {
             + expected.description() + "'");
       }
       if (!expected.checksum().equals(actual.checksum())
-          && !SUPERSEDED_CHECKSUMS
-              .getOrDefault(actual.version(), Set.of())
-              .contains(actual.checksum())) {
+          && !supersededChecksums(textType, actual.version()).contains(actual.checksum())) {
+        OracleTextType installed = otherTextType();
+        if (checksumsFor(installed, actual.version()).contains(actual.checksum())) {
+          throw new MigrationException("Threadmill schema history version " + actual.version()
+              + " was installed for the " + name(installed) + " Oracle text type, but this "
+              + "runner is configured for the " + name(textType) + " one; configure the store "
+              + "and the runner with the text type the schema was created for");
+        }
         throw new MigrationException("Threadmill schema history version " + actual.version()
             + " has checksum " + actual.checksum() + " but the shipped migration hashes to "
             + expected.checksum() + " — the migration file was edited after it was applied");
@@ -356,6 +411,30 @@ public final class OracleMigrationRunner {
       }
     }
     return applied;
+  }
+
+  private OracleTextType otherTextType() {
+    return textType == OracleTextType.STANDARD ? OracleTextType.NATIONAL : OracleTextType.STANDARD;
+  }
+
+  /** Every checksum, current or superseded, that version {@code version} has under {@code type}. */
+  private static Set<String> checksumsFor(OracleTextType type, int version) {
+    var checksums = new HashSet<String>(supersededChecksums(type, version));
+    for (Migration m : loadAll(type)) {
+      if (m.version() == version) checksums.add(m.checksum());
+    }
+    return checksums;
+  }
+
+  /** Superseded copies exist only for the standard type; national schemas start current. */
+  private static Set<String> supersededChecksums(OracleTextType type, int version) {
+    return type == OracleTextType.STANDARD
+        ? SUPERSEDED_CHECKSUMS.getOrDefault(version, Set.of())
+        : Set.of();
+  }
+
+  private static String name(OracleTextType type) {
+    return type.name().toLowerCase(Locale.ROOT);
   }
 
   private static Map<Integer, AppliedMigration> readAppliedMigrations(Connection conn)
@@ -521,13 +600,17 @@ public final class OracleMigrationRunner {
   // ------------------------------------------------------------------ loading
 
   private List<Migration> loadAll() {
+    return loadAll(textType);
+  }
+
+  private static List<Migration> loadAll(OracleTextType type) {
     var out = new ArrayList<Migration>();
     for (String name : SHIPPED_MIGRATIONS) {
       var matcher = FILE_PATTERN.matcher(name);
       if (!matcher.matches()) {
         throw new MigrationException("Migration resource has invalid name: " + name);
       }
-      String sql = readResource(RESOURCE_ROOT + name);
+      String sql = migrationSql(name, type);
       out.add(new Migration(
           Integer.parseInt(matcher.group(1)),
           name,
@@ -537,6 +620,33 @@ public final class OracleMigrationRunner {
     }
     out.sort(Comparator.comparingInt(Migration::version));
     return out;
+  }
+
+  /** The shipped migration {@code fileName}, expanded for {@code type}. */
+  static String migrationSql(String fileName, OracleTextType type) {
+    return expand(fileName, readResource(RESOURCE_ROOT + fileName), type);
+  }
+
+  /**
+   * Replace every double-braced standard type in {@code template} with itself
+   * or with its national counterpart. An unknown type fails under both text
+   * types, so a typo cannot hide in the standard schema.
+   */
+  static String expand(String fileName, String template, OracleTextType type) {
+    var matcher = TYPE_TOKEN.matcher(template);
+    var sb = new StringBuilder(template.length());
+    while (matcher.find()) {
+      String standard = matcher.group(1);
+      String national = NATIONAL_TYPES.get(standard);
+      if (national == null) {
+        throw new MigrationException(
+            fileName + " names an unknown text column type {{" + standard + "}}");
+      }
+      matcher.appendReplacement(
+          sb, Matcher.quoteReplacement(type == OracleTextType.NATIONAL ? national : standard));
+    }
+    matcher.appendTail(sb);
+    return sb.toString();
   }
 
   /**
@@ -593,7 +703,7 @@ public final class OracleMigrationRunner {
     }
   }
 
-  private String readResource(String path) {
+  private static String readResource(String path) {
     try (InputStream in = OracleMigrationRunner.class.getClassLoader().getResourceAsStream(path)) {
       if (in == null) throw new MigrationException("Migration resource not found: " + path);
       try (var reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {

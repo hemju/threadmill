@@ -12,8 +12,10 @@ adds.
 ## Supported platform and storage
 
 Java 25 is required. PostgreSQL requires 18 or later. Oracle Database requires
-19c or later with the `AL32UTF8` database character set and the default
-`NLS_COMP=BINARY`; the application supplies the JDBC driver. Redis data nodes require
+19c or later with the default `NLS_COMP=BINARY` and either the `AL32UTF8`
+database character set (the default standard text type) or the `AL16UTF16`
+national character set (the national text type, for other database character
+sets); the application supplies the JDBC driver. Redis data nodes require
 7.4 or later and `noeviction`; validate every node that may become a primary.
 The exact tested dependency versions are in Gradle/npm locks and the release
 validation artifacts. A supported major/minimum is not evidence that every

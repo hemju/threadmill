@@ -13,13 +13,18 @@ import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.jdbc.datasource.DelegatingDataSource;
 
+import com.hemju.threadmill.core.Job;
+import com.hemju.threadmill.core.spec.JobArgument;
+import com.hemju.threadmill.core.spec.JobSpec;
 import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.store.oracle.OracleJobStore;
 import com.hemju.threadmill.store.oracle.OracleMigrationRunner;
+import com.hemju.threadmill.store.oracle.OracleTextType;
 
 /**
  * Spring Boot wiring of the Oracle store: JDBC store selection with both store
- * modules on the classpath, schema modes, and join-transaction enqueue mode.
+ * modules on the classpath, schema modes, text types, and join-transaction
+ * enqueue mode.
  */
 @EnabledIf("com.hemju.threadmill.spring.DockerAvailable#check")
 class SpringOracleAutoConfigurationTest {
@@ -111,6 +116,46 @@ class SpringOracleAutoConfigurationTest {
   }
 
   @Test
+  void nationalTextTypeMigratesNationalColumnsAndTheStandardTypeRefusesThatSchema()
+      throws Exception {
+    try {
+      verifyNationalTextType();
+    } finally {
+      // The shared test database must not keep a national schema: the other
+      // Oracle test classes migrate the standard one.
+      new OracleMigrationRunner(OracleTestDatabase.dataSource()).dropThreadmillObjects();
+    }
+  }
+
+  private void verifyNationalTextType() throws Exception {
+    contextRunner
+        .withPropertyValues(
+            "threadmill.store.jdbc-type=oracle", "threadmill.store.oracle.text-type=national")
+        .run(context -> {
+          assertThat(context).hasNotFailed();
+          var store = context.getBean(JobStore.class);
+          var job = Job.builder()
+              .spec(JobSpec.of("com.example.H", new JobArgument("java.lang.String", "\"😀\"")))
+              .queue("queue 中文 😀")
+              .build();
+          store.insert(job);
+          assertThat(store.findById(job.id()).orElseThrow().queue()).isEqualTo("queue 中文 😀");
+        });
+    assertThat(columnType("THREADMILL_JOBS", "QUEUE")).isEqualTo("NVARCHAR2");
+    assertThat(columnType("THREADMILL_JOBS", "BODY")).isEqualTo("NCLOB");
+    new OracleMigrationRunner(OracleTestDatabase.dataSource(), OracleTextType.NATIONAL).validate();
+
+    contextRunner
+        .withPropertyValues(
+            "threadmill.store.jdbc-type=oracle", "threadmill.store.oracle.schema-mode=validate")
+        .run(context -> {
+          assertThat(context).hasFailed();
+          assertThat(context.getStartupFailure())
+              .hasMessageContaining("installed for the national Oracle text type");
+        });
+  }
+
+  @Test
   void joinTransactionModeUsesTheTransactionJoinedScheduler() {
     contextRunner
         .withPropertyValues(
@@ -122,6 +167,18 @@ class SpringOracleAutoConfigurationTest {
           assertThat(context.getBean(JobScheduler.class))
               .isInstanceOf(TransactionJoinedJobScheduler.class);
         });
+  }
+
+  private static String columnType(String table, String column) throws Exception {
+    try (var conn = OracleTestDatabase.dataSource().getConnection();
+        var ps = conn.prepareStatement("SELECT data_type FROM user_tab_columns "
+            + "WHERE table_name = ? AND column_name = ?")) {
+      ps.setString(1, table);
+      ps.setString(2, column);
+      try (ResultSet rs = ps.executeQuery()) {
+        return rs.next() ? rs.getString(1) : null;
+      }
+    }
   }
 
   private static boolean tableExists(String table) throws Exception {

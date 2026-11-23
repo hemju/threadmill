@@ -15,6 +15,14 @@ new OracleMigrationRunner(dataSource).migrate();
 JobStore store = new OracleJobStore(dataSource);
 ```
 
+For a database whose character set is not `AL32UTF8` (for example
+`WE8MSWIN1252`), use the national text type for both:
+
+```java
+new OracleMigrationRunner(dataSource, OracleTextType.NATIONAL).migrate();
+JobStore store = new OracleJobStore(dataSource, OracleTextType.NATIONAL);
+```
+
 With Spring Boot, `threadmill-spring-boot` wires the store from the
 application's `DataSource`; see [Oracle schema](../docs/oracle-schema.md) and
 [configuration](../docs/configuration.md#oracle-store-properties).
@@ -27,7 +35,7 @@ unless:
 | Requirement | Why |
 |---|---|
 | Oracle Database **19c or later** | 19c is the oldest release in long-term support; the SQL uses only the 19c feature set (no `BOOLEAN`, no `IF NOT EXISTS`, no 23ai syntax). |
-| Database character set **`AL32UTF8`** | Job bodies and names must round-trip every Unicode character, including 4-byte ones. `AL32UTF8` is the default since 12.2. |
+| Database character set **`AL32UTF8`** (`OracleTextType.STANDARD`, the default), or national character set **`AL16UTF16`** (`OracleTextType.NATIONAL`) | Job bodies and names must round-trip every Unicode character, including 4-byte ones. `AL32UTF8` is the default since 12.2; the national type serves databases with another character set, such as `WE8MSWIN1252`. |
 | Session **`NLS_COMP=BINARY`** (the default) | Keyset predicates and the claim path's key ranges rely on binary comparisons matching index order. |
 | An Oracle `DataSource` | A PostgreSQL (or other) `DataSource` fails with a message naming the product. |
 
@@ -50,9 +58,15 @@ tables as PostgreSQL apart from the unused `threadmill_metadata`. Type mapping:
 |---|---|---|
 | Job / node / workflow ids | `RAW(16)` | Big-endian UUID bytes; RAW compares unsigned byte by byte, which equals `JobId`'s canonical natural order. |
 | Timestamps | `TIMESTAMP(9)` holding UTC | Nanosecond-exact for `Instant`, bound as `LocalDateTime` at UTC, so neither the JVM nor the session time zone matters. |
-| Job body, recurring payload, pause reason | `CLOB` | The body is the source of truth; scalar columns are denormalised for the hot queries. |
+| Job body, recurring payload, pause reason | `CLOB` (`NCLOB`) | The body is the source of truth; scalar columns are denormalised for the hot queries. |
 | Booleans | `NUMBER(1)` with a `0/1` check | `BOOLEAN` is 23ai-only. |
-| Names | `VARCHAR2(n CHAR)` | Concurrency and dedup keys are `VARCHAR2(256 BYTE)`, matching their UTF-8 byte caps. |
+| Names | `VARCHAR2(n CHAR)` (`NVARCHAR2(n)`) | Concurrency and dedup keys are `VARCHAR2(256 BYTE)` (`NVARCHAR2(256)`), matching their UTF-8 byte caps. |
+| Threadmill's own values | `VARCHAR2(n)` | States, modes, trigger kinds, policies, time-zone ids: ASCII under both text types. |
+
+Types in parentheses apply to `OracleTextType.NATIONAL`. The migration files
+are templates for both types: each application-text column names its standard
+type in double braces, which the runner expands; see
+[Oracle schema](../docs/oracle-schema.md#character-sets-and-text-types).
 
 Oracle stores the empty string as `NULL`. The store maps it back where a value
 may legitimately be empty (a recurring payload, a mutex holder), and compares
@@ -114,8 +128,14 @@ the executed plans under the 19c optimizer feature set.
   (`ORA-08177`) are retried. Oracle rolls back only a failed statement, not the
   transaction; the deduplicated enqueue uses a savepoint to coalesce onto a
   concurrent producer's job inside a joined transaction too.
+- **Text binding.** Application-supplied text goes through one binder that uses
+  `setString` for the standard text type and `setNString` for the national one,
+  matching the column's form of use; Threadmill's own ASCII values are always
+  `setString`. A mismatch either loses characters (a database-character-set
+  bind into `NVARCHAR2`) or converts an indexed `VARCHAR2` column (a national
+  bind), so the plan tests bind exactly like the store.
 - **CLOB binding.** Values longer than 8,000 characters are written through a
-  temporary `Clob`, freed after the statement. Binding a long string directly
+  temporary `Clob` (`NClob`), freed after the statement. Binding a long string directly
   made the Oracle driver split a surrogate pair (an emoji) that straddled its
   ~32 KiB chunk boundary, corrupting the body.
 - **Locale.** The driver derives `NLS_LANGUAGE`, and so `NLS_SORT`, from the
@@ -131,8 +151,9 @@ the executed plans under the 19c optimizer feature set.
 ## Migrations
 
 `OracleMigrationRunner` applies `V<n>__<description>.sql` files listed in
-`SHIPPED_MIGRATIONS` (no classpath scanning). Statements end with a line holding
-only `/`, so the files and the emitted SQL run unchanged in SQL*Plus or SQLcl.
+`SHIPPED_MIGRATIONS` (no classpath scanning), expanded for the configured text
+type. Statements end with a line holding only `/`, so the emitted SQL runs
+unchanged in SQL*Plus or SQLcl.
 Oracle commits each DDL statement, so the runner records progress after every
 statement, resumes a crashed migration at the first unrecorded statement, and
 serializes migrators with a row lock on `threadmill_schema_lock` held on a
@@ -142,6 +163,7 @@ second connection. Details: [Oracle schema](../docs/oracle-schema.md).
 
 ```bash
 ./gradlew :threadmill-store-oracle:test                                            # Oracle 23ai Free container
+./gradlew :threadmill-store-oracle:nationalTest                                    # national text type on WE8MSWIN1252
 ./gradlew :threadmill-store-oracle:test -PoracleImage=gvenzl/oracle-xe:21-slim-faststart   # 21c XE (amd64; CI)
 ./gradlew :threadmill-store-oracle:test -PoracleJdbcUrl=jdbc:oracle:thin:@//host:1521/SVC -PoracleUser=tm_test -PoraclePassword=...
 ```
@@ -151,14 +173,26 @@ main build and 21c XE (the closest free release to 19c, without any 23ai-only
 syntax) in a separate job; every session runs with
 `OPTIMIZER_FEATURES_ENABLE='19.1.0'`. Before a release, run the suite against a
 real 19c database with the `oracleJdbcUrl` properties above — it deletes all
-Threadmill rows in that schema, so use a disposable one. The plan tests need
+Threadmill rows in that schema, so use a disposable one.
+
+`nationalTest` (part of `check`) runs the whole suite again with
+`OracleTextType.NATIONAL` on a `WE8MSWIN1252` database. The gvenzl images ship
+only `AL32UTF8` databases, so the fixture relabels the container's pluggable
+database with `ALTER DATABASE CHARACTER SET INTERNAL_USE`: that changes the
+declared character set without converting data, which is exact for the fresh,
+ASCII-only test database (and never acceptable for real data). Sessions then
+convert text exactly as on a database created with that character set, so a
+bind that bypasses the national character set loses characters and fails the
+round-trip tests. `-PoracleCharacterSet=...` picks another single-byte set for
+the container; with `-PoracleJdbcUrl=...` the database keeps its own character
+set. The plan tests need
 `SELECT ANY DICTIONARY` (or `V$SESSION`/`V$SQL`/`V$SQL_PLAN` access) and skip
 otherwise.
 
 | Test | Covers |
 |---|---|
 | `OracleJobStoreContractTest` | The shared contract suite, through connections that start with `autoCommit=false`. |
-| `OracleJobStoreRegressionTest` | Lock-as-you-fetch claiming, concurrent claims, keyed rotation, quarantine, CLOB supplementary characters, time-zone independence, empty strings, locale-independent paging, counters. |
+| `OracleJobStoreRegressionTest` | Lock-as-you-fetch claiming, concurrent claims, keyed rotation, quarantine, CLOB supplementary characters, Unicode round-trips through every application-text column, keys on both sides of the surrogate range, time-zone independence, empty strings, locale-independent paging, counters. |
 | `OracleQueryPlanTest` | Executed plans of the hot and periodic statements. |
-| `OracleMigrationRunnerTest` | Resume after a crash, DBA-applied SQL, concurrent migrators, edited migrations, constraints. |
+| `OracleMigrationRunnerTest` | Resume after a crash, DBA-applied SQL, concurrent migrators, edited migrations, constraints, the column types of each text type, a schema created for the other text type (including its emitted pending SQL). |
 | `OracleServerTest`, `OracleDeadlockRetryTest`, `OracleStatementSplitTest` | Startup gate, retry classification, statement splitting. |

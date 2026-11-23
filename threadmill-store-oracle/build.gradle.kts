@@ -26,7 +26,7 @@ dependencies {
 //   -PoracleImage=gvenzl/oracle-xe:21-slim-faststart   another gvenzl image (CI uses 21c XE)
 //   -PoracleJdbcUrl=... -PoracleUser=... -PoraclePassword=...   an existing database, for
 //       example a real 19c instance; its schema is reset by the tests
-tasks.named<Test>("test") {
+fun Test.passDatabaseSelection() {
     mapOf(
             "oracleImage" to "threadmill.oracle.image",
             "oracleJdbcUrl" to "threadmill.oracle.jdbcUrl",
@@ -37,3 +37,28 @@ tasks.named<Test>("test") {
             providers.gradleProperty(property).orNull?.let { systemProperty(systemProperty, it) }
         }
 }
+
+tasks.named<Test>("test") { passDatabaseSelection() }
+
+// The whole suite again with the national text type (NVARCHAR2/NCLOB) on a
+// WE8MSWIN1252 database: the container's pluggable database is relabelled, so a
+// bind that bypasses the national character set loses characters and fails.
+// -PoracleCharacterSet picks another set for the container; an existing
+// database (-PoracleJdbcUrl) keeps its own character set.
+val nationalTest by
+    tasks.registering(Test::class) {
+        description =
+            "Runs the Oracle suite with the national text type on a WE8MSWIN1252 database."
+        group = LifecycleBasePlugin.VERIFICATION_GROUP
+        testClassesDirs = sourceSets.test.get().output.classesDirs
+        classpath = sourceSets.test.get().runtimeClasspath
+        passDatabaseSelection()
+        systemProperty("threadmill.oracle.textType", "NATIONAL")
+        systemProperty(
+            "threadmill.oracle.characterSet",
+            providers.gradleProperty("oracleCharacterSet").getOrElse("WE8MSWIN1252"),
+        )
+        shouldRunAfter(tasks.named("test"))
+    }
+
+tasks.named("check") { dependsOn(nationalTest) }

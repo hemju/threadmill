@@ -1,7 +1,8 @@
 # Oracle Schema
 
 Threadmill's Oracle store targets Oracle Database 19c and later. The store
-constructor checks the release, the `AL32UTF8` database character set, and the
+constructor checks the release, the character set that holds application text
+(see [Character sets and text types](#character-sets-and-text-types)), and the
 session's `NLS_COMP=BINARY` (the default), and refuses anything else before any
 job query runs. Module-level design notes — type mapping, virtual-column
 indexes, the claim path — are in the
@@ -20,6 +21,59 @@ DICTIONARY` is required at runtime. A user without DDL rights can still run
 Threadmill after a DBA applies the schema (see [Manual DDL](#manual-ddl)) and
 the application uses schema mode `validate` or `none`.
 
+## Character Sets and Text Types
+
+Threadmill stores text that applications supply (queue and recurring-task
+names, handler and payload type names, concurrency and deduplication keys,
+mutex names and holders, pause reasons, job bodies, recurring payloads) in
+columns of one of two text types:
+
+| Text type | Columns | Required character set | Use for |
+|---|---|---|---|
+| `standard` (default) | `VARCHAR2`, `CLOB` | Database character set `AL32UTF8` | Every Unicode database |
+| `national` | `NVARCHAR2`, `NCLOB` | National character set `AL16UTF16` | Databases whose character set is not Unicode, for example `WE8MSWIN1252` |
+
+A `VARCHAR2` or `CLOB` column holds text in the database character set. In a
+`WE8MSWIN1252` database, every character outside that set (CJK, emoji, …) would
+be stored as `¿`, so the startup check refuses the standard type there and
+names the setting to change. The national type keeps every character,
+including 4-byte ones, whatever the database character set is: its columns use
+the national character set, `AL16UTF16` on practically every Oracle database.
+The other national character set Oracle allows, `UTF8` (CESU-8), is refused.
+
+Columns for Threadmill's own fixed ASCII values (job states, concurrency modes,
+trigger kinds, missed-run policies, time-zone ids, the lease name) are
+`VARCHAR2` under both types.
+
+```yaml
+threadmill:
+  store:
+    oracle:
+      text-type: national
+```
+
+Without Spring Boot, pass the same type to the runner and the store:
+
+```java
+new OracleMigrationRunner(dataSource, OracleTextType.NATIONAL).migrate();
+JobStore store = new OracleJobStore(dataSource, OracleTextType.NATIONAL);
+```
+
+Choose the type before the schema is created; it cannot be switched on an
+existing schema. The store binds each value with the form of use of its column:
+a database-character-set bind would lose characters before reaching an
+`NVARCHAR2` column, and a national bind compared with a `VARCHAR2` column
+converts the column, so its index is no longer used. The migration history
+records the type through its checksums, so `migrate`, `validate`, and
+`emitPendingSql()` refuse a schema created for the other type with a message
+naming both; `none` does not check.
+
+National column lengths count UTF-16 code units, the unit of Java's
+`String.length()`. The 128-character name limit and the 256-byte key limits fit
+unchanged. Mutex holders are limited to 2,000 code units instead of 4,000
+bytes, because `NVARCHAR2` holds at most 4,000 bytes under
+`MAX_STRING_SIZE=STANDARD`.
+
 ## Spring Boot Schema Modes
 
 When Spring Boot auto-configures `OracleJobStore` from an application
@@ -31,10 +85,12 @@ themselves.
 |---|---|---|
 | `threadmill.store.oracle.schema-mode` | `migrate` | `migrate`, `validate`, `none`, or `drop-and-migrate`. |
 | `threadmill.store.oracle.allow-destructive-schema-reset` | `false` | Required for `drop-and-migrate`. |
+| `threadmill.store.oracle.text-type` | `standard` | `standard` or `national`; see [Character sets and text types](#character-sets-and-text-types). |
 
 `migrate` applies pending migrations (and resumes an interrupted one).
 `validate` fails startup unless `threadmill_schema_history` records exactly the
-shipped migrations, each complete and with a matching checksum. `none` performs
+shipped migrations, each complete and with a matching checksum for the
+configured text type. `none` performs
 no DDL or validation. `drop-and-migrate` drops Threadmill-owned tables and
 recreates the schema; it destroys stored jobs and is intended only for
 disposable dev/test schemas.
@@ -74,23 +130,26 @@ native-image friendliness.
 
 ## Manual DDL
 
-The clean-install DDL is the checked-in migration:
-[`V1__baseline.sql`](../threadmill-store-oracle/src/main/resources/com/hemju/threadmill/store/oracle/migrations/V1__baseline.sql).
-Every statement ends with a line holding only `/`, the SQL*Plus convention, so
-the file runs unchanged in SQL*Plus or SQLcl.
-
-To apply SQL from your own deployment system, emit it from the runner:
+The checked-in migration,
+[`V1__baseline.sql`](../threadmill-store-oracle/src/main/resources/com/hemju/threadmill/store/oracle/migrations/V1__baseline.sql),
+is a template for both text types: each application-text column names its
+standard type in double braces (`queue {{VARCHAR2(128 CHAR)}}`). Do not run it
+directly; emit the SQL for your text type from the runner. Every emitted
+statement ends with a line holding only `/`, the SQL*Plus convention, so the
+output runs unchanged in SQL*Plus or SQLcl:
 
 ```java
-String install = new OracleMigrationRunner(dataSource).emitCleanInstallSql();
-String pending = new OracleMigrationRunner(dataSource).emitPendingSql();
+var runner = new OracleMigrationRunner(dataSource, OracleTextType.STANDARD); // or NATIONAL
+String install = runner.emitCleanInstallSql();
+String pending = runner.emitPendingSql();
 ```
 
 `emitCleanInstallSql()` returns the history-table DDL, every migration, and one
 completed history row per migration. `emitPendingSql()` is read-only: it reads
 `threadmill_schema_history` (prepending its DDL if the table does not exist yet)
 and returns only what is missing, including the remainder of an interrupted
-migration. Run the output with SQL*Plus or SQLcl, stop at the first error, and
+migration. It refuses the histories `migrate` refuses: an unknown version, an
+edited migration, or a schema created for the other text type. Run the output with SQL*Plus or SQLcl, stop at the first error, and
 then start the application with:
 
 ```yaml
@@ -124,7 +183,7 @@ migrations in production.
   not depend on fresh optimizer statistics, but keep the regular automatic
   statistics job enabled for the rest.
 - **Temporary LOBs.** Job bodies longer than 8,000 characters are written
-  through temporary LOBs that the store frees after each statement; size the
+  through temporary LOBs (`CLOB`, or `NCLOB` for the national text type) that the store frees after each statement; size the
   `TEMP` tablespace for the concurrent write rate of large jobs.
 - **No cross-node wake.** Nodes pick up work enqueued on another node within
   their `pollInterval` (default 500 ms); same-JVM wakes are immediate.

@@ -27,12 +27,12 @@ class OracleJobStoreContractTest extends AbstractJobStoreContractTest {
 
   @Test
   void poisonSerializationDoesNotDiscardEarlierClaims() {
-    ClaimPoisonRegression.verify(
-        new OracleJobStore(dataSource, ClaimPoisonRegression.serializer(), store.capabilities()));
+    ClaimPoisonRegression.verify(OracleTestDatabase.store(
+        dataSource, ClaimPoisonRegression.serializer(), store.capabilities()));
   }
 
   @Override
   protected JobStore createStore() {
-    return new OracleJobStore(new NonAutoCommitDataSource(OracleTestDatabase.dataSource()));
+    return OracleTestDatabase.store(new NonAutoCommitDataSource(OracleTestDatabase.dataSource()));
   }
 }

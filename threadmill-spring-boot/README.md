@@ -233,6 +233,7 @@ list). The most common:
 | `threadmill.store.postgres.allow-destructive-schema-reset` | `false` | Required for `drop-and-migrate`; destroys stored Threadmill jobs. |
 | `threadmill.store.oracle.schema-mode` | `migrate` | `migrate`, `validate`, `none`, or `drop-and-migrate`. |
 | `threadmill.store.oracle.allow-destructive-schema-reset` | `false` | Required for `drop-and-migrate`; destroys stored Threadmill jobs. |
+| `threadmill.store.oracle.text-type` | `standard` | `standard` or `national`; `national` stores text in `NVARCHAR2`/`NCLOB` for databases whose character set is not `AL32UTF8`. |
 | `threadmill.store.jdbc-type` | — | `postgres` or `oracle`; only needed when both JDBC store modules are on the classpath and `spring.datasource.url` does not name the database. |
 | `threadmill.store.redis.mode` | `standalone` | `standalone` / `sentinel` / `cluster`. |
 | `threadmill.store.redis.uri` | — | Lettuce `redis://` / `rediss://` URI for standalone mode. |
