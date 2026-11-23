@@ -85,6 +85,7 @@ Oracle JDBC driver.
 |---|---:|---|
 | `threadmill.store.oracle.schema-mode` | `migrate` | `migrate`, `validate`, `none`, or `drop-and-migrate`. Auto-configured Oracle stores run this action before `OracleJobStore` is created. |
 | `threadmill.store.oracle.allow-destructive-schema-reset` | `false` | Must be `true` for `drop-and-migrate`. This drops only Threadmill-owned tables and destroys stored jobs. |
+| `threadmill.store.oracle.text-type` | `standard` | `standard` (`VARCHAR2`/`CLOB`, requires the `AL32UTF8` database character set) or `national` (`NVARCHAR2`/`NCLOB`, requires the `AL16UTF16` national character set) for databases with another character set, such as `WE8MSWIN1252`. Choose it before the schema is created; `migrate` and `validate` refuse a schema created for the other type. |
 | `threadmill.store.jdbc-type` | | `postgres` or `oracle`. Needed only when both JDBC store modules are on the classpath and `spring.datasource.url` does not name the database. Without it, a `jdbc:oracle:` URL selects Oracle, a `jdbc:postgresql:` URL selects PostgreSQL, and otherwise the one module present wins (PostgreSQL when both are). |
 
 See [oracle-schema.md](oracle-schema.md) for privileges, manual DDL, and how

@@ -46,6 +46,14 @@ It deletes all Threadmill rows in that account's schema: use a disposable
 schema. Grant it `SELECT ANY DICTIONARY` (or access to `V$SESSION`, `V$SQL`, and
 `V$SQL_PLAN`) so the execution-plan tests run instead of skipping.
 
+CI tests the national text type on a container database relabelled to
+`WE8MSWIN1252`. Run it once against a database created with a non-Unicode
+character set as well, and record that character set in the validation notes:
+
+```bash
+./gradlew :threadmill-store-oracle:nationalTest -PoracleJdbcUrl=jdbc:oracle:thin:@//host:1521/SERVICE -PoracleUser=... -PoraclePassword=...
+```
+
 Then inspect artifacts:
 
 ```bash

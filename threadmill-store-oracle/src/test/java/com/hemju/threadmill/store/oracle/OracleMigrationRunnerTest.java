@@ -2,6 +2,7 @@ package com.hemju.threadmill.store.oracle;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -15,6 +16,9 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -25,6 +29,8 @@ import javax.sql.DataSource;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 import com.hemju.threadmill.core.Job;
 import com.hemju.threadmill.core.spec.JobArgument;
@@ -50,7 +56,7 @@ class OracleMigrationRunnerTest {
   @BeforeEach
   void migrated() {
     dataSource = OracleTestDatabase.dataSource();
-    runner = new OracleMigrationRunner(dataSource);
+    runner = OracleTestDatabase.migrationRunner(dataSource);
     runner.migrate();
   }
 
@@ -99,7 +105,7 @@ class OracleMigrationRunnerTest {
     }
 
     runner.validate();
-    var store = new OracleJobStore(dataSource);
+    var store = OracleTestDatabase.store(dataSource);
     var job = job();
     store.insert(job);
     assertThat(store.findById(job.id())).isPresent();
@@ -147,7 +153,7 @@ class OracleMigrationRunnerTest {
   void releasedBaselineDiffersOnlyInTheStatementThatFailsUnderExtendedStringSize()
       throws IOException {
     var released = releasedBaselineStatements();
-    var current = baselineStatements();
+    var current = baselineStatements(OracleTextType.STANDARD);
 
     assertThat(sha256(releasedBaselineSql())).isEqualTo(RELEASED_BASELINE_CHECKSUM);
     assertThat(current).hasSameSizeAs(released);
@@ -163,6 +169,7 @@ class OracleMigrationRunnerTest {
   @Test
   void releasedBaselineStoppedAtTheExtendedStringSizeFailureResumesAndRecordsTheCurrentChecksum()
       throws Exception {
+    assumeStandardRun();
     runner.dropThreadmillObjects();
     var released = releasedBaselineStatements();
     // The v1.1.0 runner committed statements 1-27, then statement 28 failed.
@@ -185,7 +192,7 @@ class OracleMigrationRunnerTest {
 
     runner.validate();
     assertThat(recordedBaselineChecksum()).isEqualTo(baselineChecksum());
-    var store = new OracleJobStore(dataSource);
+    var store = OracleTestDatabase.store(dataSource);
     var job = job();
     store.insert(job);
     assertThat(store.findById(job.id())).isPresent();
@@ -193,6 +200,7 @@ class OracleMigrationRunnerTest {
 
   @Test
   void schemaCompletedByTheReleasedBaselineStillValidatesAndMigrates() throws Exception {
+    assumeStandardRun();
     execute("UPDATE threadmill_schema_history SET checksum = '" + RELEASED_BASELINE_CHECKSUM
         + "' WHERE version = 1");
 
@@ -233,7 +241,7 @@ class OracleMigrationRunnerTest {
       for (int i = 0; i < 3; i++) {
         futures.add(executor.submit(() -> {
           start.await();
-          new OracleMigrationRunner(dataSource).migrate();
+          OracleTestDatabase.migrationRunner(dataSource).migrate();
           return null;
         }));
       }
@@ -247,7 +255,7 @@ class OracleMigrationRunnerTest {
   void migrationCommitsWhenConnectionsDefaultToNonAutoCommit() {
     runner.dropThreadmillObjects();
 
-    new OracleMigrationRunner(new NonAutoCommitDataSource(dataSource)).migrate();
+    OracleTestDatabase.migrationRunner(new NonAutoCommitDataSource(dataSource)).migrate();
 
     runner.validate();
   }
@@ -266,6 +274,126 @@ class OracleMigrationRunnerTest {
             + "SYSTIMESTAMP, SYS_GUID(), 'key-without-mode')"))
         .isInstanceOf(SQLException.class)
         .hasMessageContaining("THREADMILL_JOBS_SHAPE_CK");
+  }
+
+  /**
+   * The text type decides exactly the columns that hold application-supplied
+   * text; Threadmill's own fixed ASCII values stay {@code VARCHAR2}. A column
+   * missing from the national set would silently corrupt non-Latin text on a
+   * non-Unicode database.
+   */
+  @ParameterizedTest
+  @EnumSource(OracleTextType.class)
+  void textTypeDecidesTheTypeOfEveryApplicationTextColumn(OracleTextType type) throws SQLException {
+    runner.dropThreadmillObjects();
+    new OracleMigrationRunner(dataSource, type).migrate();
+
+    var expected = new TreeMap<String, String>();
+    for (String column : STANDARD_ASCII_COLUMNS) expected.put(column, "VARCHAR2");
+    for (var column : APPLICATION_TEXT_COLUMNS.entrySet()) {
+      boolean lob = column.getValue().equals("CLOB");
+      expected.put(
+          column.getKey(),
+          type == OracleTextType.NATIONAL ? (lob ? "NCLOB" : "NVARCHAR2") : column.getValue());
+    }
+    assertThat(characterColumnTypes()).isEqualTo(expected);
+  }
+
+  @Test
+  void aSchemaInstalledForTheOtherTextTypeIsRefusedWithBothTypesNamed() {
+    var other = OracleTestDatabase.textType() == OracleTextType.STANDARD
+        ? OracleTextType.NATIONAL
+        : OracleTextType.STANDARD;
+    var mismatched = new OracleMigrationRunner(dataSource, other);
+
+    assertThatThrownBy(mismatched::validate)
+        .isInstanceOf(OracleMigrationRunner.MigrationException.class)
+        .hasMessageContaining(
+            "installed for the " + OracleTestDatabase.textType().name().toLowerCase())
+        .hasMessageContaining("configured for the " + other.name().toLowerCase());
+    assertThatThrownBy(mismatched::migrate)
+        .isInstanceOf(OracleMigrationRunner.MigrationException.class)
+        .hasMessageContaining("installed for the");
+  }
+
+  @Test
+  void templatesExpandEveryTextTypeAndRejectAnUnknownOne() {
+    String template = "a {{VARCHAR2(128 CHAR)}} b {{VARCHAR2(4000 BYTE)}} c {{CLOB}}";
+
+    assertThat(OracleMigrationRunner.expand("t.sql", template, OracleTextType.STANDARD))
+        .isEqualTo("a VARCHAR2(128 CHAR) b VARCHAR2(4000 BYTE) c CLOB");
+    assertThat(OracleMigrationRunner.expand("t.sql", template, OracleTextType.NATIONAL))
+        .isEqualTo("a NVARCHAR2(128) b NVARCHAR2(2000) c NCLOB");
+    for (var type : OracleTextType.values()) {
+      assertThatThrownBy(() -> OracleMigrationRunner.expand("t.sql", "x {{VARCHAR2(9)}}", type))
+          .isInstanceOf(OracleMigrationRunner.MigrationException.class)
+          .hasMessageContaining("{{VARCHAR2(9)}}");
+      assertThat(OracleMigrationRunner.migrationSql("V1__baseline.sql", type)).doesNotContain("{{");
+    }
+  }
+
+  /** Character columns that hold Threadmill's own ASCII values under both text types. */
+  private static final Set<String> STANDARD_ASCII_COLUMNS = Set.of(
+      "THREADMILL_JOBS.STATE",
+      "THREADMILL_JOBS.CONCURRENCY_MODE",
+      "THREADMILL_CRON_TASKS.TRIGGER_KIND",
+      "THREADMILL_CRON_TASKS.MISSED_RUN_POLICY",
+      "THREADMILL_CRON_TASKS.TIME_ZONE",
+      "THREADMILL_LEASES.NAME",
+      "THREADMILL_JOB_COUNTS.STATE",
+      "THREADMILL_SCHEMA_HISTORY.DESCRIPTION",
+      "THREADMILL_SCHEMA_HISTORY.CHECKSUM");
+
+  /** Application-supplied text columns and their standard types. */
+  private static final Map<String, String> APPLICATION_TEXT_COLUMNS = Map.ofEntries(
+      Map.entry("THREADMILL_JOBS.QUEUE", "VARCHAR2"),
+      Map.entry("THREADMILL_JOBS.HANDLER_SIGNATURE", "VARCHAR2"),
+      Map.entry("THREADMILL_JOBS.BODY", "CLOB"),
+      Map.entry("THREADMILL_JOBS.CONCURRENCY_KEY", "VARCHAR2"),
+      Map.entry("THREADMILL_JOBS.UNKEYED_QUEUE", "VARCHAR2"),
+      Map.entry("THREADMILL_JOBS.KEYED_QUEUE", "VARCHAR2"),
+      Map.entry("THREADMILL_JOBS.KEYED_KEY", "VARCHAR2"),
+      Map.entry("THREADMILL_JOBS.PENDING_KEY", "VARCHAR2"),
+      Map.entry("THREADMILL_JOBS.EXCLUSIVE_KEY", "VARCHAR2"),
+      Map.entry("THREADMILL_JOBS.OUTSTANDING_KEY", "VARCHAR2"),
+      Map.entry("THREADMILL_JOBS.ENQUEUED_QUEUE", "VARCHAR2"),
+      Map.entry("THREADMILL_CRON_TASKS.NAME", "VARCHAR2"),
+      Map.entry("THREADMILL_CRON_TASKS.TRIGGER_VALUE", "VARCHAR2"),
+      Map.entry("THREADMILL_CRON_TASKS.HANDLER_SIGNATURE", "VARCHAR2"),
+      Map.entry("THREADMILL_CRON_TASKS.PAYLOAD_TYPE_TAG", "VARCHAR2"),
+      Map.entry("THREADMILL_CRON_TASKS.PAYLOAD_SERIALIZED", "CLOB"),
+      Map.entry("THREADMILL_CRON_TASKS.QUEUE", "VARCHAR2"),
+      Map.entry("THREADMILL_CRON_TASK_STATE.TASK_NAME", "VARCHAR2"),
+      Map.entry("THREADMILL_CRON_TASK_STATE.TIMING_FINGERPRINT", "VARCHAR2"),
+      Map.entry("THREADMILL_CRON_TASK_OWNERSHIP.NAMESPACE", "VARCHAR2"),
+      Map.entry("THREADMILL_CRON_TASK_OWNERSHIP.TASK_NAME", "VARCHAR2"),
+      Map.entry("THREADMILL_MUTEXES.NAME", "VARCHAR2"),
+      Map.entry("THREADMILL_MUTEXES.HOLDER", "VARCHAR2"),
+      Map.entry("THREADMILL_DEDUP_KEYS.QUEUE", "VARCHAR2"),
+      Map.entry("THREADMILL_DEDUP_KEYS.DEDUP_KEY", "VARCHAR2"),
+      Map.entry("THREADMILL_CONCURRENCY_GROUPS.CONCURRENCY_KEY", "VARCHAR2"),
+      Map.entry("THREADMILL_CONCURRENCY_WORKFLOW_HOLDS.CONCURRENCY_KEY", "VARCHAR2"),
+      Map.entry("THREADMILL_QUEUE_PAUSES.QUEUE", "VARCHAR2"),
+      Map.entry("THREADMILL_QUEUE_PAUSES.PAUSED_BY", "CLOB"),
+      Map.entry("THREADMILL_QUEUE_COUNTS.QUEUE", "VARCHAR2"));
+
+  private Map<String, String> characterColumnTypes() throws SQLException {
+    var types = new TreeMap<String, String>();
+    try (Connection conn = dataSource.getConnection();
+        Statement st = conn.createStatement();
+        ResultSet rs = st.executeQuery("SELECT table_name, column_name, data_type "
+            + "FROM user_tab_cols WHERE table_name LIKE 'THREADMILL\\_%' ESCAPE '\\' "
+            + "AND table_name <> 'THREADMILL_SCHEMA_LOCK' AND hidden_column = 'NO' "
+            + "AND data_type IN ('VARCHAR2', 'CLOB', 'NVARCHAR2', 'NCLOB', 'CHAR', 'NCHAR')")) {
+      while (rs.next()) types.put(rs.getString(1) + "." + rs.getString(2), rs.getString(3));
+    }
+    return types;
+  }
+
+  private static void assumeStandardRun() {
+    assumeTrue(
+        OracleTestDatabase.textType() == OracleTextType.STANDARD,
+        "the released v1.1.x history exists only for the standard text type");
   }
 
   private static Job job() {
@@ -294,12 +422,8 @@ class OracleMigrationRunnerTest {
     }
   }
 
-  private static String baselineSql() throws IOException {
-    try (var in = OracleMigrationRunnerTest.class
-        .getClassLoader()
-        .getResourceAsStream("com/hemju/threadmill/store/oracle/migrations/V1__baseline.sql")) {
-      return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-    }
+  private static String baselineSql() {
+    return OracleMigrationRunner.migrationSql("V1__baseline.sql", OracleTestDatabase.textType());
   }
 
   private static String releasedBaselineSql() throws IOException {
@@ -325,8 +449,13 @@ class OracleMigrationRunnerTest {
     }
   }
 
-  private static List<String> baselineStatements() throws IOException {
+  private static List<String> baselineStatements() {
     return OracleMigrationRunner.splitStatements("V1__baseline.sql", baselineSql());
+  }
+
+  private static List<String> baselineStatements(OracleTextType type) {
+    return OracleMigrationRunner.splitStatements(
+        "V1__baseline.sql", OracleMigrationRunner.migrationSql("V1__baseline.sql", type));
   }
 
   private String historyDdl() {
@@ -335,7 +464,7 @@ class OracleMigrationRunnerTest {
         .getFirst();
   }
 
-  private static String baselineChecksum() throws IOException {
+  private static String baselineChecksum() {
     return sha256(baselineSql());
   }
 

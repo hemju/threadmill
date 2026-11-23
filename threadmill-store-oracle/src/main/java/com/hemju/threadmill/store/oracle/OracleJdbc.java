@@ -27,7 +27,8 @@ import java.util.UUID;
  *       {@link LocalDateTime}. Binding {@code java.sql.Timestamp} would apply
  *       the JVM's default time zone, so the stored wall time would depend on
  *       the host configuration.</li>
- *   <li>CLOB text is bound through {@link OracleClobs}.</li>
+ *   <li>Application-supplied text is bound through {@link OracleText} and
+ *       {@link OracleClobs}, matching the schema's {@link OracleTextType}.</li>
  * </ul>
  */
 final class OracleJdbc {
@@ -119,19 +120,6 @@ final class OracleJdbc {
   /** {@code ?, ?, ...} with {@code size} placeholders. */
   static String placeholders(int size) {
     return String.join(", ", Collections.nCopies(size, "?"));
-  }
-
-  /** Bind strings into {@code size} consecutive slots, padding with NULL. */
-  static int bindStrings(PreparedStatement ps, int start, Collection<String> values, int size)
-      throws SQLException {
-    int index = start;
-    for (String value : values) {
-      ps.setString(index++, value);
-    }
-    while (index < start + size) {
-      ps.setNull(index++, Types.VARCHAR);
-    }
-    return index;
   }
 
   /** Bind UUIDs into {@code size} consecutive slots, padding with NULL. */

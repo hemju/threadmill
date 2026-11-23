@@ -1,5 +1,7 @@
 package com.hemju.threadmill.spring;
 
+import java.util.Locale;
+
 import javax.sql.DataSource;
 
 import org.slf4j.Logger;
@@ -18,6 +20,8 @@ import com.hemju.threadmill.core.store.JobStore;
 import com.hemju.threadmill.core.store.JobStoreCapabilities;
 import com.hemju.threadmill.store.oracle.OracleJobStore;
 import com.hemju.threadmill.store.oracle.OracleMigrationRunner;
+import com.hemju.threadmill.store.oracle.OracleTextType;
+import com.hemju.threadmill.store.oracle.OracleTransactionBoundary;
 
 /**
  * Oracle-specific Threadmill auto-configuration.
@@ -46,22 +50,26 @@ public class ThreadmillOracleAutoConfiguration {
   @ConditionalOnBean(DataSource.class)
   @Conditional({OnRedisStoreNotConfigured.class, JdbcStoreSelection.OracleSelected.class})
   public JobStore threadmillJobStore(ThreadmillProperties properties, DataSource dataSource) {
-    LOG.info("Threadmill: using Oracle store wired from the application's DataSource");
-    OracleJobStore.requireSupportedServer(dataSource);
-    applyOracleSchemaMode(dataSource, properties.getStore().getOracle());
-    if (properties.getSpring().getEnqueueMode() == SpringEnqueueMode.JOIN_TRANSACTION) {
-      return new OracleJobStore(
-          dataSource,
-          new JsonJobSerializer(),
-          JobStoreCapabilities.defaults(),
-          new SpringOracleTransactionBoundary(dataSource));
-    }
-    return new OracleJobStore(dataSource);
+    var oracle = properties.getStore().getOracle();
+    var textType = OracleTextType.valueOf(oracle.getTextType().name());
+    LOG.info(
+        "Threadmill: using Oracle store ({} text type) wired from the application's DataSource",
+        oracle.getTextType().name().toLowerCase(Locale.ROOT));
+    OracleJobStore.requireSupportedServer(dataSource, textType);
+    applyOracleSchemaMode(dataSource, oracle, textType);
+    OracleTransactionBoundary boundary =
+        properties.getSpring().getEnqueueMode() == SpringEnqueueMode.JOIN_TRANSACTION
+            ? new SpringOracleTransactionBoundary(dataSource)
+            : OracleTransactionBoundary.owning(dataSource);
+    return new OracleJobStore(
+        dataSource, new JsonJobSerializer(), JobStoreCapabilities.defaults(), boundary, textType);
   }
 
   private static void applyOracleSchemaMode(
-      DataSource dataSource, ThreadmillProperties.OracleProperties properties) {
-    var migrations = new OracleMigrationRunner(dataSource);
+      DataSource dataSource,
+      ThreadmillProperties.OracleProperties properties,
+      OracleTextType textType) {
+    var migrations = new OracleMigrationRunner(dataSource, textType);
     switch (properties.getSchemaMode()) {
       case MIGRATE -> migrations.migrate();
       case VALIDATE -> migrations.validate();

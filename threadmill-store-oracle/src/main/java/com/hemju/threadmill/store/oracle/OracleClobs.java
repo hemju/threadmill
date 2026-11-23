@@ -6,14 +6,16 @@ import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
- * Binds text to {@code CLOB} parameters for the statements of one scope and
- * frees the temporary LOBs it created when the scope closes.
+ * Binds text to {@code CLOB} or {@code NCLOB} parameters for the statements of
+ * one scope and frees the temporary LOBs it created when the scope closes.
  *
- * <p>Short values are bound directly with {@code setString}. Longer values are
- * written through a temporary {@link Clob}: the Oracle driver streams a long
- * directly bound string in fixed-size chunks and corrupts a supplementary
+ * <p>Short values are bound directly ({@code setString}, or {@code setNString}
+ * for {@link OracleTextType#NATIONAL}). Longer values are written through a
+ * temporary {@link Clob} or {@link java.sql.NClob}: the Oracle driver streams a
+ * long directly bound string in fixed-size chunks and corrupts a supplementary
  * character (a surrogate pair, such as an emoji) that straddles a chunk
  * boundary, while {@link Clob#setString} keeps characters whole. Temporary LOBs
  * live in the session until freed, so a pooled connection would otherwise
@@ -22,19 +24,31 @@ import java.util.List;
 final class OracleClobs implements AutoCloseable {
 
   /**
-   * Longest value bound directly. At most 3 bytes per UTF-16 unit in AL32UTF8,
-   * this stays below the driver's 32 KiB direct-bind limit, so it is never
-   * chunked.
+   * Longest value bound directly. At most 3 bytes per UTF-16 unit in AL32UTF8
+   * and 2 in AL16UTF16, this stays below the driver's 32 KiB direct-bind
+   * limit, so it is never chunked.
    */
   static final int DIRECT_BIND_MAX_CHARS = 8_000;
 
+  private final OracleTextType type;
   private final List<Clob> created = new ArrayList<>();
 
+  OracleClobs(OracleTextType type) {
+    this.type = Objects.requireNonNull(type, "type");
+  }
+
   void bind(PreparedStatement ps, int index, String value) throws SQLException {
+    boolean national = type == OracleTextType.NATIONAL;
     if (value == null) {
-      ps.setNull(index, Types.CLOB);
+      ps.setNull(index, national ? Types.NCLOB : Types.CLOB);
     } else if (value.length() <= DIRECT_BIND_MAX_CHARS) {
-      ps.setString(index, value);
+      if (national) ps.setNString(index, value);
+      else ps.setString(index, value);
+    } else if (national) {
+      var clob = ps.getConnection().createNClob();
+      created.add(clob);
+      clob.setString(1, value);
+      ps.setNClob(index, clob);
     } else {
       Clob clob = ps.getConnection().createClob();
       created.add(clob);

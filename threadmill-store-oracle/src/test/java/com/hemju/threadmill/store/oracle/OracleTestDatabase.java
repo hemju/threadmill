@@ -1,10 +1,13 @@
 package com.hemju.threadmill.store.oracle;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.time.Duration;
+import java.util.Locale;
+import java.util.Optional;
 
 import javax.sql.DataSource;
 
@@ -13,6 +16,9 @@ import com.zaxxer.hikari.HikariDataSource;
 import org.testcontainers.containers.GenericContainer;
 import org.testcontainers.containers.wait.strategy.Wait;
 import org.testcontainers.utility.DockerImageName;
+
+import com.hemju.threadmill.core.serialization.JobSerializer;
+import com.hemju.threadmill.core.store.JobStoreCapabilities;
 
 /**
  * One Oracle database per test JVM, shared by every test class because Oracle
@@ -28,6 +34,18 @@ import org.testcontainers.utility.DockerImageName;
  *
  * <p>Every session runs with {@code OPTIMIZER_FEATURES_ENABLE='19.1.0'}, so
  * execution-plan assertions reflect the 19c optimizer on newer servers too.
+ *
+ * <p>{@code threadmill.oracle.textType} selects the {@link OracleTextType} the
+ * schema and every store use ({@code STANDARD} by default). With
+ * {@code threadmill.oracle.characterSet} (for example {@code WE8MSWIN1252}) the
+ * container's pluggable database is relabelled to that database character set
+ * before any test runs: {@code ALTER DATABASE CHARACTER SET INTERNAL_USE}
+ * changes the declared character set without converting data, which is exact
+ * for a fresh database whose dictionary holds only ASCII and never acceptable
+ * for real data. Sessions then convert text exactly as on a database created
+ * with that character set, so a bind that bypasses the national character set
+ * loses characters and fails the round-trip tests. The gvenzl images ship only
+ * {@code AL32UTF8} databases; this is how CI tests a non-Unicode one.
  */
 final class OracleTestDatabase {
 
@@ -46,9 +64,47 @@ final class OracleTestDatabase {
   static synchronized DataSource dataSource() {
     if (pooled == null) {
       pooled = start();
-      new OracleMigrationRunner(pooled).migrate();
+      new OracleMigrationRunner(pooled, textType()).migrate();
     }
     return pooled;
+  }
+
+  /** The text type this test run uses for the schema and every store. */
+  static OracleTextType textType() {
+    return OracleTextType.valueOf(
+        System.getProperty("threadmill.oracle.textType", "STANDARD").toUpperCase(Locale.ROOT));
+  }
+
+  /** The database character set this run relabelled the test database to, if any. */
+  static Optional<String> characterSet() {
+    String value = System.getProperty("threadmill.oracle.characterSet");
+    return value == null || value.isBlank() ? Optional.empty() : Optional.of(value);
+  }
+
+  /** Binds application-supplied text the way this run's stores do. */
+  static OracleText text() {
+    return new OracleText(textType());
+  }
+
+  /** A store over {@code dataSource} for this run's text type. */
+  static OracleJobStore store(DataSource dataSource) {
+    return new OracleJobStore(dataSource, textType());
+  }
+
+  /** A store over {@code dataSource} for this run's text type. */
+  static OracleJobStore store(
+      DataSource dataSource, JobSerializer serializer, JobStoreCapabilities capabilities) {
+    return new OracleJobStore(
+        dataSource,
+        serializer,
+        capabilities,
+        OracleTransactionBoundary.owning(dataSource),
+        textType());
+  }
+
+  /** A migration runner over {@code dataSource} for this run's text type. */
+  static OracleMigrationRunner migrationRunner(DataSource dataSource) {
+    return new OracleMigrationRunner(dataSource, textType());
   }
 
   /** Delete every Threadmill row and zero the counters, keeping the schema. */
@@ -92,6 +148,7 @@ final class OracleTestDatabase {
               .withStartupTimeout(Duration.ofMinutes(10)));
       container.start();
       String service = image.contains("oracle-xe") ? "XEPDB1" : "FREEPDB1";
+      characterSet().ifPresent(set -> relabelCharacterSet(container, service, set));
       url = "jdbc:oracle:thin:@//" + container.getHost() + ":" + container.getMappedPort(1521) + "/"
           + service;
       user = USER;
@@ -109,16 +166,66 @@ final class OracleTestDatabase {
   }
 
   /**
+   * Declare {@code characterSet} as the pluggable database's character set.
+   * Only valid on the fresh, otherwise empty test database (see the class
+   * documentation).
+   */
+  private static void relabelCharacterSet(
+      GenericContainer<?> container, String service, String characterSet) {
+    if (!characterSet.matches("[A-Z0-9]+")) {
+      throw new IllegalArgumentException("Not an Oracle character set name: " + characterSet);
+    }
+    String script = String.join(
+        "\n",
+        "WHENEVER SQLERROR EXIT FAILURE",
+        "ALTER PLUGGABLE DATABASE " + service + " CLOSE IMMEDIATE;",
+        "ALTER PLUGGABLE DATABASE " + service + " OPEN RESTRICTED;",
+        "ALTER SESSION SET CONTAINER = " + service + ";",
+        "ALTER DATABASE CHARACTER SET INTERNAL_USE " + characterSet + ";",
+        "ALTER SESSION SET CONTAINER = CDB$ROOT;",
+        "ALTER PLUGGABLE DATABASE " + service + " CLOSE IMMEDIATE;",
+        "ALTER PLUGGABLE DATABASE " + service + " OPEN;",
+        "EXIT");
+    try {
+      var result = container.execInContainer(
+          "bash", "-c", "sqlplus -s / as sysdba <<'SQL'\n" + script + "\nSQL");
+      if (result.getExitCode() != 0) {
+        throw new IllegalStateException("Relabelling the test database to " + characterSet
+            + " failed: " + result.getStdout() + result.getStderr());
+      }
+    } catch (IOException e) {
+      throw new IllegalStateException("Could not relabel the test database", e);
+    } catch (InterruptedException e) {
+      Thread.currentThread().interrupt();
+      throw new IllegalStateException("Interrupted while relabelling the test database", e);
+    }
+  }
+
+  /**
    * Let the test user read executed-cursor plans ({@code DBMS_XPLAN.DISPLAY_CURSOR}
    * needs the {@code V$} views). Only the throwaway container's admin account
    * is used for this.
    */
   private static void grantPlanInspection(String url) {
-    try (Connection admin = DriverManager.getConnection(url, "system", PASSWORD);
-        Statement st = admin.createStatement()) {
-      st.execute("GRANT SELECT ANY DICTIONARY TO " + USER);
-    } catch (SQLException e) {
-      throw new IllegalStateException("Could not grant plan inspection to the test user", e);
+    // A relabelled pluggable database was just reopened; its service may take
+    // a moment to register with the listener again.
+    long deadline = System.nanoTime() + Duration.ofMinutes(1).toNanos();
+    while (true) {
+      try (Connection admin = DriverManager.getConnection(url, "system", PASSWORD);
+          Statement st = admin.createStatement()) {
+        st.execute("GRANT SELECT ANY DICTIONARY TO " + USER);
+        return;
+      } catch (SQLException e) {
+        if (System.nanoTime() > deadline) {
+          throw new IllegalStateException("Could not grant plan inspection to the test user", e);
+        }
+      }
+      try {
+        Thread.sleep(1_000);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        throw new IllegalStateException("Interrupted while waiting for the test database", e);
+      }
     }
   }
 

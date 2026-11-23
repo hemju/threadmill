@@ -27,7 +27,9 @@ import org.junit.jupiter.api.Test;
  * for it, with cost bounded by the page size, the number of keys, or a key's
  * first entries — never by backlog depth. Each statement runs for real with
  * typed binds (bind types change plans: a {@code RAW} column compared with a
- * character bind is converted and can no longer use its index), and the test
+ * character bind is converted and can no longer use its index, as is a
+ * {@code VARCHAR2} column compared with a national-character bind), with
+ * application-supplied text bound for the run's {@link OracleTextType}, and the test
  * reads the plan of the executed cursor. The schema is seeded with tens of
  * thousands of mixed-state rows, including one hot key, and real statistics.
  * Sessions run with the 19c optimizer feature set (see {@link OracleTestDatabase}).
@@ -80,7 +82,7 @@ class OracleQueryPlanTest {
 
   @Test
   void unkeyedClaimWalksItsIndexInOrderWithoutSorting() throws SQLException {
-    assertThat(executedPlan(OracleJobStore.UNKEYED_CLAIM_SQL, ps -> ps.setString(1, "q1")))
+    assertThat(executedPlan(OracleJobStore.UNKEYED_CLAIM_SQL, ps -> text(ps, 1, "q1")))
         .contains("THREADMILL_JOBS_UNKEYED_IDX")
         .doesNotContain("SORT ORDER BY")
         .doesNotContain("TABLE ACCESS FULL");
@@ -89,8 +91,8 @@ class OracleQueryPlanTest {
   @Test
   void keyEnumerationIsOneMinProbePerKey() throws SQLException {
     assertThat(executedPlan(OracleJobStore.pendingKeysSql(false), ps -> {
-          ps.setString(1, "q1");
-          ps.setString(2, "q1");
+          text(ps, 1, "q1");
+          text(ps, 2, "q1");
           ps.setInt(3, OracleJobStore.MAX_PENDING_KEYS_PER_PASS);
         }))
         .contains("INDEX RANGE SCAN (MIN/MAX)")
@@ -98,9 +100,9 @@ class OracleQueryPlanTest {
         .doesNotContain("FAST FULL SCAN")
         .doesNotContain("TABLE ACCESS FULL");
     assertThat(executedPlan(OracleJobStore.pendingKeysSql(true), ps -> {
-          ps.setString(1, "q1");
-          ps.setString(2, "k1");
-          ps.setString(3, "q1");
+          text(ps, 1, "q1");
+          text(ps, 2, "k1");
+          text(ps, 3, "q1");
           ps.setInt(4, OracleJobStore.MAX_PENDING_KEYS_PER_PASS);
         }))
         .contains("INDEX RANGE SCAN (MIN/MAX)")
@@ -113,8 +115,8 @@ class OracleQueryPlanTest {
     assertThat(executedPlan(OracleJobStore.keyedHeadsSql(4), ps -> {
           int parameter = 1;
           for (String key : List.of("hot", "k3", "k9", "k15")) {
-            ps.setString(parameter++, "q1");
-            ps.setString(parameter++, key);
+            text(ps, parameter++, "q1");
+            text(ps, parameter++, key);
             ps.setInt(parameter++, 10);
           }
         }))
@@ -152,9 +154,9 @@ class OracleQueryPlanTest {
     assertThat(executedPlan(OracleJobStore.holdMembersSql(4), ps -> {
           int parameter = 1;
           for (byte[] root : roots) {
-            ps.setString(parameter++, "hot");
+            text(ps, parameter++, "hot");
             ps.setBytes(parameter++, root);
-            ps.setString(parameter++, "q1");
+            text(ps, parameter++, "q1");
             ps.setInt(parameter++, 10);
           }
         }))
@@ -193,7 +195,7 @@ class OracleQueryPlanTest {
         .contains("THREADMILL_JOBS_AWAITING_IDX")
         .doesNotContain("SORT ORDER BY")
         .doesNotContain("TABLE ACCESS FULL");
-    assertThat(executedPlan(OracleJobStore.QUEUE_AGE_SQL, ps -> ps.setString(1, "q1")))
+    assertThat(executedPlan(OracleJobStore.QUEUE_AGE_SQL, ps -> text(ps, 1, "q1")))
         .contains("INDEX RANGE SCAN (MIN/MAX)")
         .contains("THREADMILL_JOBS_QUEUE_AGE_IDX");
     assertThat(executedPlan(OracleJobStore.OLDEST_SCHEDULED_SQL, ps -> {}))
@@ -231,7 +233,7 @@ class OracleQueryPlanTest {
     assertThat(executedPlan(OracleJobStore.idleGroupsSql(false), ps -> {}))
         .contains("THREADMILL_CONCURRENCY_IDLE_IDX")
         .doesNotContain("SORT ORDER BY");
-    assertThat(executedPlan(OracleJobStore.idleGroupsSql(true), ps -> ps.setString(1, "g5")))
+    assertThat(executedPlan(OracleJobStore.idleGroupsSql(true), ps -> text(ps, 1, "g5")))
         .contains("THREADMILL_CONCURRENCY_IDLE_IDX")
         .doesNotContain("SORT ORDER BY");
   }
@@ -312,6 +314,15 @@ class OracleQueryPlanTest {
   private static void bindRaw(PreparedStatement ps, int start, List<byte[]> ids)
       throws SQLException {
     for (int i = 0; i < ids.size(); i++) ps.setBytes(start + i, ids.get(i));
+  }
+
+  /**
+   * Bind application-supplied text the way the store does for this run's text
+   * type: a national-character bind against a {@code VARCHAR2} column, or a
+   * plain bind against an {@code NVARCHAR2} one, would change the plan.
+   */
+  private static void text(PreparedStatement ps, int index, String value) throws SQLException {
+    OracleTestDatabase.text().bind(ps, index, value);
   }
 
   private static LocalDateTime utc(Instant instant) {

@@ -6,8 +6,9 @@
 -- threadmill_schema_history itself.
 --
 -- Statement format: every statement ends with a line containing only "/"
--- (the SQL*Plus / SQLcl convention), so the file runs unchanged in those
--- tools. SQL statements carry no trailing semicolon; PL/SQL blocks do.
+-- (the SQL*Plus / SQLcl convention), so the SQL the runner emits runs
+-- unchanged in those tools. SQL statements carry no trailing semicolon;
+-- PL/SQL blocks do.
 --
 -- Oracle commits DDL implicitly, so a migration is not atomic. The runner
 -- records progress after every statement and resumes a crashed migration at
@@ -19,8 +20,13 @@
 --   * Timestamps are TIMESTAMP(9) holding UTC wall time: nanosecond-exact for
 --     java.time.Instant, time-zone independent, and directly indexable.
 --   * Booleans are NUMBER(1) with a 0/1 check (BOOLEAN is 23ai-only).
---   * Text uses CHAR length semantics where values are user names, and the
---     database character set must be AL32UTF8 (checked at startup).
+--   * Columns that hold application-supplied text name their standard type
+--     in double braces. The runner expands each to that type (VARCHAR2 and
+--     CLOB in an AL32UTF8 database character set) or to its national
+--     counterpart (NVARCHAR2 and NCLOB in the AL16UTF16 national character
+--     set), following OracleTextType; the startup check verifies the
+--     character set. Columns for Threadmill's own fixed ASCII values (states,
+--     modes, policy names, time-zone ids) are plain VARCHAR2 in both.
 --   * Oracle has no partial indexes. Each one is emulated with VIRTUAL columns of
 --     the form CASE WHEN <predicate> THEN <column> END and an index over them:
 --     Oracle B-tree indexes skip rows whose key columns are all NULL, so the
@@ -35,9 +41,9 @@
 CREATE TABLE threadmill_jobs (
     id RAW(16) NOT NULL,
     state VARCHAR2(16) NOT NULL,
-    queue VARCHAR2(128 CHAR) NOT NULL,
+    queue {{VARCHAR2(128 CHAR)}} NOT NULL,
     priority NUMBER(10) DEFAULT 0 NOT NULL,
-    handler_signature VARCHAR2(1000 CHAR) NOT NULL,
+    handler_signature {{VARCHAR2(1000 CHAR)}} NOT NULL,
     scheduled_at TIMESTAMP(9),
     owner_node_id RAW(16),
     owner_heartbeat_at TIMESTAMP(9),
@@ -45,16 +51,16 @@ CREATE TABLE threadmill_jobs (
     current_state_at TIMESTAMP(9) NOT NULL,
     version NUMBER(19) NOT NULL,
     execution_revision NUMBER(19) DEFAULT 0 NOT NULL,
-    body CLOB NOT NULL,
+    body {{CLOB}} NOT NULL,
     created_at TIMESTAMP(9) NOT NULL,
-    concurrency_key VARCHAR2(256 BYTE),
+    concurrency_key {{VARCHAR2(256 BYTE)}},
     concurrency_mode VARCHAR2(16),
     workflow_root_id RAW(16) NOT NULL,
     parent_job_id RAW(16),
     -- Claim path, unkeyed lane: ENQUEUED jobs without a concurrency key, per
     -- queue, in (priority DESC, id) order. The rank is -priority so the index
     -- is ascending throughout.
-    unkeyed_queue VARCHAR2(128 CHAR) GENERATED ALWAYS AS (
+    unkeyed_queue {{VARCHAR2(128 CHAR)}} GENERATED ALWAYS AS (
         CASE WHEN state = 'ENQUEUED' AND concurrency_key IS NULL THEN queue END) VIRTUAL,
     unkeyed_rank NUMBER(11) GENERATED ALWAYS AS (
         CASE WHEN state = 'ENQUEUED' AND concurrency_key IS NULL THEN -priority END) VIRTUAL,
@@ -62,9 +68,9 @@ CREATE TABLE threadmill_jobs (
         CASE WHEN state = 'ENQUEUED' AND concurrency_key IS NULL THEN id END) VIRTUAL,
     -- Claim path, keyed lane: per-queue distinct keys and each key's ENQUEUED
     -- heads in the engine's (current_state_at, id) in-key order.
-    keyed_queue VARCHAR2(128 CHAR) GENERATED ALWAYS AS (
+    keyed_queue {{VARCHAR2(128 CHAR)}} GENERATED ALWAYS AS (
         CASE WHEN state = 'ENQUEUED' AND concurrency_key IS NOT NULL THEN queue END) VIRTUAL,
-    keyed_key VARCHAR2(256 BYTE) GENERATED ALWAYS AS (
+    keyed_key {{VARCHAR2(256 BYTE)}} GENERATED ALWAYS AS (
         CASE WHEN state = 'ENQUEUED' AND concurrency_key IS NOT NULL THEN concurrency_key END)
         VIRTUAL,
     keyed_at TIMESTAMP(9) GENERATED ALWAYS AS (
@@ -73,7 +79,7 @@ CREATE TABLE threadmill_jobs (
     keyed_id RAW(16) GENERATED ALWAYS AS (
         CASE WHEN state = 'ENQUEUED' AND concurrency_key IS NOT NULL THEN id END) VIRTUAL,
     -- Claim-time admission: pending (ENQUEUED, SCHEDULED, AWAITING) keyed jobs.
-    pending_key VARCHAR2(256 BYTE) GENERATED ALWAYS AS (
+    pending_key {{VARCHAR2(256 BYTE)}} GENERATED ALWAYS AS (
         CASE WHEN state IN ('ENQUEUED', 'SCHEDULED', 'AWAITING')
             THEN concurrency_key END) VIRTUAL,
     pending_at TIMESTAMP(9) GENERATED ALWAYS AS (
@@ -83,7 +89,7 @@ CREATE TABLE threadmill_jobs (
         CASE WHEN state IN ('ENQUEUED', 'SCHEDULED', 'AWAITING')
             AND concurrency_key IS NOT NULL THEN id END) VIRTUAL,
     -- Claim-time admission: pending EXCLUSIVE jobs (the leapfrog rule).
-    exclusive_key VARCHAR2(256 BYTE) GENERATED ALWAYS AS (
+    exclusive_key {{VARCHAR2(256 BYTE)}} GENERATED ALWAYS AS (
         CASE WHEN state IN ('ENQUEUED', 'SCHEDULED', 'AWAITING')
             AND concurrency_mode = 'EXCLUSIVE' THEN concurrency_key END) VIRTUAL,
     exclusive_at TIMESTAMP(9) GENERATED ALWAYS AS (
@@ -93,7 +99,7 @@ CREATE TABLE threadmill_jobs (
         CASE WHEN state IN ('ENQUEUED', 'SCHEDULED', 'AWAITING')
             AND concurrency_mode = 'EXCLUSIVE' THEN id END) VIRTUAL,
     -- Workflow holds: non-terminal keyed jobs by (key, workflow root).
-    outstanding_key VARCHAR2(256 BYTE) GENERATED ALWAYS AS (
+    outstanding_key {{VARCHAR2(256 BYTE)}} GENERATED ALWAYS AS (
         CASE WHEN state NOT IN ('SUCCEEDED', 'FAILED', 'DELETED', 'QUARANTINED')
             THEN concurrency_key END) VIRTUAL,
     outstanding_root RAW(16) GENERATED ALWAYS AS (
@@ -120,7 +126,7 @@ CREATE TABLE threadmill_jobs (
     awaiting_id RAW(16) GENERATED ALWAYS AS (
         CASE WHEN state = 'AWAITING' AND parent_job_id IS NOT NULL THEN id END) VIRTUAL,
     -- Oldest ENQUEUED job per queue and idle-queue checks.
-    enqueued_queue VARCHAR2(128 CHAR) GENERATED ALWAYS AS (
+    enqueued_queue {{VARCHAR2(128 CHAR)}} GENERATED ALWAYS AS (
         CASE WHEN state = 'ENQUEUED' THEN queue END) VIRTUAL,
     enqueued_at TIMESTAMP(9) GENERATED ALWAYS AS (
         CASE WHEN state = 'ENQUEUED' THEN current_state_at END) VIRTUAL,
@@ -205,13 +211,13 @@ CREATE TABLE threadmill_nodes (
 -- Recurring task identity. payload_serialized is nullable only because Oracle
 -- stores an empty string as NULL; the store reads NULL back as "".
 CREATE TABLE threadmill_cron_tasks (
-    name VARCHAR2(128 CHAR) NOT NULL,
+    name {{VARCHAR2(128 CHAR)}} NOT NULL,
     trigger_kind VARCHAR2(16) NOT NULL,
-    trigger_value VARCHAR2(1000 CHAR) NOT NULL,
-    handler_signature VARCHAR2(1000 CHAR) NOT NULL,
-    payload_type_tag VARCHAR2(1000 CHAR) NOT NULL,
-    payload_serialized CLOB,
-    queue VARCHAR2(128 CHAR) DEFAULT 'default' NOT NULL,
+    trigger_value {{VARCHAR2(1000 CHAR)}} NOT NULL,
+    handler_signature {{VARCHAR2(1000 CHAR)}} NOT NULL,
+    payload_type_tag {{VARCHAR2(1000 CHAR)}} NOT NULL,
+    payload_serialized {{CLOB}},
+    queue {{VARCHAR2(128 CHAR)}} DEFAULT 'default' NOT NULL,
     priority NUMBER(10) DEFAULT 0 NOT NULL,
     timeout_seconds NUMBER(19),
     max_attempts NUMBER(10),
@@ -233,12 +239,12 @@ CREATE TABLE threadmill_cron_tasks (
 -- requestCronNudge / clearCronNudge; the blanket state upsert leaves them
 -- untouched so re-registration cannot clobber a concurrently accepted nudge.
 CREATE TABLE threadmill_cron_task_state (
-    task_name VARCHAR2(128 CHAR) NOT NULL,
+    task_name {{VARCHAR2(128 CHAR)}} NOT NULL,
     last_run_at TIMESTAMP(9),
     last_run_job_id RAW(16),
     next_run_at TIMESTAMP(9),
     in_flight_job_id RAW(16),
-    timing_fingerprint VARCHAR2(4000 BYTE),
+    timing_fingerprint {{VARCHAR2(4000 BYTE)}},
     nudge_requested_at TIMESTAMP(9),
     nudge_revision NUMBER(19),
     CONSTRAINT threadmill_cron_state_pk PRIMARY KEY (task_name),
@@ -251,8 +257,8 @@ CREATE INDEX threadmill_cron_state_due_idx ON threadmill_cron_task_state (next_r
 /
 
 CREATE TABLE threadmill_cron_task_ownership (
-    namespace VARCHAR2(128 CHAR) NOT NULL,
-    task_name VARCHAR2(128 CHAR) NOT NULL,
+    namespace {{VARCHAR2(128 CHAR)}} NOT NULL,
+    task_name {{VARCHAR2(128 CHAR)}} NOT NULL,
     CONSTRAINT threadmill_cron_owner_pk PRIMARY KEY (namespace, task_name),
     CONSTRAINT threadmill_cron_owner_task_fk FOREIGN KEY (task_name)
         REFERENCES threadmill_cron_tasks (name) ON DELETE CASCADE
@@ -266,8 +272,8 @@ CREATE INDEX threadmill_cron_owner_task_idx ON threadmill_cron_task_ownership (t
 -- Oracle stores an empty string as NULL; comparisons use DECODE, which treats
 -- two NULLs as equal.
 CREATE TABLE threadmill_mutexes (
-    name VARCHAR2(128 CHAR) NOT NULL,
-    holder VARCHAR2(4000 BYTE),
+    name {{VARCHAR2(128 CHAR)}} NOT NULL,
+    holder {{VARCHAR2(4000 BYTE)}},
     expires_at TIMESTAMP(9) NOT NULL,
     CONSTRAINT threadmill_mutexes_pk PRIMARY KEY (name)
 )
@@ -285,8 +291,8 @@ CREATE TABLE threadmill_leases (
 -- Producer-side deduplication. Cleanup is gated on the referenced job being
 -- terminal so a long-running active job keeps its dedup protection.
 CREATE TABLE threadmill_dedup_keys (
-    queue VARCHAR2(128 CHAR) NOT NULL,
-    dedup_key VARCHAR2(256 BYTE) NOT NULL,
+    queue {{VARCHAR2(128 CHAR)}} NOT NULL,
+    dedup_key {{VARCHAR2(256 BYTE)}} NOT NULL,
     job_id RAW(16) NOT NULL,
     expires_at TIMESTAMP(9) NOT NULL,
     CONSTRAINT threadmill_dedup_keys_pk PRIMARY KEY (queue, dedup_key),
@@ -306,7 +312,7 @@ CREATE INDEX threadmill_dedup_keys_job_idx ON threadmill_dedup_keys (job_id)
 -- Claim-time per-key concurrency bookkeeping, updated in the same transaction
 -- as the job state transition.
 CREATE TABLE threadmill_concurrency_groups (
-    concurrency_key VARCHAR2(256 BYTE) NOT NULL,
+    concurrency_key {{VARCHAR2(256 BYTE)}} NOT NULL,
     exclusive_in_flight NUMBER(10) DEFAULT 0 NOT NULL,
     shared_in_flight NUMBER(10) DEFAULT 0 NOT NULL,
     last_modified TIMESTAMP(9) NOT NULL,
@@ -336,7 +342,7 @@ CREATE INDEX threadmill_concurrency_idle_idx ON threadmill_concurrency_groups (i
 -- Workflow-root outstanding counts: the key stays held from the root's claim
 -- to the last descendant's terminal save.
 CREATE TABLE threadmill_concurrency_workflow_holds (
-    concurrency_key VARCHAR2(256 BYTE) NOT NULL,
+    concurrency_key {{VARCHAR2(256 BYTE)}} NOT NULL,
     workflow_root_id RAW(16) NOT NULL,
     outstanding NUMBER(10) NOT NULL,
     CONSTRAINT threadmill_workflow_holds_pk PRIMARY KEY (concurrency_key, workflow_root_id),
@@ -346,9 +352,9 @@ CREATE TABLE threadmill_concurrency_workflow_holds (
 
 -- Per-queue pause primitive.
 CREATE TABLE threadmill_queue_pauses (
-    queue VARCHAR2(128 CHAR) NOT NULL,
+    queue {{VARCHAR2(128 CHAR)}} NOT NULL,
     paused_at TIMESTAMP(9) NOT NULL,
-    paused_by CLOB,
+    paused_by {{CLOB}},
     CONSTRAINT threadmill_queue_pauses_pk PRIMARY KEY (queue)
 )
 /
@@ -381,7 +387,7 @@ CROSS JOIN (SELECT LEVEL - 1 AS shard_no FROM dual CONNECT BY LEVEL <= 16) sh
 -- Incrementally maintained ENQUEUED depth per queue, sharded the same way.
 -- Monitoring work scales with queue cardinality, not queued job count.
 CREATE TABLE threadmill_queue_counts (
-    queue VARCHAR2(128 CHAR) NOT NULL,
+    queue {{VARCHAR2(128 CHAR)}} NOT NULL,
     shard_no NUMBER(2) NOT NULL,
     job_count NUMBER(19) NOT NULL,
     CONSTRAINT threadmill_queue_counts_pk PRIMARY KEY (queue, shard_no)
@@ -404,7 +410,7 @@ DECLARE
         WHERE state = st AND shard_no = sh;
     END;
 
-    PROCEDURE adjust_queue(q VARCHAR2, delta PLS_INTEGER) IS
+    PROCEDURE adjust_queue(q {{VARCHAR2}}, delta PLS_INTEGER) IS
     BEGIN
         UPDATE threadmill_queue_counts SET job_count = job_count + delta
         WHERE queue = q AND shard_no = sh;
